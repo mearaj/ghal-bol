@@ -115,7 +115,7 @@ class ContactStore {
       "sender_public_key_hex": contactPublicKeyHex.trim(),
       "preview": preview,
       "mark_unread": markUnread,
-      if (messageAtMs != null) "message_at_ms": messageAtMs,
+      ...?(messageAtMs == null ? null : {"message_at_ms": messageAtMs}),
     });
     _bumpPreview();
   }

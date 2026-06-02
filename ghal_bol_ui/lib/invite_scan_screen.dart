@@ -1,6 +1,5 @@
 import "package:flutter/material.dart";
 import "package:ghal_bol_ui/ghalbol_connect_invite.dart";
-import "package:ghal_bol_ui/invite_uri_codec.dart";
 import "package:mobile_scanner/mobile_scanner.dart";
 
 /// Full-screen QR reader — avoids tiny dialog previews that often fail on Android.

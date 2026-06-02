@@ -325,7 +325,7 @@ class GhalBolDaemonClient {
     required bool ensureDaemon,
     required bool stateSocket,
   }) {
-    final run = () async {
+    Future<Map<String, dynamic>> run() async {
       final sw = Stopwatch()..start();
       Map<String, dynamic> result;
       if (ensureDaemon) {
@@ -391,7 +391,7 @@ class GhalBolDaemonClient {
         _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
         return result;
       }
-    };
+    }
     return _serialized(run, state: stateSocket);
   }
 

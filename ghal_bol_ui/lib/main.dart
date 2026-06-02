@@ -280,7 +280,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
     const ns = kGhalBolAndroidLibraryNamespace;
     SessionFlowLog.step("ui_lock_resume");
     try {
-      final ffi = await GhalBolFfi.createOrUnlockIdentity(appNamespace: ns, password: password);
+      final ffi = GhalBolFfi.createOrUnlockIdentity(appNamespace: ns, password: password);
       if (!ffi.ok) {
         SessionFlowLog.issue("ffi_unlock_failed", detail: ffi.error ?? "unknown");
         if (mounted) setState(() => _last = ffi);

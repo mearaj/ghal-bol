@@ -95,7 +95,7 @@ Map<String, dynamic> _wireFromPk(String pk, {String? alias}) {
     "format_version": kConnectInviteFormatV2,
     "topic": _defaultTopic,
     "public_key_hex": pk,
-    if (alias != null) "peer_alias": alias,
+    ...?(alias == null ? null : {"peer_alias": alias}),
   };
 }
 

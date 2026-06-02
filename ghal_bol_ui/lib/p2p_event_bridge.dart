@@ -241,7 +241,7 @@ class P2pEventBridge {
     if (last != null && now.difference(last).inSeconds < backoffSec) return;
     _lastRecoverAttemptAt = now;
 
-    final run = () async {
+    Future<void> run() async {
       if (await GhalBolP2p.isRunning()) return;
       if (GhalBolP2p.usesDaemon) {
         final up = await GhalBolDaemonClient.probeDaemon(force: true);
@@ -282,7 +282,7 @@ class P2pEventBridge {
       } catch (e, st) {
         AppLog.instance.e("P2P", "recover failed", e, st);
       }
-    };
+    }
     _p2pRecoverInFlight = run();
     try {
       await _p2pRecoverInFlight;
@@ -322,7 +322,7 @@ class P2pEventBridge {
   }
 
   Future<void> _drain({int maxEvents = _maxEventsPerDrain}) {
-    final run = () async {
+    Future<void> run() async {
       if (!GhalBolP2p.isAvailable) return;
       final savedDispatcher = GhalBolP2p.pollEventDispatcher;
       GhalBolP2p.pollEventDispatcher = null;
@@ -363,7 +363,7 @@ class P2pEventBridge {
           );
         }
       }
-    };
+    }
     final next = (_drainChain ?? Future<void>.value()).then((_) => run());
     _drainChain = next.catchError((_) {});
     return next;

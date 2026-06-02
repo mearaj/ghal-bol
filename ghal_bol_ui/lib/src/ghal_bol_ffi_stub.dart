@@ -200,19 +200,19 @@ abstract final class GhalBolFfi {
 
   static List<Map<String, dynamic>> contactsList(String _) => [];
 
-  static Map<String, dynamic> contactsUpsert(String _, Map<String, dynamic> __) => {"ok": false};
+  static Map<String, dynamic> contactsUpsert(String _, Map<String, dynamic> _) => {"ok": false};
 
-  static bool contactsRemove(String _, Map<String, dynamic> __) => false;
+  static bool contactsRemove(String _, Map<String, dynamic> _) => false;
 
-  static Map<String, dynamic>? contactsFind(String _, Map<String, dynamic> __) => null;
+  static Map<String, dynamic>? contactsFind(String _, Map<String, dynamic> _) => null;
 
-  static bool contactsMergeDiscovered(String _, String __, String ___) => false;
+  static bool contactsMergeDiscovered(String _, String _, String _) => false;
 
-  static bool contactsRecordInboundPreview(String _, Map<String, dynamic> __) => false;
+  static bool contactsRecordInboundPreview(String _, Map<String, dynamic> _) => false;
 
-  static bool contactsClearUnread(String _, String __) => false;
+  static bool contactsClearUnread(String _, String _) => false;
 
-  static Map<String, dynamic> contactsSetTrust(String _, Map<String, dynamic> __) => {"ok": false};
+  static Map<String, dynamic> contactsSetTrust(String _, Map<String, dynamic> _) => {"ok": false};
 
   static Map<String, dynamic>? coordSettingsGet({required String appNamespace}) => null;
 
@@ -220,12 +220,12 @@ abstract final class GhalBolFfi {
 
   static String? transcriptResolvePath(String _) => null;
 
-  static List<Map<String, dynamic>> transcriptLoadMerged(String _, Map<String, dynamic> __) =>
+  static List<Map<String, dynamic>> transcriptLoadMerged(String _, Map<String, dynamic> _) =>
       [];
 
-  static bool transcriptSave(String _, String __, List<Map<String, dynamic>> ___) => false;
+  static bool transcriptSave(String _, String _, List<Map<String, dynamic>> _) => false;
 
-  static bool transcriptAppendIfNew(String _, String __, Map<String, dynamic> ___) => false;
+  static bool transcriptAppendIfNew(String _, String _, Map<String, dynamic> _) => false;
 
   static bool transcriptPatchOutgoingDelivery(
     String _, {
