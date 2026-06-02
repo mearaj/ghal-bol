@@ -108,10 +108,7 @@ abstract final class GhalBolP2p {
     final err = r["error"]?.toString() ?? "";
     if (!_isRecoverableDaemonRpcError(err)) return r;
     await GhalBolDaemonClient.reconnectDaemon();
-    if (!await SessionCredentials.ensureDaemonUnlocked()) {
-      await GhalBolDaemonClient.hardResetP2pService();
-      if (!await SessionCredentials.ensureDaemonUnlocked()) return r;
-    }
+    await SessionCredentials.ensureDaemonUnlocked();
     return GhalBolDaemonClient.instance.callState(
       method,
       params: params,
@@ -280,9 +277,6 @@ abstract final class GhalBolP2p {
     if (last != null && now.difference(last).inSeconds < 20) return;
     _lastDaemonRecoverAt = now;
     await GhalBolDaemonClient.reconnectDaemon();
-    if (!await GhalBolDaemonClient.probeDaemon(force: true)) {
-      await GhalBolDaemonClient.hardResetP2pService();
-    }
   }
 
   static Future<bool> waitNodeReady({

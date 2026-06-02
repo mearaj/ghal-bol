@@ -250,9 +250,6 @@ class P2pEventBridge {
         if (!await GhalBolDaemonClient.probeDaemon(force: true)) {
           await GhalBolDaemonClient.reconnectDaemon();
         }
-        if (!await GhalBolDaemonClient.probeDaemon(force: true)) {
-          await GhalBolDaemonClient.hardResetP2pService();
-        }
         if (!await GhalBolDaemonClient.probeDaemon(force: true)) return;
         if (!await SessionCredentials.ensureDaemonUnlocked()) return;
       }
@@ -338,9 +335,6 @@ class P2pEventBridge {
           if (ev == null) {
             _drainEmptyPolls++;
             _maybeLogEmptyPollStreak();
-            if (_drainEmptyPolls >= 3 && _networkBootstrapOk) {
-              unawaited(recoverP2pIfNeeded());
-            }
             break;
           }
           _drainEmptyPolls = 0;

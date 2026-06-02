@@ -156,11 +156,10 @@ class GhalBolDaemonClient {
     if (!_usesOutOfProcessP2p) return;
     SessionFlowLog.daemon("prepare_login", {"action": "disconnect_sockets"});
     await reconnectDaemon();
-    if (!await probeDaemon(force: true)) {
-      SessionFlowLog.daemon("prepare_login_hard_reset");
-      await hardResetP2pService();
-    } else {
+    if (await probeDaemon(force: true)) {
       SessionFlowLog.daemon("prepare_login_ok");
+    } else {
+      SessionFlowLog.daemonIssue("prepare_login_probe_failed");
     }
   }
 
@@ -218,12 +217,9 @@ class GhalBolDaemonClient {
   }) async {
     Map<String, dynamic>? last;
     for (var attempt = 0; attempt < 3; attempt++) {
-      if (attempt == 1) {
-        SessionFlowLog.daemon("unlock_retry", {"attempt": "1", "mode": "reconnect"});
+      if (attempt > 0) {
+        SessionFlowLog.daemon("unlock_retry", {"attempt": attempt.toString(), "mode": "reconnect"});
         await reconnectDaemon();
-      } else if (attempt == 2) {
-        SessionFlowLog.daemon("unlock_retry", {"attempt": "2", "mode": "hard_reset"});
-        await hardResetP2pService();
       }
       last = await unlock(appNamespace: appNamespace, password: password);
       if (last["ok"] == true) return last;

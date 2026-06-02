@@ -3,7 +3,6 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Duration;
 
@@ -81,90 +80,6 @@ fn poll_next_p2p_event() -> Option<GossipChatEvent> {
         .lock()
         .ok()
         .and_then(|mut q| q.pop_front())
-}
-
-fn requeue_p2p_event(ev: GossipChatEvent) {
-    if let Ok(mut q) = pending_p2p_events_mx().lock() {
-        q.push_back(ev);
-    }
-}
-
-fn event_persists_to_stores(ev: &GossipChatEvent) -> bool {
-    matches!(
-        ev,
-        GossipChatEvent::DmMessage { .. } | GossipChatEvent::PeerIdentified { .. }
-    )
-}
-
-/// Apply inbound DM + roster events to disk while the UI is backgrounded (poll is UI-driven).
-fn drain_p2p_events_to_stores(max: usize) -> usize {
-    let mut applied = 0usize;
-    for _ in 0..max {
-        let Some(ev) = poll_next_p2p_event() else {
-            break;
-        };
-        if !event_persists_to_stores(&ev) {
-            requeue_p2p_event(ev);
-            continue;
-        }
-        let mut j = gossip_event_json(ev.clone());
-        if apply_p2p_event_json(&j) {
-            applied += 1;
-            continue;
-        }
-        let kind = j.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        if kind == "dm_message" {
-            let mk = j
-                .get("msg_kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
-            if mk == "ack_received" || mk == "ack_read" {
-                continue;
-            }
-        }
-        requeue_p2p_event(ev);
-    }
-    applied
-}
-
-static STORE_DRAIN_STOP: AtomicBool = AtomicBool::new(true);
-static STORE_DRAIN_JOIN: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
-
-fn store_drain_join_mx() -> &'static Mutex<Option<JoinHandle<()>>> {
-    STORE_DRAIN_JOIN.get_or_init(|| Mutex::new(None))
-}
-
-fn stop_store_drain_thread() {
-    STORE_DRAIN_STOP.store(true, Ordering::SeqCst);
-    if let Ok(mut g) = store_drain_join_mx().lock() {
-        g.take();
-    }
-}
-
-fn start_store_drain_thread() {
-    stop_store_drain_thread();
-    STORE_DRAIN_STOP.store(false, Ordering::SeqCst);
-    let handle = thread::Builder::new()
-        .name("ghal_bol_store_drain".into())
-        .spawn(|| {
-            while !STORE_DRAIN_STOP.load(Ordering::SeqCst) {
-                if !p2p_holder_alive() {
-                    thread::sleep(Duration::from_millis(250));
-                    continue;
-                }
-                let n = drain_p2p_events_to_stores(48);
-                if n == 0 {
-                    thread::sleep(Duration::from_millis(150));
-                } else {
-                    thread::sleep(Duration::from_millis(50));
-                }
-            }
-        })
-        .ok();
-    if let (Some(h), Ok(mut g)) = (handle, store_drain_join_mx().lock()) {
-        *g = Some(h);
-    }
 }
 
 fn clear_p2p_holder() {
@@ -449,7 +364,6 @@ pub fn p2p_start(config: &Value) -> Value {
             let _ = p2p_register_dm_peer(pk);
         }
         dial_bootstrap_on_running_node(bootstrap_for_hot_dial);
-        start_store_drain_thread();
         return json_ok(serde_json::json!({ "ok": true, "already_running": true }));
     }
 
@@ -569,7 +483,6 @@ pub fn p2p_start(config: &Value) -> Value {
         Err(_) => return json_err("p2p mutex poisoned"),
     }
 
-    start_store_drain_thread();
     json_ok(serde_json::json!({ "ok": true }))
 }
 
@@ -588,7 +501,6 @@ pub fn p2p_notify_network_change() -> Value {
 
 pub fn p2p_stop() {
     native_log::info("p2p", "p2p_stop requested");
-    stop_store_drain_thread();
     crate::coord_runtime::stop_coord_presence();
     crate::p2p::set_app_ack_read_enabled(false);
     stop_p2p_node(Duration::from_secs(3));
@@ -961,19 +873,16 @@ pub fn p2p_poll_event() -> Option<Value> {
                 .unwrap_or("")
                 .trim();
             if mk == "ack_received" || mk == "ack_read" {
-                // Duplicate ack on wire — transcript already at target state; drain, no UI.
+                // DESIGN.md: duplicate/no-op acks do not change stores — drain, no UI event.
                 continue;
             }
             if mk == "text" {
-                // Inbound text is persisted on the stream path; re-queue if poll apply failed
-                // (e.g. handler context not set yet) instead of dropping the event.
-                requeue_p2p_event(ev);
-                continue;
+                // Wire path may have persisted already; never spin requeue (blocks chat_ready/acks).
+                return Some(j);
             }
         }
         if kind == "peer_identified" {
-            requeue_p2p_event(ev);
-            continue;
+            return Some(j);
         }
         return Some(j);
     }

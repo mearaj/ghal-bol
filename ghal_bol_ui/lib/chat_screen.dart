@@ -28,6 +28,11 @@ import "dm_ack_validation.dart";
 import "dm_delivery_sync.dart";
 import "public_key_hex.dart";
 
+/// Shift+Enter in the chat composer (handled via [Shortcuts] before the [TextField]).
+class _ComposerSendIntent extends Intent {
+  const _ComposerSendIntent();
+}
+
 /// One chat surface: you are always reachable locally; optionally you **join someone**
 /// using their link/QR, or you **share** yours so they can reach you. No “host/client” choice.
 class ChatScreen extends StatefulWidget {
@@ -139,7 +144,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Set<String> _ackedReadIds = {};
   /// Acks can arrive before [messageId] is assigned on the outgoing bubble.
   final Set<String> _pendingDeliveredAckRefs = {};
-  final Set<String> _pendingReadAckRefs = {};
   String? _transcriptLoadedKey;
   bool _loadingTranscript = false;
   final List<Map<String, dynamic>> _bufferedHubDmEvents = [];
@@ -217,9 +221,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   static bool _hexEq(String a, String b) =>
       a.trim().toLowerCase() == b.trim().toLowerCase();
 
-  bool _outgoingHasMessageId(String refId) =>
-      _lines.any((l) => l.outgoing && l.messageId != null && l.messageId == refId);
-
   bool _hasInboundMessageId(String refId) =>
       _lines.any((l) => !l.outgoing && l.messageId?.trim() == refId);
 
@@ -244,27 +245,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       ),
     );
     if (changed && mounted) setState(() {});
-  }
-
-  /// Recipient decided our outbound delivery state (`ack_received` / `ack_read`).
-  void _applyRecipientOutboundAck(String refId, String msgKind) {
-    final mid = refId.trim();
-    if (mid.isEmpty || !isRecipientOutboundAckKind(msgKind)) return;
-    if (msgKind == kRecipientAckRead) {
-      if (_outgoingHasMessageId(mid)) {
-        _updateOutgoingDelivery(mid, _MsgDelivery.delivered);
-        _updateOutgoingDelivery(mid, _MsgDelivery.read);
-      } else {
-        _pendingDeliveredAckRefs.add(mid);
-        _pendingReadAckRefs.add(mid);
-      }
-      return;
-    }
-    if (_outgoingHasMessageId(mid)) {
-      _updateOutgoingDelivery(mid, _MsgDelivery.delivered);
-    } else {
-      _pendingDeliveredAckRefs.add(mid);
-    }
   }
 
   bool _inboundAckFromActivePeer(Map<String, dynamic> ev) {
@@ -297,25 +277,45 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         return;
       }
     }
+    if (widget.hubPollsEvents && ev["kind"]?.toString() == "dm_message") {
+      final mk = ev["msg_kind"]?.toString() ?? "";
+      if (isRecipientOutboundAckKind(mk)) {
+        // DESIGN.md: merge delivery only after native patched transcript (stores_updated).
+        if (ev["stores_updated"] == true) {
+          _scheduleDeliveryMergeFromNative();
+        }
+        return;
+      }
+      if (mk == "text") {
+        final mid = ev["id"]?.toString().trim() ?? "";
+        if (mid.isNotEmpty && _uiSeenMessageIds.contains(mid)) {
+          if (ev["stores_updated"] == true) {
+            unawaited(mergeTranscriptFromNative(deliveryOnly: true));
+          }
+          return;
+        }
+        unawaited(mergeTranscriptFromNative());
+        return;
+      }
+      if (mk == kSenderConfirmedReadReceipt) {
+        if (ev["stores_updated"] == true) {
+          unawaited(mergeTranscriptFromNative());
+        }
+        return;
+      }
+    }
     if (ev["kind"]?.toString() == "dm_message" &&
         ev["msg_kind"]?.toString() == "text") {
       final mid = ev["id"]?.toString().trim() ?? "";
       if (mid.isNotEmpty && _uiSeenMessageIds.contains(mid)) return;
     }
     _handleEvent(ev);
-    // Native wrote contacts/transcript on poll — merge disk truth (no full list replace).
     if (widget.hubPollsEvents &&
         ev["stores_updated"] == true &&
         ev["kind"] == "dm_message") {
-      ChatTranscriptStore.invalidateThreadCache(
-        appNamespace: _resolvedAppNamespace,
-        conversationKeys: _conversationKeysForLoad(),
-      );
       final mk = ev["msg_kind"]?.toString() ?? "";
       if (isRecipientOutboundAckKind(mk)) {
         _scheduleDeliveryMergeFromNative();
-      } else if (mk == "text" || mk == kSenderConfirmedReadReceipt) {
-        unawaited(mergeTranscriptFromNative());
       }
     }
   }
@@ -523,7 +523,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final mid = messageId?.trim() ?? "";
     if (mid.isNotEmpty) {
       if (_uiSeenMessageIds.contains(mid) || _hasMessageId(mid)) return false;
-      _uiSeenMessageIds.add(mid);
     }
     final probe = _ChatLine(
       localId: "",
@@ -550,6 +549,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         createdAtMs: createdAtMs,
       ),
     );
+    if (mid.isNotEmpty) _uiSeenMessageIds.add(mid);
     return true;
   }
 
@@ -616,17 +616,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _onActivePeerLinkLost() {
-  }
-
-  void _applyPendingOutboundAcksForMessageId(String? messageId) {
-    final id = messageId?.trim() ?? "";
-    if (id.isEmpty) return;
-    if (_pendingDeliveredAckRefs.remove(id)) {
-      _updateOutgoingDelivery(id, _MsgDelivery.delivered);
-    }
-    if (_pendingReadAckRefs.remove(id)) {
-      _updateOutgoingDelivery(id, _MsgDelivery.read);
-    }
   }
 
   Map<String, dynamic>? _dmPeerEntryFromPublicKey(String? publicKeyHex) {
@@ -826,7 +815,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         continue;
       }
       if (mid.isNotEmpty) {
-        _uiSeenMessageIds.add(mid);
         for (final l in _lines) {
           if (l.messageId?.trim() != mid) continue;
           if (r.outgoing) {
@@ -903,8 +891,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _scheduleSaveTranscript({bool persistAll = false}) {
+    // Append new rows only (safe in hub mode). Full save rewrites delivery from stale UI state.
     unawaited(_enqueueTranscriptFlush(_flushTranscriptIncremental));
-    // Hub mode: native owns delivery ticks on poll — avoid periodic full save clobbering them.
     if (widget.hubPollsEvents) return;
     if (persistAll) {
       _scheduleFullTranscriptSave();
@@ -1490,7 +1478,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           final mid = id?.trim() ?? "";
           if (mid.isNotEmpty) {
             _uiSeenMessageIds.add(mid);
-            _applyPendingOutboundAcksForMessageId(mid);
           }
           return;
         }
@@ -1521,10 +1508,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           refId != null &&
           refId.isNotEmpty) {
         if (!_inboundAckFromActivePeer(ev)) return;
-        _applyRecipientOutboundAck(refId, msgKind);
-        if (widget.hubPollsEvents) {
-          _scheduleDeliveryMergeFromNative();
-        }
+        if (ev["stores_updated"] != true) return;
+        _scheduleDeliveryMergeFromNative();
         return;
       }
       if (msgKind == kSenderConfirmedReadReceipt &&
@@ -1727,9 +1712,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       line.messageId = assignedId;
       _chatError = null;
     });
-    _applyPendingOutboundAcksForMessageId(line.messageId);
     _scheduleSaveTranscript();
     if (widget.hubPollsEvents) {
+      unawaited(_enqueueTranscriptFlush(_flushTranscriptIncremental));
       P2pEventBridge.instance.drainNow();
     }
     return true;
@@ -2034,48 +2019,52 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 ),
               ),
               Expanded(
-                child: Focus(
-                  onKeyEvent: (node, event) {
-                    if (event is! KeyDownEvent) return KeyEventResult.ignored;
-                    if (event.logicalKey != LogicalKeyboardKey.enter &&
-                        event.logicalKey != LogicalKeyboardKey.numpadEnter) {
-                      return KeyEventResult.ignored;
-                    }
-                    // Chat composer keybinds (all platforms / hardware keyboards):
-                    // - Enter: newline
-                    // - Shift+Enter: send
-                    if (!HardwareKeyboard.instance.isShiftPressed) {
-                      return KeyEventResult.ignored;
-                    }
-                    _send();
-                    return KeyEventResult.handled;
+                child: Shortcuts(
+                  shortcuts: const <ShortcutActivator, Intent>{
+                    SingleActivator(LogicalKeyboardKey.enter, shift: true):
+                        _ComposerSendIntent(),
+                    SingleActivator(LogicalKeyboardKey.numpadEnter, shift: true):
+                        _ComposerSendIntent(),
                   },
-                  child: TextField(
-                    controller: _msgCtrl,
-                    enabled: !blocked,
-                    minLines: 1,
-                    maxLines: 6,
-                    style: TextStyle(color: p.receivedForeground, fontSize: 15),
-                    cursorColor: p.sendFab,
-                    decoration: InputDecoration(
-                      filled: true,
-                      fillColor: p.composerFieldFill,
-                      hintText: blocked ? "Blocked" : "Message",
-                      hintStyle: TextStyle(color: p.metaText, fontSize: 15),
-                      isDense: false,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(22),
-                        borderSide: BorderSide(color: p.composerBorder),
+                  child: Actions(
+                    actions: <Type, Action<Intent>>{
+                      _ComposerSendIntent: CallbackAction<_ComposerSendIntent>(
+                        onInvoke: (_) {
+                          if (!blocked) _send();
+                          return null;
+                        },
                       ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(22),
-                        borderSide: BorderSide(color: p.composerBorder),
+                    },
+                    child: TextField(
+                      controller: _msgCtrl,
+                      enabled: !blocked,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
+                      minLines: 1,
+                      maxLines: 6,
+                      style: TextStyle(color: p.receivedForeground, fontSize: 15),
+                      cursorColor: p.sendFab,
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: p.composerFieldFill,
+                        hintText: blocked ? "Blocked" : "Message",
+                        hintStyle: TextStyle(color: p.metaText, fontSize: 15),
+                        isDense: false,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(22),
+                          borderSide: BorderSide(color: p.composerBorder),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(22),
+                          borderSide: BorderSide(color: p.composerBorder),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(22),
+                          borderSide: BorderSide(color: p.sendFab, width: 1.4),
+                        ),
+                        contentPadding:
+                            const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(22),
-                        borderSide: BorderSide(color: p.sendFab, width: 1.4),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     ),
                   ),
                 ),

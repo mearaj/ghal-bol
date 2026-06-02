@@ -252,7 +252,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
     required String? ffiPublicKeyHex,
     required bool firstTimeSetup,
   }) async {
-    final dr = await GhalBolDaemon.unlockWithRecovery(
+    final dr = await GhalBolDaemon.unlock(
       appNamespace: ns,
       password: password,
     );

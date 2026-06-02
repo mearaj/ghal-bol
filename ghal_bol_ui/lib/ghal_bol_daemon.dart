@@ -42,15 +42,7 @@ abstract final class GhalBolDaemon {
       appNamespace: appNamespace,
       password: password,
     );
-    if (r["ok"] == true) return r;
-    await GhalBolDaemonClient.hardResetP2pService();
-    r = await GhalBolDaemonClient.instance.unlock(
-      appNamespace: appNamespace,
-      password: password,
-    );
-    if (r["ok"] != true) {
-      SessionFlowLog.daemonIssue("unlock_failed", detail: r["error"]?.toString());
-    }
+    SessionFlowLog.daemonIssue("unlock_failed", detail: r["error"]?.toString());
     return r;
   }
 
