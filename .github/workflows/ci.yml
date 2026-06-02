@@ -50,6 +50,9 @@ jobs:
           channel: stable
           cache: true
 
+      - name: flutter pub get
+        run: flutter pub get
+
       - name: dart analyze
         run: dart analyze --fatal-warnings
 
