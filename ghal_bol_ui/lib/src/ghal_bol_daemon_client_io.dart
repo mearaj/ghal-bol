@@ -135,46 +135,65 @@ class GhalBolDaemonClient {
     return next;
   }
 
+  /// Drop stale UI RPC sockets only — does **not** stop the `:p2p` process (keeps libp2p up).
+  static Future<void> reconnectDaemon() async {
+    if (!_usesOutOfProcessP2p) return;
+    await instance.disconnect();
+    invalidateProbeCache();
+    await ensureDaemonRunning();
+    for (var i = 0; i < 40; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (await probeDaemon(force: true)) {
+        SessionFlowLog.daemon("reconnect_ok");
+        return;
+      }
+    }
+    SessionFlowLog.daemonIssue("reconnect_failed");
+  }
+
   /// Drop stale UI sockets and bring `:p2p` / `ghal_bol_daemon` back before unlock.
   static Future<void> prepareForLoginUnlock() async {
     if (!_usesOutOfProcessP2p) return;
     SessionFlowLog.daemon("prepare_login", {"action": "disconnect_sockets"});
-    await instance.disconnect();
-    invalidateProbeCache();
-    await ensureDaemonRunning();
+    await reconnectDaemon();
     if (!await probeDaemon(force: true)) {
-      SessionFlowLog.daemonIssue(
-        "probe_failed_after_prepare",
-        check: "grep Daemon forceRecover / :p2p service",
-      );
-      await forceRecoverDaemon();
+      SessionFlowLog.daemon("prepare_login_hard_reset");
+      await hardResetP2pService();
     } else {
       SessionFlowLog.daemon("prepare_login_ok");
     }
   }
 
-  /// Hard reset when JSON-RPC returns disconnect / dead socket (Android `:p2p` restart).
-  static Future<void> forceRecoverDaemon() async {
+  /// Stop and restart Android `:p2p` — last resort (drops active libp2p until unlock + p2p_start).
+  static Future<void> hardResetP2pService() async {
     if (!_usesOutOfProcessP2p) return;
     await instance.disconnect();
     invalidateProbeCache();
     if (Platform.isAndroid) {
       try {
         await ghalBolAndroidStopP2pService();
-        await Future<void>.delayed(const Duration(milliseconds: 300));
+        await Future<void>.delayed(const Duration(milliseconds: 400));
       } catch (e) {
-        AppLog.instance.w("Daemon", "stop :p2p before recover: $e");
+        AppLog.instance.w("Daemon", "stop :p2p: $e");
       }
       instance._cachedSocketPath = await ghalBolAndroidStartP2pService();
     }
     for (var i = 0; i < 50; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
       if (await probeDaemon(force: true)) {
-        SessionFlowLog.daemon("force_recover_ok");
+        SessionFlowLog.daemon("hard_reset_ok");
         return;
       }
     }
-    SessionFlowLog.daemonIssue("force_recover_failed");
+    SessionFlowLog.daemonIssue("hard_reset_failed");
+  }
+
+  /// Reconnect UI sockets; only hard-reset `:p2p` if the daemon still does not answer ping.
+  static Future<void> forceRecoverDaemon() async {
+    if (!_usesOutOfProcessP2p) return;
+    await reconnectDaemon();
+    if (await probeDaemon(force: true)) return;
+    await hardResetP2pService();
   }
 
   static bool _isRecoverableDaemonError(String? err) {
@@ -188,18 +207,23 @@ class GhalBolDaemonClient {
         low.contains("timed out");
   }
 
-  /// Unlock with reconnect / `:p2p` restart on transient socket failures.
+  /// Unlock with `:p2p` restart on transient socket failures.
+  ///
+  /// Does **not** call [prepareForLoginUnlock] on the first attempt — login and
+  /// UI-lock flows must call that once before FFI unlock. Re-unlock via [unlock]
+  /// must not disconnect sockets mid-session.
   Future<Map<String, dynamic>> unlockWithRecovery({
     required String appNamespace,
     required String password,
   }) async {
     Map<String, dynamic>? last;
     for (var attempt = 0; attempt < 3; attempt++) {
-      if (attempt == 0) {
-        await prepareForLoginUnlock();
-      } else {
-        SessionFlowLog.daemon("unlock_retry", {"attempt": attempt.toString()});
-        await forceRecoverDaemon();
+      if (attempt == 1) {
+        SessionFlowLog.daemon("unlock_retry", {"attempt": "1", "mode": "reconnect"});
+        await reconnectDaemon();
+      } else if (attempt == 2) {
+        SessionFlowLog.daemon("unlock_retry", {"attempt": "2", "mode": "hard_reset"});
+        await hardResetP2pService();
       }
       last = await unlock(appNamespace: appNamespace, password: password);
       if (last["ok"] == true) return last;

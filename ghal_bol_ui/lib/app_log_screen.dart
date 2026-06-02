@@ -114,19 +114,66 @@ class _AppLogScreenState extends State<AppLogScreen> {
     });
   }
 
-  Future<void> _shareAll() async {
+  String _logFileName() {
+    final ts = DateTime.now()
+        .toIso8601String()
+        .replaceAll(":", "-")
+        .replaceAll(".", "-");
+    return "ghalbol-app-log-$ts.txt";
+  }
+
+  Future<File?> _writeVisibleLogFile({required Directory directory}) async {
     final visible = _visible;
-    if (visible.isEmpty) return;
+    if (visible.isEmpty) return null;
     final exportedText = AppLog.instance.exportText(subset: visible);
-    if (exportedText.isEmpty) return;
+    if (exportedText.isEmpty) return null;
+    final file = File("${directory.path}/${_logFileName()}");
+    await file.writeAsString(exportedText, flush: true);
+    return file;
+  }
+
+  Future<Directory> _downloadDirectory() async {
+    final downloads = await getDownloadsDirectory();
+    if (downloads != null) return downloads;
+    if (Platform.isAndroid) {
+      final ext = await getExternalStorageDirectory();
+      if (ext != null) {
+        final legacy = Directory("${ext.path}/Download");
+        if (!await legacy.exists()) {
+          await legacy.create(recursive: true);
+        }
+        return legacy;
+      }
+    }
+    return await getApplicationDocumentsDirectory();
+  }
+
+  /// Save filtered log lines to the device Downloads folder (or app documents fallback).
+  Future<void> _downloadAll() async {
+    try {
+      final dir = await _downloadDirectory();
+      final file = await _writeVisibleLogFile(directory: dir);
+      if (file == null) return;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Saved to ${file.path}"),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Download failed: $e")),
+      );
+    }
+  }
+
+  Future<void> _shareAll() async {
     try {
       final dir = await getTemporaryDirectory();
-      final ts = DateTime.now()
-          .toIso8601String()
-          .replaceAll(":", "-")
-          .replaceAll(".", "-");
-      final file = File("${dir.path}/ghalbol-app-log-$ts.txt");
-      await file.writeAsString(exportedText, flush: true);
+      final file = await _writeVisibleLogFile(directory: dir);
+      if (file == null) return;
       await SharePlus.instance.share(
         ShareParams(
           files: [XFile(file.path, mimeType: "text/plain")],
@@ -138,7 +185,6 @@ class _AppLogScreenState extends State<AppLogScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Share failed: $e")),
       );
-      return;
     }
   }
 
@@ -176,6 +222,11 @@ class _AppLogScreenState extends State<AppLogScreen> {
               _jumpToEnd();
             },
             icon: Icon(_followTail ? Icons.vertical_align_bottom : Icons.arrow_downward),
+          ),
+          IconButton(
+            tooltip: "Download visible lines to Downloads",
+            onPressed: lines.isEmpty ? null : _downloadAll,
+            icon: const Icon(Icons.download_outlined),
           ),
           IconButton(
             tooltip: "Share visible lines as a text file",

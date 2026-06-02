@@ -19,8 +19,9 @@ import "identity_setup_copy.dart";
 import "invite_uri_builder.dart";
 import "public_key_hex.dart";
 import "secret_key_hex.dart";
-import "native_build_hint.dart";
 import "session_credentials.dart";
+import "p2p_event_bridge.dart";
+import "p2p_network_coordinator.dart";
 import "app_log.dart";
 import "user_flow_log.dart";
 
@@ -244,6 +245,45 @@ class _IdentityScreenState extends State<IdentityScreen> {
     return GhalBolIdentityResult(ok: false, error: "$err$_firstTimeRetryHint");
   }
 
+  /// Unblocks the chat shell immediately after FFI unlock; P2P process unlock runs in parallel.
+  Future<void> _finishDaemonUnlockAfterLogin({
+    required String ns,
+    required String password,
+    required String? ffiPublicKeyHex,
+    required bool firstTimeSetup,
+  }) async {
+    final dr = await GhalBolDaemon.unlockWithRecovery(
+      appNamespace: ns,
+      password: password,
+    );
+    if (dr["ok"] != true) {
+      SessionFlowLog.daemonIssue(
+        "daemon_unlock_deferred",
+        check: "P2pEventBridge recoverP2pIfNeeded",
+        detail: dr["error"]?.toString(),
+      );
+      unawaited(P2pEventBridge.instance.recoverP2pIfNeeded());
+      return;
+    }
+    if (!publicKeysEqual(ffiPublicKeyHex, dr["public_key_hex"]?.toString())) {
+      SessionFlowLog.issue(
+        "identity_split",
+        check: "clear app data; rebuild native; FFI vs daemon data dir",
+        detail: "ffi pk != daemon pk",
+      );
+      if (firstTimeSetup) {
+        await _recoverFirstTimeSetupFailed();
+      } else {
+        await GhalBolDaemon.stopSession();
+        GhalBolFfi.lock();
+      }
+      return;
+    }
+    SessionFlowLog.daemon("daemon_unlock_ok");
+    P2pNetworkCoordinator.markSessionRefresh();
+    unawaited(P2pEventBridge.instance.recoverP2pIfNeeded());
+  }
+
   Future<bool> _confirmImportPrivateKeyWarning(BuildContext context) async {
     final go = await showDialog<bool>(
       context: context,
@@ -289,6 +329,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
       SessionFlowLog.step("ffi_unlock_ok", {"pk": SessionFlowLog.shortPk(ffi.publicKeyHex)});
       SessionCredentials.store(appNamespace: ns, password: password);
       if (GhalBolDaemon.isSupported && !await GhalBolDaemon.sessionUnlocked()) {
+        await GhalBolDaemon.prepareForLoginUnlock();
         final dr = await GhalBolDaemon.unlockWithRecovery(
           appNamespace: ns,
           password: password,
@@ -363,56 +404,20 @@ class _IdentityScreenState extends State<IdentityScreen> {
           return;
         }
         SessionFlowLog.step("ffi_unlock_ok", {"pk": SessionFlowLog.shortPk(ffi.publicKeyHex)});
-        SessionFlowLog.daemon("daemon_unlock_start");
-        final dr = await GhalBolDaemon.unlockWithRecovery(
+        SessionCredentials.store(appNamespace: ns, password: password);
+        r = GhalBolIdentityResult(
+          ok: true,
+          publicKeyHex: ffi.publicKeyHex,
+          libp2pPeerId: ffi.libp2pPeerId,
           appNamespace: ns,
-          password: password,
         );
-        if (dr["ok"] == true) {
-          if (!publicKeysEqual(ffi.publicKeyHex, dr["public_key_hex"]?.toString())) {
-            SessionFlowLog.issue(
-              "identity_split",
-              check: "clear app data; rebuild native; FFI vs daemon data dir",
-              detail: "ffi pk != daemon pk",
-            );
-            if (firstTimeSetup) {
-              await _recoverFirstTimeSetupFailed();
-            } else {
-              await GhalBolDaemon.stopSession();
-              GhalBolFfi.lock();
-            }
-            if (mounted) {
-              setState(() {
-                _last = GhalBolIdentityResult(
-                  ok: false,
-                  error:
-                      "App and P2P daemon loaded different identities (split data). "
-                      "${NativeBuildHint.rebuildInstructions} Clear app data, then unlock again.",
-                );
-              });
-            }
-            return;
-          }
-          SessionFlowLog.daemon("daemon_unlock_ok");
-          r = GhalBolIdentityResult(
-            ok: true,
-            publicKeyHex: dr["public_key_hex"]?.toString() ?? ffi.publicKeyHex,
-            libp2pPeerId: dr["libp2p_peer_id"]?.toString() ?? ffi.libp2pPeerId,
-            appNamespace: ns,
-          );
-        } else {
-          SessionFlowLog.daemonIssue(
-            "daemon_unlock_deferred",
-            check: "app enters on FFI; SessionCredentials may re-unlock P2P",
-            detail: dr["error"]?.toString(),
-          );
-          r = GhalBolIdentityResult(
-            ok: true,
-            publicKeyHex: ffi.publicKeyHex,
-            libp2pPeerId: ffi.libp2pPeerId,
-            appNamespace: ns,
-          );
-        }
+        SessionFlowLog.daemon("daemon_unlock_background");
+        unawaited(_finishDaemonUnlockAfterLogin(
+          ns: ns,
+          password: password,
+          ffiPublicKeyHex: ffi.publicKeyHex,
+          firstTimeSetup: firstTimeSetup,
+        ));
       } else {
         SessionFlowLog.step("ffi_unlock_start", {"daemon": "false"});
         r = await _unlockOrImportIdentity(ns: ns, password: password);
@@ -428,7 +433,9 @@ class _IdentityScreenState extends State<IdentityScreen> {
       }
       if (mounted) {
         if (r.ok) {
-          SessionCredentials.store(appNamespace: ns, password: password);
+          if (!GhalBolDaemon.isSupported || widget.onUnlockedSession == null) {
+            SessionCredentials.store(appNamespace: ns, password: password);
+          }
           SessionFlowLog.step("session_unlocked", {
             "pk": SessionFlowLog.shortPk(r.publicKeyHex),
             "peer_id": r.libp2pPeerId ?? "?",

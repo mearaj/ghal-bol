@@ -3,6 +3,7 @@ import "dart:io" show Platform;
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 import "package:ghal_bol_ui/p2p_event_log.dart";
+import "package:ghal_bol_ui/session_credentials.dart";
 import "package:ghal_bol_ui/src/ghal_bol_daemon_client_io.dart"
     if (dart.library.html) "package:ghal_bol_ui/src/ghal_bol_daemon_client_stub.dart";
 
@@ -83,16 +84,48 @@ abstract final class GhalBolP2p {
   ) async {
     if (usesDaemon) {
       // State socket — must not queue behind poll-driven p2p_register_dm_peer on main.
-      return GhalBolDaemonClient.instance.callState(
+      return _callStateWithDaemonRecovery(
         "p2p_send_text_dm",
         params: {
           "recipient_public_key_hex": recipientPublicKeyHex,
           "text": text,
         },
-        ensureDaemon: true,
       );
     }
     return GhalBolFfi.p2pSendTextDm(recipientPublicKeyHex, text);
+  }
+
+  static Future<Map<String, dynamic>> _callStateWithDaemonRecovery(
+    String method, {
+    required Map<String, dynamic> params,
+  }) async {
+    var r = await GhalBolDaemonClient.instance.callState(
+      method,
+      params: params,
+      ensureDaemon: true,
+    );
+    if (r["ok"] == true) return r;
+    final err = r["error"]?.toString() ?? "";
+    if (!_isRecoverableDaemonRpcError(err)) return r;
+    await GhalBolDaemonClient.reconnectDaemon();
+    if (!await SessionCredentials.ensureDaemonUnlocked()) {
+      await GhalBolDaemonClient.hardResetP2pService();
+      if (!await SessionCredentials.ensureDaemonUnlocked()) return r;
+    }
+    return GhalBolDaemonClient.instance.callState(
+      method,
+      params: params,
+      ensureDaemon: false,
+    );
+  }
+
+  static bool _isRecoverableDaemonRpcError(String err) {
+    final low = err.toLowerCase();
+    return low.contains("broken pipe") ||
+        low.contains("connection reset") ||
+        low.contains("daemon disconnected") ||
+        low.contains("connection refused") ||
+        low.contains("not running");
   }
 
   static Future<Map<String, dynamic>> requeueOutboundDm({
@@ -239,14 +272,17 @@ abstract final class GhalBolP2p {
     );
   }
 
-  /// Linux: start bundled `ghal_bol_daemon` when poll runs but socket is down.
+  /// Reconnect RPC when poll socket is down (does not stop `:p2p` unless ping still fails).
   static Future<void> _tryRecoverDaemon() async {
     if (!usesDaemon) return;
     final now = DateTime.now();
     final last = _lastDaemonRecoverAt;
-    if (last != null && now.difference(last).inSeconds < 15) return;
+    if (last != null && now.difference(last).inSeconds < 20) return;
     _lastDaemonRecoverAt = now;
-    await GhalBolDaemonClient.ensureDaemonRunning();
+    await GhalBolDaemonClient.reconnectDaemon();
+    if (!await GhalBolDaemonClient.probeDaemon(force: true)) {
+      await GhalBolDaemonClient.hardResetP2pService();
+    }
   }
 
   static Future<bool> waitNodeReady({

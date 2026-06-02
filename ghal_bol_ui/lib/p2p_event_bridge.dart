@@ -124,11 +124,14 @@ class P2pEventBridge {
     _appNs = session.appNamespace?.trim().isNotEmpty == true
         ? session.appNamespace!.trim()
         : kGhalBolAndroidLibraryNamespace;
-    SessionFlowLog.step("bridge_start", {
-      "ns": _appNs,
-      "daemon": GhalBolP2p.usesDaemon.toString(),
-    });
-    AppLog.instance.trace("session_start", "poll bridge + network bootstrap");
+    final firstStart = _poll == null;
+    if (firstStart) {
+      SessionFlowLog.step("bridge_start", {
+        "ns": _appNs,
+        "daemon": GhalBolP2p.usesDaemon.toString(),
+      });
+      AppLog.instance.trace("session_start", "poll bridge + network bootstrap");
+    }
     _poll ??= Timer.periodic(const Duration(milliseconds: 200), (_) {
       unawaited(_drain());
     });
@@ -244,9 +247,11 @@ class P2pEventBridge {
     Future<void> run() async {
       if (await GhalBolP2p.isRunning()) return;
       if (GhalBolP2p.usesDaemon) {
-        final up = await GhalBolDaemonClient.probeDaemon(force: true);
-        if (!up) {
-          await GhalBolDaemonClient.ensureDaemonRunning();
+        if (!await GhalBolDaemonClient.probeDaemon(force: true)) {
+          await GhalBolDaemonClient.reconnectDaemon();
+        }
+        if (!await GhalBolDaemonClient.probeDaemon(force: true)) {
+          await GhalBolDaemonClient.hardResetP2pService();
         }
         if (!await GhalBolDaemonClient.probeDaemon(force: true)) return;
         if (!await SessionCredentials.ensureDaemonUnlocked()) return;

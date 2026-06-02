@@ -7,6 +7,10 @@ class GhalBolDaemonClient {
 
   static Future<void> prepareForLoginUnlock() async {}
 
+  static Future<void> reconnectDaemon() async {}
+
+  static Future<void> hardResetP2pService() async {}
+
   static Future<void> forceRecoverDaemon() async {}
 
   static Future<bool> probeDaemon({bool force = false}) async => false;

@@ -402,6 +402,9 @@ fn is_transient_outbound_error(err: &str) -> bool {
         || e.contains("chat stream not ready")
         || e.contains("wait until connected")
         || e.contains("open_stream")
+        || e.contains("broken pipe")
+        || e.contains("connection reset")
+        || e.contains("stream closed")
 }
 
 fn notify_outbound_on_wire(
@@ -2425,6 +2428,21 @@ async fn handle_inbound_stream(
                     );
                 }
                 if is_new {
+                    if !crate::dm_event_handler::persist_inbound_text_on_wire(
+                        &peer.to_string(),
+                        &t.id,
+                        &t.text,
+                        &t.sender_public_key_hex,
+                        t.created_at_ms,
+                    ) {
+                        native_log::warn(
+                            "DM/store",
+                            format!(
+                                "inbound text not persisted on wire id={} from {peer} (handler context?)",
+                                t.id
+                            ),
+                        );
+                    }
                     if let Some(tx) = &events_tx {
                         let _ = tx.send(GossipChatEvent::DmMessage {
                             from: peer,

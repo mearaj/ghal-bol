@@ -19,15 +19,53 @@ abstract final class GhalBolDaemon {
     await GhalBolDaemonClient.prepareForLoginUnlock();
   }
 
+  /// Lightweight re-unlock (poll bridge, session refresh) — no socket teardown.
   static Future<Map<String, dynamic>> unlock({
     required String appNamespace,
     required String password,
   }) async {
     if (!isSupported) return {"ok": false, "error": "daemon not supported"};
-    return unlockWithRecovery(appNamespace: appNamespace, password: password);
+    SessionFlowLog.daemon("unlock_request", {"ns": appNamespace});
+    var r = await GhalBolDaemonClient.instance.unlock(
+      appNamespace: appNamespace,
+      password: password,
+    );
+    if (r["ok"] == true) return r;
+    final err = r["error"]?.toString();
+    if (!_isRecoverableUnlockError(err)) {
+      SessionFlowLog.daemonIssue("unlock_failed", detail: err);
+      return r;
+    }
+    SessionFlowLog.daemon("unlock_recover", {"reason": err ?? "unknown"});
+    await GhalBolDaemonClient.reconnectDaemon();
+    r = await GhalBolDaemonClient.instance.unlock(
+      appNamespace: appNamespace,
+      password: password,
+    );
+    if (r["ok"] == true) return r;
+    await GhalBolDaemonClient.hardResetP2pService();
+    r = await GhalBolDaemonClient.instance.unlock(
+      appNamespace: appNamespace,
+      password: password,
+    );
+    if (r["ok"] != true) {
+      SessionFlowLog.daemonIssue("unlock_failed", detail: r["error"]?.toString());
+    }
+    return r;
   }
 
-  /// Unlock in P2P process; retries after disconnect / restarts `:p2p` on Android.
+  static bool _isRecoverableUnlockError(String? err) {
+    if (err == null || err.isEmpty) return false;
+    final low = err.toLowerCase();
+    return low.contains("disconnected") ||
+        low.contains("not running") ||
+        low.contains("broken pipe") ||
+        low.contains("connection reset") ||
+        low.contains("connection refused") ||
+        low.contains("timed out");
+  }
+
+  /// Fresh sign-in / UI-lock resume — caller must [prepareForLoginUnlock] first when needed.
   static Future<Map<String, dynamic>> unlockWithRecovery({
     required String appNamespace,
     required String password,

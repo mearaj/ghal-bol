@@ -15,6 +15,13 @@ bool isTransientP2pLinkError(String raw) {
   if (r.contains("dialpeercondition")) return true;
   if (r.contains("no addresses")) return true;
   if (r.contains("not connected")) return true;
+  if (r.contains("broken pipe")) return true;
+  if (r.contains("connection reset")) return true;
+  if (r.contains("write failed")) return true;
+  if (r.contains("socketexception")) return true;
+  if (r.contains("daemon disconnected")) return true;
+  if (r.contains("daemon not running")) return true;
+  if (r.contains("reconnecting")) return true;
   return false;
 }
 
@@ -26,6 +33,14 @@ String? shortUserP2pError(String raw) {
   final r = trimmed.toLowerCase();
   if (r.contains("peer not known") || r.contains("unknown contact")) {
     return "Add them via invitation first.";
+  }
+  if (r.contains("broken pipe") ||
+      r.contains("connection reset") ||
+      r.contains("write failed") ||
+      r.contains("socketexception") ||
+      r.contains("daemon disconnected") ||
+      r.contains("daemon not running")) {
+    return null;
   }
   if (r.contains("connection refused") ||
       r.contains("timeout") ||

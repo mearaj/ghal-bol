@@ -1235,9 +1235,9 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
           ),
           const Divider(height: 1),
           ListTile(
-            leading: Icon(Icons.receipt_long_outlined, color: colorScheme.primary),
+            leading: Icon(Icons.download_outlined, color: colorScheme.primary),
             title: const Text("App log"),
-            subtitle: const Text("P2P, native libp2p, and app diagnostics (copy / clear)"),
+            subtitle: const Text("Diagnostics — download, share, or clear log file"),
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(

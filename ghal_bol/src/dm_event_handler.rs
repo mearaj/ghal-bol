@@ -113,6 +113,26 @@ fn outbound_delivery_for_ack(msg_kind: &str) -> &'static str {
     }
 }
 
+/// Persist inbound text as soon as the DM stream delivers it (must not wait for UI poll).
+pub fn persist_inbound_text_on_wire(
+    from_peer_id: &str,
+    message_id: &str,
+    text: &str,
+    sender_public_key_hex: &str,
+    created_at_ms: i64,
+) -> bool {
+    let ev = serde_json::json!({
+        "kind": "dm_message",
+        "from": from_peer_id,
+        "id": message_id,
+        "msg_kind": "text",
+        "text": text,
+        "sender_public_key_hex": sender_public_key_hex,
+        "created_at_ms": created_at_ms,
+    });
+    apply_p2p_event_json(&ev)
+}
+
 /// Returns `true` when contacts or transcript were updated (UI should refresh).
 pub fn apply_p2p_event_json(ev: &Value) -> bool {
     let kind = ev.get("kind").and_then(|v| v.as_str()).unwrap_or("");

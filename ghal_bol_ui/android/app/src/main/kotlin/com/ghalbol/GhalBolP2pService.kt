@@ -211,8 +211,8 @@ class GhalBolP2pService : Service() {
         val notification =
             NotificationCompat.Builder(this, channelId)
                 .setContentTitle("Ghal Bol")
-                .setContentText("Chat listener is active")
-                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentText("Listening for messages")
+                .setSmallIcon(R.drawable.ic_notification)
                 .setContentIntent(open)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -222,7 +222,7 @@ class GhalBolP2pService : Service() {
 
         val fgType =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
             } else {
                 0
             }
