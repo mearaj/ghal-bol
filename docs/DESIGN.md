@@ -1,0 +1,525 @@
+# Ghal Bol — system design
+
+This document is the **single design reference** for how Ghal Bol is meant to work: layers, messaging state, chat-room semantics, and P2P lifecycle. Wire-level detail lives in [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md); invites in [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
+
+**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md).
+
+## Goals
+
+- **Direct peer-to-peer** text between people who already know each other (QR / link handoff).
+- **No server-side chat history** — each device keeps its own transcript.
+- **Recipient-authority** delivery and read state — the sender does not invent ticks.
+- **Resilience** — sender retries **text** until acked; recipient retries **acks** until the stream accepts them.
+- **Thin UI** — Flutter handles navigation and rendering; **`ghal_bol`** owns crypto, **libp2p** transport, outbox, **all ack send/retry**, and persistence. Flutter **polls** only to refresh UI from native stores.
+
+## Layer split
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│  ghal_bol_ui — Flutter (main process)                         │
+│  Screens, hub/chat, QR, composer                              │
+│  FFI: identity unlock, contacts list, transcript read         │
+│  RPC client: p2p_start, send, poll, foreground (see below)    │
+│  Poll P2pEventBridge → refresh UI only (no ack logic)         │
+└───────────────┬──────────────────────────────┬───────────────┘
+                │ dart:ffi (same data dir)      │ Unix socket JSON-RPC
+                ▼                              ▼
+┌───────────────────────────┐    ┌──────────────────────────────┐
+│  ghal_bol in UI process    │    │  ghal_bol in :p2p / daemon    │
+│  Keystore, contacts_v1,    │    │  libp2p node, outbox,          │
+│  transcript read/write   │    │  ack send/retry, dm_event_    │
+│  via FFI                 │    │  handler on p2p_poll         │
+└───────────────────────────┘    └──────────────────────────────┘
+         shared on-disk stores (contacts_v1.json, chat_transcript_v1.json)
+```
+
+**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `libghal_bol.so` for identity and store I/O over FFI. Both processes must use the **same** Android data directory / namespace paths.
+
+| Concern | Owner |
+|---------|--------|
+| libp2p listen/dial, streams, outbox, ack send/retry | `chat_server.rs`, `p2p_runtime.rs` (in **:p2p** / daemon) |
+| Coord endpoint → dial helpers | `coord_runtime.rs`, `dm_transport/` |
+| Envelope crypto | `msg_v1.rs`, `secp256k1_seal.rs` |
+| Apply `dm_message` → contacts + transcript | `dm_event_handler.rs` (on **`p2p_poll`** in the P2P process) |
+| Contacts / previews / unread | `contacts_v1.rs` (disk; UI reads via FFI) |
+| Transcript lines, `delivery`, `read_ack_sent` | `dm_transcript_store.rs`, `dm_transcript_v1.rs` |
+| Invite build/parse/verify | `connect_invite_v1.rs`, `invite_ffi.rs` |
+| Hub, roster, foreground, layout | `chat_hub_screen.dart` |
+| Delivery tick **display** rules (comments) | `dm_delivery_sync.dart` |
+| P2P RPC + poll bridge | `p2p_runtime.rs`, `daemon/server.rs`, `ghal_bol_p2p.dart`, `p2p_event_bridge.dart` |
+
+**Rule:** New protocol or state-machine behaviour belongs in **Rust** first, exposed via FFI or daemon RPC; Dart should not re-implement ack policy, outbox, or `dm_message` store merges.
+
+**`ghal_bol_ui` should stay minimal** — only what is required for smooth UI (screens, hub foreground signals, poll bridge, FFI wrappers). See [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Identity and trust
+
+- One **secp256k1** keypair per device → libp2p **PeerId**, signatures, and message sealing.
+- Connect invite (format **2**) carries **`public_key_hex` only** — no PeerId, no IP/multiaddrs on the wire.
+- On each DM stream: Noise proves PeerId; every frame’s `sender_public_key_hex` must **match** that PeerId.
+
+## Asymmetric “who knows whom”
+
+| Role | After QR |
+|------|----------|
+| **Guest** (scanner) | Knows host’s `public_key_hex` → derives PeerId → registers `dm_peer` → dials |
+| **Host** (QR shown) | May have **zero** contacts until first inbound connection or frame; first inbound text may create an **unknown** roster row until the user **Add**s or replies — see [Contact trust (`is_known` / `is_blocked`)](#contact-trust-is_known--is_blocked) |
+
+Both sides must run P2P. For **configured** contacts only (no public directory): **LAN mDNS first** (`_ghalbol._tcp`), then **coord lookup** as fallback when still offline.
+
+## Truthful status in the UI (critical)
+
+Users must **never** see delivery or read ticks that the local device has not earned from the network. The UI is a **view** of on-disk transcript + poll-applied acks — not a guess, not “optimistic sync”, not a mirror of the other phone.
+
+| Principle | Meaning |
+|-----------|---------|
+| **Recipient authority** | Only the peer who received the text sends `ack_received` / `ack_read`. Our UI must not show “delivered” or “read” on outbound lines until **`dm_event_handler`** patches `delivery` after an inbound ack on **`p2p_poll`**. |
+| **No sender self-promotion** | The sender never sends `ack_request` and must not bump ticks locally when send succeeds — only when peer acks arrive. |
+| **Transcript is source of truth** | Ticks come from `chat_transcript_v1.json` (`delivery` on outbound, `read_ack_sent` on inbound). Flutter **reloads** that state; it does not invent it. |
+| **Poll applies, does not send** | `p2p_poll` runs `apply_p2p_event_json` in `:p2p` / daemon. Poll **never** transmits acks. A fast poll loop does not mean “more read receipts”. |
+| **No-op = no UI storm** | If transcript is already `delivered` / `read` / `read_ack_sent`, native returns **`stores_updated: false`** and poll **drops** duplicate ack events — so the UI is not spam-reloaded with fake “new” state. |
+| **Disagreement is normal** | Outbound `pending` while the peer already has the message is valid. Do not “fix” the UI by syncing the other device’s model. |
+
+**Wrong (fake or misleading state):**
+
+- Showing read/delivered because the user opened the chat, before peer acks are applied to transcript.
+- Setting `read_ack_sent` on enter-room without peer **`ack_received`** confirming our **`ack_read`**.
+- Emitting a poll/UI event for every wire ack retry when transcript did not change.
+- Merging duplicate transcript rows in Dart that hide missing native acks.
+
+**Right:** show exactly what is in the native transcript after poll/FFI merge, with monotonic-only updates (pending → delivered → read).
+
+## Message state — intent and how Ghal Bol implements it
+
+Read this before changing acks, ticks, foreground, or transcript fields. The goal is the same as a well-behaved P2P chat: **the recipient owns delivery/read**, **each phone keeps its own view**, **progress is learned from the network over time**, not from forcing both UIs to match.
+
+### Core intent (product rules)
+
+1. **Only the recipient advances “delivered” and “read” for a given text.** The sender must not bump its own checkmarks locally. The sender may only **retry the same text** until the peer’s signals arrive.
+
+2. **Sender and recipient are allowed to disagree.** Your outbound row can still say `pending` while the peer already has the text. That is normal. There is **no** feature to “sync read state” or download the other device’s UI model.
+
+3. **Two levels, not one.** “I got it” (delivered) and “I read it in the conversation” (read) are separate decisions. Delivered must happen even when the app is in the background. Read is tied to **having the chat room open**, not to having a name highlighted in a list.
+
+4. **Monotonic progress.** State only moves forward: pending → delivered → read on the sender; inbound moves toward read_ack_sent on the recipient. Duplicates merge upward, never downgrade.
+
+5. **Long-lived P2P + ~1 s upkeep.** A background networking process keeps streams and retries until the sender’s copy of outbound mail is acknowledged. UI poll is for **showing** what native already stored — not for **sending** receipts.
+
+### Mental model: one text, two local views
+
+```text
+Peer A (sender)                         Peer B (recipient)
+─────────────────                       ───────────────────
+Stores outbound line                    Stores inbound line
+  delivery: pending → …                   read_ack_sent: false → true
+  (ticks in UI)                           (no ticks on B for A's send)
+
+B decides when A's text is "delivered"  → B sends ack_received(ref_id)
+B decides when A's text is "read"       → B sends ack_read(ref_id) [room open]
+
+A's upkeep resends same text id         B's upkeep retries acks if stream was down
+until ack_received or ack_read          until written on wire
+```
+
+### Recipient lifecycle
+
+| When | What should happen | Ghal Bol |
+|------|-------------------|----------|
+| **First time** peer’s text is accepted | Mark “delivered” toward sender; persist locally | Wire **`ack_received`**; append transcript; update contact preview (`dm_event_handler` on poll) |
+| **Duplicate** same `id` (sender resend) | Still ensure delivered signal; no second bubble | **`ack_received`** if needed; dedupe transcript |
+| **Chat room open** for that peer | Treat visible thread as read toward sender | Hub sets **`live_foreground_peer`** + **`app_ack_read_enabled`** → native **`ack_read`** after **`ack_received`**; seed backlog + one pass on enter |
+| **Chat room closed** (list, other tab, navigated back, app paused) | New mail stays “delivered” only | **`ack_received` only** for **new** inbound |
+| **Left room but mail arrived while open** | Still finish read signaling for that backlog | **Keep** read-ack retry queue; do **not** clear on leave |
+| **Mail arrives after leave** | Do not auto-read | **`ack_received` only** until room opens again |
+| **Opened chat UI** | Does **not** by itself mean read is done on the wire | **`read_ack_sent`** only after sender’s **`ack_received`** confirms our **`ack_read`** |
+
+Native code: `send_inbound_delivery_ack`, `send_inbound_read_ack_if_possible`, `pending_delivery_acks` / `pending_read_acks` in `chat_server.rs`. Runs in **`:p2p` / daemon** — not in the Flutter isolate.
+
+### Sender lifecycle
+
+| When | What should happen | Ghal Bol |
+|------|-------------------|----------|
+| User sends | Persist locally, queue on wire when stream ready | `p2p_send_text_dm` → transcript `delivery: pending` + outbox |
+| Peer slow / offline | Same message id retried ~1 s | Outbox + `transcript_sync_outbound_tick` |
+| Peer signals delivered | Stop resending; single-check tick | Inbound **`ack_received`** on poll → `delivery: delivered` |
+| Peer signals read | Stop resending; read tick | Inbound **`ack_read`** on poll → `delivery: read` (implies delivered) |
+| Peer echoes nothing locally | Sender must **not** self-promote ticks | Sender **never** sends `ack_request`; only applies peer acks |
+
+### What “chat room open” means
+
+**Open** = the user is in the **conversation UI** for that contact, and the hub has told native which peer is foreground.
+
+| Meaning | Ghal Bol |
+|---------|----------|
+| **Is** open | Hub engaged: narrow **`_narrowShowRoom`** or split **`_splitChatEngaged`** + **`set_foreground_peer`** + **`set_app_ack_read_enabled(true)`** |
+| **Is not** open | Contact row selected in hub only; chat pane mounted off-room (`hubPollsEvents`); app paused — **`ChatScreen` must not** set foreground in hub mode |
+
+Read marking applies only while the **conversation screen is active** in the hub, not when the contact merely appears in a list.
+
+### How Ghal Bol differs on the wire (same intent)
+
+Some stacks store `Received` / `Read` **on the message struct** and echo the **full message** on the stream when the sender retries; the sender merges a higher `State` from that echo.
+
+**Ghal Bol does not do that.** Text frames carry body + `id` only. Progress uses **separate** signed envelopes:
+
+| Intent | Wire in Ghal Bol | Local transcript |
+|--------|------------------|------------------|
+| Delivered | **`ack_received`** (`ref_id` = text `id`) | Outbound **`delivery`**: `delivered` |
+| Read | **`ack_read`** (`ref_id` = text `id`) | Outbound **`delivery`**: `read`; inbound **`read_ack_sent`** after confirm |
+| Sender learns | Inbound ack events on **`p2p_poll`** → `dm_event_handler` | Not from a resent text blob with embedded status |
+
+Read still reaches the sender when the recipient has marked read locally and the stream is up: native **retries `ack_read`** on upkeep (and on enter-room seed), instead of embedding `Read` inside a resent text payload.
+
+### Leave / backlog (do not get this wrong)
+
+This is a **sensitive** product rule. Users expect: “I saw it in the chat while the room was open” → the other side should eventually get **read**, even after I go back to the list or switch tabs.
+
+| | Behaviour |
+|---|-----------|
+| **Wrong** | Leaving the chat **clears** the read-ack queue or **stops** all `ack_read` work. |
+| **Wrong** | Turning off `app_ack_read_enabled` **clears** `live_foreground_peer` before native can run leave drain (loses which peer to flush). |
+| **Wrong** | Hub disables read gate **before** `SetForegroundPeer(null)`, so leave seed/drain never runs. |
+| **Right** | Leaving stops **new** `ack_read` for **new** inbound only. |
+| **Right** | Mail that arrived **while the room was open** stays in `pending_read_acks` + transcript; native **keeps retrying** `ack_read` (~1 s) until the sender’s **`ack_received`** confirms each id. |
+| **Right** | **`ack_received`** for **all** inbound (including after leave) continues in `:p2p` — delivery is never gated on the room. |
+
+**Native (`chat_server.rs`):**
+
+- **`pending_read_acks` is not cleared on leave** — only per-id dequeue on confirm or successful policy.
+- On leave: `seed_read_acks_for_peer_from_transcript` + `spawn_leave_read_ack_drain` (not gated on `app_ack_read_enabled`).
+- **`last_room_peer`**: remembers who was in the room if `SetForegroundPeer` enter was still queued — leave drain still runs.
+- **Leave read-ack drain**: only from **`SetForegroundPeer(null)`** on the outbound queue — **not** from `set_app_ack_read_enabled(false)` (that duplicated leave work and starved `SendText`).
+- **`set_app_ack_read_enabled(false)` does not call `sync_foreground_peer_now(None)`** — foreground is cleared by hub via **`SetForegroundPeer(null)`** so leave logic sees the previous peer.
+
+**Hub close order (`chat_hub_screen.dart`):**
+
+1. `setForegroundConversation(null)` and await (native leave drain + clear foreground).
+2. Then `setAppAckReadEnabled(false)` (stop **new** in-room read; backlog drain already scheduled).
+
+**Hub open order:**
+
+1. `setAppAckReadEnabled(true)` first (read gate on before enter-room cmd may run on outbound queue).
+2. `setForegroundConversation(peer)` and await.
+3. Native: seed transcript + enter-room catch-up (`RunReadAckCatchup` if gate opened after foreground was already set).
+
+### Who must not touch policy
+
+| Layer | May | Must not |
+|-------|-----|----------|
+| **`chat_server` (`:p2p`)** | Send/retry acks; outbox text resend | — |
+| **`dm_event_handler` (on poll)** | Write contacts + transcript from events | Send acks |
+| **Flutter** | Foreground peer, composer, poll UI | Send acks; merge dm policy; assume synced ticks across devices |
+
+Duplicate inbound `id`: delivery ack if needed; **no** second transcript row.
+
+## Chat room — native gates (summary)
+
+| Situation | Recipient sends |
+|-----------|-----------------|
+| Any inbound text | **`ack_received`** (always, including `:p2p` background) |
+| Room **open** | **`ack_received`** + **`ack_read`** |
+| Room **closed** / new mail after leave | **`ack_received` only** |
+| **Enter** room | Seed transcript + **one pass** of queued **`ack_read`** for backlog (then ~1 s retries only until confirm) |
+| **Leave** / pause | Clear foreground; **retry** queued read acks; no new **`ack_read`** for new mail |
+
+Hub clears foreground on pause so `:p2p` never keeps a stale “in room” flag and skips delivery. **`ack_received` always precedes `ack_read`.**
+
+## Read receipts — wire volume, confirm loop, poll (do not flood)
+
+**Healthy behaviour:** for each text `id`, the recipient sends **at most one immediate `ack_read` while the room is open**, then **at most ~1 wire retry per second** until the sender confirms. The sender should see **one** inbound `ack_read` poll apply per message (blue tick), not hundreds.
+
+**Duplicate `ack_read` for the same `ref_id` is not normal** and almost always means the implementation broke the confirm loop or retried too fast — not that “dedupe at poll” is the product fix.
+
+### Confirm loop (both peers must implement)
+
+```text
+Recipient (room open)                         Sender (our outbound text id = X)
+─────────────────────                         ─────────────────────────────────
+Inbound text id=X
+  → ack_received(ref=X)  ──────────────────→  delivery: delivered
+  → ack_read(ref=X)        ──────────────────→  delivery: read  (first time only)
+                                              → MUST send ack_received(ref=X)
+                    ←──────────────────────────   (confirms they got our ack_read)
+mark_read_ack_confirmed(X)
+  → stop read retries for X
+  → read_ack_sent on inbound row (transcript)
+```
+
+- **`ref_id` on `ack_read` / `ack_received` is always the original text message `id`**, not the ack frame’s own id.
+- On inbound **`ack_read`**: native **always** replies **`ack_received(ref_id=text id)`** so the peer can stop retrying — even if our transcript was already `read`.
+- On inbound **`ack_received`**: if `ref_id` matches an inbound id we sent **`ack_read` for**, call **`mark_read_ack_confirmed`** and dequeue read retries.
+
+### Native send rules (`chat_server.rs`)
+
+| Rule | Implementation |
+|------|----------------|
+| First send in-room | `send_inbound_read_ack_if_possible` after `ack_received`; enqueue + try wire immediately |
+| Retry cadence | `PendingReadAck.last_send_ms`: no second wire send for same id until **`OUTBOX_RESEND_INTERVAL_MS` (~1 s)** |
+| Room enter backlog | `seed_read_acks_for_peer_from_transcript` then **`ACK_BURST_MAX_ROUNDS = 1`** (one pass), not multi-hundred-round bursts |
+| Upkeep | `run_ack_upkeep` ~1 s; read batch respects `last_send_ms` and `is_read_ack_confirmed` |
+| Poll events | Emit inbound **`ack_read`** to the poll queue **always** (first apply patches `read`; wire retries no-op in `apply_inbound_ack`). Emit outbound **`ack_received`** when outbox had the row or read-ack confirm advanced. |
+| Transcript on poll | `dm_event_handler::apply_inbound_ack` returns **`stores_updated` only if** `patch_outgoing_delivery` / `patch_inbound_read_ack_sent` returns **changed** |
+| Poll drain | `p2p_poll_event` skips returning duplicate ack events that did not change stores |
+
+### Flutter rules (display only)
+
+| Rule | Where |
+|------|--------|
+| Hub sets foreground + `app_ack_read_enabled` | `chat_hub_screen.dart` when room open |
+| Chat must not set foreground when `hubPollsEvents` | `chat_screen.dart` |
+| Acks arrive via `ingestP2pEvent` | Do not also full-merge transcript on every `previewChangeCount` for the open room |
+| Delivery ticks | Debounced `mergeTranscriptFromNative(deliveryOnly: true)` on ack polls — not one FFI reload per retry |
+| Never send acks from Dart | Poll refreshes UI only |
+
+### Regression symptoms (treat as bugs)
+
+| Log / behaviour | Likely cause |
+|-----------------|--------------|
+| Same `ack_read` `ref=` many times per second | Read retry without confirm; burst rounds ≫ 1; upkeep ignoring `last_send_ms` |
+| `poll drain saturated` + `totalEvents` ≫ message count | Every wire retry emitted to UI; `stores_updated` on no-op transcript patch |
+| `patch outbound delivery=read` in a tight loop on unlock | Draining stale poll queue; fix emit + apply gates |
+| `Large outgoing transaction` / app dies copying logs | Log + poll storm; fix native volume first |
+| Blue tick never appears | Confirm `ack_received` not sent or not applied; foreground/room gates wrong — not “send more ack_read” |
+
+**Do not fix floods by:** larger poll batches, Dart-side ack filtering alone, or “dedupe” without fixing confirm + retry cadence in Rust.
+
+**Anti-patterns (do not reintroduce):**
+
+- In-room path that sends **`ack_read` only** with **no** `ack_received` when `:p2p` can outlive the UI.
+- Relying on Flutter poll to **send** acks (poll only applies events to stores).
+- Clearing read-ack retry queues on leave.
+- **`set_app_ack_read_enabled(false)` clearing `live_foreground_peer`** before `SetForegroundPeer(null)` (breaks leave backlog drain).
+- Hub **disabling read gate before** `setForegroundConversation(null)` on room close.
+- Showing ticks from Flutter logic without a transcript/poll patch (fake delivered/read).
+- Loading chat with a **single** conversation key when history spans peer id + public key buckets.
+- Setting `read_ack_sent` on enter without sender `ack_received` confirm.
+- Sender emitting `ack_request`.
+- Mutual-QR / “both sides must scan” requirement.
+- **High-volume `ack_read` retry** (burst rounds ≫ 1, upkeep every tick without `last_send_ms`, or 128×512 style bursts).
+- **Emitting a poll/UI event for every wire ack retry** when transcript delivery / `read_ack_sent` is already at target.
+- **`stores_updated` on no-op** transcript patches (forces hub/chat FFI reload storms).
+- **Hub `previewChangeCount` → full `mergeTranscriptFromNative`** while the open chat already handles the same events in `ingestP2pEvent`.
+- Treating duplicate read acks as expected — fix the confirm loop and retry cadence instead.
+
+## Flutter: who sets foreground
+
+`ChatHubScreen` owns foreground when it polls P2P (`hubPollsEvents: true` on embedded `ChatScreen`).
+
+| Layout | Room “open” when |
+|--------|------------------|
+| **Narrow** (phone) | Chats tab + `_narrowShowRoom` + selected contact |
+| **Split** (desktop) | Chats tab + selected contact + **`_splitChatEngaged`** (user opened chat column; list click can disengage) |
+
+`ChatScreen` **must not** call `p2pSetForegroundPeer` when `hubPollsEvents` is true (IndexedStack keeps chat mounted off-room).
+
+On **pause / background**, hub uses the **same close order** as leaving a room: `setForegroundConversation(null)` first, then `setAppAckReadEnabled(false)`. Delivery acks continue in `:p2p`; read gate off only blocks **new** in-room read.
+
+Native applies foreground **synchronously** via `sync_foreground_peer_now` when FFI/RPC sets peer — inbound handler uses **`live_foreground_peer`** for the in-room `ack_read` gate. **`last_room_peer`** is updated whenever foreground is set to a peer (for leave drain).
+
+On Linux/Android, **foreground** and **`set_app_ack_read_enabled`** use a **dedicated RPC socket** so they are not queued behind `send_text_dm` or bulk sync. **`p2p_poll`** uses the same dedicated socket so UI events are not starved by sends.
+
+### Room open vs closed — decision table
+
+| User situation | `app_ack_read_enabled` | `live_foreground_peer` | Inbound **new** text | Backlog from while room was open |
+|----------------|------------------------|-------------------------|----------------------|----------------------------------|
+| In conversation UI (hub room open) | `true` | that peer | `ack_received` + `ack_read` | Retries until confirm |
+| Contact selected, list only / split not engaged | `false` | `none` or stale | `ack_received` only | Drain may still run on leave |
+| Left room / other tab / paused | `false` | `none` (after hub close) | `ack_received` only | **`ack_read` retries continue** |
+| App background, `:p2p` alive | `false` | `none` | `ack_received` only | Same backlog rule |
+
+Selecting a row in the roster is **not** “room open”. Only the hub rules in the table above count.
+
+## Transcript threads and conversation keys
+
+`chat_transcript_v1.json` stores one array per **conversation key**. Contacts use **`libp2p_peer_id` when known**, else **`public_key_hex`**.
+
+Historically, some threads were stored under the **public key** before PeerId was learned; newer lines may use **peer id**. That must not look like an empty chat or block ack patches.
+
+| Operation | Key rule |
+|-----------|----------|
+| **Write** (append/save) | Canonical key = `SavedContact.conversationKey` (peer id preferred). |
+| **Read** (chat UI, ack patch, seed on enter/leave) | **`load_merged`** expands to **peer id + public key** for the same contact (`expand_conversation_keys` in Rust; `allConversationKeys` in Flutter). |
+| **Patch delivery / read_ack_sent** | Try all expanded keys so old rows under `public_key_hex` still get ticks and confirms. |
+
+**Symptom if broken:** hub preview shows `last_message_preview` (contacts) but the chat pane is empty, or outbound ticks never update for old messages — usually a **key mismatch**, not missing P2P.
+
+**Rule:** never show transcript lines in the UI without loading through merged keys for the active contact.
+
+## P2P lifecycle
+
+1. **Unlock** — UI: FFI `createOrUnlockIdentity`; daemon: `unlock` with the same namespace and password (must match public key). Both call `set_p2p_handler_context(app_namespace)`.
+2. **`p2p_start`** — `dm_peers: [{ "public_key_hex": "…" }]`, `bootstrap_peers: []`, `app_namespace`. If the node is **already running**, native still refreshes handler context and re-registers all `dm_peers` from config (daemon may survive UI restarts).
+3. **Contact added** (scan) → `sync_contacts` **hot-registers** keys on the **running** node — **no full `p2p_stop` / restart** for roster changes.
+4. **Dial** → DHT/mDNS toward configured PeerId (guest dials from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
+5. **Connect** → open `/ghal-bol/msg/1.0.0` (no separate key-exchange prelude).
+6. **`chat_ready`** → outbound stream writer up; safe to send frames.
+7. **Poll** → `p2p_poll` → JSON events; `dm_event_handler` updates on-disk stores; Flutter reloads roster/transcript via FFI.
+
+**Host after scan (asymmetric):** scanner’s roster updates immediately from QR. Host may show **zero** contacts until `peer_identified` or first inbound `dm_message` (text) creates/updates the row — poll must bump **roster** on those `stores_updated` events, not only preview.
+
+### Event chain for delivery (debugging)
+
+```text
+register_dm_peer → lookup+dial → peer_connected → chat_ready → outbound_sent
+                                                      ↘ dm_message (inbound text)
+```
+
+If sends stay `queued` / `not connected yet`, the break is in the **native chain** (dm_peer registered, dial, stream, handler context) — not missing Flutter ack logic.
+
+### Background listener (`:p2p` / daemon)
+
+**Android:** `GhalBolP2pService` in process **`:p2p`** (foreground + multicast lock). JSON-RPC on `filesDir/.../ghalbol/p2p.sock`. Same `configure_android_data_directory` path as Flutter (`getApplicationDocumentsDirectory`).
+
+**Linux desktop:** **`ghal_bol_daemon`** under `libexec/`. Socket: `$XDG_RUNTIME_DIR/ghalbol/p2p.sock` (or `GHAL_BOL_DAEMON_SOCKET`).
+
+**Both:**
+
+- libp2p, outbox, and **all ack send/retry** run here — **not** in the Flutter isolate.
+- Flutter **poll** refreshes UI from disk after `dm_event_handler` runs on each `p2p_poll`.
+- UI lock / hub dispose: clear foreground; **do not** `p2p_stop`.
+- Logout / delete identity: `p2p_stop` + lock.
+
+**Do not** run `scripts/sync_ghal_bol_native_for_flutter.sh` while the Linux app holds an open daemon socket (stops `ghal_bol_daemon` → `Broken pipe`). Android native rebuild uses `pack_android_workspace_jni_libs.sh` only.
+
+## Contacts and roster preview
+
+On inbound `dm_message` (text), native `dm_event_handler`:
+
+- Always updates **last message preview** on the contact (either direction).
+- Increments **unread** only when the message is **not** from the foreground peer; clears **unread** when the hub has that peer in the foreground (room open) or on preview update with `mark_unread` false.
+- Contact trust fields (`is_known`, `is_blocked`) follow [Contact trust](#contact-trust-is_known--is_blocked) — preview and unread behavior for unknown peers is unchanged unless the peer is **blocked**.
+
+## Contact trust (`is_known` / `is_blocked`)
+
+### Intent
+
+After an asymmetric connect (one side scanned, the other did not), the **host** may see a new roster row from **first inbound text** before choosing to trust that peer. Contact trust is how the **local** UI expresses that choice:
+
+- **`is_known`** — user accepts this peer on **this** device.
+- **`is_blocked`** — user blocks this peer on **this** device.
+
+Trust is **per device** (`contacts_v1.json` only). It is **not** on the wire, not synced between phones, and not part of DM frames.
+
+**Hard requirement:** This feature is **additive**. It must **never** change existing messaging behavior: P2P registration, outbox, `ack_received` / `ack_read`, hub foreground open/close order, transcript keys, poll, delivery/read ticks, or invite scan flow for peers the user already added.
+
+**No legacy / backward compatibility:** Do **not** keep parallel block lists, infer trust from “we chatted before”, or migrate old preference keys. Block state lives **only** on the contact row as `is_blocked`. Every persisted contact includes both booleans explicitly.
+
+### Stored fields (`contacts_v1.json`)
+
+Each contact row has two required booleans:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| **`is_known`** | `bool` | `true` when the user accepted this peer on this device; `false` when the peer is **unknown** in the UI. |
+| **`is_blocked`** | `bool` | `true` when the user blocked this peer on this device. |
+
+**Initial values when the row is created:**
+
+| How the row appears | `is_known` | `is_blocked` |
+|---------------------|------------|--------------|
+| User **scans** peer A’s invite (peer B scanned A) or otherwise saves a contact they chose | `true` | `false` |
+| Row appears because **first inbound text** arrived and this key was not already in the roster (typical **peer A** after B scanned and messaged) | `false` | `false` |
+
+**User actions (persist immediately):**
+
+| Action | `is_known` after | `is_blocked` after | UI after |
+|--------|------------------|--------------------|----------|
+| Tap **Add** on room banner | `true` | `false` | Banner gone; hub **Unknown** control gone |
+| Tap **Block** on room banner | (unchanged) | `true` | Banner gone; block UX (no normal chat) |
+| Send **any** outbound text in that room (including the first character) | `true` | `false` | Same as **Add** — banner gone; **Unknown** control gone |
+
+Do not infer `is_known` from preview text, unread, or transcript length — **only** these fields and the rules above.
+
+### Canonical flow (peer B scans peer A, then messages)
+
+Naming matches [Asymmetric “who knows whom”](#asymmetric-who-knows-whom): **B** = guest (scanner), **A** = host (QR shown).
+
+1. **B** scans **A**’s QR → **B**’s roster gets **A** with `is_known: true`, `is_blocked: false` (B chose to add A).
+2. **B** sends a message to **A**.
+3. **A** receives it → native creates/updates a roster row for **B** with `is_known: false`, `is_blocked: false` (A did not scan B).
+4. On **A**’s **hub** contact list, the row for **B** shows a **highlighted button-like widget** on the **right** side of the item, labeled **`Unknown`**. Show it only while `is_known == false` **and** `is_blocked == false`.
+5. **A** taps the row and enters the chat **room** → a **banner** at the **top** of the room with two option buttons: **Add** and **Block**.
+6. **Add** → `is_known: true`; persist; remove banner and hub **Unknown** control.
+7. **Block** → `is_blocked: true`; persist; remove banner; apply block UX.
+8. If **A** sends even a **single** outbound message before tapping Add → same as step 6 (`is_known: true`); banner and **Unknown** control must not remain.
+
+Peers who were already `is_known: true` (everyone added via scan on this device) must see **no** new banner or **Unknown** control.
+
+### UI specification
+
+| Surface | When visible | What to show |
+|---------|----------------|--------------|
+| Hub roster item (right side) | `!is_known && !is_blocked` | Highlighted button-like control, text **`Unknown`** |
+| Chat room (top) | Room open for that peer and `!is_known && !is_blocked` | Banner with **`Add`** and **`Block`** buttons |
+| Hub + room | `is_known == true` | No **Unknown** control; no trust banner |
+| Hub + room | `is_blocked == true` | No trust banner; blocked interaction rules apply |
+
+Preview, unread, and opening the room for an unknown peer behave as today except for this added chrome and block policy.
+
+### Layer ownership (implementation later)
+
+| Concern | Owner |
+|---------|--------|
+| Persist `is_known` / `is_blocked`; set defaults on create/upsert | **Rust** — `contacts_v1.rs`, `dm_event_handler` on first inbound text |
+| Hub **Unknown** control | **Flutter** — `chat_hub_screen.dart` (read contacts via FFI) |
+| Room **Add** / **Block** banner; dismiss rules | **Flutter** — `chat_screen.dart` |
+| First outbound send ⇒ `is_known: true` | **Flutter** triggers native update before/at send; **Rust** stores |
+| Block enforcement (ignore new inbound from blocked peer, etc.) | **Rust** preferred; Flutter must not treat blocked peers as normal chat |
+
+Use the existing contacts reload path (`contacts_list` / roster bump after poll). **Do not** add a second contact or block store in Dart.
+
+### Invariants (do not break)
+
+- **`is_known: false`** does **not** stop receiving messages, writing transcript, or sending **`ack_received`** — it only drives trust UI until Add, Block, or first outbound send.
+- **`is_blocked: true`** gates product interaction (e.g. hide/normal chat); must not corrupt transcript or ack state for data already accepted.
+- Trust UI must not alter hub **foreground** order (`setForegroundConversation` / `setAppAckReadEnabled`), leave backlog, or read-ack confirm loop documented above.
+- Removing separate “blocked peer id” preferences is intentional — **`is_blocked` on the contact is the only block flag**.
+
+## Connect invite (summary)
+
+- Single wire format: **`format_version`: 2**, `public_key_hex` only.
+- **One codec** in Rust and Dart (`invite_uri_codec.dart` / `connect_invite_v1.rs`) — share and scan must use the same bytes.
+- Verify in native; Dart fallback parse only when needed for dev builds.
+
+Details: [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
+
+## Persistence
+
+| File | Contents |
+|------|----------|
+| `contacts_v1.json` | Roster, alias, preview, unread, **`is_known`**, **`is_blocked`** |
+| `chat_transcript_v1.json` | Per-conversation lines; outbound `delivery`; inbound `read_ack_sent` |
+| Keystore | Encrypted identity under app namespace |
+
+Transcript survives restart; native re-seeds outbox and read-ack queues from disk.
+
+## What we explicitly do **not** do
+
+- Pull chat history from the peer’s device (“give me messages since T”).
+- Mirror the other side’s delivery/read flags without ack frames.
+- Put multiaddrs or PeerId on new connect invites.
+- Restart the whole libp2p node on every contact list change.
+- Use gossipsub for 1:1 DM (streams only).
+- Store block state outside `contacts_v1.json` (`is_blocked` on the contact row is the only block flag; no legacy blocked-peer-id list).
+- Infer `is_known` from chat history or preview alone.
+
+## Code map (quick)
+
+| Topic | Path |
+|-------|------|
+| AI entry | `AGENTS.md` |
+| Layer contract | `docs/ARCHITECTURE.md` |
+| Design (this file) | `docs/DESIGN.md` |
+| DM wire + acks | `docs/GHAL_BOL_DM_MSG_V1.md` |
+| URI / QR | `docs/GHAL_BOL_URI_SCHEME.md` |
+| Stream node + ack send | `ghal_bol/src/p2p/chat_server.rs` |
+| P2P FFI + poll | `ghal_bol/src/p2p_runtime.rs`, `p2p_ffi.rs` |
+| Daemon RPC | `ghal_bol/src/daemon/server.rs` |
+| Event → stores | `ghal_bol/src/dm_event_handler.rs` |
+| Contacts / transcript | `ghal_bol/src/contacts_v1.rs`, `dm_transcript_store.rs` |
+| Hub / foreground | `ghal_bol_ui/lib/chat_hub_screen.dart` |
+| Chat UI (display) | `ghal_bol_ui/lib/chat_screen.dart` |
+| P2P start / dm_peers | `ghal_bol_ui/lib/p2p_network_coordinator.dart` |
+| Poll bridge | `ghal_bol_ui/lib/p2p_event_bridge.dart` |
+| Tick labels (comments) | `ghal_bol_ui/lib/dm_delivery_sync.dart` |
+| Android `:p2p` service | `ghal_bol_ui/android/.../GhalBolP2pService.kt` |

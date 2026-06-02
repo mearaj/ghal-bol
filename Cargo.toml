@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["ghal_bol", "ghal_bol_server"]
+
+# Faster iterative builds (deps compile at opt-level 2 in dev) — same idea as emilk/eframe_template.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ghal Bol
+Comment=Ghal Bol anonymous chat
+Exec=ghal_bol_ui
+Icon=app_icon
+StartupWMClass=com.ghalbol
+Categories=Network;Chat;
+Terminal=false

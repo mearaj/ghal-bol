@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    env:
+      GHAL_BOL_COORD_URL: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests (ghal_bol)
+        run: cargo test -p ghal_bol --lib
+
+      - name: Unit tests (ghal_bol_server)
+        run: cargo test -p ghal_bol_server
+
+      - name: P2P integration tests
+        run: cargo test -p ghal_bol --test dm_two_peer_delivery --test dm_coord_lookup_delivery
+        timeout-minutes: 15
+
+  flutter:
+    name: Flutter analyze & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ghal_bol_ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: dart analyze
+        run: dart analyze --fatal-warnings
+
+      - name: flutter test
+        run: flutter test

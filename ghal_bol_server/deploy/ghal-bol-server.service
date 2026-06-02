@@ -1,0 +1,28 @@
+# Systemd unit for production VM (coord.ghalbol.com).
+#
+# Install on the server:
+#   sudo cp ghal_bol_server/deploy/ghal-bol-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ghal-bol-server
+#
+# Edit User, ExecStart, and GHAL_BOL_SERVER_DB before enabling.
+
+[Unit]
+Description=Ghal Bol coordination server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mearajbhagad
+Group=mearajbhagad
+WorkingDirectory=/home/mearajbhagad
+ExecStart=/home/mearajbhagad/ghal_bol_server
+Environment=GHAL_BOL_SERVER_LISTEN=127.0.0.1:8765
+Environment=GHAL_BOL_SERVER_DB=/home/mearajbhagad/.local/share/com.ghalbol/ghalbol_server
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

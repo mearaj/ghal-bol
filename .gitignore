@@ -1,0 +1,38 @@
+# Cargo — workspace build output (default layout)
+/target/
+**/target/
+
+# Prebuilt Android native libs from **scripts/pack_android_workspace_jni_libs.sh**
+/build/
+/dist/
+
+# Local secrets at repo root or in members (templates stay tracked as `.env.example`)
+.env
+.env.local
+.env.*.local
+
+# Optional local keystores — not wired into default debug Gradle; ignore if unused
+ghal_bol_ui/keystore/
+
+# Prebuilt native binaries from sync scripts (rebuild locally)
+ghal_bol_ui/linux/native/lib/
+ghal_bol_ui/linux/native/libexec/
+ghal_bol_ui/windows/native/
+ghal_bol_ui/macos/native/
+
+# Backup / editor swap files
+*.rs.bk
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE (local-only; commit shared editor config only if you rename/adjust this section)
+.idea/
+
+# Logs and profiling dumps
+*.log
+*.profraw

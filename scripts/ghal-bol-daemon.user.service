@@ -1,0 +1,18 @@
+# Optional: run ghal_bol_daemon at graphical login (Linux).
+# Install: mkdir -p ~/.config/systemd/user && cp scripts/ghal-bol-daemon.user.service ~/.config/systemd/user/
+#          systemctl --user enable --now ghal-bol-daemon.service
+#
+# Set GHAL_BOL_DAEMON_BIN to your built or bundled binary path.
+
+[Unit]
+Description=Ghal Bol libp2p background listener
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ghal_bol_daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

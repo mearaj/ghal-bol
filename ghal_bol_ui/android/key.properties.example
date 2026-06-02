@@ -1,0 +1,8 @@
+# Copy to key.properties (gitignored) and fill in for release APK/AAB signing.
+# Generate a keystore:
+#   keytool -genkey -v -keystore ~/ghalbol-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias ghalbol
+#
+storePassword=CHANGE_ME
+keyPassword=CHANGE_ME
+keyAlias=ghalbol
+storeFile=/absolute/path/to/ghalbol-release.jks
