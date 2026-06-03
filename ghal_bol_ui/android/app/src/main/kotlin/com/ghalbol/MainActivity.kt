@@ -39,7 +39,7 @@ class MainActivity : FlutterActivity() {
                     }
                     "stopP2pService" -> {
                         try {
-                            stopService(Intent(applicationContext, GhalBolP2pService::class.java))
+                            startService(GhalBolP2pService.stopIntent(applicationContext))
                             result.success(null)
                         } catch (e: Throwable) {
                             result.error("stop_failed", e.message, null)
@@ -65,7 +65,7 @@ class MainActivity : FlutterActivity() {
                     }
                     "stopForeground" -> {
                         try {
-                            stopService(Intent(applicationContext, GhalBolP2pService::class.java))
+                            startService(GhalBolP2pService.stopIntent(applicationContext))
                             result.success(null)
                         } catch (e: Throwable) {
                             result.error("stop_failed", e.message, null)

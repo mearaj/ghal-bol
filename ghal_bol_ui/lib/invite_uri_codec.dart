@@ -3,6 +3,7 @@ const String kGhalBolConnectShareV1 = "ghal_bol_connect_v1";
 const int kConnectInviteFormatV2 = 2;
 
 const String kGhalBolConnectHttpsHost = "ghalbol.com";
+const String kGhalBolConnectHttpsHostWww = "www.ghalbol.com";
 const String kGhalBolConnectAppScheme = "ghalbol";
 const String kGhalBolConnectPathSegment = "connect";
 
@@ -57,10 +58,12 @@ Map<String, dynamic>? _decodePathStyleInvite(String t) {
   }
 
   for (final scheme in ["https://", "http://"]) {
-    final prefix = "$scheme$kGhalBolConnectHttpsHost/";
-    if (lower.startsWith(prefix)) {
-      final pk = _pkFromPathRest(pathPart.substring(prefix.length));
-      if (pk != null) return _wireFromPk(pk, alias: alias);
+    for (final host in [kGhalBolConnectHttpsHost, kGhalBolConnectHttpsHostWww]) {
+      final prefix = "$scheme$host/";
+      if (lower.startsWith(prefix)) {
+        final pk = _pkFromPathRest(pathPart.substring(prefix.length));
+        if (pk != null) return _wireFromPk(pk, alias: alias);
+      }
     }
   }
   return null;
@@ -68,6 +71,9 @@ Map<String, dynamic>? _decodePathStyleInvite(String t) {
 
 String? _pkFromPathRest(String rest) {
   var r = rest.trim();
+  while (r.startsWith("/")) {
+    r = r.substring(1);
+  }
   if (r.startsWith("$kGhalBolConnectPathSegment/")) {
     r = r.substring(kGhalBolConnectPathSegment.length + 1);
   } else if (r.startsWith(kGhalBolConnectPathSegment)) {
@@ -143,13 +149,46 @@ bool verifyConnectInviteWireMap(Map<String, dynamic> v) {
   return _isHex66(pk);
 }
 
+/// Canonical `https://ghalbol.com/connect/…` for a browser [Uri] (path + query).
+String? inviteHttpsStringFromUri(Uri uri) {
+  final pk = _pkFromPathRest(uri.path);
+  if (pk == null) return null;
+  final alias = _parseAliasQuery(uri.query.isEmpty ? null : uri.query);
+  return encodeConnectInviteUri(_wireFromPk(pk, alias: alias));
+}
+
+/// `ghalbol://connect/…` equivalent for an HTTPS invite URL or location [Uri].
+String? inviteAppUriFromHttps(String https) {
+  final wire = decodeConnectInviteUri(https);
+  if (wire == null) return null;
+  return encodeConnectInviteAppUri(wire);
+}
+
+String? inviteAppUriFromUri(Uri uri) {
+  final https = inviteHttpsStringFromUri(uri);
+  if (https == null) return null;
+  return inviteAppUriFromHttps(https);
+}
+
+Map<String, dynamic>? connectInviteWireFromUri(Uri uri) {
+  final https = inviteHttpsStringFromUri(uri);
+  if (https == null) return null;
+  return decodeConnectInviteUri(https);
+}
+
 String? extractConnectInviteUri(String? raw) {
   if (raw == null) return null;
   final t = normalizeInviteInput(raw);
   if (t.isEmpty) return null;
 
+  // Full decode first (keeps ?alias= from QR / paste; regex alone can miss query).
+  final wire = decodeConnectInviteUri(t);
+  if (wire != null) {
+    return encodeConnectInviteUri(wire);
+  }
+
   final https = RegExp(
-    r"https?://ghalbol\.com/connect/[0-9a-fA-F]{66}[^\s]*",
+    r"https?://(?:www\.)?ghalbol\.com/connect/[0-9a-fA-F]{66}[^\s]*",
     caseSensitive: false,
   ).firstMatch(t);
   if (https != null) return https.group(0);

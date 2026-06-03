@@ -279,6 +279,19 @@ abstract final class GhalBolP2p {
     await GhalBolDaemonClient.reconnectDaemon();
   }
 
+  /// Hint `:p2p` / daemon that the OS default network may have changed (resume, VPN, Wi‑Fi).
+  static Future<void> notifyNetworkChange() async {
+    if (!usesDaemon) return;
+    if (!await isRunning()) return;
+    try {
+      await GhalBolDaemonClient.instance.callState(
+        "p2p_notify_network_change",
+        params: {},
+        ensureDaemon: false,
+      );
+    } catch (_) {}
+  }
+
   static Future<bool> waitNodeReady({
     Duration timeout = const Duration(seconds: 8),
   }) async {

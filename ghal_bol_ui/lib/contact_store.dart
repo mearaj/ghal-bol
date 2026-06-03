@@ -3,6 +3,7 @@ import "package:flutter/foundation.dart";
 import "app_log.dart";
 import "chat_transcript_store.dart";
 import "ghal_bol_ffi.dart";
+import "identity_display_name.dart";
 import "public_key_hex.dart";
 import "saved_contact.dart";
 
@@ -60,6 +61,34 @@ class ContactStore {
   }) async {
     final c = GhalBolFfi.contactsFind(appNamespace, {"libp2p_peer_id": libp2pPeerId.trim()});
     return c == null ? null : SavedContact.fromJson(c);
+  }
+
+  /// Updates only the contact display alias (empty [raw] clears). Other fields unchanged.
+  static Future<SavedContact?> updateDisplayAlias({
+    required String appNamespace,
+    required SavedContact contact,
+    required String raw,
+  }) async {
+    if (!contact.hasPublicKey) return null;
+    final body = contact.toJson();
+    final alias = ghalSanitizePeerAlias(raw);
+    body["display_alias"] = alias ?? "";
+    final r = GhalBolFfi.contactsUpsert(appNamespace, body);
+    if (r["ok"] != true) {
+      AppLog.instance.w("Contacts", "update_display_alias failed: ${r["error"]}");
+      return null;
+    }
+    // Alias-only: do not bump [rosterChangeCount] (avoids P2P re-sync from Contacts screen).
+    // Defer so Contacts edit dialog route can finish popping before hub/listeners rebuild.
+    Future.microtask(() => changeCount.value++);
+    final c = r["contact"];
+    if (c is Map) {
+      return SavedContact.fromJson(c);
+    }
+    return findByPublicKey(
+      appNamespace: appNamespace,
+      publicKeyHex: contact.publicKeyHex,
+    );
   }
 
   static Future<SavedContact> upsertContact({

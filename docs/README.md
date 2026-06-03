@@ -16,5 +16,9 @@
 | [PLAY_STORE_LISTING.md](PLAY_STORE_LISTING.md) | Play Store listing and Data safety draft |
 | [IDENTITY.md](IDENTITY.md) | Local identity: create vs import, export/import backup, reveal private key, ownership model |
 | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional Tier 3 services, payment rails, membership separate from messaging keys |
+| [TODO.md](TODO.md) | **Product backlog** — wish list only; design lives in other docs |
+| [WEB_SITE.md](WEB_SITE.md) | **ghalbol.com** — Firebase Hosting, `/connect/…` handoff, `/download/linux`, Linux tarball in `web/downloads/` |
 
-**Invite domain (current):** `https://ghalbol.com/connect/<public_key_hex>` and `ghalbol://connect/<public_key_hex>`.
+**Public site:** `https://ghalbol.com` — home, Play Store, Linux download, invite pages. **Coordination (separate host):** `https://coord.ghalbol.com`.
+
+**Invite URLs:** `https://ghalbol.com/connect/<public_key_hex>` and `ghalbol://connect/<public_key_hex>`.

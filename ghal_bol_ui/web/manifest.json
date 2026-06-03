@@ -1,6 +1,6 @@
 {
-    "name": "ghal_bol_ui",
-    "short_name": "ghal_bol_ui",
+    "name": "Ghal Bol",
+    "short_name": "Ghal Bol",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

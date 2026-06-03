@@ -32,9 +32,17 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   Future<void> _load() async {
-    final list = await ContactStore.listContacts(widget.appNamespace);
-    if (!mounted) return;
-    setState(() => _contacts = list);
+    try {
+      final list = await ContactStore.listContacts(widget.appNamespace);
+      if (!mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _contacts = list);
+      });
+    } catch (e, st) {
+      if (!mounted) return;
+      debugPrint("ContactsScreen._load failed: $e\n$st");
+    }
   }
 
   Future<void> _addByKeys() async {
@@ -103,6 +111,45 @@ class _ContactsScreenState extends State<ContactsScreen> {
     );
   }
 
+  Future<void> _editAlias(SavedContact c) async {
+    final raw = await showDialog<String>(
+      context: context,
+      builder: (ctx) => _EditContactAliasDialog(contact: c),
+    );
+    if (raw == null || !mounted) return;
+    try {
+      final updated = await ContactStore.updateDisplayAlias(
+        appNamespace: widget.appNamespace,
+        contact: c,
+        raw: raw,
+      );
+      if (!mounted) return;
+      if (updated == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Could not save display name.")),
+        );
+        return;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() {
+          final i = _contacts.indexWhere(
+            (x) => x.publicKeyHex == updated.publicKeyHex,
+          );
+          if (i >= 0) _contacts[i] = updated;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Display name saved.")),
+        );
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Could not save display name: $e")),
+      );
+    }
+  }
+
   Future<void> _confirmDelete(SavedContact c) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -158,13 +205,90 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   subtitle: Text(
                     c.hasPublicKey ? "keys ready" : "missing public key",
                   ),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => _confirmDelete(c),
+                  onTap: () => _editAlias(c),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: "Edit display name",
+                        icon: const Icon(Icons.edit_outlined),
+                        onPressed: () => _editAlias(c),
+                      ),
+                      IconButton(
+                        tooltip: "Remove contact",
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => _confirmDelete(c),
+                      ),
+                    ],
                   ),
                 );
               },
             ),
+    );
+  }
+}
+
+/// Edit dialog — controller owned by [State] so dispose never races route pop.
+class _EditContactAliasDialog extends StatefulWidget {
+  const _EditContactAliasDialog({required this.contact});
+
+  final SavedContact contact;
+
+  @override
+  State<_EditContactAliasDialog> createState() => _EditContactAliasDialogState();
+}
+
+class _EditContactAliasDialogState extends State<_EditContactAliasDialog> {
+  late final TextEditingController _aliasCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _aliasCtrl = TextEditingController(text: widget.contact.displayAlias ?? "");
+  }
+
+  @override
+  void dispose() {
+    _aliasCtrl.dispose();
+    super.dispose();
+  }
+
+  void _save() => Navigator.pop(context, _aliasCtrl.text);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.contact;
+    return AlertDialog(
+      title: const Text("Edit display name"),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              ghalBolIdName(publicKeyHex: c.publicKeyHex, customAlias: null),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _aliasCtrl,
+              autofocus: true,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                labelText: "Display name",
+                hintText: "Leave blank for default",
+                border: OutlineInputBorder(),
+              ),
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _save(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        FilledButton(onPressed: _save, child: const Text("Save")),
+      ],
     );
   }
 }

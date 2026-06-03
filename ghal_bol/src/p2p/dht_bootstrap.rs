@@ -109,18 +109,18 @@ impl LocalNetworkProfile {
 
     pub(crate) fn dial_hint(&self) -> &'static str {
         if self.has_active_lan() {
-            return "prioritize mDNS/LAN TCP; coord/relay for WAN";
+            return "WAN/coord for remote peers; mDNS/LAN when peer is local or internet down";
         }
         if self.has_cellular_iface || self.has_cgnat_ipv4 {
-            return "prefer coord+relay, keep LAN fallback";
+            return "prefer coord+relay; mDNS/LAN for co-located peer";
         }
         if self.has_tether_iface || self.has_usb_iface {
-            return "prioritize LAN TCP + mDNS";
+            return "LAN for local peer; coord/relay for WAN";
         }
         if self.has_rfc1918_ipv4 && !self.has_public_ipv4 {
-            return "prioritize mDNS/LAN TCP";
+            return "mDNS/LAN when peer is local; else coord/relay";
         }
-        "use coord + DHT + mDNS"
+        "coord + relay + DHT; mDNS when peer is on LAN"
     }
 
     /// Cellular/CGNAT without an active LAN — needs relay for coord when URL is set.
@@ -404,6 +404,44 @@ pub(crate) fn wan_kad_record_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr>
     filter_coord_relay_dial_platform(sort_coord_dial_multiaddrs(filtered))
 }
 
+/// True when [prefer_lan_dial_path] should rank RFC1918 before relay/WAN.
+pub(crate) fn prefer_lan_dial_path(peer_on_local_lan: bool, internet_reachable: bool) -> bool {
+    peer_on_local_lan || !internet_reachable
+}
+
+/// Same /24 for typical home LAN (192.168.x, 10.x).
+pub(crate) fn ipv4_same_lan_subnet(local: std::net::Ipv4Addr, peer: std::net::Ipv4Addr) -> bool {
+    if local.is_loopback() || peer.is_loopback() {
+        return false;
+    }
+    if !local.is_private() || !peer.is_private() {
+        return false;
+    }
+    if local.octets()[0] == 10 && peer.octets()[0] == 10 {
+        return local.octets()[1] == peer.octets()[1];
+    }
+    if local.octets()[0] == 192
+        && local.octets()[1] == 168
+        && peer.octets()[0] == 192
+        && peer.octets()[1] == 168
+    {
+        return local.octets()[2] == peer.octets()[2];
+    }
+    false
+}
+
+/// Rank dial targets for a contact (LAN-first vs WAN-first).
+pub(crate) fn rank_dm_dial_addrs_for_peer(
+    addrs: Vec<Multiaddr>,
+    prefer_lan: bool,
+) -> Vec<Multiaddr> {
+    if prefer_lan {
+        sort_dm_dial_addrs(addrs)
+    } else {
+        sort_dm_dial_addrs_wan_first(addrs)
+    }
+}
+
 /// Sort order for DM dials: LAN TCP first, then relay, then public WAN.
 pub(crate) fn dm_dial_addr_rank(ma: &Multiaddr) -> u8 {
     if let Some(ip) = ipv4_from_ma_str(&ma.to_string()) {
@@ -423,6 +461,28 @@ pub(crate) fn dm_dial_addr_rank(ma: &Multiaddr) -> u8 {
 
 pub(crate) fn sort_dm_dial_addrs(mut addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     addrs.sort_by_key(|ma| dm_dial_addr_rank(ma));
+    addrs
+}
+
+/// WAN-first: relay circuit, then public TCP, then RFC1918 (remote peers over the internet).
+pub(crate) fn dm_dial_addr_rank_wan_first(ma: &Multiaddr) -> u8 {
+    if is_relay_circuit_multiaddr(ma) {
+        return 0;
+    }
+    if let Some(ip) = ipv4_from_ma_str(&ma.to_string()) {
+        if ip.is_loopback() || is_docker_or_link_local_ipv4(ip) {
+            return 4;
+        }
+        if ip.is_private() {
+            return 3;
+        }
+        return 1;
+    }
+    2
+}
+
+pub(crate) fn sort_dm_dial_addrs_wan_first(mut addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
+    addrs.sort_by_key(|ma| dm_dial_addr_rank_wan_first(ma));
     addrs
 }
 
@@ -801,6 +861,33 @@ mod tests {
         assert_eq!(p.mode_label(), "mobile-data");
         assert!(p.avoid_blind_routed_dial());
         assert!(p.on_mobile_data_path());
+    }
+
+    #[test]
+    fn prefer_lan_when_peer_local_or_internet_down() {
+        assert!(prefer_lan_dial_path(true, true));
+        assert!(prefer_lan_dial_path(true, false));
+        assert!(prefer_lan_dial_path(false, false));
+        assert!(!prefer_lan_dial_path(false, true));
+    }
+
+    #[test]
+    fn wan_first_sort_puts_relay_before_lan() {
+        let lan: Multiaddr = "/ip4/192.168.1.50/tcp/41000".parse().unwrap();
+        let relay: Multiaddr = "/ip4/51.81.93.51/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa/p2p-circuit/p2p/16Uiu2HAm699TtKnm9LHXoS6MbVp8ehX7U8hyomVhivz9KuVKsYis"
+            .parse()
+            .unwrap();
+        let out = sort_dm_dial_addrs_wan_first(vec![lan.clone(), relay.clone()]);
+        assert_eq!(out[0], relay);
+    }
+
+    #[test]
+    fn same_lan_subnet_192_168() {
+        let local = std::net::Ipv4Addr::new(192, 168, 1, 10);
+        let peer = std::net::Ipv4Addr::new(192, 168, 1, 99);
+        assert!(ipv4_same_lan_subnet(local, peer));
+        let far = std::net::Ipv4Addr::new(192, 168, 2, 99);
+        assert!(!ipv4_same_lan_subnet(local, far));
     }
 
     #[test]

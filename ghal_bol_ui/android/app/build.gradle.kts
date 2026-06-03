@@ -45,6 +45,11 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.inputStream())
 }
 
+// Play: `flutter build appbundle` → bundleRelease → com.ghalbol
+// Dev on device: flutter run → com.ghalbol.debug | flutter run --release → com.ghalbol.release
+val gradleTasks = gradle.startParameter.taskNames.joinToString(" ").lowercase()
+val isPlayAppBundle = gradleTasks.contains("bundle")
+
 android {
     namespace = "com.ghalbol"
     compileSdk = flutter.compileSdkVersion
@@ -82,7 +87,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+        }
         release {
+            if (!isPlayAppBundle) {
+                applicationIdSuffix = ".release"
+            }
             signingConfig =
                 if (keystorePropertiesFile.exists()) {
                     signingConfigs.getByName("release")

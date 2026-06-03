@@ -33,6 +33,16 @@ Thumbs.db
 # IDE (local-only; commit shared editor config only if you rename/adjust this section)
 .idea/
 
+# Firebase CLI
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+.firebaserc
+
+# Linux desktop bundle for Firebase Hosting (build locally; see ghal_bol_ui/web/downloads/README.txt)
+ghal_bol_ui/web/downloads/*.tar.gz
+
 # Logs and profiling dumps
 *.log
 *.profraw

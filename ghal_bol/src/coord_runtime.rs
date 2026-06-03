@@ -137,6 +137,18 @@ pub fn coord_is_registered() -> bool {
     COORD_REGISTERED.load(Ordering::Relaxed)
 }
 
+/// Recent successful coord register, heartbeat, or self-lookup (internet likely up).
+pub fn coord_link_recently_ok() -> bool {
+    if !coord_is_configured() {
+        return true;
+    }
+    if !COORD_REGISTERED.load(Ordering::Relaxed) {
+        return false;
+    }
+    let last = COORD_LAST_OK_MS.load(Ordering::Relaxed);
+    last > 0 && unix_ms_now().saturating_sub(last) < PRESENCE_STALE_MS
+}
+
 pub fn set_coord_base_url(url: &str, insecure_tls: bool) {
     let g = coord_globals();
     if let Ok(mut u) = g.base_url.lock() {

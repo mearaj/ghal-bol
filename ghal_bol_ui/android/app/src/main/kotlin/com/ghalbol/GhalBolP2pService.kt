@@ -14,8 +14,9 @@ import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
 import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -26,6 +27,7 @@ import java.io.File
  */
 class GhalBolP2pService : Service() {
 
+    private var wakeLock: PowerManager.WakeLock? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var daemonThread: Thread? = null
     private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
@@ -37,6 +39,17 @@ class GhalBolP2pService : Service() {
             P2pDaemonNative.notifyNetworkChange()
         } catch (e: Throwable) {
             android.util.Log.w("GhalBol", "notifyNetworkChange: ${e.message}")
+        }
+    }
+    private val restartRunnable = Runnable {
+        if (userRequestedStop) return@Runnable
+        try {
+            ContextCompat.startForegroundService(
+                applicationContext,
+                Intent(applicationContext, GhalBolP2pService::class.java),
+            )
+        } catch (e: Throwable) {
+            android.util.Log.w("GhalBol", "p2p service restart: ${e.message}")
         }
     }
 
@@ -53,7 +66,33 @@ class GhalBolP2pService : Service() {
         }
     }
 
+    private fun acquireWakeLock() {
+        releaseWakeLock()
+        try {
+            val pm = getSystemService(POWER_SERVICE) as? PowerManager ?: return
+            wakeLock =
+                pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ghalbol:p2p_listener").apply {
+                    setReferenceCounted(false)
+                    acquire(6 * 60 * 60 * 1000L)
+                }
+        } catch (e: Throwable) {
+            android.util.Log.w("GhalBol", "wake lock (p2p): ${e.message}")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) it.release()
+            }
+        } catch (_: Throwable) {
+        }
+        wakeLock = null
+    }
+
     private fun acquireMulticastLock() {
+        if (multicastLock?.isHeld == true) return
+        releaseMulticastLock()
         try {
             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
             multicastLock =
@@ -181,11 +220,24 @@ class GhalBolP2pService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP_FOR_LOGOUT) {
+            userRequestedStop = true
+            mainHandler.removeCallbacks(restartRunnable)
+            mainHandler.removeCallbacks(networkNotifyRunnable)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        userRequestedStop = false
+        promoteForegroundNotification()
         configureNativeDataDir()
+        acquireWakeLock()
         acquireMulticastLock()
         startDaemonThreadIfNeeded()
         registerConnectivityCallback()
+        return START_STICKY
+    }
 
+    private fun promoteForegroundNotification() {
         val channelId = "ghal_bol_p2p_v1"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch =
@@ -227,8 +279,12 @@ class GhalBolP2pService : Service() {
                 0
             }
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgType)
+    }
 
-        return START_STICKY
+    private fun scheduleRestart() {
+        if (userRequestedStop) return
+        mainHandler.removeCallbacks(restartRunnable)
+        mainHandler.postDelayed(restartRunnable, 800)
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -247,12 +303,30 @@ class GhalBolP2pService : Service() {
         mainHandler.removeCallbacks(networkNotifyRunnable)
         unregisterConnectivityCallback()
         releaseMulticastLock()
+        releaseWakeLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        val restart = !userRequestedStop
+        if (!restart) {
+            mainHandler.removeCallbacks(restartRunnable)
+        }
         super.onDestroy()
+        if (restart) {
+            scheduleRestart()
+        } else {
+            userRequestedStop = false
+        }
     }
 
     companion object {
+        const val ACTION_STOP_FOR_LOGOUT = "com.ghalbol.STOP_P2P_LOGOUT"
+
+        @Volatile
+        private var userRequestedStop = false
+
         private const val NOTIFICATION_ID = 0x6768_6c62
+
+        fun stopIntent(context: Context): Intent =
+            Intent(context, GhalBolP2pService::class.java).setAction(ACTION_STOP_FOR_LOGOUT)
 
         fun socketPath(context: Context): String {
             val dir = File(context.filesDir, "ghalbol")

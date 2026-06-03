@@ -340,7 +340,10 @@ class AppLog extends ChangeNotifier {
     _traceSeq = 0;
     _journeySeq = 0;
     _callStepSeq = 0;
-    notifyListeners();
+    _lastNotifyAt = null;
+    if (hasListeners) {
+      notifyListeners();
+    }
   }
 
   List<AppLogEntry> filtered({

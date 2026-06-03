@@ -25,6 +25,8 @@ class _AppLogScreenState extends State<AppLogScreen> {
   final Set<_ShowArea> _showAreas = {};
   bool _problemsOnly = false;
   bool _recordExpanded = false;
+  bool _exportBusy = false;
+  int _exportSeq = 0;
 
   bool _verboseNative = AppLog.logNativeDebug;
   bool _messageFlow = AppLog.logMessageFlow;
@@ -52,9 +54,15 @@ class _AppLogScreenState extends State<AppLogScreen> {
   void _onLog() {
     if (!mounted) return;
     setState(() {});
-    if (_followTail) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToEnd());
-    }
+    if (!_followTail) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      if (AppLog.instance.entries.isEmpty) {
+        _scroll.jumpTo(0);
+        return;
+      }
+      _jumpToEnd();
+    });
   }
 
   void _onScroll() {
@@ -65,7 +73,14 @@ class _AppLogScreenState extends State<AppLogScreen> {
 
   void _jumpToEnd() {
     if (!_scroll.hasClients) return;
-    _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    final max = _scroll.position.maxScrollExtent;
+    if (!max.isFinite) return;
+    _scroll.jumpTo(max.clamp(0.0, max));
+  }
+
+  void _resetScrollToTop() {
+    if (!_scroll.hasClients) return;
+    _scroll.jumpTo(0);
   }
 
   bool _entryInArea(AppLogEntry e, _ShowArea area) {
@@ -115,20 +130,30 @@ class _AppLogScreenState extends State<AppLogScreen> {
   }
 
   String _logFileName() {
-    final ts = DateTime.now()
-        .toIso8601String()
-        .replaceAll(":", "-")
-        .replaceAll(".", "-");
-    return "ghalbol-app-log-$ts.txt";
+    _exportSeq++;
+    return "ghalbol-app-log-${DateTime.now().millisecondsSinceEpoch}-$_exportSeq.txt";
   }
 
   Future<File?> _writeVisibleLogFile({required Directory directory}) async {
     final visible = _visible;
     if (visible.isEmpty) return null;
-    final exportedText = AppLog.instance.exportText(subset: visible);
-    if (exportedText.isEmpty) return null;
     final file = File("${directory.path}/${_logFileName()}");
-    await file.writeAsString(exportedText, flush: true);
+    IOSink? sink;
+    try {
+      sink = file.openWrite();
+      for (final e in visible) {
+        sink.writeln(e.formatLine());
+      }
+      await sink.flush();
+    } catch (_) {
+      try {
+        if (await file.exists()) await file.delete();
+      } catch (_) {}
+      rethrow;
+    } finally {
+      await sink?.close();
+    }
+    if (!await file.exists() || await file.length() == 0) return null;
     return file;
   }
 
@@ -148,32 +173,50 @@ class _AppLogScreenState extends State<AppLogScreen> {
     return await getApplicationDocumentsDirectory();
   }
 
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 5)),
+    );
+  }
+
   /// Save filtered log lines to the device Downloads folder (or app documents fallback).
   Future<void> _downloadAll() async {
+    if (_exportBusy) return;
+    if (_visible.isEmpty) {
+      _snack("Nothing to save — widen filters or use the app to generate log lines.");
+      return;
+    }
+    _exportBusy = true;
     try {
       final dir = await _downloadDirectory();
       final file = await _writeVisibleLogFile(directory: dir);
-      if (file == null) return;
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("Saved to ${file.path}"),
-          duration: const Duration(seconds: 5),
-        ),
-      );
+      if (file == null) {
+        _snack("Save failed — no file written.");
+        return;
+      }
+      _snack("Saved to ${file.path}");
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Download failed: $e")),
-      );
+      _snack("Download failed: $e");
+    } finally {
+      _exportBusy = false;
     }
   }
 
   Future<void> _shareAll() async {
+    if (_exportBusy) return;
+    if (_visible.isEmpty) {
+      _snack("Nothing to share — widen filters or use the app to generate log lines.");
+      return;
+    }
+    _exportBusy = true;
     try {
       final dir = await getTemporaryDirectory();
       final file = await _writeVisibleLogFile(directory: dir);
-      if (file == null) return;
+      if (file == null) {
+        _snack("Share failed — no file written.");
+        return;
+      }
       await SharePlus.instance.share(
         ShareParams(
           files: [XFile(file.path, mimeType: "text/plain")],
@@ -181,10 +224,9 @@ class _AppLogScreenState extends State<AppLogScreen> {
         ),
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Share failed: $e")),
-      );
+      _snack("Share failed: $e");
+    } finally {
+      _exportBusy = false;
     }
   }
 
@@ -200,7 +242,9 @@ class _AppLogScreenState extends State<AppLogScreen> {
         ],
       ),
     );
-    if (go != true) return;
+    if (go != true || !mounted) return;
+    _resetScrollToTop();
+    setState(() => _followTail = true);
     AppLog.instance.clear();
   }
 
@@ -225,12 +269,12 @@ class _AppLogScreenState extends State<AppLogScreen> {
           ),
           IconButton(
             tooltip: "Download visible lines to Downloads",
-            onPressed: lines.isEmpty ? null : _downloadAll,
+            onPressed: lines.isEmpty || _exportBusy ? null : _downloadAll,
             icon: const Icon(Icons.download_outlined),
           ),
           IconButton(
             tooltip: "Share visible lines as a text file",
-            onPressed: lines.isEmpty ? null : _shareAll,
+            onPressed: lines.isEmpty || _exportBusy ? null : _shareAll,
             icon: const Icon(Icons.share_outlined),
           ),
           IconButton(

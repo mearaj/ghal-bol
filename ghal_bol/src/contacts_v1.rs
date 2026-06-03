@@ -293,10 +293,23 @@ pub fn upsert_contact(app_namespace: &str, contact: SavedContact) -> Result<Save
         };
         let next = SavedContact {
             public_key_hex: pk_norm,
-            display_alias: contact.display_alias.clone().or(base.display_alias.clone()),
-            last_message_preview: contact.last_message_preview.clone().or(base.last_message_preview.clone()),
+            // `Some(_)` in the upsert payload updates alias (empty → clear); `None` keeps existing.
+            display_alias: match &contact.display_alias {
+                Some(s) => crate::preferences_v1::sanitize_peer_display_alias(s.as_str()),
+                None => base.display_alias.clone(),
+            },
+            last_message_preview: contact
+                .last_message_preview
+                .clone()
+                .or(base.last_message_preview.clone()),
             last_message_at_ms: contact.last_message_at_ms.or(base.last_message_at_ms),
-            unread_count: contact.unread_count,
+            unread_count: if contact.last_message_preview.is_some()
+                || contact.last_message_at_ms.is_some()
+            {
+                contact.unread_count
+            } else {
+                base.unread_count
+            },
             created_at_ms: base.created_at_ms.or(Some(now)),
             updated_at_ms: Some(now),
             is_known: contact.is_known || base.is_known,
@@ -525,6 +538,67 @@ mod tests {
             c.last_message_preview.as_deref(),
             Some("seen in room")
         );
+    }
+
+    #[test]
+    fn upsert_display_alias_set_and_clear() {
+        let td = TempDir::new().unwrap();
+        let ns = "dev.contacts.alias";
+        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
+        let pk = "0305b1b0d27745e0a38a7254ea100abc38857b51ded2ac7ea88d3063fb8da21784";
+
+        upsert_contact(
+            ns,
+            SavedContact {
+                public_key_hex: pk.to_string(),
+                display_alias: Some("Alice".to_string()),
+                last_message_preview: None,
+                last_message_at_ms: None,
+                unread_count: 0,
+                created_at_ms: None,
+                updated_at_ms: None,
+                is_known: true,
+                is_blocked: false,
+            },
+        )
+        .unwrap();
+
+        upsert_contact(
+            ns,
+            SavedContact {
+                public_key_hex: pk.to_string(),
+                display_alias: Some("Bob".to_string()),
+                last_message_preview: None,
+                last_message_at_ms: None,
+                unread_count: 0,
+                created_at_ms: None,
+                updated_at_ms: None,
+                is_known: true,
+                is_blocked: false,
+            },
+        )
+        .unwrap();
+        let c = find_by_public_key(ns, pk).unwrap().unwrap();
+        assert_eq!(c.display_alias.as_deref(), Some("Bob"));
+
+        upsert_contact(
+            ns,
+            SavedContact {
+                public_key_hex: pk.to_string(),
+                display_alias: Some("".to_string()),
+                last_message_preview: None,
+                last_message_at_ms: None,
+                unread_count: 0,
+                created_at_ms: None,
+                updated_at_ms: None,
+                is_known: true,
+                is_blocked: false,
+            },
+        )
+        .unwrap();
+        let c = find_by_public_key(ns, pk).unwrap().unwrap();
+        assert_eq!(c.display_alias, None);
     }
 
     #[test]

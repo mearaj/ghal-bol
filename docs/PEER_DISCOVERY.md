@@ -15,6 +15,8 @@ The coordination server helps peers find each other, but it is not the primary c
 
 **Invite shapes:** `https://ghalbol.com/connect/<public_key_hex>` (QR / share) and `ghalbol://connect/<public_key_hex>` (app deep link). Optional `?alias=…`.
 
+**Web handoff:** If the app is not installed (or App Links are not verified), `https://ghalbol.com/connect/…` loads the static invite page on Firebase Hosting — it tries `ghalbol://`, offers copy link, and links to Play Store / [Linux download](WEB_SITE.md). See [WEB_SITE.md](WEB_SITE.md).
+
 ---
 
 # Important Concept
@@ -272,10 +274,10 @@ Preferred connection order:
 Used for:
 
 - QR codes printed or shared as normal URLs
-- universal / app links into `ghal_bol_ui`
+- Android App Links into `ghal_bol_ui` when `/.well-known/assetlinks.json` is verified
 - human-readable invites
 
-The **website** layer is bootstrap and identification only. After the app opens, networking is native.
+When the app opens, networking is native. When it does not, the **static web** invite page ([WEB_SITE.md](WEB_SITE.md)) handles handoff only — not chat transport.
 
 ## Custom scheme — `ghalbol://connect/...`
 

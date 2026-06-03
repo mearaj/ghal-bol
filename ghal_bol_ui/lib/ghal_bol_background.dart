@@ -29,12 +29,14 @@ class GhalBolBackground {
 
   /// Foreground service + drain when the process resumes (hub may be absent after UI lock).
   static Future<void> onAppResumed() async {
+    if (!SessionCredentials.hasPassword) return;
     if (await GhalBolP2p.isRunning()) {
       unawaited(ghalBolListenerForegroundEnsureStarted());
+      unawaited(GhalBolP2p.notifyNetworkChange());
+      P2pEventBridge.instance.drainNow();
     } else {
       unawaited(P2pEventBridge.instance.recoverP2pIfNeeded());
     }
-    P2pEventBridge.instance.drainNow();
   }
 
   /// Logout / delete identity: tear down listener, poll loop, and native P2P.

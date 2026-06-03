@@ -376,10 +376,44 @@ If sends stay `queued` / `not connected yet`, the break is in the **native chain
 
 - libp2p, outbox, and **all ack send/retry** run here — **not** in the Flutter isolate.
 - Flutter **poll** refreshes UI from disk after `dm_event_handler` runs on each `p2p_poll`.
-- UI lock / hub dispose: clear foreground; **do not** `p2p_stop`.
+- **UI lock** (`bootstrap_native.dart` `_uiLocked`): hides hub UI only — **does not** `p2p_stop`, stop `:p2p` / daemon, or stop poll. **Logout / delete identity** stops P2P.
+- Hub pause / leave room: clear **conversation** foreground (`setForegroundConversation`) for read-ack policy — not the Android foreground service.
 - Logout / delete identity: `p2p_stop` + lock.
 
 **Do not** run `scripts/sync_ghal_bol_native_for_flutter.sh` while the Linux app holds an open daemon socket (stops `ghal_bol_daemon` → `Broken pipe`). Android native rebuild uses `pack_android_workspace_jni_libs.sh` only.
+
+### First identity create → P2P bootstrap (code path only)
+
+After **Create identity** succeeds, `onUnlockedSession` runs `GhalBolBackground.ensureRunning` (same callback as unlock of an existing keystore). That starts the poll loop and async `syncContacts` → `p2p_start` in `:p2p` / daemon. It does **not** wait for opening a chat.
+
+Coord HTTP register in Rust waits until listen addrs (often relay on CGNAT) are publishable — see `coord_runtime.rs`. WAN relay recovery runs when coord URL is configured (`chat_server.rs` coord tick).
+
+### Dial strategy — LAN vs WAN (native)
+
+Implemented in `p2p/dht_bootstrap.rs` + `chat_server.rs` (not Flutter).
+
+| Prefer **LAN** TCP / mDNS first | Prefer **WAN** (relay / public) first |
+|--------------------------------|--------------------------------------|
+| Peer seen on mDNS recently, or coord addr on same RFC1918 /24 as us | Peer not on local LAN **and** internet likely up (`coord_link_recently_ok`, bootstrap, or public IPv4) |
+| Internet likely **down** (no recent coord OK, no bootstrap, no public IP) | Wi‑Fi with working internet — do **not** skip relay/coord just because `has_active_lan()` |
+
+**Always:** coord register/lookup retries while configured; coord HTTP failure → Kademlia + mDNS + relay (libp2p). **Network watch:** Android connectivity callback + 1s profile poll; Wi‑Fi ↔ mobile runs WAN recovery without requiring users to open a chat. **UI lock** does not stop `:p2p` / daemon / poll.
+
+**Throttles (anti-flood):** coord lookup backoff, dial spacing (1–2s), disconnected-peer coord lookup every 3s (8s if LAN-local peer), coord tick 3s.
+
+### Network change — either peer (2026)
+
+Either device may roam (Wi‑Fi ↔ mobile, subnet change, remote peer reboot). Native handles this in `chat_server.rs`:
+
+| Event | Action |
+|-------|--------|
+| **Local** OS connectivity callback (Android `:p2p`) or 1s profile poll | Rebuild coord endpoints; mode change → WAN handover + **DM reconnect pass**; same-mode refresh → redial contacts |
+| **Local** app resume (Linux/Android UI) | `p2p_notify_network_change` → same refresh path |
+| **Remote** DM `ConnectionClosed` | Mark contact **urgent** (~800ms coord lookup), clear dial/coord throttles, Kademlia + routed dial |
+| **Coord** newly registered (relay ready) | Full DM reconnect pass so WAN paths update before chat stalls |
+| **WAN recovery** completes | Reconnect pass (not only periodic 3s tick) |
+
+Goal: rediscover within **seconds** when a path exists, without coord/DHT lookup storms (urgent flag + existing backoff).
 
 ## Contacts and roster preview
 

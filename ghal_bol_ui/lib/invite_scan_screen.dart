@@ -47,11 +47,13 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
 
   void _onDetect(BarcodeCapture capture) {
     for (final b in capture.barcodes) {
-      final merged = b.rawValue ?? b.displayValue;
-      final uri = InviteScanScreen.extractInviteUri(merged);
-      if (uri != null) {
-        _acceptUri(uri);
-        return;
+      // Prefer raw QR payload — displayValue may drop ?alias= on some devices.
+      for (final candidate in [b.rawValue, b.displayValue]) {
+        final uri = InviteScanScreen.extractInviteUri(candidate);
+        if (uri != null) {
+          _acceptUri(uri);
+          return;
+        }
       }
     }
   }

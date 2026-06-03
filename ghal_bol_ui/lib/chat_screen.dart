@@ -28,7 +28,6 @@ import "dm_ack_validation.dart";
 import "dm_delivery_sync.dart";
 import "public_key_hex.dart";
 
-/// Shift+Enter in the chat composer (handled via [Shortcuts] before the [TextField]).
 class _ComposerSendIntent extends Intent {
   const _ComposerSendIntent();
 }
@@ -1617,17 +1616,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  String? _computeInviteUri() {
-    final pk = widget.publicKeyHex?.trim() ?? "";
-    if (!isValidPublicKeyHex(pk)) return null;
-    return buildGhalBolInviteUri(
-      publicKeyHex: pk,
-      peerAlias: _effectiveCustomAlias,
-    );
-  }
-
   Future<void> copyInvitationLink() async {
-    final uri = _computeInviteUri();
+    final uri = await _resolveInviteUriForShare();
     if (uri == null) return;
     await Clipboard.setData(ClipboardData(text: uri));
     if (!mounted) return;
@@ -1637,11 +1627,23 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> shareInvitationLink() async {
-    final uri = _computeInviteUri();
+    final uri = await _resolveInviteUriForShare();
     if (uri == null) return;
     await SharePlus.instance.share(
       ShareParams(text: uri, subject: "Ghal Bol invitation"),
     );
+  }
+
+  /// Same source as QR screen: native store alias + public key.
+  Future<String?> _resolveInviteUriForShare() async {
+    final pk = widget.publicKeyHex?.trim().toLowerCase() ?? "";
+    if (!isValidPublicKeyHex(pk)) return null;
+    final alias = _effectiveCustomAlias ??
+        await IdentityAliasStore.read(
+          appNamespace: _resolvedAppNamespace,
+          publicKeyHex: pk,
+        );
+    return buildGhalBolInviteUri(publicKeyHex: pk, peerAlias: alias);
   }
 
   void _refreshInviteUri() {
@@ -1865,11 +1867,14 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _openShareSheet() async {
     if (!mounted) return;
+    final pk = widget.publicKeyHex?.trim() ?? "";
+    if (!isValidPublicKeyHex(pk)) return;
     P2pEventBridge.instance.drainNow();
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder: (_) => ShareInviteScreen(
-          readInviteUri: _computeInviteUri,
+          publicKeyHex: pk,
+          appNamespace: _resolvedAppNamespace,
           readListenReady: () => P2pEventBridge.instance.isNodeReady,
           onParentRefresh: _refreshInviteUri,
         ),

@@ -1,0 +1,12 @@
+{
+  "hosting": {
+    "public": "ghal_bol_ui/build/web",
+    "ignore": ["firebase.json", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}

@@ -79,6 +79,27 @@ Typical WAN flow ([PEER_DISCOVERY.md](PEER_DISCOVERY.md)):
 
 Coord publishes `tcp`, `quic`, and `libp2p` multiaddrs; `coord_runtime.rs` and `dm_transport/addr.rs` help filter and rank dial targets before libp2p dials.
 
+### LAN vs WAN dial policy (2026)
+
+Native code ranks dial addresses **per contact**, not only per device interface:
+
+1. **WAN-first** when the peer is not on the local LAN and the device likely has internet (coord heartbeat/register OK, public DHT bootstrap connected, or public IPv4).
+2. **LAN-first** when the peer was seen via mDNS (or same RFC1918 /24), or when internet is likely down — mDNS and direct TCP still work on the LAN.
+3. **Coord** — register/lookup every ~3s while P2P runs; HTTP failures do not stop libp2p; lookups fall back to DHT/mDNS. Disconnected DM contacts get a throttled coord lookup every 3s (8s for LAN-local peers).
+4. **Handover** — Wi‑Fi with internet still runs WAN recovery (relay listen + coord) instead of treating “on Wi‑Fi” as “WAN not needed”. Mobile-data path still resets stale bootstrap TCP when switching routes.
+
+See [DESIGN.md](DESIGN.md) § “Dial strategy — LAN vs WAN”.
+
+### Roaming and reconnect (2026)
+
+Connectivity is designed for **either peer** changing network:
+
+- **This device** — Android `ConnectivityManager` in `:p2p`; all platforms poll local interfaces every 1s; app resume calls `p2p_notify_network_change`.
+- **Other peer** — detected when the DM libp2p connection closes; native immediately runs a throttled **reconnect pass** (coord lookup + Kademlia + mDNS), not a multi-minute wait.
+- **After relay/coord register** — all contacts get a fresh lookup so new WAN addresses are used.
+
+Throttles remain (800ms–3s between coord lookups per peer) to avoid flooding the network while still beating the old 5–10 minute stall window.
+
 ---
 
 ## Helper modules (not a separate transport)

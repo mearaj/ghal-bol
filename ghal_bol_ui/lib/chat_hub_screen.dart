@@ -35,6 +35,7 @@ import "hub_back_stack.dart";
 import "hub_roster_selection.dart";
 import "call/call_controller.dart";
 import "ghal_bol_p2p.dart";
+import "invite_deep_link.dart";
 
 /// Post-unlock shell: responsive **Chats / Identity / More** chrome (bottom bar on narrow
 /// windows, [NavigationRail] on wide), plus chat list + room.
@@ -53,10 +54,10 @@ class ChatHubScreen extends StatefulWidget {
   final VoidCallback onEndSession;
 
   @override
-  State<ChatHubScreen> createState() => _ChatHubScreenState();
+  State<ChatHubScreen> createState() => ChatHubScreenState();
 }
 
-class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserver {
+class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserver {
   /// Shell tab: 0 = Chats, 1 = Identity, 2 = More.
   int _navTab = 0;
 
@@ -65,6 +66,8 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
 
   /// Wide/split: `true` while the chat column is the active conversation (see [_syncNativeForegroundPeer]).
   bool _splitChatEngaged = false;
+
+  final HubHistoryStack _hubHistory = HubHistoryStack();
 
   /// Active hub chat surface (no [GlobalKey] — avoids duplicate-key crashes).
   ChatScreenState? _attachedHubChat;
@@ -99,60 +102,86 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
 
   bool _hubShellSplit(BuildContext context) => ghalBolUseChatShellSplit(context);
 
-  bool _hubHasSelectedContact() =>
-      _selectedContact != null && _selectedConversationKey != null;
+  HubHistoryEntry _hubHistorySnapshot() => HubHistoryEntry(
+        navTab: _navTab,
+        narrowShowRoom: _narrowShowRoom,
+        splitChatEngaged: _splitChatEngaged,
+        conversationKey: _selectedConversationKey,
+      );
 
-  bool _computeHubCanPop(BuildContext context) {
-    final nav = Navigator.of(context);
-    return hubAllowsSystemPop(
-      navigatorCanPop: nav.canPop(),
-      shellSplit: _hubShellSplit(context),
-      navTab: _navTab,
-      narrowShowRoom: _narrowShowRoom,
-      splitChatEngaged: _splitChatEngaged,
-      hasSelectedContact: _hubHasSelectedContact(),
-    );
+  void _recordHubNavigation() {
+    _hubHistory.recordNavigate(_hubHistorySnapshot());
   }
 
-  void _hubOnSystemPopInvoked(bool didPop, Object? result) {
-    if (didPop) return;
-    final nav = Navigator.of(context);
-    if (nav.canPop()) {
-      nav.pop(result);
-      return;
-    }
-    _hubApplySyntheticBack();
-  }
-
-  void _hubApplySyntheticBack() {
-    final split = _hubShellSplit(context);
-    switch (hubSyntheticBackResult(
-      shellSplit: split,
-      navTab: _navTab,
-      narrowShowRoom: _narrowShowRoom,
-      splitChatEngaged: _splitChatEngaged,
-      hasSelectedContact: _hubHasSelectedContact(),
-    )) {
-      case HubSyntheticBackResult.leaveChatRoom:
-        _leaveChatRoom(split: split);
-      case HubSyntheticBackResult.popToChatsTab:
-        setState(() => _navTab = 0);
-        _syncNativeForegroundPeer();
-      case HubSyntheticBackResult.none:
-        break;
-    }
-  }
-
-  void _leaveChatRoom({required bool split}) {
-    if (split) {
-      if (!_splitChatEngaged) return;
-      setState(() => _splitChatEngaged = false);
-    } else {
-      if (!_narrowShowRoom) return;
-      setState(() => _narrowShowRoom = false);
-    }
+  void _applyHubHistoryEntry(HubHistoryEntry entry) {
+    setState(() {
+      _navTab = entry.navTab;
+      _narrowShowRoom = entry.narrowShowRoom;
+      _splitChatEngaged = entry.splitChatEngaged;
+      _selectedConversationKey = entry.conversationKey;
+      final key = entry.conversationKey;
+      if (key == null || key.isEmpty) {
+        _openRoomContact = null;
+      } else if (_openRoomContact?.conversationKey != key) {
+        _openRoomContact = _selectedContact;
+      }
+    });
     _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
     _syncNativeForegroundPeer();
+  }
+
+  /// Hub chrome still above root (room open or non-Chats tab) — used if history desyncs.
+  bool _hubHasChromeToUnwind() =>
+      _isHubChatRoomOpen(context) || _navTab != 0;
+
+  /// One step back without relying on history (same UI + foreground contract as before).
+  void _hubUnwindChromeFallback() {
+    final split = _hubShellSplit(context);
+    if (_isHubChatRoomOpen(context)) {
+      setState(() {
+        if (split) {
+          _splitChatEngaged = false;
+        } else {
+          _narrowShowRoom = false;
+        }
+      });
+    } else if (_navTab != 0) {
+      setState(() => _navTab = 0);
+    }
+    _hubHistory.replaceTop(_hubHistorySnapshot());
+    _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
+    _syncNativeForegroundPeer();
+  }
+
+  /// System back (Android edge gesture, desktop mouse back). Called from [GhalBolRoot].
+  ///
+  /// Returns `true` when this back press was handled; `false` at hub root so the shell
+  /// may exit the app. Always use with a parent [PopScope] where `canPop` is `false`.
+  ///
+  /// Pushed [Navigator] routes pop first. Hub history pops next and always runs
+  /// [_syncNativeForegroundPeer] (leave: clear foreground then disable read gate).
+  bool handleHubSystemBack() {
+    final nav = Navigator.of(context);
+    if (nav.canPop()) {
+      nav.pop();
+      return true;
+    }
+    final prev = _hubHistory.pop();
+    if (prev == null) {
+      if (_hubHasChromeToUnwind()) {
+        _hubUnwindChromeFallback();
+        return true;
+      }
+      return false;
+    }
+    _applyHubHistoryEntry(prev);
+    return true;
+  }
+
+  void _popHubChromeBack() {
+    if (!handleHubSystemBack()) {
+      SystemNavigator.pop();
+    }
   }
 
   /// Native `ack_read` only while the chat **room** is visible (DESIGN.md).
@@ -188,6 +217,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
       // Wide → narrow: list-only; engaged flag is stale until user taps the chat pane again.
       if (!nowSplit && _splitChatEngaged) {
         setState(() => _splitChatEngaged = false);
+        _hubHistory.replaceTop(_hubHistorySnapshot());
       }
       final roomNow = _isHubChatRoomOpen(context);
       if (_layoutSyncedRoomOpen != roomNow) {
@@ -249,12 +279,16 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
   @override
   void initState() {
     super.initState();
+    _hubHistory.reset(_hubHistorySnapshot());
     WidgetsBinding.instance.addObserver(this);
     _loadStoredAlias();
     ContactStore.rosterChangeCount.addListener(_onRosterChanged);
     ContactStore.changeCount.addListener(_onContactsUiChanged);
     ContactStore.previewChangeCount.addListener(_onPreviewPollChanged);
     P2pEventBridge.instance.addListener(_routeHubP2pEvent);
+    InviteDeepLink.onInviteUri = (uri) {
+      if (mounted) unawaited(_joinFromUri(uri));
+    };
     unawaited(_bootstrapHub());
   }
 
@@ -290,6 +324,9 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
 
   @override
   void dispose() {
+    if (InviteDeepLink.onInviteUri != null) {
+      InviteDeepLink.onInviteUri = null;
+    }
     P2pEventBridge.instance.removeListener(_routeHubP2pEvent);
     P2pEventBridge.instance.setForegroundConversation(null);
     unawaited(() async {
@@ -333,6 +370,10 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
     if (!mounted) return;
     unawaited(P2pEventBridge.instance.ensureStarted(_s));
     _syncNativeForegroundPeer();
+    final pending = InviteDeepLink.takePending();
+    if (pending != null && mounted) {
+      await _joinFromUri(pending);
+    }
   }
 
   Future<void> _reloadContactsListOnly() async {
@@ -358,15 +399,21 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
 
   Future<void> _showMyQrInvitation() async {
     if (!GhalBolFfi.isP2pAvailable) return;
+    await _loadStoredAlias();
     P2pEventBridge.instance.drainNow();
     if (!mounted) return;
+    final pk = _s.publicKeyHex?.trim() ?? "";
+    if (!isValidPublicKeyHex(pk)) return;
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder: (_) => ShareInviteScreen(
-          readInviteUri: _computeInviteUri,
+          publicKeyHex: pk,
+          appNamespace: _appNs,
           readListenReady: () => P2pEventBridge.instance.isNodeReady,
           onParentRefresh: () {
-            if (mounted) setState(() {});
+            if (mounted) {
+              unawaited(_loadStoredAlias());
+            }
           },
         ),
       ),
@@ -491,6 +538,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
         _splitChatEngaged = true;
       }
     });
+    _recordHubNavigation();
     _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
     _syncNativeForegroundPeer();
     P2pEventBridge.instance.drainNow();
@@ -690,6 +738,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
           _splitChatEngaged = true;
         }
       });
+      _recordHubNavigation();
       _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
       _syncNativeForegroundPeer();
       if (saved.hasFullKeys) {
@@ -732,27 +781,39 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
       await st.requestCopyInvitationLink();
       return;
     }
+    await _loadStoredAlias();
     final uri = _computeInviteUri();
     if (uri == null) return;
     await Clipboard.setData(ClipboardData(text: uri));
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Invitation copied (open Chats for QR / dial hints).")),
+      const SnackBar(content: Text("Invitation copied")),
     );
   }
 
   Future<void> _shareInvitationFromHub(BuildContext context) async {
+    await _loadStoredAlias();
     final uri = _computeInviteUri();
     if (uri == null) return;
-    await SharePlus.instance.share(ShareParams(text: uri, subject: "Ghal Bol invitation"));
+    await SharePlus.instance.share(
+      ShareParams(text: uri, subject: "Ghal Bol invitation"),
+    );
   }
 
   void _openChatInvitationFromHub() {
     if (!GhalBolFfi.isP2pAvailable) return;
     if (_navTab != 0) {
       setState(() => _navTab = 0);
+      _recordHubNavigation();
     }
     unawaited(_showMyQrInvitation());
+  }
+
+  void _onHubNavTabSelected(int index) {
+    if (index == _navTab) return;
+    setState(() => _navTab = index);
+    _recordHubNavigation();
+    _syncNativeForegroundPeer();
   }
 
   String? _selectedContactCallPk() {
@@ -1209,7 +1270,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
           ListTile(
             leading: Icon(Icons.contacts_outlined, color: colorScheme.primary),
             title: const Text("Contacts"),
-            subtitle: const Text("Add or remove people by public key"),
+            subtitle: const Text("Add, edit display names, or remove by public key"),
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -1235,9 +1296,9 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
           ),
           const Divider(height: 1),
           ListTile(
-            leading: Icon(Icons.download_outlined, color: colorScheme.primary),
+            leading: Icon(Icons.article_outlined, color: colorScheme.primary),
             title: const Text("App log"),
-            subtitle: const Text("Diagnostics — download, share, or clear log file"),
+            subtitle: const Text("Session diagnostics log"),
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -1358,9 +1419,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
       onHubChatDetach: _detachHubChat,
       hubPeerStreamReady: _hubPeerStreamReady,
       onContactJoined: _onContactJoined,
-      onLeaveRoom: split
-          ? null
-          : () => _leaveChatRoom(split: false),
+      onLeaveRoom: split ? null : _popHubChromeBack,
       onLock: null,
       networkActionsInHub: true,
     );
@@ -1407,10 +1466,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
           unselectedIconTheme: IconThemeData(color: p.metaText, size: 24),
           unselectedLabelTextStyle: TextStyle(color: p.metaText, fontSize: 11),
           labelType: railExtended ? NavigationRailLabelType.none : NavigationRailLabelType.all,
-          onDestinationSelected: (i) {
-            setState(() => _navTab = i);
-            _syncNativeForegroundPeer();
-          },
+          onDestinationSelected: _onHubNavTabSelected,
           leading: Padding(
             padding: const EdgeInsets.only(top: 8, bottom: 12),
             child: ClipRRect(
@@ -1451,6 +1507,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
                       onPointerDown: (_) {
                         if (!_splitChatEngaged) {
                           setState(() => _splitChatEngaged = true);
+                          _recordHubNavigation();
                           _syncNativeForegroundPeer();
                         }
                       },
@@ -1476,7 +1533,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
           return AppBar(
             leading: BackButton(
               color: p.appBarFg,
-              onPressed: () => _leaveChatRoom(split: false),
+              onPressed: _popHubChromeBack,
             ),
             title: Text(
               _selectedContact != null
@@ -1577,10 +1634,7 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
       bottomNavigationBar: showBottomNav
           ? NavigationBar(
               selectedIndex: _navTab,
-              onDestinationSelected: (i) {
-                setState(() => _navTab = i);
-                _syncNativeForegroundPeer();
-              },
+              onDestinationSelected: _onHubNavTabSelected,
               height: 64,
               backgroundColor: p.composerBar,
               elevation: 8,
@@ -1615,11 +1669,6 @@ class _ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserv
   Widget build(BuildContext context) {
     _syncNativeForegroundIfLayoutChanged(context);
     final split = _hubShellSplit(context);
-    final shell = split ? _wideShell(context) : _narrowShell(context);
-    return PopScope(
-      canPop: _computeHubCanPop(context),
-      onPopInvokedWithResult: _hubOnSystemPopInvoked,
-      child: shell,
-    );
+    return split ? _wideShell(context) : _narrowShell(context);
   }
 }

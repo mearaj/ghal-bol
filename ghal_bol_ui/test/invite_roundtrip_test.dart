@@ -1,9 +1,21 @@
 import "package:flutter_test/flutter_test.dart";
+import "package:ghal_bol_ui/ghalbol_connect_invite.dart";
+import "package:ghal_bol_ui/invite_uri_builder.dart";
 import "package:ghal_bol_ui/invite_uri_codec.dart";
 
 void main() {
   const pk =
       "02f229f167ac2337144dbeba4392a6300c8fe97fb061efdb4f81ec9f29dec76936";
+
+  test("invite links include alias on web and app URIs", () {
+    final links = buildGhalBolInviteLinks(
+      publicKeyHex: pk,
+      peerAlias: "Mearaj",
+    );
+    expect(links, isNotNull);
+    expect(links!.httpsUri, contains("?alias=Mearaj"));
+    expect(links.appUri, "ghalbol://connect/$pk?alias=Mearaj");
+  });
 
   test("HTTPS encode/decode roundtrip", () {
     final wire = {
@@ -23,6 +35,22 @@ void main() {
     expect(dec!["public_key_hex"], pk);
     expect(dec["peer_alias"], "Test");
     expect(verifyConnectInviteWireMap(dec), isTrue);
+  });
+
+  test("www.ghalbol.com invite decodes", () {
+    final https = "https://www.ghalbol.com/connect/$pk?alias=Mearaj";
+    expect(decodeConnectInviteUri(https), isNotNull);
+    expect(inviteAppUriFromHttps(https), "ghalbol://connect/$pk?alias=Mearaj");
+  });
+
+  test("HTTPS location to ghalbol app URI", () {
+    final https =
+        "https://ghalbol.com/connect/$pk?alias=Probrine99";
+    final app = inviteAppUriFromHttps(https);
+    expect(app, "ghalbol://connect/$pk?alias=Probrine99");
+    final loc = Uri.parse(https);
+    expect(inviteAppUriFromUri(loc), app);
+    expect(inviteHttpsStringFromUri(loc), https);
   });
 
   test("app scheme encode/decode roundtrip", () {
@@ -53,6 +81,15 @@ void main() {
     expect(dec, isNotNull);
     expect(dec!.containsKey("coord_base_url"), isFalse);
     expect(verifyConnectInviteWireMap(dec), isTrue);
+  });
+
+  test("extractConnectInviteUri preserves alias from QR-style payload", () {
+    const withAlias =
+        "https://ghalbol.com/connect/$pk?alias=Mearaj";
+    final extracted = extractConnectInviteUri(withAlias);
+    expect(extracted, withAlias);
+    final inv = GhalBolConnectInvite.tryParseInviteUri(extracted!);
+    expect(inv?.peerAlias, "Mearaj");
   });
 
   test("extractConnectInviteUri finds HTTPS in wrapper text", () {

@@ -156,6 +156,20 @@ Use the draft in [PLAY_STORE_LISTING.md](PLAY_STORE_LISTING.md): short descripti
 
 **P2 is done when:** internal testing build is installable from Play Store.
 
+### P2.5 Public website (ghalbol.com)
+
+Hosting is Firebase (`firebase.json`, `scripts/deploy_web_firebase.sh`). Not a substitute for P0 ship test on phones.
+
+| Step | Action |
+|------|--------|
+| Web build | `cd ghal_bol_ui && flutter build web --release` |
+| Linux tarball | `web/downloads/ghal-bol-linux-x64.tar.gz` before web build — see [WEB_SITE.md](WEB_SITE.md) |
+| App Links | `web/.well-known/assetlinks.json` with Play app-signing SHA-256 |
+| Deploy | `./scripts/deploy_web_firebase.sh` from repo root |
+| Verify | `/`, `/download/linux`, `/downloads/ghal-bol-linux-x64.tar.gz` (file, not HTML), `/.well-known/assetlinks.json` |
+
+Privacy policy URL for Play: `https://ghalbol.com/privacy` when that page is published ([PRIVACY_POLICY.md](PRIVACY_POLICY.md)).
+
 ---
 
 ## Quick reference
@@ -168,7 +182,11 @@ COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 ./scripts/pack_android_workspace_jni_libs.sh
 cd ghal_bol_ui && flutter build appbundle --release
 
-# Linux release
+# Linux release (desktop app)
 ./scripts/sync_ghal_bol_native_for_flutter.sh
 cd ghal_bol_ui && flutter build linux --release
+
+# Linux bundle for ghalbol.com (then web build + deploy)
+# See WEB_SITE.md — tar bundle/ into web/downloads/ghal-bol-linux-x64.tar.gz
+./scripts/deploy_web_firebase.sh
 ```

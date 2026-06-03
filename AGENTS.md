@@ -97,7 +97,7 @@ Read **`docs/DESIGN.md`** in full before touching acks, ticks, foreground, or tr
 # Android phone: pack only (cargo-ndk → build/android-native-ndk/; no adb)
 ./scripts/pack_android_workspace_jni_libs.sh
 
-cd ghal_bol_ui && flutter run
+cd ghal_bol_ui && flutter run   # Android: com.ghalbol.debug (Play stays com.ghalbol)
 
 # Checks
 cargo test -p ghal_bol
@@ -161,9 +161,9 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `docs/GHAL_BOL_URI_SCHEME.md` | QR / `ghalbol://` invites |
 | `docs/GHAL_BOL_VOICE_V1.md` | Call signaling |
 | `docs/TRANSPORT.md` | libp2p transport stack, discovery, invariants |
+| `docs/WEB_SITE.md` | Static **ghalbol.com** web build, Firebase, Linux download, `/connect/…` handoff |
 | `README.md` | Product vision + repo map |
-| `PORTABILITY.md` | Targets / JNI |
-| `ghal_bol_ui/README.md` | Flutter-only scope |
+| `ghal_bol_ui/README.md` | Flutter shell scope (native vs `bootstrap_web`) |
 
 ## Naming
 

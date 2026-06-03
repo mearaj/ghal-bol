@@ -1,5 +1,9 @@
 # Ghal Bol
 
+<p align="center">
+  <img src="ghal_bol_ui/assets/app_icon.png" alt="Ghal Bol app icon" width="1024">
+</p>
+
 Ghal Bol is a realtime peer-to-peer messaging system focused on direct communication, local-first identity, minimal infrastructure dependency, and high-speed synchronization between online peers.
 
 The project intentionally avoids traditional cloud-centric messaging architecture. There are no phone numbers, no email-based accounts, no permanent centralized chat storage, and no server-owned transcripts. Users own their identities, messages, and local history.
@@ -15,6 +19,8 @@ Unlike traditional messengers such as WhatsApp or Signal, Ghal Bol does not aim 
 **Communication tiers (direct → peer relay → paid backup):** [docs/COMMUNICATION_TIERS.md](docs/COMMUNICATION_TIERS.md)
 
 **Peer discovery and invites:** [docs/PEER_DISCOVERY.md](docs/PEER_DISCOVERY.md)
+
+**Product backlog (planned UX and parity work):** [docs/TODO.md](docs/TODO.md)
 
 **Transport (libp2p):** [docs/TRANSPORT.md](docs/TRANSPORT.md)
 
@@ -62,7 +68,7 @@ Peer connections can be established through QR codes, invite links, or public ke
 - Web: `https://ghalbol.com/connect/<public_key_hex>`
 - App: `ghalbol://connect/<public_key_hex>`
 
-The link identifies the peer only; the app resolves live endpoints via `ghal_bol_server`, then connects directly. See [docs/PEER_DISCOVERY.md](docs/PEER_DISCOVERY.md).
+The link identifies the peer only; the app resolves live endpoints via `ghal_bol_server`, then connects directly. See [docs/PEER_DISCOVERY.md](docs/PEER_DISCOVERY.md). **HTTPS invites:** with verified App Links (`/.well-known/assetlinks.json` on the site), Android opens the app directly; otherwise the browser shows the [web invite handoff](docs/WEB_SITE.md). **Linux desktop:** [download page](https://ghalbol.com/download/linux).
 
 ---
 
@@ -299,8 +305,10 @@ Open this directory as the workspace root (the folder that contains this `README
 |------|------|
 | `ghal_bol/` | Rust core: identity, libp2p sync engine, local stores |
 | `ghal_bol_server/` | Coordination server — see [ghal_bol_server/README.md](ghal_bol_server/README.md) |
-| `ghal_bol_ui/` | Flutter UI shell |
-| `docs/` | Vision, [tiers](docs/COMMUNICATION_TIERS.md), [identity](docs/IDENTITY.md), [premium](docs/PREMIUM_SERVICES.md), peer discovery, [transport](docs/TRANSPORT.md), doc index |
+| `ghal_bol_ui/` | Flutter UI shell — [ghal_bol_ui/README.md](ghal_bol_ui/README.md) |
+| `docs/` | Vision, [tiers](docs/COMMUNICATION_TIERS.md), [identity](docs/IDENTITY.md), [premium](docs/PREMIUM_SERVICES.md), peer discovery, [transport](docs/TRANSPORT.md), [web site](docs/WEB_SITE.md), [backlog](docs/TODO.md), [doc index](docs/README.md) |
+| `firebase.json` | Firebase Hosting for **ghalbol.com** (static web build) |
+| `scripts/deploy_web_firebase.sh` | `flutter build web` + `firebase deploy --only hosting` |
 
 ---
 

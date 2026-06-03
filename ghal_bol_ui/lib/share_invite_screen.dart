@@ -1,18 +1,26 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:qr_flutter/qr_flutter.dart";
 import "package:share_plus/share_plus.dart";
 
-/// Full-screen host invitation — QR encodes format-2 connect invite (public key only).
+import "package:ghal_bol_ui/identity_alias_store.dart";
+import "package:ghal_bol_ui/invite_uri_builder.dart";
+import "package:ghal_bol_ui/public_key_hex.dart";
+
+/// Full-screen host invitation — one QR for the HTTPS invite (Android / desktop).
 class ShareInviteScreen extends StatefulWidget {
   const ShareInviteScreen({
     super.key,
-    required this.readInviteUri,
+    required this.publicKeyHex,
+    required this.appNamespace,
     required this.readListenReady,
     required this.onParentRefresh,
   });
 
-  final String? Function() readInviteUri;
+  final String publicKeyHex;
+  final String appNamespace;
   final bool Function() readListenReady;
   final VoidCallback onParentRefresh;
 
@@ -21,15 +29,41 @@ class ShareInviteScreen extends StatefulWidget {
 }
 
 class _ShareInviteScreenState extends State<ShareInviteScreen> {
-  void _rebuild() {
+  String? _uri;
+  bool _loadingUri = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_reloadUri());
+  }
+
+  /// Always read alias from native store so QR matches Copy / Share after Save.
+  Future<void> _reloadUri() async {
+    setState(() => _loadingUri = true);
     widget.onParentRefresh();
-    if (mounted) setState(() {});
+    final pk = widget.publicKeyHex.trim().toLowerCase();
+    String? uri;
+    if (isValidPublicKeyHex(pk)) {
+      final alias = await IdentityAliasStore.read(
+        appNamespace: widget.appNamespace,
+        publicKeyHex: pk,
+      );
+      uri = buildGhalBolInviteUri(publicKeyHex: pk, peerAlias: alias);
+    }
+    if (!mounted) return;
+    setState(() {
+      _uri = uri;
+      _loadingUri = false;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final uri = widget.readInviteUri();
+    final uri = _uri;
     final listenReady = widget.readListenReady();
+    final waiting = _loadingUri || uri == null;
+    final inviteUri = uri;
 
     return Scaffold(
       appBar: AppBar(
@@ -39,10 +73,10 @@ class _ShareInviteScreenState extends State<ShareInviteScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
           children: [
-            if (uri != null) ...[
+            if (!waiting && inviteUri != null) ...[
               Builder(
                 builder: (_) {
-                  final qr = QrValidator.validate(data: uri);
+                  final qr = QrValidator.validate(data: inviteUri);
                   if (qr.status == QrValidationStatus.valid) {
                     return Center(
                       child: DecoratedBox(
@@ -51,7 +85,7 @@ class _ShareInviteScreenState extends State<ShareInviteScreen> {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: QrImageView(
-                          data: uri,
+                          data: inviteUri,
                           size: 280,
                           padding: const EdgeInsets.all(14),
                         ),
@@ -61,7 +95,7 @@ class _ShareInviteScreenState extends State<ShareInviteScreen> {
                   return Padding(
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     child: Text(
-                      "This link is too long for a QR (${uri.length} characters). "
+                      "This link is too long for a QR (${inviteUri.length} characters). "
                       "Use Copy link below — the other person can paste it in Join.",
                       style: TextStyle(color: Theme.of(context).colorScheme.error),
                       textAlign: TextAlign.center,
@@ -86,7 +120,7 @@ class _ShareInviteScreenState extends State<ShareInviteScreen> {
                     ),
                     const SizedBox(height: 12),
                     FilledButton.tonalIcon(
-                      onPressed: _rebuild,
+                      onPressed: () => unawaited(_reloadUri()),
                       icon: const Icon(Icons.refresh),
                       label: const Text("Refresh now"),
                     ),
@@ -94,20 +128,18 @@ class _ShareInviteScreenState extends State<ShareInviteScreen> {
                 ),
               ),
             Text(
-              "QR encodes a link to your public key on ghalbol.com (no PeerId, no IP addresses). "
-              "They tap Join → Scan QR (or paste the link). The app looks up your endpoints on the coordination server.",
+              "QR encodes your https://ghalbol.com invite (public key and saved display name). "
+              "They tap Join → Scan QR (or paste the link).",
               style: Theme.of(context).textTheme.bodyLarge,
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 12),
-            // Removed: redundant "P2P still starting" banner (spinner + button already cover it).
-            if (uri != null) ...[
+            if (!waiting && inviteUri != null) ...[
               const SizedBox(height: 20),
-              SelectableText(uri, style: const TextStyle(fontSize: 11)),
+              SelectableText(inviteUri, style: const TextStyle(fontSize: 11)),
               const SizedBox(height: 16),
               FilledButton.icon(
                 onPressed: () async {
-                  await Clipboard.setData(ClipboardData(text: uri));
+                  await Clipboard.setData(ClipboardData(text: inviteUri));
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text("Invitation copied")),
@@ -121,7 +153,7 @@ class _ShareInviteScreenState extends State<ShareInviteScreen> {
               OutlinedButton.icon(
                 onPressed: () async {
                   await SharePlus.instance.share(
-                    ShareParams(text: uri, subject: "Ghal Bol chat invitation"),
+                    ShareParams(text: inviteUri, subject: "Ghal Bol chat invitation"),
                   );
                 },
                 icon: const Icon(Icons.share_outlined),
