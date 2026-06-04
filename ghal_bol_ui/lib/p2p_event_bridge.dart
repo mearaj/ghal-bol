@@ -22,6 +22,7 @@ class P2pEventBridge {
   Timer? _poll;
   Timer? _heartbeat;
   Timer? _coordDialDebounce;
+  Future<void>? _coordDialInFlight;
   String _appNs = kGhalBolAndroidLibraryNamespace;
   bool _networkBootstrapOk = false;
   Future<void>? _bootstrapFuture;
@@ -304,6 +305,7 @@ class P2pEventBridge {
     _heartbeat = null;
     _coordDialDebounce?.cancel();
     _coordDialDebounce = null;
+    _coordDialInFlight = null;
     _networkBootstrapOk = false;
     _bootstrapFuture = null;
     _foregroundDesired = null;
@@ -383,6 +385,13 @@ class P2pEventBridge {
 
   void _handleCore(Map<String, dynamic> ev) {
     final kind = ev["kind"]?.toString();
+    if (kind == "dm_message") {
+      final msgKind = ev["msg_kind"]?.toString() ?? "";
+      if (msgKind == "text") {
+        // Native may have persisted on wire before this poll replay — still refresh roster badge.
+        ContactStore.previewChangeCount.value++;
+      }
+    }
     if (ev["stores_updated"] == true) {
       AppLog.instance.flow("DM/store", "UI refresh: stores_updated kind=$kind");
       final msgKind = ev["msg_kind"]?.toString() ?? "";
@@ -392,7 +401,7 @@ class P2pEventBridge {
         ContactStore.rosterChangeCount.value++;
         _scheduleCoordDialIfNeeded();
       } else if (kind == "dm_message" && msgKind == "text") {
-        ContactStore.previewChangeCount.value++;
+        // Already bumped above for every inbound text poll event.
       } else {
         ContactStore.bumpListFromPoll();
       }
@@ -448,14 +457,30 @@ class P2pEventBridge {
   }
 
   Future<void> _coordDialIfNeeded() async {
+    final inFlight = _coordDialInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    Future<void> run() async {
+      try {
+        final contacts = await ContactStore.listContacts(_appNs);
+        await P2pNetworkCoordinator.refreshCoordDial(
+          contacts,
+          appNamespace: _appNs,
+        );
+      } catch (e, st) {
+        AppLog.instance.d("P2P", "coord dial skipped: $e $st");
+      }
+    }
+
+    final next = run();
+    _coordDialInFlight = next;
     try {
-      final contacts = await ContactStore.listContacts(_appNs);
-      await P2pNetworkCoordinator.refreshCoordDial(
-        contacts,
-        appNamespace: _appNs,
-      );
-    } catch (e, st) {
-      AppLog.instance.d("P2P", "coord dial skipped: $e $st");
+      await next;
+    } finally {
+      if (identical(_coordDialInFlight, next)) {
+        _coordDialInFlight = null;
+      }
     }
   }
 

@@ -75,30 +75,24 @@ Typical WAN flow ([PEER_DISCOVERY.md](PEER_DISCOVERY.md)):
 3. Lookup `GET /v1/peers/{public_key_hex}` → dial returned endpoints via libp2p.
 4. Open `/ghal-bol/msg/1.0.0` stream; speak `ghal_bol_msg_v1`.
 
-**LAN:** mDNS for configured contacts when on the same network. **WAN fallback:** Kademlia when coord paths fail.
+**WAN first:** coord register/lookup + relay (and public TCP when registered). **LAN only** when mDNS shows the configured peer on the same network (direct TCP). Kademlia when coord paths fail.
 
 Coord publishes `tcp`, `quic`, and `libp2p` multiaddrs; `coord_runtime.rs` and `dm_transport/addr.rs` help filter and rank dial targets before libp2p dials.
 
-### LAN vs WAN dial policy (2026)
+### LAN vs WAN dial policy
 
-Native code ranks dial addresses **per contact**, not only per device interface:
+**WAN first** for every configured contact. **LAN** (mDNS → direct TCP) **only** when that peer is discovered on the local LAN — not from coord RFC1918 addrs alone.
 
-1. **WAN-first** when the peer is not on the local LAN and the device likely has internet (coord heartbeat/register OK, public DHT bootstrap connected, or public IPv4).
-2. **LAN-first** when the peer was seen via mDNS (or same RFC1918 /24), or when internet is likely down — mDNS and direct TCP still work on the LAN.
-3. **Coord** — register/lookup every ~3s while P2P runs; HTTP failures do not stop libp2p; lookups fall back to DHT/mDNS. Disconnected DM contacts get a throttled coord lookup every 3s (8s for LAN-local peers).
-4. **Handover** — Wi‑Fi with internet still runs WAN recovery (relay listen + coord) instead of treating “on Wi‑Fi” as “WAN not needed”. Mobile-data path still resets stale bootstrap TCP when switching routes.
+- **WAN:** coord presence (relay on CGNAT/mobile-data, public TCP when registered) + Kademlia/identify fallbacks.
+- **LAN exception:** mDNS `Discovered` for the contact → prefer direct TCP for that peer.
+- **Mobile-data:** no blind peer-id dials when coord is configured — explicit relay multiaddrs only.
 
-See [DESIGN.md](DESIGN.md) § “Dial strategy — LAN vs WAN”.
+See [DESIGN.md](DESIGN.md) § “Dial strategy — WAN first”. Do not add Dart dial policy or RFC1918 /24 guessing from coord (regression: long connect stalls).
 
-### Roaming and reconnect (2026)
+### Roaming
 
-Connectivity is designed for **either peer** changing network:
-
-- **This device** — Android `ConnectivityManager` in `:p2p`; all platforms poll local interfaces every 1s; app resume calls `p2p_notify_network_change`.
-- **Other peer** — detected when the DM libp2p connection closes; native immediately runs a throttled **reconnect pass** (coord lookup + Kademlia + mDNS), not a multi-minute wait.
-- **After relay/coord register** — all contacts get a fresh lookup so new WAN addresses are used.
-
-Throttles remain (800ms–3s between coord lookups per peer) to avoid flooding the network while still beating the old 5–10 minute stall window.
+- **This device** — Android connectivity in `:p2p`, 1s interface profile poll, WAN relay recovery when coord URL is set; optional `p2p_notify_network_change` from UI resume.
+- **Coord tick** — periodic lookup (~5s) plus immediate lookup when send is queued and peer is not connected.
 
 ---
 

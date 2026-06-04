@@ -28,6 +28,8 @@ class CallWebRtc {
   bool _disposed = false;
   bool _remoteDescriptionSet = false;
   bool _pendingEnableVideo = false;
+  bool _deferDesktopRemotePlayback = false;
+  bool _incomingWarmedUp = false;
   final List<Map<String, dynamic>> _pendingIce = [];
   Future<void> _negotiationChain = Future<void>.value();
 
@@ -35,6 +37,8 @@ class CallWebRtc {
   final remoteRenderer = RTCVideoRenderer();
 
   MediaStream? get remoteStream => _remoteStream;
+  bool get remoteDescriptionSet => _remoteDescriptionSet;
+  bool get hasLocalAudio => (_localStream?.getAudioTracks().isNotEmpty ?? false);
   bool get localVideoEnabled => _videoEnabled;
   bool get remoteVideoActive =>
       _remoteStream?.getVideoTracks().any((t) => t.enabled) ?? false;
@@ -45,8 +49,8 @@ class CallWebRtc {
     ],
   };
 
-  /// Route call audio to speaker / communication mode (mobile). Call before getUserMedia.
-  static Future<void> prepareCallAudio({bool speakerOn = true}) async {
+  /// OS-default routing only — do not force speaker or BT hands-free at call start.
+  static Future<void> prepareCallAudio() async {
     if (kIsWeb) return;
     try {
       if (CallDesktopMedia.isDesktopNative) {
@@ -54,14 +58,21 @@ class CallWebRtc {
       }
       if (WebRTC.platformIsAndroid) {
         await Helper.setAndroidAudioConfiguration(
-          AndroidAudioConfiguration.communication,
+          AndroidAudioConfiguration(
+            manageAudioFocus: true,
+            androidAudioMode: AndroidAudioMode.inCommunication,
+            androidAudioFocusMode: AndroidAudioFocusMode.gain,
+            androidAudioStreamType: AndroidAudioStreamType.voiceCall,
+            androidAudioAttributesUsageType:
+                AndroidAudioAttributesUsageType.voiceCommunication,
+            androidAudioAttributesContentType:
+                AndroidAudioAttributesContentType.speech,
+            forceHandleAudioRouting: false,
+          ),
         );
       }
       if (WebRTC.platformIsIOS) {
         await Helper.ensureAudioSession();
-      }
-      if (WebRTC.platformIsAndroid || WebRTC.platformIsIOS) {
-        await Helper.setSpeakerphoneOn(speakerOn);
       }
     } catch (e) {
       CallFlowLog.issue("prepare_audio_failed", detail: e.toString());
@@ -72,6 +83,15 @@ class CallWebRtc {
     CallFlowLog.webrtc("renderers_init");
     await localRenderer.initialize();
     await remoteRenderer.initialize();
+  }
+
+  /// Incoming callee: PC + renderers before Accept (no mic / no remote bind).
+  Future<void> warmupIncomingCallee() async {
+    if (_disposed || _incomingWarmedUp) return;
+    await initRenderers();
+    await _ensurePc();
+    _incomingWarmedUp = true;
+    CallFlowLog.webrtc("callee_warmup_ok");
   }
 
   Future<void> dispose() async {
@@ -122,6 +142,14 @@ class CallWebRtc {
       "remote_audio": _remoteStream?.getAudioTracks().length.toString() ?? "0",
       "remote_video": _remoteStream?.getVideoTracks().length.toString() ?? "0",
     });
+    if (CallDesktopMedia.isDesktopNative &&
+        kind == "audio" &&
+        !hasLocalAudio) {
+      _deferDesktopRemotePlayback = true;
+      CallFlowLog.media("playback", {"route": "deferred_until_local_mic"});
+      _notifyStreams();
+      return;
+    }
     await _bindRemotePlayback(forceRendererRefresh: kind == "video");
     _notifyStreams();
   }
@@ -199,7 +227,7 @@ class CallWebRtc {
     await _ensurePc();
     final constraints = <String, dynamic>{
       "audio": CallDesktopMedia.isDesktopNative
-          ? await CallDesktopMedia.audioConstraints()
+          ? CallDesktopMedia.audioConstraints()
           : {
               "echoCancellation": true,
               "noiseSuppression": true,
@@ -275,10 +303,10 @@ class CallWebRtc {
         case "ice":
           if (!_remoteDescriptionSet) {
             _pendingIce.add(Map<String, dynamic>.from(payload));
-            CallFlowLog.webrtcDetail(
-              "ice_buffered",
-              "pending=${_pendingIce.length}",
-            );
+            final n = _pendingIce.length;
+            if (n <= 2 || n % 10 == 0) {
+              CallFlowLog.webrtcDetail("ice_buffered", "pending=$n");
+            }
             return;
           }
           await _addIceCandidate(payload);
@@ -362,11 +390,14 @@ class CallWebRtc {
       await prepareCallAudio();
       await _ensureLocal(video: false);
     }
+    if (_deferDesktopRemotePlayback) {
+      _deferDesktopRemotePlayback = false;
+      await _bindRemotePlayback(forceRendererRefresh: true);
+    }
     final answer = await _pc!.createAnswer(_sdpMediaOptions);
     final local = await _setLocalDescriptionAndGather(answer);
     CallFlowLog.webrtc("sdp_answer_tx");
     await onSignal("sdp_answer", {"sdp": local.sdp, "type": local.type});
-    await _bindRemotePlayback(forceRendererRefresh: true);
     _notifyStreams();
     await _runPendingEnableVideo();
   }
@@ -427,26 +458,17 @@ class CallWebRtc {
     return int.tryParse(v.toString());
   }
 
-  /// Embed host/LAN candidates in SDP so calls work when trickle ICE is delayed in poll.
+  /// Trickle ICE via [onIceCandidate] + poll — never block the UI thread on full gather.
+  /// (Native [setLocalDescription] can stall 10–20s waiting for STUN on desktop.)
   Future<RTCSessionDescription> _setLocalDescriptionAndGather(
     RTCSessionDescription desc,
   ) async {
     final pc = _pc!;
-    final done = Completer<void>();
-    pc.onIceGatheringState = (state) {
-      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete &&
-          !done.isCompleted) {
-        done.complete();
-      }
-    };
     await pc.setLocalDescription(desc);
-    try {
-      await done.future.timeout(const Duration(seconds: 4));
-      CallFlowLog.webrtcDetail("ice_gather", "complete");
-    } catch (_) {
-      CallFlowLog.webrtcDetail("ice_gather", "timeout — sending partial SDP");
-    }
+    // Brief window for host/LAN candidates to land in SDP without a long block.
+    await Future<void>.delayed(const Duration(milliseconds: 400));
     final updated = await pc.getLocalDescription();
+    CallFlowLog.webrtcDetail("ice_gather", "trickle — sdp sent without full gather");
     return updated ?? desc;
   }
 

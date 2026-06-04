@@ -68,11 +68,14 @@ All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encr
 ## Desktop media (Linux / Windows / macOS)
 
 - Flutter **WebRTC** only; Rust does not capture/play audio.
-- Uses **OS default** mic/speaker (no `selectAudioOutput` / device pinning that forced Bluetooth hands-free on Linux).
+- **Desktop:** ringtone unchanged. Callee opens mic with flutter_webrtc `optional` + `sourceId` (non-HFP), never top-level `deviceId`. Local capture before `setRemoteDescription`; defer `RTCVideoRenderer` remote bind until mic is open (`call_webrtc.dart`, `call_desktop_media.dart`).
+- **Mobile:** no `setSpeakerphoneOn` at call start; `forceHandleAudioRouting: false`. User can toggle speaker in-call.
 - SDP offer/answer includes **gathered ICE candidates** (LAN-friendly when trickle over DM is slow).
 - Voice calls still need a hidden **`RTCVideoView`** on the remote renderer for GTK audio output.
 - Remote **audio + video** tracks merge into one `MediaStream` on `onTrack` (unified-plan fires twice); the remote renderer is re-bound when a video track arrives so desktop/mobile show peer video after renegotiation.
 - UI shows **connected** only after **ICE connected** or remote audio track — not on SDP alone.
+- **Ring / ringback:** bundled WAV loops via `call_ringtone.dart` (incoming on invite, outgoing after `invite` sent); stops when media connects or call ends. Android incoming also vibrates.
+- **Desktop capture:** echo cancellation / noise suppression enabled when a non–hands-free mic is pinned; left off for system default (avoids forcing Bluetooth HFP).
 
 **Debug:** More → **App log** → filter **Calls**. Lines use `[Call]`, `[Call/WebRTC]`, `[Call/Media]` (`AppLog.logCallFlow`, independent of journey toggles). Look for `wire_rx signal=sdp_answer`, `ice_connected`, `remote_track`.
 

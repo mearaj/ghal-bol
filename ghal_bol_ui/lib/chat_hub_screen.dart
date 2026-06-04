@@ -357,9 +357,8 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   void _onPreviewPollChanged() {
-    // Open chat merges via [ChatScreenState.ingestP2pEvent] — avoid duplicate FFI reloads.
     _contactsPreviewDebounce?.cancel();
-    _contactsPreviewDebounce = Timer(const Duration(milliseconds: 1200), () {
+    _contactsPreviewDebounce = Timer(const Duration(milliseconds: 400), () {
       unawaited(_reloadContactsListOnly());
     });
   }
@@ -582,28 +581,6 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     }
     if (kind == "node_ready") {
       setState(() {});
-    }
-    if (kind == "dm_message") {
-      final msgKind = ev["msg_kind"]?.toString() ?? "";
-      if (msgKind == "text") {
-        final senderPk = contactPublicKeyHexFromEvent(ev);
-        final text = ev["text"]?.toString() ?? "";
-        if (isValidPublicKeyHex(senderPk) && text.isNotEmpty) {
-          final sel = _selectedContact;
-          // Only clear unread while the room is open for this peer (DESIGN: not list selection).
-          if (_isHubChatRoomOpen(context) &&
-              sel != null &&
-              isValidPublicKeyHex(senderPk) &&
-              publicKeysEqual(senderPk, sel.publicKeyHex)) {
-            unawaited(
-              ContactStore.clearUnreadForContact(
-                appNamespace: _appNs,
-                contact: sel,
-              ),
-            );
-          }
-        }
-      }
     }
     _attachedHubChat?.ingestP2pEvent(ev);
   }

@@ -3,7 +3,7 @@ import "package:flutter_webrtc/flutter_webrtc.dart";
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/call/call_flow_log.dart";
 
-/// Desktop call media: OS-default playback; capture without forcing BT HFP.
+/// Desktop call media: OS-default playback; non-HFP capture via flutter_webrtc [sourceId].
 abstract final class CallDesktopMedia {
   static String? _videoInputId;
 
@@ -30,37 +30,22 @@ abstract final class CallDesktopMedia {
     });
   }
 
-  /// No [selectAudioOutput] / [RTCVideoRenderer.audioOutput] — those change routing.
   static Future<void> bindRemoteAudioOutput(RTCVideoRenderer renderer) async {}
 
-  static const _audioProcessingOff = {
-    "echoCancellation": false,
-    "noiseSuppression": false,
-    "autoGainControl": false,
-  };
+  static const List<Map<String, dynamic>> _audioProcessingOffOptional = [
+    {"echoCancellation": false},
+    {"googEchoCancellation": false},
+    {"googEchoCancellation2": false},
+    {"googDAEchoCancellation": false},
+    {"googNoiseSuppression": false},
+    {"noiseSuppression": false},
+    {"autoGainControl": false},
+  ];
 
-  /// Mic: avoid BT hands-free capture (switches whole card to HFP on Linux).
-  /// Speaker: always OS default via renderer [srcObject] only.
-  static Future<Object> audioConstraints() async {
-    if (!isDesktopNative) return true;
-    try {
-      final devices = await navigator.mediaDevices.enumerateDevices();
-      final inputs =
-          devices.where((d) => d.kind == "audioinput").toList(growable: false);
-      final mic = _pickCaptureInput(inputs);
-      final id = mic?.deviceId.trim() ?? "";
-      if (id.isNotEmpty) {
-        CallFlowLog.media("mic", {
-          "route": "pinned_non_hfp",
-          "label": mic!.label,
-        });
-        return {..._audioProcessingOff, "deviceId": id};
-      }
-    } catch (e, st) {
-      AppLog.instance.e("Call/Media", "audioConstraints enumerate", e, st);
-    }
-    CallFlowLog.media("mic", {"route": "system_default"});
-    return _audioProcessingOff;
+  /// Echo processing off only — no enumerate/select (fast; avoids BT "default:" HFP).
+  static Map<String, dynamic> audioConstraints() {
+    CallFlowLog.media("mic", {"route": "os_default_no_pin"});
+    return {"optional": _audioProcessingOffOptional};
   }
 
   static Map<String, dynamic> get _videoSizeHints => {
@@ -91,48 +76,6 @@ abstract final class CallDesktopMedia {
     } catch (e, st) {
       AppLog.instance.e("Call/Media", "refreshCameraId", e, st);
     }
-  }
-
-  static MediaDeviceInfo? _pickCaptureInput(List<MediaDeviceInfo> inputs) {
-    MediaDeviceInfo? defaultNonHfp;
-    MediaDeviceInfo? builtIn;
-
-    for (final d in inputs) {
-      final label = d.label.trim().toLowerCase();
-      if (_isHandsFreeProfile(label)) continue;
-      if (label.contains("monitor") || label.contains("virtual")) continue;
-      if (d.deviceId.trim().isEmpty) continue;
-
-      if (label.startsWith("default:") || label.startsWith("default ")) {
-        defaultNonHfp = d;
-        break;
-      }
-      if (builtIn == null && _looksBuiltInMic(label)) {
-        builtIn = d;
-      }
-    }
-
-    // PipeWire often marks only the HFP mic as "default:" — use built-in so BT stays on A2DP.
-    return defaultNonHfp ?? builtIn;
-  }
-
-  static bool _looksBuiltInMic(String label) {
-    return label.contains("built-in") ||
-        label.contains("builtin") ||
-        label.contains("internal") ||
-        label.contains("analog") ||
-        label.contains("laptop") ||
-        label.contains("microphone array") ||
-        label.contains("pch");
-  }
-
-  static bool _isHandsFreeProfile(String label) {
-    return label.contains("hands-free") ||
-        label.contains("handsfree") ||
-        label.contains("hfp") ||
-        label.contains("headset-hf") ||
-        label.contains("headset_hfp") ||
-        label.contains("sco");
   }
 
   static MediaDeviceInfo? _pickCamera(List<MediaDeviceInfo> list) {

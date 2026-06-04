@@ -9,13 +9,19 @@ import "package:ghal_bol_ui/app_log.dart";
 import "package:flutter_webrtc/flutter_webrtc.dart";
 import "package:ghal_bol_ui/call/call_desktop_media.dart";
 import "package:ghal_bol_ui/call/call_flow_log.dart";
+import "package:ghal_bol_ui/call/call_incoming_alert.dart";
+import "package:ghal_bol_ui/call/call_ringtone.dart";
 import "package:ghal_bol_ui/call/call_webrtc.dart";
 import "package:ghal_bol_ui/call/ghal_bol_call.dart";
 import "package:ghal_bol_ui/call/call_screen.dart";
+import "package:ghal_bol_ui/contact_store.dart";
+import "package:ghal_bol_ui/ghal_bol_constants.dart";
 import "package:ghal_bol_ui/ghal_bol_p2p.dart";
+import "package:ghal_bol_ui/identity_display_name.dart";
 import "package:ghal_bol_ui/p2p_event_bridge.dart";
 import "package:ghal_bol_ui/p2p_link_error_ui.dart";
 import "package:ghal_bol_ui/public_key_hex.dart";
+import "package:wakelock_plus/wakelock_plus.dart";
 
 enum CallUiPhase {
   idle,
@@ -41,7 +47,7 @@ class CallController {
   bool localVideoOn = false;
   bool remoteVideoOn = false;
   bool micMuted = false;
-  bool speakerOn = true;
+  bool speakerOn = false;
   bool onHold = false;
   String? statusMessage;
 
@@ -51,6 +57,26 @@ class CallController {
   bool _inviteSent = false;
   Timer? _connectFallbackTimer;
   Timer? _connectPollTimer;
+  Timer? _presentUiTimer;
+  final List<MapEntry<String, Map<String, dynamic>>> _deferredWebRtcSignals =
+      [];
+
+  /// Wire Android notification tap → show call UI.
+  static void install() {
+    CallIncomingAlert.installOpenedHandler(() {
+      instance.onAppForeground();
+    });
+  }
+
+  /// App returned to foreground — show pending incoming call UI.
+  void onAppForeground() {
+    if (phase == CallUiPhase.incomingRinging ||
+        phase == CallUiPhase.outgoingRinging) {
+      unawaited(_presentIncomingCall());
+      _ensureCallScreenVisible();
+    }
+    P2pEventBridge.instance.drainNow();
+  }
 
   CallWebRtc? get webrtc => _webrtc;
 
@@ -172,6 +198,7 @@ class CallController {
     }
     _inviteSent = true;
     CallFlowLog.step("invite_sent", {"peer": CallFlowLog.shortPk(pk)});
+    unawaited(CallRingtone.startOutgoing());
   }
 
   Future<bool> _waitForStreamReady(String publicKeyHex, {Duration timeout = const Duration(seconds: 45)}) async {
@@ -198,6 +225,21 @@ class CallController {
     });
 
     if (signal == "invite") {
+      if (phase == CallUiPhase.outgoingRinging &&
+          publicKeysEqual(peerPublicKeyHex, fromPk)) {
+        final ours = callId;
+        if (ours != null && remoteCallId.compareTo(ours) < 0) {
+          await _abandonOutgoingForGlare(fromPk, remoteCallId);
+          return;
+        }
+        if (ours != null && remoteCallId.compareTo(ours) >= 0) {
+          CallFlowLog.step("glare_keep_outgoing", {
+            "ours": ours,
+            "theirs": remoteCallId,
+          });
+          return;
+        }
+      }
       if (phase != CallUiPhase.idle) {
         CallFlowLog.step("invite_rejected_busy", {
           "from": CallFlowLog.shortPk(fromPk),
@@ -210,15 +252,7 @@ class CallController {
         );
         return;
       }
-      callId = remoteCallId;
-      CallFlowLog.bindCall(remoteCallId);
-      peerPublicKeyHex = fromPk;
-      isOutgoing = false;
-      CallFlowLog.step("incoming_ring", {"from": CallFlowLog.shortPk(fromPk)});
-      _setPhase(CallUiPhase.incomingRinging, "invite");
-      statusMessage = "Incoming call";
-      _notify();
-      _pushCallScreenIfNeeded();
+      await _beginIncomingRing(fromPk, remoteCallId);
       return;
     }
 
@@ -262,18 +296,14 @@ class CallController {
       case "sdp_offer":
       case "sdp_answer":
       case "ice":
-        if (_webrtc == null) {
-          if (!isOutgoing) {
-            await _initWebRtcCallee();
-          } else {
-            _webrtc ??= _newWebRtc();
-            await _webrtc!.initRenderers();
-          }
+        if (_shouldDeferWebRtcUntilAccept(signal)) {
+          _deferredWebRtcSignals.add(
+            MapEntry(signal, Map<String, dynamic>.from(payload)),
+          );
+          CallFlowLog.step("signal_deferred", {"signal": signal});
+          break;
         }
-        await _webrtc?.handleRemoteSignal(signal, payload);
-        if (phase == CallUiPhase.incomingRinging) {
-          _enterConnecting();
-        }
+        await _deliverWebRtcSignal(signal, payload);
         break;
     }
   }
@@ -281,13 +311,51 @@ class CallController {
   bool get inCallActive =>
       phase == CallUiPhase.connecting || phase == CallUiPhase.connected;
 
+  bool _shouldDeferWebRtcUntilAccept(String signal) {
+    return !isOutgoing &&
+        phase == CallUiPhase.incomingRinging &&
+        !_acceptSent &&
+        (signal == "sdp_offer" || signal == "sdp_answer" || signal == "ice");
+  }
+
+  Future<void> _deliverWebRtcSignal(
+    String signal,
+    Map<String, dynamic> payload,
+  ) async {
+    if (_webrtc == null) {
+      if (!isOutgoing) {
+        await _initWebRtcCallee();
+      } else {
+        _webrtc ??= _newWebRtc();
+        await _webrtc!.initRenderers();
+      }
+    }
+    await _webrtc?.handleRemoteSignal(signal, payload);
+  }
+
+  Future<void> _flushDeferredWebRtcSignals() async {
+    if (_deferredWebRtcSignals.isEmpty) return;
+    final batch = List<MapEntry<String, Map<String, dynamic>>>.from(
+      _deferredWebRtcSignals,
+    );
+    _deferredWebRtcSignals.clear();
+    CallFlowLog.step("signal_flush", {"count": batch.length.toString()});
+    for (final entry in batch) {
+      await _deliverWebRtcSignal(entry.key, entry.value);
+    }
+  }
+
   void _enterConnecting() {
     if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) return;
+    unawaited(CallRingtone.stop());
+    unawaited(CallIncomingAlert.dismiss());
+    _presentUiTimer?.cancel();
+    _presentUiTimer = null;
     _setPhase(CallUiPhase.connecting, "media_start");
     statusMessage = "Connecting audio…";
     _connectFallbackTimer?.cancel();
     _connectPollTimer?.cancel();
-    _connectPollTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+    _connectPollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (phase != CallUiPhase.connecting) {
         _connectPollTimer?.cancel();
         _connectPollTimer = null;
@@ -295,6 +363,7 @@ class CallController {
       }
       P2pEventBridge.instance.drainNow();
     });
+    _refreshConnectingStatus();
     _connectFallbackTimer = Timer(const Duration(seconds: 20), () {
       if (phase == CallUiPhase.connecting) {
         CallFlowLog.issue(
@@ -307,6 +376,18 @@ class CallController {
       }
     });
     _notify();
+  }
+
+  void _refreshConnectingStatus() {
+    if (phase != CallUiPhase.connecting) return;
+    final w = _webrtc;
+    if (w == null || !w.remoteDescriptionSet) {
+      statusMessage = "Waiting for caller…";
+    } else if (!w.hasLocalAudio) {
+      statusMessage = "Opening microphone…";
+    } else {
+      statusMessage = "Connecting audio…";
+    }
   }
 
   void _markMediaConnected() {
@@ -333,6 +414,25 @@ class CallController {
       "trigger": trigger,
       "outgoing": isOutgoing.toString(),
     });
+    _syncCallSessionExtras();
+  }
+
+  void _syncCallSessionExtras() {
+    final keepAwake = phase == CallUiPhase.incomingRinging ||
+        phase == CallUiPhase.outgoingRinging ||
+        phase == CallUiPhase.connecting ||
+        phase == CallUiPhase.connected;
+    unawaited(_setWakelock(keepAwake));
+  }
+
+  Future<void> _setWakelock(bool on) async {
+    try {
+      if (on) {
+        await WakelockPlus.enable();
+      } else {
+        await WakelockPlus.disable();
+      }
+    } catch (_) {}
   }
 
   Future<void> acceptIncoming() async {
@@ -363,6 +463,9 @@ class CallController {
     }
     CallFlowLog.step("accept_sent");
     await _initWebRtcCallee();
+    _refreshConnectingStatus();
+    await _flushDeferredWebRtcSignals();
+    _refreshConnectingStatus();
   }
 
   Future<void> rejectIncoming() async {
@@ -461,7 +564,7 @@ class CallController {
     }
     _webrtc ??= _newWebRtc();
     try {
-      await _webrtc!.initRenderers();
+      await _webrtc!.warmupIncomingCallee();
     } catch (e, st) {
       _webrtc?.logError(e, st);
       CallFlowLog.issue(
@@ -477,9 +580,7 @@ class CallController {
         politePeer: !isOutgoing,
         onSignal: _sendWebRtcSignal,
         onStreamsChanged: () {
-          if (_webrtc?.remoteStream != null) {
-            _markMediaConnected();
-          }
+          _refreshConnectingStatus();
           if (_webrtc?.remoteVideoActive ?? false) {
             remoteVideoOn = true;
           }
@@ -489,6 +590,9 @@ class CallController {
       );
 
   void _onIceState(RTCIceConnectionState state) {
+    if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) {
+      return;
+    }
     final name = state.toString().split(".").last;
     CallFlowLog.webrtc("ice_$name");
     switch (state) {
@@ -497,15 +601,17 @@ class CallController {
         _markMediaConnected();
         break;
       case RTCIceConnectionState.RTCIceConnectionStateFailed:
+        if (!inCallActive) return;
         CallFlowLog.issue(
           "ice_failed",
-          check: "same network, coord, UDP; grep Call/WebRTC ice_",
+          check: "grep Call/WebRTC ice_; DM stream must be up",
         );
-        statusMessage = "Media link failed — same Wi‑Fi or coord may be needed";
+        statusMessage = "Audio connection failed";
         break;
       case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
+        if (!inCallActive) return;
         CallFlowLog.issue("ice_disconnected", check: "peer left or network drop");
-        statusMessage = "Media disconnected";
+        statusMessage = "Audio disconnected";
         break;
       default:
         break;
@@ -542,8 +648,14 @@ class CallController {
     _connectFallbackTimer = null;
     _connectPollTimer?.cancel();
     _connectPollTimer = null;
+    _presentUiTimer?.cancel();
+    _presentUiTimer = null;
+    unawaited(CallRingtone.stop());
+    unawaited(CallIncomingAlert.dismiss());
+    unawaited(_setWakelock(false));
     await _webrtc?.dispose();
     _webrtc = null;
+    _deferredWebRtcSignals.clear();
     CallDesktopMedia.clearCallSession();
     _acceptSent = false;
     _inviteSent = false;
@@ -567,7 +679,7 @@ class CallController {
     localVideoOn = false;
     remoteVideoOn = false;
     micMuted = false;
-    speakerOn = true;
+    speakerOn = false;
     onHold = false;
     statusMessage = null;
     _notify();
@@ -606,7 +718,100 @@ class CallController {
     );
   }
 
-  void _pushCallScreenIfNeeded() {
+  Future<void> _beginIncomingRing(String fromPk, String remoteCallId) async {
+    callId = remoteCallId;
+    CallFlowLog.bindCall(remoteCallId);
+    peerPublicKeyHex = fromPk;
+    isOutgoing = false;
+    await _resolvePeerDisplayName(fromPk);
+    CallFlowLog.step("incoming_ring", {"from": CallFlowLog.shortPk(fromPk)});
+    _setPhase(CallUiPhase.incomingRinging, "invite");
+    statusMessage = "Incoming call";
+    unawaited(CallRingtone.startIncoming());
+    unawaited(_prewarmIncomingWebRtc());
+    _notify();
+    await _presentIncomingCall();
+    _ensureCallScreenVisible();
+  }
+
+  Future<void> _abandonOutgoingForGlare(String fromPk, String remoteCallId) async {
+    final oldId = callId;
+    CallFlowLog.step("glare_become_callee", {
+      "ours": oldId ?? "?",
+      "theirs": remoteCallId,
+    });
+    unawaited(CallRingtone.stop());
+    if (oldId != null) {
+      await GhalBolCall.send(
+        recipientPublicKeyHex: fromPk,
+        callId: oldId,
+        signal: "hangup",
+      );
+    }
+    _inviteSent = false;
+    await _webrtc?.dispose();
+    _webrtc = null;
+    await _beginIncomingRing(fromPk, remoteCallId);
+  }
+
+  Future<void> _prewarmIncomingWebRtc() async {
+    if (!callWebRtcSupported) return;
+    try {
+      _webrtc ??= _newWebRtc();
+      await _webrtc!.warmupIncomingCallee();
+    } catch (e, st) {
+      CallFlowLog.issue("callee_prewarm_failed", detail: e.toString());
+      _webrtc?.logError(e, st);
+    }
+  }
+
+  Future<void> _resolvePeerDisplayName(String pk) async {
+    if (peerDisplayName != null && peerDisplayName!.trim().isNotEmpty) return;
+    try {
+      final c = await ContactStore.findByPublicKey(
+        appNamespace: kGhalBolAndroidLibraryNamespace,
+        publicKeyHex: pk,
+      );
+      peerDisplayName = ghalBolIdName(
+        publicKeyHex: pk,
+        customAlias: c?.displayAlias,
+      );
+    } catch (_) {}
+    peerDisplayName ??= "Contact";
+  }
+
+  Future<void> _presentIncomingCall() async {
+    final pk = peerPublicKeyHex;
+    if (pk == null) return;
+    await _resolvePeerDisplayName(pk);
+    final name = peerDisplayName ?? "Contact";
+    unawaited(CallIncomingAlert.presentWindow());
+    unawaited(
+      CallIncomingAlert.show(displayName: name, publicKeyHex: pk),
+    );
+  }
+
+  void _ensureCallScreenVisible() {
+    if (callScreenVisible) return;
+    if (phase != CallUiPhase.incomingRinging &&
+        phase != CallUiPhase.outgoingRinging) {
+      return;
+    }
+    _presentUiTimer?.cancel();
+    _tryPushCallScreen();
+    _presentUiTimer = Timer.periodic(const Duration(milliseconds: 350), (_) {
+      if (callScreenVisible ||
+          (phase != CallUiPhase.incomingRinging &&
+              phase != CallUiPhase.outgoingRinging)) {
+        _presentUiTimer?.cancel();
+        _presentUiTimer = null;
+        return;
+      }
+      _tryPushCallScreen();
+    });
+  }
+
+  void _tryPushCallScreen() {
     if (callScreenVisible) return;
     final nav = navigatorKey.currentState;
     if (nav == null) return;

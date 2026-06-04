@@ -65,7 +65,7 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 | **Guest** (scanner) | Knows host’s `public_key_hex` → derives PeerId → registers `dm_peer` → dials |
 | **Host** (QR shown) | May have **zero** contacts until first inbound connection or frame; first inbound text may create an **unknown** roster row until the user **Add**s or replies — see [Contact trust (`is_known` / `is_blocked`)](#contact-trust-is_known--is_blocked) |
 
-Both sides must run P2P. For **configured** contacts only (no public directory): **LAN mDNS first** (`_ghalbol._tcp`), then **coord lookup** as fallback when still offline.
+Both sides must run P2P. For **configured** contacts only (no public directory): **WAN first** — coord lookup + relay/public paths. Use **LAN** (mDNS `_ghalbol._tcp` / direct TCP) **only** when that peer is actually on the local LAN (mDNS discovery on this device), not because both happen to use `192.168.x` addresses from coord.
 
 ## Truthful status in the UI (critical)
 
@@ -388,39 +388,31 @@ After **Create identity** succeeds, `onUnlockedSession` runs `GhalBolBackground.
 
 Coord HTTP register in Rust waits until listen addrs (often relay on CGNAT) are publishable — see `coord_runtime.rs`. WAN relay recovery runs when coord URL is configured (`chat_server.rs` coord tick).
 
-### Dial strategy — LAN vs WAN (native)
+### Dial strategy — WAN first (native — `chat_server.rs`, not Flutter)
 
-Implemented in `p2p/dht_bootstrap.rs` + `chat_server.rs` (not Flutter).
+| Default (remote / WAN) | LAN exception only |
+|------------------------|-------------------|
+| **WAN first:** coord lookup → relay circuit + public TCP when registered; Kademlia / identify as fallback | **LAN only when the peer is on your LAN:** mDNS `Discovered` for that contact → direct TCP (`dial_mdns_peer`) |
 
-| Prefer **LAN** TCP / mDNS first | Prefer **WAN** (relay / public) first |
-|--------------------------------|--------------------------------------|
-| Peer seen on mDNS recently, or coord addr on same RFC1918 /24 as us | Peer not on local LAN **and** internet likely up (`coord_link_recently_ok`, bootstrap, or public IPv4) |
-| Internet likely **down** (no recent coord OK, no bootstrap, no public IP) | Wi‑Fi with working internet — do **not** skip relay/coord just because `has_active_lan()` |
+Rules:
 
-**Always:** coord register/lookup retries while configured; coord HTTP failure → Kademlia + mDNS + relay (libp2p). **Network watch:** Android connectivity callback + 1s profile poll; Wi‑Fi ↔ mobile runs WAN recovery without requiring users to open a chat. **UI lock** does not stop `:p2p` / daemon / poll.
+1. **Always try WAN/coord** for configured contacts while the network is up. Do not prefer RFC1918 addrs from coord presence for a peer who is not on your LAN.
+2. **LAN path is opt-in by discovery** — mDNS sighting (or an explicit same-LAN signal), not “both devices use 192.168.1.x”.
+3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): skip blind `DialOpts::peer_id` dials; dial explicit coord relay multiaddrs only.
+4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally.
 
-**Throttles (anti-flood):** coord lookup backoff, dial spacing (1–2s), disconnected-peer coord lookup every 3s (8s if LAN-local peer), coord tick 3s.
+Coord register/lookup on a **5s** tick; send-text triggers an immediate coord lookup when not connected. Throttles: coord `peer_not_on_server` backoff, 1–2s between dials per peer.
 
-### Network change — either peer (2026)
+**Anti-patterns (caused multi-minute stalls):** Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer.
 
-Either device may roam (Wi‑Fi ↔ mobile, subnet change, remote peer reboot). Native handles this in `chat_server.rs`:
-
-| Event | Action |
-|-------|--------|
-| **Local** OS connectivity callback (Android `:p2p`) or 1s profile poll | Rebuild coord endpoints; mode change → WAN handover + **DM reconnect pass**; same-mode refresh → redial contacts |
-| **Local** app resume (Linux/Android UI) | `p2p_notify_network_change` → same refresh path |
-| **Remote** DM `ConnectionClosed` | Mark contact **urgent** (~800ms coord lookup), clear dial/coord throttles, Kademlia + routed dial |
-| **Coord** newly registered (relay ready) | Full DM reconnect pass so WAN paths update before chat stalls |
-| **WAN recovery** completes | Reconnect pass (not only periodic 3s tick) |
-
-Goal: rediscover within **seconds** when a path exists, without coord/DHT lookup storms (urgent flag + existing backoff).
+**Network watch:** Android connectivity + profile poll → WAN relay recovery when coord URL is set. UI lock does not stop `:p2p` / daemon / poll.
 
 ## Contacts and roster preview
 
 On inbound `dm_message` (text), native `dm_event_handler`:
 
 - Always updates **last message preview** on the contact (either direction).
-- Increments **unread** only when the message is **not** from the foreground peer; clears **unread** when the hub has that peer in the foreground (room open) or on preview update with `mark_unread` false.
+- Increments **unread** once per inbound text when the message is **not** from the foreground peer (including out-of-order apply when preview timestamp is older). Clears **unread** when the hub opens that peer’s room (`clear_unread` on foreground). Poll replay of the same `message_id` does not bump again. **Poll still emits `stores_updated` on inbound text** so Flutter reloads the roster after wire persist (apply may be a no-op replay).
 - Contact trust fields (`is_known`, `is_blocked`) follow [Contact trust](#contact-trust-is_known--is_blocked) — preview and unread behavior for unknown peers is unchanged unless the peer is **blocked**.
 
 ## Contact trust (`is_known` / `is_blocked`)

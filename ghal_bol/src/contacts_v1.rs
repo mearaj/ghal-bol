@@ -436,7 +436,15 @@ pub fn record_inbound_preview(
             return Ok(((), all));
         };
         let c = &list[i];
+        // Out-of-order apply (poll replay, wire batch) must still bump unread per message.
         if c.last_message_at_ms.is_some_and(|t| at < t) {
+            if mark_unread {
+                list[i] = SavedContact {
+                    unread_count: c.unread_count.saturating_add(1),
+                    updated_at_ms: Some(now_ms()),
+                    ..c.clone()
+                };
+            }
             return Ok(((), all));
         }
         let p = truncate_preview(preview);
@@ -445,11 +453,11 @@ pub fn record_inbound_preview(
             display_alias: c.display_alias.clone(),
             last_message_preview: Some(p),
             last_message_at_ms: Some(at),
-            // DESIGN.md: unread only when not foreground; viewing the room clears the badge.
+            // Foreground room clears via `clear_unread`; in-room inbound uses mark_unread false without wiping backlog.
             unread_count: if mark_unread {
                 c.unread_count.saturating_add(1)
             } else {
-                0
+                c.unread_count
             },
             created_at_ms: c.created_at_ms,
             updated_at_ms: Some(now_ms()),
@@ -504,7 +512,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn record_inbound_preview_clears_unread_when_not_marking() {
+    fn record_inbound_preview_preserves_unread_when_not_marking() {
         let td = TempDir::new().unwrap();
         let ns = "dev.contacts.unread";
         let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
@@ -533,11 +541,42 @@ mod tests {
 
         record_inbound_preview(ns, &other_pk, "seen in room", false, Some(2000)).unwrap();
         let c = find_by_public_key(ns, &other_pk).unwrap().unwrap();
-        assert_eq!(c.unread_count, 0);
+        assert_eq!(c.unread_count, 1);
         assert_eq!(
             c.last_message_preview.as_deref(),
             Some("seen in room")
         );
+    }
+
+    #[test]
+    fn record_inbound_preview_stale_timestamp_still_bumps_unread() {
+        let td = TempDir::new().unwrap();
+        let ns = "dev.contacts.unread.stale";
+        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
+        let other_pk = id.public_key_hex();
+
+        upsert_contact(
+            ns,
+            SavedContact {
+                public_key_hex: other_pk.to_string(),
+                display_alias: None,
+                last_message_preview: Some("newest".into()),
+                last_message_at_ms: Some(3000),
+                unread_count: 0,
+                created_at_ms: None,
+                updated_at_ms: None,
+                is_known: true,
+                is_blocked: false,
+            },
+        )
+        .unwrap();
+
+        record_inbound_preview(ns, &other_pk, "older", true, Some(1000)).unwrap();
+        let c = find_by_public_key(ns, &other_pk).unwrap().unwrap();
+        assert_eq!(c.unread_count, 1);
+        assert_eq!(c.last_message_preview.as_deref(), Some("newest"));
+        assert_eq!(c.last_message_at_ms, Some(3000));
     }
 
     #[test]

@@ -128,7 +128,7 @@ cd ghal_bol_ui && dart analyze && flutter test
 
 **Logs:** In-app App log shows `Native/flow` connectivity snapshots every ~30s, `Native/kad|coord|dial|swarm|listen|mdns`, and numbered `P2P` `step=` journey lines. Full libp2p detail on stderr/logcat: `grep ghal_bol` (all levels). Optional: `GHAL_BOL_VERBOSE_LOG=1` before start to forward Rust `debug` lines into the App log too.
 
-**LAN vs mobile-data:** Wi‑Fi + RFC1918 → `profile=lan`, mDNS + direct TCP unchanged. Cellular/CGNAT without active LAN → coord needs relay circuit (CGNAT is not registered). Do not treat “cellular iface present” as mobile-data when Wi‑Fi LAN is active.
+**Dial — WAN first:** coord/relay for remote peers; mDNS/direct TCP **only** when the peer is on local LAN (mDNS discovery). Wi‑Fi + RFC1918 → `profile=lan` but still WAN-first for contacts not on LAN. Cellular/CGNAT without active LAN → relay via coord. Do not treat “cellular iface present” as mobile-data when Wi‑Fi LAN is active.
 
 Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutter for ack send.
 

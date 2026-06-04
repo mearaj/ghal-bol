@@ -155,17 +155,34 @@ pub fn apply_inbound(peer_pk_hex: &str, call_id: &str, kind: CallSigKind) -> Res
     let cur = g.get(&key).cloned();
     match kind {
         CallSigKind::Invite => {
-            if cur.is_some_and(|c| c.phase != CallPhase::Idle) {
-                return Err("busy".to_string());
+            match cur {
+                None => {
+                    g.insert(
+                        key,
+                        PeerCall {
+                            call_id: call_id.to_string(),
+                            phase: CallPhase::IncomingRinging,
+                            video_enabled: false,
+                        },
+                    );
+                }
+                Some(c) if c.phase == CallPhase::OutgoingRinging => {
+                    // Glare: both sides tapped Call — lower call_id is the canonical call.
+                    if call_id < c.call_id.as_str() {
+                        g.insert(
+                            key,
+                            PeerCall {
+                                call_id: call_id.to_string(),
+                                phase: CallPhase::IncomingRinging,
+                                video_enabled: false,
+                            },
+                        );
+                    } else {
+                        return Err("busy".to_string());
+                    }
+                }
+                Some(_) => return Err("busy".to_string()),
             }
-            g.insert(
-                key,
-                PeerCall {
-                    call_id: call_id.to_string(),
-                    phase: CallPhase::IncomingRinging,
-                    video_enabled: false,
-                },
-            );
         }
         CallSigKind::Accept => {
             let Some(c) = cur else {
@@ -228,4 +245,32 @@ pub fn apply_inbound(peer_pk_hex: &str, call_id: &str, kind: CallSigKind) -> Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call_sig_v1::CallSigKind;
+
+    const PK: &str = "0305b1b0d27745e0a38a7254ea100abc38857b51ded2ac7ea88d3063fb8da21784";
+
+    #[test]
+    fn glare_simultaneous_outbound_invites() {
+        clear_all_calls();
+        apply_outbound(PK, "call-bbb", CallSigKind::Invite).unwrap();
+        assert_eq!(phase_for_peer(PK), CallPhase::OutgoingRinging);
+        apply_inbound(PK, "call-aaa", CallSigKind::Invite).unwrap();
+        let snap = snapshot_for_peer(PK);
+        assert_eq!(snap.phase, CallPhase::IncomingRinging);
+        assert_eq!(snap.call_id.as_deref(), Some("call-aaa"));
+
+        clear_all_calls();
+        apply_outbound(PK, "call-aaa", CallSigKind::Invite).unwrap();
+        assert!(apply_inbound(PK, "call-bbb", CallSigKind::Invite).is_err());
+        assert_eq!(phase_for_peer(PK), CallPhase::OutgoingRinging);
+        assert_eq!(
+            snapshot_for_peer(PK).call_id.as_deref(),
+            Some("call-aaa")
+        );
+    }
 }

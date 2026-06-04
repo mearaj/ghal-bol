@@ -1,12 +1,21 @@
 package com.ghalbol
 
 import android.content.Intent
+import android.os.Bundle
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+
+    companion object {
+        const val ACTION_INCOMING_CALL = "com.ghalbol.INCOMING_CALL"
+        const val EXTRA_CALLER_NAME = "caller_name"
+        const val EXTRA_CALLER_PK = "caller_pk"
+    }
+
+    private var incomingCallChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -74,5 +83,43 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        incomingCallChannel =
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ghal_bol/incoming_call")
+                .also { channel ->
+                    channel.setMethodCallHandler { call, result ->
+                        when (call.method) {
+                            "show" -> {
+                                val name = call.argument<String>("displayName") ?: "Contact"
+                                val pk = call.argument<String>("publicKeyHex") ?: ""
+                                IncomingCallNotifier.show(applicationContext, name, pk)
+                                result.success(null)
+                            }
+                            "dismiss" -> {
+                                IncomingCallNotifier.dismiss(applicationContext)
+                                result.success(null)
+                            }
+                            else -> result.notImplemented()
+                        }
+                    }
+                }
+
+        deliverIncomingCallIntent(intent)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        deliverIncomingCallIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        deliverIncomingCallIntent(intent)
+    }
+
+    private fun deliverIncomingCallIntent(intent: Intent?) {
+        if (intent?.action != ACTION_INCOMING_CALL) return
+        incomingCallChannel?.invokeMethod("openedFromNotification", null)
     }
 }

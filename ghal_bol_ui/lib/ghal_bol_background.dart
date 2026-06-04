@@ -1,5 +1,6 @@
 import "dart:async";
 
+import "package:ghal_bol_ui/call/call_controller.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/ghal_bol_coord.dart";
 import "package:ghal_bol_ui/ghal_bol_daemon.dart";
@@ -30,6 +31,7 @@ class GhalBolBackground {
   /// Foreground service + drain when the process resumes (hub may be absent after UI lock).
   static Future<void> onAppResumed() async {
     if (!SessionCredentials.hasPassword) return;
+    CallController.instance.onAppForeground();
     if (await GhalBolP2p.isRunning()) {
       unawaited(ghalBolListenerForegroundEnsureStarted());
       unawaited(GhalBolP2p.notifyNetworkChange());

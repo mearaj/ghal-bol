@@ -31,9 +31,41 @@ static void set_window_icon(GtkWindow* window) {
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  GtkWindow* main_window;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+static void incoming_call_method_cb(FlMethodChannel* channel,
+                                    FlMethodCall* method_call,
+                                    gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  const gchar* method = fl_method_call_get_name(method_call);
+  g_autoptr(GError) error = nullptr;
+
+  if (g_strcmp0(method, "show") == 0 || g_strcmp0(method, "present") == 0 ||
+      g_strcmp0(method, "openedFromNotification") == 0) {
+    if (self->main_window != nullptr) {
+      gtk_window_present(self->main_window);
+    }
+    fl_method_call_respond_success(method_call, fl_value_new_null(), &error);
+    return;
+  }
+  if (g_strcmp0(method, "dismiss") == 0) {
+    fl_method_call_respond_success(method_call, fl_value_new_null(), &error);
+    return;
+  }
+  fl_method_call_respond_not_implemented(method_call, &error);
+}
+
+static void register_incoming_call_channel(MyApplication* self, FlView* view) {
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_autoptr(FlMethodChannel) channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "ghal_bol/incoming_call", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      channel, incoming_call_method_cb, g_object_ref(self), g_object_unref);
+}
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
@@ -45,6 +77,7 @@ static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
+  self->main_window = window;
 
   // Use a header bar when running in GNOME as this is the common style used
   // by applications and is the setup most users will be using (e.g. Ubuntu
@@ -96,6 +129,7 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+  register_incoming_call_channel(self, view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
@@ -142,6 +176,7 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  self->main_window = nullptr;
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }

@@ -13,18 +13,24 @@ class CallScreen extends StatefulWidget {
   State<CallScreen> createState() => _CallScreenState();
 }
 
-class _CallScreenState extends State<CallScreen> {
+class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateMixin {
   final _ctrl = CallController.instance;
+  late final AnimationController _ringPulse;
 
   @override
   void initState() {
     super.initState();
+    _ringPulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
     _ctrl.callScreenVisible = true;
     _ctrl.addListener(_onChange);
   }
 
   @override
   void dispose() {
+    _ringPulse.dispose();
     _ctrl.callScreenVisible = false;
     _ctrl.removeListener(_onChange);
     super.dispose();
@@ -48,6 +54,11 @@ class _CallScreenState extends State<CallScreen> {
     final status = _statusLabel(phase, _ctrl.statusMessage);
     final showSpinner = phase == CallUiPhase.outgoingRinging ||
         phase == CallUiPhase.incomingRinging;
+    final ringPulse = showSpinner
+        ? Tween<double>(begin: 0.92, end: 1.08).animate(
+            CurvedAnimation(parent: _ringPulse, curve: Curves.easeInOut),
+          )
+        : null;
 
     return Scaffold(
       backgroundColor: const Color(0xFF2D3142),
@@ -96,15 +107,24 @@ class _CallScreenState extends State<CallScreen> {
                       ),
                     ),
                   if (!_ctrl.showRemoteVideo) ...[
-                    Icon(
-                      Icons.person,
-                      size: 120,
-                      color: Colors.white.withValues(alpha: 0.35),
-                    ),
+                    if (ringPulse != null)
+                      ScaleTransition(
+                        scale: ringPulse,
+                        child: _avatarPlaceholder(phase),
+                      )
+                    else
+                      _avatarPlaceholder(phase),
                     if (showSpinner)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 160),
-                        child: CircularProgressIndicator(color: Colors.white54),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 24),
+                        child: Text(
+                          phase == CallUiPhase.incomingRinging
+                              ? "Ringing…"
+                              : "Waiting for answer…",
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                color: Colors.white54,
+                              ),
+                        ),
                       ),
                   ],
                   if (_ctrl.showLocalPreview && webrtc != null)
@@ -148,6 +168,31 @@ class _CallScreenState extends State<CallScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _avatarPlaceholder(CallUiPhase phase) {
+    final incoming = phase == CallUiPhase.incomingRinging;
+    return Container(
+      width: 132,
+      height: 132,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: incoming
+            ? Colors.green.withValues(alpha: 0.18)
+            : Colors.white.withValues(alpha: 0.08),
+        border: Border.all(
+          color: incoming
+              ? Colors.green.withValues(alpha: 0.55)
+              : Colors.white.withValues(alpha: 0.2),
+          width: 2,
+        ),
+      ),
+      child: Icon(
+        incoming ? Icons.phone_in_talk : Icons.person,
+        size: 72,
+        color: Colors.white.withValues(alpha: incoming ? 0.85 : 0.35),
       ),
     );
   }

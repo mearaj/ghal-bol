@@ -877,7 +877,11 @@ pub fn p2p_poll_event() -> Option<Value> {
                 continue;
             }
             if mk == "text" {
-                // Wire path may have persisted already; never spin requeue (blocks chat_ready/acks).
+                // Wire path persists before this poll event; apply is often a no-op replay but
+                // contacts on disk already have the new unread — UI must reload the roster.
+                if let Some(obj) = j.as_object_mut() {
+                    obj.insert("stores_updated".to_string(), Value::Bool(true));
+                }
                 return Some(j);
             }
         }

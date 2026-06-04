@@ -1,6 +1,6 @@
 import "package:flutter_test/flutter_test.dart";
 
-import "package:ghal_bol_ui/main.dart";
+import "package:ghal_bol_ui/bootstrap_native.dart";
 
 void main() {
   testWidgets("home shows identity title", (WidgetTester tester) async {

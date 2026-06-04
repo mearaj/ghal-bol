@@ -61,6 +61,7 @@ Future<void> runGhalBol() async {
     };
   }
   await ghalBolHostInitBeforeRunApp();
+  CallController.install();
   runApp(const GhalBolApp());
 }
 
@@ -89,16 +90,30 @@ class GhalBolRoot extends StatefulWidget {
   State<GhalBolRoot> createState() => _GhalBolRootState();
 }
 
-class _GhalBolRootState extends State<GhalBolRoot> {
+class _GhalBolRootState extends State<GhalBolRoot> with WidgetsBindingObserver {
   GhalBolIdentityResult? _session;
   /// Hides chat UI only — P2P poll, daemon, and hub state stay alive.
   bool _uiLocked = false;
   final _chatHubKey = GlobalKey<ChatHubScreenState>();
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(InviteDeepLink.dispose());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      CallController.instance.onAppForeground();
+    }
   }
 
   void _onRootSystemBackInvoked(bool didPop) {
