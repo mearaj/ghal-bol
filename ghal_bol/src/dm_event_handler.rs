@@ -60,6 +60,14 @@ pub fn clear_p2p_handler_context() {
     }
 }
 
+/// Active `app_namespace` from unlock / `p2p_start` (coord prefs, etc.).
+pub fn active_app_namespace() -> Option<String> {
+    state_mx()
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| s.app_namespace.clone()))
+}
+
 pub fn set_foreground_peer(public_key_hex: Option<String>) {
     let Ok(mut g) = state_mx().lock() else {
         return;
@@ -470,15 +478,30 @@ mod tests {
 
     struct IsolatedStore {
         _temp: TempDir,
+        // Held for the whole test: the data dir + handler-context namespace are
+        // process-global, so two of these tests running in parallel would clobber
+        // each other's store (flaky unread counts). Serialize them.
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn isolated_store_lock() -> &'static std::sync::Mutex<()> {
+        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        L.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     fn isolated_store(ns: &str) -> IsolatedStore {
+        let guard = isolated_store_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         configure_android_data_directory(temp.path().to_str().unwrap());
         let cfg = StorageConfig::new(ns).with_override_data_dir(temp.path());
         let _ = create_or_unlock_identity_v1(&cfg, "pw");
         set_p2p_handler_context(ns);
-        IsolatedStore { _temp: temp }
+        IsolatedStore {
+            _temp: temp,
+            _guard: guard,
+        }
     }
 
     fn seed_contact(ns: &str, pk: &str) {

@@ -16,24 +16,35 @@ abstract final class GhalBolCoord {
 
   static bool get isLookupEnabled => usesDaemon || hasNativeCoord;
 
-  static Future<Map<String, dynamic>> setBaseUrl({
-    String? baseUrl,
+  static Future<Map<String, dynamic>> setBaseUrls({
+    List<String>? baseUrls,
     bool? insecureTls,
   }) async {
-    final url = (baseUrl ?? await CoordinationUrl.effectiveBaseUrl()).trim();
+    final resolved = baseUrls ?? await CoordinationUrl.effectiveBaseUrls();
+    final cleaned =
+        resolved.map((u) => u.trim()).where((u) => u.isNotEmpty).toList();
     final tls = insecureTls ?? await CoordinationUrl.effectiveInsecureTls();
-    AppLog.instance.i("Coord", "set_base_url url=$url insecure_tls=$tls");
-    if (url.isEmpty) {
+    AppLog.instance.i(
+      "Coord",
+      "set_base_url urls=$cleaned insecure_tls=$tls",
+    );
+    if (cleaned.isEmpty) {
       return {"ok": false, "error": "coord URL not configured"};
     }
     if (usesDaemon) {
       await GhalBolDaemonClient.ensureDaemonRunning();
       return GhalBolDaemonClient.instance.call(
         "coord_set_base_url",
-        params: {"base_url": url, "insecure_tls": tls},
+        params: {
+          "base_urls": cleaned,
+          "insecure_tls": tls,
+        },
       );
     }
-    return GhalBolFfi.coordSetBaseUrl(baseUrl: url, insecureTls: tls);
+    return GhalBolFfi.coordSetBaseUrls(
+      baseUrls: cleaned,
+      insecureTls: tls,
+    );
   }
 
   static Future<Map<String, dynamic>> lookupPeer(String publicKeyHex) async {
@@ -65,8 +76,8 @@ abstract final class GhalBolCoord {
     if (!isLookupEnabled) {
       return {"ok": false, "error": "coord unavailable"};
     }
-    final url = await CoordinationUrl.effectiveBaseUrl();
-    if (url.isEmpty) {
+    final urls = await CoordinationUrl.effectiveBaseUrls();
+    if (urls.isEmpty) {
       return {"ok": false, "error": "coord URL not configured"};
     }
     if (!await GhalBolP2p.isRunning()) {
@@ -93,9 +104,9 @@ abstract final class GhalBolCoord {
   }
 
   static Future<Map<String, dynamic>> p2pConfigFields() async {
-    final url = await CoordinationUrl.effectiveBaseUrl();
+    final urls = await CoordinationUrl.effectiveBaseUrls();
     return {
-      if (url.isNotEmpty) "coord_base_url": url,
+      if (urls.isNotEmpty) "coord_base_urls": urls,
       "coord_insecure_tls": await CoordinationUrl.effectiveInsecureTls(),
     };
   }
@@ -109,15 +120,15 @@ abstract final class GhalBolCoord {
       );
       return;
     }
-    final url = await CoordinationUrl.effectiveBaseUrl();
-    if (url.isEmpty) {
+    final urls = await CoordinationUrl.effectiveBaseUrls();
+    if (urls.isEmpty) {
       AppLog.instance.i(
         "Coord",
-        "coord URL not set — add env/.env.development, --dart-define, or export GHAL_BOL_COORD_URL",
+        "coord URL not set — add env/.env.development, --dart-define, or export GHAL_BOL_COORD_URLS",
       );
       return;
     }
-    final r = await setBaseUrl(baseUrl: url);
+    final r = await setBaseUrls(baseUrls: urls);
     if (r["ok"] != true) {
       AppLog.instance.w("Coord", "set_base_url failed: ${r["error"]}");
     }
@@ -126,9 +137,11 @@ abstract final class GhalBolCoord {
   /// After [GhalBolP2p] is up: health check only. Presence register runs in `:p2p`
   /// (listen snapshot + coord tick) — do not block the daemon main socket with HTTP.
   static Future<void> registerAndVerifyAfterP2pUp() async {
-    final url = await CoordinationUrl.effectiveBaseUrl();
-    if (url.isEmpty) return;
-    await _probeHealth(url);
+    final urls = await CoordinationUrl.effectiveBaseUrls();
+    if (urls.isEmpty) return;
+    for (final url in urls) {
+      await _probeHealth(url);
+    }
   }
 
   static Future<void> _probeHealth(String baseUrl) async {

@@ -28,7 +28,7 @@ unsafe fn utf8(c: *const c_char, ctx: &'static str) -> Result<String, String> {
         .map_err(|_| format!("utf-8 ({ctx})"))
 }
 
-/// JSON config: `{ "base_url": "http://127.0.0.1:8765", "insecure_tls": false }`.
+/// JSON config: `{ "base_urls": ["https://coord.example.com"], "insecure_tls": false }`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_coord_set_base_url(config_json_utf8: *const c_char) -> *mut c_char {
     let run = || -> *mut c_char {
@@ -40,15 +40,15 @@ pub unsafe extern "C" fn ghal_bol_ffi_coord_set_base_url(config_json_utf8: *cons
             Ok(v) => v,
             Err(e) => return json_err(format!("coord config json: {e}")),
         };
-        let url = v
-            .get("base_url")
-            .and_then(|x| x.as_str())
-            .unwrap_or("");
         let insecure = v
             .get("insecure_tls")
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
-        json_value(coord_runtime::coord_set_base_url_json(url, insecure))
+        let urls = coord_runtime::coord_urls_from_json_value(&v);
+        if urls.is_empty() {
+            return json_err("base_url or base_urls required");
+        }
+        json_value(coord_runtime::coord_set_base_urls_json(&urls, insecure))
     };
     run()
 }

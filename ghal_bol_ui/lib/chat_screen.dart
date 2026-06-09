@@ -67,7 +67,7 @@ class ChatScreen extends StatefulWidget {
   final VoidCallback? onLock;
   /// Parent bumps this after alias save so this screen re-reads storage when [localPeerAlias] stays null.
   final int aliasNonce;
-  /// Logical app namespace for **`ghal_bol`** prefs (defaults to [kGhalBolAndroidLibraryNamespace]).
+  /// Logical app namespace for **`ghal_bol`** prefs (defaults to [kGhalBolAppNamespace]).
   final String? appNamespace;
 
   /// When true, Join / Share invitation live on [ChatHubScreen]; this surface is messages only.
@@ -236,13 +236,15 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         changed = true;
       }
     }
-    unawaited(
-      ChatTranscriptStore.patchInboundReadAckSent(
-        appNamespace: _resolvedAppNamespace,
-        conversationKey: _conversationKey(),
-        messageId: mid,
-      ),
-    );
+    if (!widget.hubPollsEvents) {
+      unawaited(
+        ChatTranscriptStore.patchInboundReadAckSent(
+          appNamespace: _resolvedAppNamespace,
+          conversationKey: _conversationKey(),
+          messageId: mid,
+        ),
+      );
+    }
     if (changed && mounted) setState(() {});
   }
 
@@ -769,7 +771,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       } else {
         unawaited(_flushDeliveryPatches());
       }
-    } catch (_) {}
+    } catch (e) {
+      AppLog.instance.w("Chat", "mergeTranscriptFromNative failed: $e");
+    }
   }
 
   void _applyDeliveryFromStoredRows(List<StoredChatLine> rows) {
@@ -890,9 +894,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _scheduleSaveTranscript({bool persistAll = false}) {
-    // Append new rows only (safe in hub mode). Full save rewrites delivery from stale UI state.
-    unawaited(_enqueueTranscriptFlush(_flushTranscriptIncremental));
+    // Hub/daemon: :p2p owns transcript I/O on poll — UI writes race the background process.
     if (widget.hubPollsEvents) return;
+    unawaited(_enqueueTranscriptFlush(_flushTranscriptIncremental));
     if (persistAll) {
       _scheduleFullTranscriptSave();
       return;
@@ -919,6 +923,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Append only new rows — avoids rewriting 500+ lines on every send (main-thread hang).
   Future<void> _flushTranscriptIncremental() async {
+    if (widget.hubPollsEvents) return;
     final ns = _resolvedAppNamespace;
     final key = _conversationKey();
     for (final l in List<_ChatLine>.from(_lines)) {
@@ -934,6 +939,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _flushTranscriptFull() async {
+    if (widget.hubPollsEvents) return;
     _dedupeLinesByMessageId();
     ChatTranscriptStore.invalidateThreadCache(
       appNamespace: _resolvedAppNamespace,
@@ -978,6 +984,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _flushDeliveryPatches() async {
+    if (widget.hubPollsEvents) return;
     if (_pendingDeliveryPatches.isEmpty) return;
     final batch = Map<String, _MsgDelivery>.from(_pendingDeliveryPatches);
     _pendingDeliveryPatches.clear();
@@ -1052,7 +1059,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String get _resolvedAppNamespace {
     final n = widget.appNamespace?.trim();
     if (n != null && n.isNotEmpty) return n;
-    return kGhalBolAndroidLibraryNamespace;
+    return kGhalBolAppNamespace;
   }
 
   void _pullAliasFromStore() {
@@ -1252,8 +1259,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         }
         _dedupeLinesByMessageId();
         _sortLinesByTime();
-        if (loaded.isNotEmpty || !hasVisibleLines) {
+        // Do not mark loaded when FFI returned 0 rows — cold start can race unlock/daemon
+        // and would otherwise skip all later reloads while the room looks empty.
+        if (loaded.isNotEmpty) {
           _transcriptLoadedKey = key;
+          _emptyTranscriptRetryCount = 0;
+          _emptyTranscriptRetry?.cancel();
         }
         _transcriptFlushedLocalIds
           ..clear()
@@ -1267,9 +1278,31 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _flushBufferedHubDmEvents();
       _scheduleListScroll(force: false);
       _syncOpenChatToNative();
+      AppLog.instance.flow(
+        "Chat",
+        "transcript reload conv=$key rows=${loaded.length} "
+        "marked_loaded=${_transcriptLoadedKey == key} force=$force",
+      );
+      if (loaded.isEmpty && widget.hubPollsEvents && key != "solo") {
+        _scheduleEmptyTranscriptRetry();
+      }
     } finally {
       if (gen == _reloadGeneration) _loadingTranscript = false;
     }
+  }
+
+  Timer? _emptyTranscriptRetry;
+  int _emptyTranscriptRetryCount = 0;
+
+  /// Hub cold start: FFI read can return 0 rows before daemon/unlock path is ready.
+  void _scheduleEmptyTranscriptRetry() {
+    if (_emptyTranscriptRetryCount >= 4) return;
+    _emptyTranscriptRetry?.cancel();
+    _emptyTranscriptRetry = Timer(const Duration(milliseconds: 800), () {
+      if (!mounted) return;
+      _emptyTranscriptRetryCount++;
+      unawaited(_reloadTranscriptForConversation(force: true));
+    });
   }
 
   @override
@@ -1716,7 +1749,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     });
     _scheduleSaveTranscript();
     if (widget.hubPollsEvents) {
-      unawaited(_enqueueTranscriptFlush(_flushTranscriptIncremental));
       P2pEventBridge.instance.drainNow();
     }
     return true;
@@ -1931,8 +1963,13 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _saveTranscriptDebounce?.cancel();
     _fullTranscriptSaveTimer?.cancel();
     _deliveryMergeDebounce?.cancel();
+    _emptyTranscriptRetry?.cancel();
     unawaited(_flushDeliveryPatches());
-    unawaited(_flushTranscriptFull());
+    // Hub/daemon mode: :p2p owns transcript writes on poll — never full-save stale UI
+    // lines on dispose (was wiping inbound rows native persisted on Android).
+    if (!widget.hubPollsEvents) {
+      unawaited(_flushTranscriptFull());
+    }
     _poll?.cancel();
     _scrollController.dispose();
     _msgCtrl.dispose();

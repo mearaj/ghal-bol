@@ -10,7 +10,7 @@ Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/
 |-------|--------|
 | App framing | 4-byte little-endian length + UTF-8 JSON envelope |
 | Envelope tag | `ghal_bol_msg_v1` (`format_version`: **`2`**) |
-| **Transport (libp2p)** | Stream protocol `/ghal-bol/msg/1.0.0`; underneath QUIC/TCP, Noise, Yamux; LAN mDNS; WAN Kademlia + **coord lookup** |
+| **Transport (libp2p)** | Stream protocol `/ghal-bol/msg/1.0.0`; underneath QUIC/TCP, Noise, Yamux; LAN mDNS; WAN **coord lookup + relay** ([STORY.md](STORY.md)) |
 
 **Long-lived session:** one bidirectional channel per remote **PeerId** when possible. A dedicated writer task sends frames; inbound read loop on the same session.
 
@@ -122,7 +122,7 @@ On inbound **`ack_received`**:
 | Until `ack_received` or `ack_read` | Same `id` **text** may be resent (~1s upkeep). No ack frames from sender. |
 | After `ack_received` or `ack_read` | Remove from outbox; `delivery` → `delivered` or `read`. |
 
-**Streams:** one long-lived `/ghal-bol/msg/1.0.0` per remote **PeerId** when possible; open only if missing (no connect spam). DHT + mDNS dial configured contacts only.
+**Streams:** one long-lived `/ghal-bol/msg/1.0.0` per remote **PeerId** when possible; open only if missing (no connect spam). coord/relay (WAN) + mDNS (LAN) dial configured contacts only.
 
 ### Mechanisms (summary)
 
@@ -177,7 +177,7 @@ Code: `ghal_bol/src/p2p/chat_server.rs`, `ghal_bol/src/dm_transcript_v1.rs`, `gh
 |------|----------------|
 | Scan QR (format **2**) | App stores remote **`public_key_hex`**; **PeerId** is derived locally. |
 | `p2p_start` | `dm_peers` lists `{ "public_key_hex": "<66 hex>" }` per contact. |
-| Connect | DHT/mDNS dial; native opens `/ghal-bol/msg/1.0.0` on connect (no key-exchange prelude). |
+| Connect | coord/relay (WAN) or mDNS (LAN) dial; native opens `/ghal-bol/msg/1.0.0` on connect (no key-exchange prelude). |
 | `chat_ready` | Outbound stream open; safe to send encrypted/signed frames. If this peer is **foreground**, native seeds read acks and runs **one pass** of queued `ack_read` for backlog. |
 | Chat | Encrypt to recipient `public_key_hex`; sign with local secp256k1 key. |
 

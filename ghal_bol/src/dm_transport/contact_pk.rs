@@ -13,7 +13,3 @@ pub fn normalize_contact_pk(s: &str) -> Result<ContactPk, String> {
     }
     Ok(s)
 }
-
-pub fn contact_pk_from_frame_sender(sender_public_key_hex: &str) -> Option<ContactPk> {
-    normalize_contact_pk(sender_public_key_hex).ok()
-}

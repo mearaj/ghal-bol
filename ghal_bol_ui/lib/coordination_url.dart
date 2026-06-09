@@ -1,56 +1,88 @@
+import "dart:convert";
 import "dart:io" show Platform;
 
+import "package:flutter/foundation.dart" show visibleForTesting;
 import "package:ghal_bol_ui/app_env_config.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 import "package:ghal_bol_ui/ghal_bol_constants.dart";
 
-/// Coordination server base URL (presence + endpoint lookup).
+/// Coordination server base URLs (presence + endpoint lookup).
 ///
 /// Resolved from `--dart-define`, OS env, bundled `env/.env.*` ([AppEnvConfig]),
-/// platform defaults, then native preferences.
+/// then native preferences. Set `GHAL_BOL_COORD_URLS` in `env/.env.development` or
+/// `env/.env.production` (see `env/README.md`).
 abstract final class CoordinationUrl {
-  static const _defineKey = "GHAL_BOL_COORD_URL";
+  static const _urlsDefineKey = "GHAL_BOL_COORD_URLS";
   static const _tlsDefineKey = "GHAL_BOL_COORD_INSECURE_TLS";
-  static const _emulatorFlagKey = "GHAL_BOL_ANDROID_EMULATOR";
-
-  static bool get _androidEmulatorBuild {
-    const v = String.fromEnvironment(_emulatorFlagKey, defaultValue: "");
-    return v == "1" || v.toLowerCase() == "true";
-  }
 
   static String _trimUrl(String raw) => raw.trim().replaceAll(RegExp(r"/+$"), "");
 
-  static String? _fromBuildConfig() {
-    const fromDefine = String.fromEnvironment(_defineKey, defaultValue: "");
-    if (fromDefine.trim().isNotEmpty) return _trimUrl(fromDefine);
-    final shell = Platform.environment[_defineKey]?.trim();
-    if (shell != null && shell.isNotEmpty) return _trimUrl(shell);
-    final file = AppEnvConfig.get(_defineKey);
-    if (file != null && file.isNotEmpty) return _trimUrl(file);
+  /// Splits on comma, semicolon, tab, space, newline, or any mix.
+  static final _urlDelimiters = RegExp(r"[\s,;]+");
+
+  /// Test-only entry for [parseUrlsForTest].
+  @visibleForTesting
+  static List<String> parseUrlsForTest(String raw) => _parseUrls(raw);
+
+  static List<String> _parseUrls(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return [];
+    if (t.startsWith("[")) {
+      try {
+        final list = jsonDecode(t) as List<dynamic>;
+        return list
+            .map((e) => _trimUrl(e.toString()))
+            .where((s) => s.isNotEmpty)
+            .toList();
+      } catch (_) {}
+    }
+    return t
+        .split(_urlDelimiters)
+        .map(_trimUrl)
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+
+  static List<String>? _fromBuildConfig() {
+    const fromUrlsDefine =
+        String.fromEnvironment(_urlsDefineKey, defaultValue: "");
+    if (fromUrlsDefine.trim().isNotEmpty) {
+      final parsed = _parseUrls(fromUrlsDefine);
+      if (parsed.isNotEmpty) return parsed;
+    }
+    final shellUrls = Platform.environment[_urlsDefineKey]?.trim();
+    if (shellUrls != null && shellUrls.isNotEmpty) {
+      final parsed = _parseUrls(shellUrls);
+      if (parsed.isNotEmpty) return parsed;
+    }
+    final fileUrls = AppEnvConfig.get(_urlsDefineKey);
+    if (fileUrls != null && fileUrls.isNotEmpty) {
+      final parsed = _parseUrls(fileUrls);
+      if (parsed.isNotEmpty) return parsed;
+    }
     return null;
   }
 
-  /// Non-empty when a coord server should be used for this build/session.
-  static String get defaultBaseUrl {
+  /// Non-empty when build/env configured at least one coord server.
+  static List<String> get defaultBaseUrls {
     final configured = _fromBuildConfig();
-    if (configured != null && configured.isNotEmpty) return configured;
-    if (Platform.isAndroid && _androidEmulatorBuild) {
-      return "http://10.0.2.2:8765";
-    }
-    if (Platform.isLinux || Platform.isMacOS || Platform.isWindows) {
-      return "http://127.0.0.1:8765";
-    }
-    return "";
+    return configured ?? [];
   }
 
-  /// Includes persisted native preference when build/env did not set a URL.
-  static Future<String> effectiveBaseUrl() async {
-    final configured = defaultBaseUrl;
+  /// Includes persisted native preference when build/env did not set URLs.
+  static Future<List<String>> effectiveBaseUrls() async {
+    final configured = defaultBaseUrls;
     if (configured.isNotEmpty) return configured;
-    final prefs = GhalBolFfi.coordSettingsGet(appNamespace: kGhalBolAndroidLibraryNamespace);
-    final url = prefs?["base_url"]?.toString().trim() ?? "";
-    if (url.isEmpty) return "";
-    return _trimUrl(url);
+    final prefs = GhalBolFfi.coordSettingsGet(appNamespace: kGhalBolAppNamespace);
+    final urlsRaw = prefs?["base_urls"];
+    if (urlsRaw is List) {
+      final urls = urlsRaw
+          .map((e) => _trimUrl(e.toString()))
+          .where((s) => s.isNotEmpty)
+          .toList();
+      if (urls.isNotEmpty) return urls;
+    }
+    return [];
   }
 
   static Future<bool> effectiveInsecureTls() async {
@@ -60,11 +92,11 @@ abstract final class CoordinationUrl {
     if (shell == "1" || shell.toLowerCase() == "true") return true;
     final file = AppEnvConfig.get(_tlsDefineKey);
     if (file == "1" || file?.toLowerCase() == "true") return true;
-    final prefs = GhalBolFfi.coordSettingsGet(appNamespace: kGhalBolAndroidLibraryNamespace);
+    final prefs = GhalBolFfi.coordSettingsGet(appNamespace: kGhalBolAppNamespace);
     return prefs?["insecure_tls"] == true;
   }
 
-  static bool get isConfigured => defaultBaseUrl.isNotEmpty;
+  static bool get isConfigured => defaultBaseUrls.isNotEmpty;
 
   static bool get defaultInsecureTls {
     const fromEnv = String.fromEnvironment(_tlsDefineKey, defaultValue: "");

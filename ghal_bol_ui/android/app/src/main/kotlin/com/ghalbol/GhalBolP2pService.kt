@@ -59,6 +59,7 @@ class GhalBolP2pService : Service() {
         val dir = NativeStorage.dataRoot(this).absolutePath
         try {
             P2pDaemonNative.initTls(applicationContext)
+            P2pDaemonNative.initAudio(applicationContext)
             P2pDaemonNative.configureDataDirectory(dir)
             android.util.Log.i("GhalBol", "p2p data dir=$dir")
         } catch (e: Throwable) {
@@ -272,13 +273,46 @@ class GhalBolP2pService : Service() {
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .build()
 
-        val fgType =
+        val baseType =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
             } else {
                 0
             }
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgType)
+        // Native voice (P6) records the mic from `:p2p`; this needs the microphone FGS
+        // type, which is only legal once RECORD_AUDIO is granted. If we promote with it
+        // from the background, Android 14+ may reject it — fall back to base type then.
+        val micGranted =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.RECORD_AUDIO,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val cameraGranted =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.CAMERA,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        var fgType =
+            if (micGranted) {
+                baseType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                baseType
+            }
+        if (cameraGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            fgType = fgType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        }
+        try {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgType)
+        } catch (e: Throwable) {
+            android.util.Log.w("GhalBol", "startForeground(mic=$micGranted): ${e.message}")
+            try {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, baseType)
+            } catch (e2: Throwable) {
+                android.util.Log.e("GhalBol", "startForeground fallback: ${e2.message}")
+            }
+        }
     }
 
     private fun scheduleRestart() {

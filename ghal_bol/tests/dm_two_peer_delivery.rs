@@ -2,7 +2,9 @@
 //!
 //! Privacy model: **host** (scanned QR) knows nobody upfront; **guest** (scanner) knows only
 //! the host's `public_key_hex` from the invite. Guest dials host via explicit bootstrap multiaddr
-//! from host `Listening` (LAN test harness — production uses coord + Kademlia).
+//! from host `Listening` (LAN test harness — production uses coord/relay + mDNS).
+
+mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -77,6 +79,7 @@ struct AsymmetricPair {
 
 impl AsymmetricPair {
     fn start() -> Self {
+        common::init_integration_env();
         let (_ks_a, id_a) = create_keystore_v1("peer-a", None).expect("identity a");
         let (_ks_b, id_b) = create_keystore_v1("peer-b", None).expect("identity b");
         let host_pk = public_key_hex(&id_a);
@@ -100,14 +103,11 @@ impl AsymmetricPair {
             .to_peer_id();
         let stop_host_t = Arc::clone(&stop_host);
         let id_a_t = id_a;
-        let host_server = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let _ = rt.block_on(run_gossip_chat_node_with_std_io(
+        let host_server = common::spawn_p2p_thread("two-peer-host", move || {
+            common::block_on_local(run_gossip_chat_node_with_std_io(
                 cfg_a, id_a_t, out_host_rx, ev_host_tx, stop_host_t,
-            ));
+            ))
+            .expect("host gossip node");
         });
 
         let host_dial = with_host_peer_id(wait_listening(&ev_host_rx), host_peer);
@@ -122,14 +122,11 @@ impl AsymmetricPair {
         let (ev_guest_tx, ev_guest_rx) = mpsc::channel::<GossipChatEvent>();
 
         let stop_guest_t = Arc::clone(&stop_guest);
-        let guest_server = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let _ = rt.block_on(run_gossip_chat_node_with_std_io(
+        let guest_server = common::spawn_p2p_thread("two-peer-guest", move || {
+            common::block_on_local(run_gossip_chat_node_with_std_io(
                 cfg_b, id_b, out_guest_rx, ev_guest_tx, stop_guest_t,
-            ));
+            ))
+            .expect("guest gossip node");
         });
 
         out_guest_tx
@@ -162,19 +159,6 @@ impl AsymmetricPair {
             }
         }
         panic!("host did not see guest connect");
-    }
-
-    fn wait_chat_ready_on_host(&self, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            match self.ev_host_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(GossipChatEvent::ChatReady { .. }) => return,
-                Ok(_) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        panic!("chat stream not ready on host");
     }
 
     fn wait_chat_ready_on_guest(&self, timeout: Duration) {

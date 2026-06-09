@@ -1,5 +1,6 @@
 import "dart:async";
 
+import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/call/call_controller.dart";
@@ -23,7 +24,7 @@ class P2pEventBridge {
   Timer? _heartbeat;
   Timer? _coordDialDebounce;
   Future<void>? _coordDialInFlight;
-  String _appNs = kGhalBolAndroidLibraryNamespace;
+  String _appNs = kGhalBolAppNamespace;
   bool _networkBootstrapOk = false;
   Future<void>? _bootstrapFuture;
   final Set<String> _streamReadyPeers = {};
@@ -42,6 +43,29 @@ class P2pEventBridge {
   String? _foregroundDesired;
   Future<void>? _foregroundPumpFuture;
   bool? _appAckReadDesired;
+
+  /// Linux only: user pressed window **close (X)** — not minimize, not alt-tab unfocus.
+  bool _linuxWindowClosedByUser = false;
+  final List<void Function(bool closedByUser)> _linuxWindowCloseListeners = [];
+
+  bool get linuxWindowClosedByUser => _linuxWindowClosedByUser;
+
+  void addLinuxWindowCloseListener(void Function(bool closedByUser) listener) {
+    if (!_linuxWindowCloseListeners.contains(listener)) {
+      _linuxWindowCloseListeners.add(listener);
+    }
+  }
+
+  void removeLinuxWindowCloseListener(void Function(bool closedByUser) listener) {
+    _linuxWindowCloseListeners.remove(listener);
+  }
+
+  void _notifyLinuxWindowCloseListeners(bool closedByUser) {
+    for (final l
+        in List<void Function(bool closedByUser)>.from(_linuxWindowCloseListeners)) {
+      l(closedByUser);
+    }
+  }
 
   bool get isRunning => _poll != null;
   /// True after native `node_ready` (DM transport up). Used for share QR — not listen addrs.
@@ -124,7 +148,7 @@ class P2pEventBridge {
     GhalBolP2p.pollEventDispatcher = dispatchPolledEvent;
     _appNs = session.appNamespace?.trim().isNotEmpty == true
         ? session.appNamespace!.trim()
-        : kGhalBolAndroidLibraryNamespace;
+        : kGhalBolAppNamespace;
     final firstStart = _poll == null;
     if (firstStart) {
       SessionFlowLog.step("bridge_start", {
@@ -294,8 +318,38 @@ class P2pEventBridge {
     }
   }
 
-  void stop() {
+  /// Linux window hide / bridge stop — DESIGN close order (hub owns normal room leave).
+  Future<void> notifyNativeUiExited() async {
+    setForegroundConversation(null);
+    await awaitForegroundApplied();
+    await setAppAckReadEnabled(false);
+  }
+
+  /// GTK **close (X)** only (`delete-event` → hide). Minimize/unfocus do not call this.
+  Future<void> onLinuxWindowClosedByUser() async {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      if (_linuxWindowClosedByUser) return;
+      _linuxWindowClosedByUser = true;
+      SessionFlowLog.step("linux_window_closed_by_user");
+      await notifyNativeUiExited();
+      _notifyLinuxWindowCloseListeners(true);
+    }
+  }
+
+  /// User reopened the app after **close (X)** — notification tap or launcher activate.
+  void onLinuxWindowRestoredFromClose() {
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.linux &&
+        _linuxWindowClosedByUser) {
+      _linuxWindowClosedByUser = false;
+      SessionFlowLog.step("linux_window_restored_from_close");
+      _notifyLinuxWindowCloseListeners(false);
+    }
+  }
+
+  Future<void> stop() async {
     AppLog.instance.i("Session", "bridge stop");
+    await notifyNativeUiExited();
     if (identical(GhalBolP2p.pollEventDispatcher, dispatchPolledEvent)) {
       GhalBolP2p.pollEventDispatcher = null;
     }
@@ -315,7 +369,6 @@ class P2pEventBridge {
     _identifiedPeersHotRegistered.clear();
     _listeners.clear();
     _nodeReady = false;
-    unawaited(setAppAckReadEnabled(false));
   }
 
   static const int _maxEventsPerDrain = 32;
@@ -422,8 +475,8 @@ class P2pEventBridge {
       P2pFlowLog.issue("node_stopped", detail: ev["error"]?.toString());
     }
     if (kind == "peer_connected" || kind == "chat_ready") {
-      final pk = publicKeyHexFromEvent(ev);
-      if (pk.isNotEmpty && _streamReadyPeers.add(pk.toLowerCase())) {
+      final pk = streamContactKeyFromEvent(ev);
+      if (pk.isNotEmpty && _streamReadyPeers.add(pk)) {
         P2pFlowLog.step("stream_ready", {
           "peer": P2pFlowLog.shortPk(pk),
           "kind": kind ?? "?",
@@ -432,8 +485,8 @@ class P2pEventBridge {
       }
     }
     if (kind == "peer_disconnected") {
-      final pk = publicKeyHexFromEvent(ev);
-      if (pk.isNotEmpty && _streamReadyPeers.remove(pk.toLowerCase())) {
+      final pk = streamContactKeyFromEvent(ev);
+      if (pk.isNotEmpty && _streamReadyPeers.remove(pk)) {
         P2pFlowLog.step("stream_down", {
           "peer": P2pFlowLog.shortPk(pk),
           "count": _streamReadyPeers.length.toString(),

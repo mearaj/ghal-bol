@@ -84,6 +84,44 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ghal_bol/call_video_texture")
+            .setMethodCallHandler { call, result ->
+                val registry = flutterEngine.renderer
+                when (call.method) {
+                    "register" -> {
+                        val shmPath = call.argument<String>("shmPath")
+                        val width = call.argument<Int>("width") ?: 0
+                        val height = call.argument<Int>("height") ?: 0
+                        if (shmPath.isNullOrBlank()) {
+                            result.error("bad_args", "shmPath required", null)
+                        } else {
+                            val id =
+                                CallVideoTexture.register(
+                                    registry,
+                                    shmPath,
+                                    width,
+                                    height,
+                                )
+                            result.success(id)
+                        }
+                    }
+                    "release" -> {
+                        val textureId = call.argument<Number>("textureId")?.toLong()
+                        if (textureId == null) {
+                            result.error("bad_args", "textureId required", null)
+                        } else {
+                            CallVideoTexture.release(textureId)
+                            result.success(null)
+                        }
+                    }
+                    "releaseAll" -> {
+                        CallVideoTexture.releaseAll()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
         incomingCallChannel =
             MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ghal_bol/incoming_call")
                 .also { channel ->

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ghal Bol (Debug)
+Comment=Ghal Bol anonymous chat — debug build
+Exec=ghal_bol_ui
+Icon=app_icon
+StartupWMClass=com.ghalbol.debug
+Categories=Network;Chat;
+Terminal=false

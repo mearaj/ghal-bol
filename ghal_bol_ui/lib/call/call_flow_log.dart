@@ -16,16 +16,8 @@ abstract final class CallFlowLog {
     AppLog.instance.callStep("Call/Media", step, _withCall(fields));
   }
 
-  static void webrtc(String step, [Map<String, String>? fields]) {
-    AppLog.instance.callStep("Call/WebRTC", step, _withCall(fields));
-  }
-
   static void mediaDetail(String step, String detail) {
     AppLog.instance.callDetail("Call/Media", step, _detail(detail));
-  }
-
-  static void webrtcDetail(String step, String detail) {
-    AppLog.instance.callDetail("Call/WebRTC", step, _detail(detail));
   }
 
   static void issue(

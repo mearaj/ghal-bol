@@ -1,10 +1,10 @@
 # Ghal Bol
 
 <p align="center">
-  <img src="ghal_bol_ui/assets/app_icon.png" alt="Ghal Bol app icon" width="1024">
+  <img src="ghal_bol_ui/assets/for-feature-graphic-1.png" alt="Ghal Bol Icon for playstore's feature graphic" width="1536">
 </p>
 
-Ghal Bol is a realtime peer-to-peer messaging system focused on direct communication, local-first identity, minimal infrastructure dependency, and high-speed synchronization between online peers.
+Gh`al Bol is a realtime peer-to-peer messaging system focused on direct communication, local-first identity, minimal infrastructure dependency, and high-speed synchronization between online peers.
 
 The project intentionally avoids traditional cloud-centric messaging architecture. There are no phone numbers, no email-based accounts, no permanent centralized chat storage, and no server-owned transcripts. Users own their identities, messages, and local history.
 
@@ -14,15 +14,9 @@ The system is designed around a simple principle:
 
 Unlike traditional messengers such as WhatsApp or Signal, Ghal Bol does not aim to provide permanent cloud-backed offline message guarantees. Instead, it focuses on deterministic realtime synchronization, direct peer communication, and decentralized temporary relaying.
 
-**Product vision (why Ghal Bol exists):** [docs/WHAT_GHAL_BOL_SOLVES.md](docs/WHAT_GHAL_BOL_SOLVES.md)
+**Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md), [docs/STORY.md](docs/STORY.md)
 
-**Communication tiers (direct → peer relay → paid backup):** [docs/COMMUNICATION_TIERS.md](docs/COMMUNICATION_TIERS.md)
-
-**Peer discovery and invites:** [docs/PEER_DISCOVERY.md](docs/PEER_DISCOVERY.md)
-
-**Product backlog (planned UX and parity work):** [docs/TODO.md](docs/TODO.md)
-
-**Transport (libp2p):** [docs/TRANSPORT.md](docs/TRANSPORT.md)
+**Invites & coordination:** [docs/GHAL_BOL_URI_SCHEME.md](docs/GHAL_BOL_URI_SCHEME.md), [docs/COORDINATION_SERVER.md](docs/COORDINATION_SERVER.md)
 
 ---
 
@@ -68,7 +62,7 @@ Peer connections can be established through QR codes, invite links, or public ke
 - Web: `https://ghalbol.com/connect/<public_key_hex>`
 - App: `ghalbol://connect/<public_key_hex>`
 
-The link identifies the peer only; the app resolves live endpoints via `ghal_bol_server`, then connects directly. See [docs/PEER_DISCOVERY.md](docs/PEER_DISCOVERY.md). **HTTPS invites:** with verified App Links (`/.well-known/assetlinks.json` on the site), Android opens the app directly; otherwise the browser shows the [web invite handoff](docs/WEB_SITE.md). **Linux desktop:** [download page](https://ghalbol.com/download/linux).
+The link identifies the peer only; the app resolves live endpoints via `ghal_bol_server`, then connects directly. See [docs/TRANSPORT.md](docs/TRANSPORT.md) § Discovery. **HTTPS invites:** with verified App Links (`/.well-known/assetlinks.json` on the site), Android opens the app directly; otherwise the browser shows the [web invite handoff](docs/WEB_SITE.md). **Linux desktop:** [download page](https://ghalbol.com/download/linux).
 
 ---
 
@@ -103,11 +97,14 @@ Every peer in Ghal Bol acts as both:
 
 Peers communicate directly whenever possible.
 
-Preferred connection order:
-1. Existing active session
-2. Direct IPv6 connection
-3. Direct IPv4 connection
-4. Future relay fallback
+Preferred connection order for a configured contact ([STORY.md](docs/STORY.md), [TRANSPORT.md](docs/TRANSPORT.md)):
+
+1. Existing active session (resume)
+2. **WAN first** — coord lookup + relay circuit + public TCP when registered
+3. **LAN exception (per-peer):** when mDNS shows the contact on the local LAN → direct TCP immediately; losing LAN falls back to WAN without user-visible disruption
+4. **libp2p Circuit Relay v2** on a **Ghal Bol relay** (co-located with coord) for NAT/CGNAT, then **DCUtR** hole-punch to upgrade to a direct link
+
+Peer **discovery over WAN requires coord + relay** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. The app does **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN discovery. Multiple coord servers are supported as a list (today a single production entry).
 
 The system is designed to be:
 - IPv6-first
@@ -170,7 +167,7 @@ The system intentionally does not guarantee permanent centralized offline delive
 
 # Temporary Distributed Relay (Tier 2)
 
-If a recipient peer is offline, Ghal Bol can optionally use decentralized temporary relaying (see [docs/COMMUNICATION_TIERS.md](docs/COMMUNICATION_TIERS.md)). **Not implemented yet** in this repo.
+If a recipient peer is offline, Ghal Bol can optionally use decentralized temporary relaying (Tier 2 peer blob relay; Tier 3 paid backup — see [docs/PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md)). **Not implemented yet** in this repo.
 
 Example flow:
 1. Peer B wants to send message to offline Peer A.
@@ -306,7 +303,7 @@ Open this directory as the workspace root (the folder that contains this `README
 | `ghal_bol/` | Rust core: identity, libp2p sync engine, local stores |
 | `ghal_bol_server/` | Coordination server — see [ghal_bol_server/README.md](ghal_bol_server/README.md) |
 | `ghal_bol_ui/` | Flutter UI shell — [ghal_bol_ui/README.md](ghal_bol_ui/README.md) |
-| `docs/` | Vision, [tiers](docs/COMMUNICATION_TIERS.md), [identity](docs/IDENTITY.md), [premium](docs/PREMIUM_SERVICES.md), peer discovery, [transport](docs/TRANSPORT.md), [web site](docs/WEB_SITE.md), [backlog](docs/TODO.md), [doc index](docs/README.md) |
+| `docs/` | [Design](docs/DESIGN.md), [transport](docs/TRANSPORT.md), [identity](docs/IDENTITY.md), [coord server](docs/COORDINATION_SERVER.md), [web site](docs/WEB_SITE.md), [doc index](docs/README.md) |
 | `firebase.json` | Firebase Hosting for **ghalbol.com** (static web build) |
 | `scripts/deploy_web_firebase.sh` | `flutter build web` + `firebase deploy --only hosting` |
 

@@ -3,7 +3,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ghal_bol_server::registration_message_digest;
-use ghal_bol_server::{router, AppState, ServerConfig};
+use ghal_bol_server::{router, AppState, RelayInfo, ServerConfig};
 use secp256k1::{Secp256k1, SecretKey};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -52,13 +52,40 @@ async fn health_ok() {
 }
 
 #[tokio::test]
+async fn relay_disabled_by_default_then_advertised() {
+    let config = ServerConfig::default();
+    let state = Arc::new(AppState::open_in_memory(config).expect("db"));
+    let app = router(Arc::clone(&state));
+
+    // No relay started → endpoint reports disabled.
+    let resp = json_request(&app, "GET", "/v1/relay", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = json_body(resp).await;
+    assert_eq!(v["enabled"], false);
+
+    // Once the relay node publishes its coordinates, clients can discover them.
+    state.set_relay_info(RelayInfo {
+        peer_id: "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X".to_string(),
+        addrs: vec!["/dns4/coord.ghalbol.com/tcp/4002".to_string()],
+    });
+    let resp = json_request(&app, "GET", "/v1/relay", None).await;
+    let v = json_body(resp).await;
+    assert_eq!(v["enabled"], true);
+    assert_eq!(
+        v["peer_id"],
+        "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X"
+    );
+    assert_eq!(v["addrs"][0], "/dns4/coord.ghalbol.com/tcp/4002");
+}
+
+#[tokio::test]
 async fn register_lookup_survives_new_store_handle() {
     let config = ServerConfig::default();
     let state = Arc::new(AppState::open_in_memory(config).expect("db"));
     let app = router(Arc::clone(&state));
 
     let secp = Secp256k1::new();
-    let sk = SecretKey::from_slice(&[0x42u8; 32]).unwrap();
+    let sk = SecretKey::from_byte_array([0x42u8; 32]).unwrap();
     let pk_hex = hex::encode(sk.public_key(&secp).serialize());
 
     let ch = json_request(
@@ -120,7 +147,7 @@ async fn sqlite_file_persistence() {
     let state1 = Arc::new(AppState::open(config.clone()).unwrap());
     let app1 = router(Arc::clone(&state1));
     let secp = Secp256k1::new();
-    let sk = SecretKey::from_slice(&[0x11u8; 32]).unwrap();
+    let sk = SecretKey::from_byte_array([0x11u8; 32]).unwrap();
     let pk_hex = hex::encode(sk.public_key(&secp).serialize());
 
     let ch = json_request(

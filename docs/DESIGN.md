@@ -2,7 +2,7 @@
 
 This document is the **single design reference** for how Ghal Bol is meant to work: layers, messaging state, chat-room semantics, and P2P lifecycle. Wire-level detail lives in [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md); invites in [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
 
-**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md).
+**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. **Connectivity / discovery policy:** [STORY.md](STORY.md) overrides conflicting guidance. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md).
 
 ## Goals
 
@@ -33,7 +33,7 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
          shared on-disk stores (contacts_v1.json, chat_transcript_v1.json)
 ```
 
-**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `libghal_bol.so` for identity and store I/O over FFI. Both processes must use the **same** Android data directory / namespace paths.
+**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `libghal_bol.so` for identity and store I/O over FFI. Both processes must use the **same** data directory and `app_namespace`. Debug (`com.ghalbol.debug`) uses its own root (`~/.local/share/com.ghalbol.debug/` on Linux); release uses `~/.local/share/com.ghalbol/`.
 
 | Concern | Owner |
 |---------|--------|
@@ -57,6 +57,20 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 - One **secp256k1** keypair per device → libp2p **PeerId**, signatures, and message sealing.
 - Connect invite (format **2**) carries **`public_key_hex` only** — no PeerId, no IP/multiaddrs on the wire.
 - On each DM stream: Noise proves PeerId; every frame’s `sender_public_key_hex` must **match** that PeerId.
+
+## End-to-end encryption (product rule)
+
+**All communications that are between two known contacts using their secp256k1 keys must be E2E** — only those two identities (or holders of the matching private keys) can read the payload.
+
+| Channel | E2E mechanism | Keys |
+|---------|----------------|------|
+| **Text DM** | `ghal_bol_msg_v1` sealed inner JSON | Ephemeral ECDH + AES-GCM to recipient pubkey; signed envelope |
+| **Call signaling** (invite, SDP, ICE, …) | `ghal_bol_call_v1` | Same seal + signature on DM stream |
+| **Call media** (audio + in-call video) | FrameCryptor AES-GCM on encoded RTP + DTLS-SRTP | `call_media_key.rs`: ECDH(local secret, peer `public_key_hex`) + HKDF(`call_id`, both pubkeys) |
+
+libp2p **Noise** encrypts the transport; it is not a substitute for app-layer E2E above. New features (voice messages, attachments, group chat) must follow the same rule unless explicitly scoped otherwise in design docs.
+
+Implementation detail: [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (calls), [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) (chat). [AGENTS.md](../AGENTS.md) golden rule 7.
 
 ## Asymmetric “who knows whom”
 
@@ -350,7 +364,7 @@ Historically, some threads were stored under the **public key** before PeerId wa
 1. **Unlock** — UI: FFI `createOrUnlockIdentity`; daemon: `unlock` with the same namespace and password (must match public key). Both call `set_p2p_handler_context(app_namespace)`.
 2. **`p2p_start`** — `dm_peers: [{ "public_key_hex": "…" }]`, `bootstrap_peers: []`, `app_namespace`. If the node is **already running**, native still refreshes handler context and re-registers all `dm_peers` from config (daemon may survive UI restarts).
 3. **Contact added** (scan) → `sync_contacts` **hot-registers** keys on the **running** node — **no full `p2p_stop` / restart** for roster changes.
-4. **Dial** → DHT/mDNS toward configured PeerId (guest dials from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
+4. **Dial** → coord lookup + relay (WAN) or mDNS (LAN per-peer) toward configured PeerId (guest dials from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
 5. **Connect** → open `/ghal-bol/msg/1.0.0` (no separate key-exchange prelude).
 6. **`chat_ready`** → outbound stream writer up; safe to send frames.
 7. **Poll** → `p2p_poll` → JSON events; `dm_event_handler` updates on-disk stores; Flutter reloads roster/transcript via FFI.
@@ -392,7 +406,7 @@ Coord HTTP register in Rust waits until listen addrs (often relay on CGNAT) are 
 
 | Default (remote / WAN) | LAN exception only |
 |------------------------|-------------------|
-| **WAN first:** coord lookup → relay circuit + public TCP when registered; Kademlia / identify as fallback | **LAN only when the peer is on your LAN:** mDNS `Discovered` for that contact → direct TCP (`dial_mdns_peer`) |
+| **WAN first:** coord lookup (try all configured servers; stop on first success) → relay circuit + public TCP when registered | **LAN only when the peer is on your LAN:** mDNS `Discovered` for that contact → direct TCP (`dial_mdns_peer`); **immediate** shift to LAN; **immediate** WAN fallback when LAN is lost |
 
 Rules:
 
@@ -406,6 +420,14 @@ Coord register/lookup on a **5s** tick; send-text triggers an immediate coord lo
 **Anti-patterns (caused multi-minute stalls):** Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer.
 
 **Network watch:** Android connectivity + profile poll → WAN relay recovery when coord URL is set. UI lock does not stop `:p2p` / daemon / poll.
+
+### Steady connection (both peers online)
+
+When two contacts are both online the link must stay **steady** and recover instantly from blips — never an idle drop or a backoff-delayed reconnect that the user perceives as lag. Native (`chat_server.rs`) enforces this; see [TRANSPORT.md](TRANSPORT.md) § “Steady connection”:
+
+- **Keepalive ping** keeps an idle DM/relay connection alive (ping interval **15s** < `idle_connection_timeout` 45s/300s), so the next message reuses the live link instead of paying a reconnect.
+- **Urgent reconnect** after `dm connection closed`: the peer’s key is urgent for ~30s — coord lookup **skips** the `peer_not_on_server` backoff and the 1s upkeep tick retries immediately (`mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent`), cleared on reconnect.
+- **Reserve on all configured coord relays in parallel, throttled per relay** (`try_relay_reservations` / `try_relay_reservation`, per-relay `RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or WAN peer discovery ([STORY.md](STORY.md)). The anti-pattern is re-issuing `listen_on` **every tick** (a 1s storm), **not** covering all relays once — serializing onto a single relay let one pending-but-never-accepted reservation block the others and stalled WAN for minutes. See [TRANSPORT.md](TRANSPORT.md) § “Steady connection”.
 
 ## Contacts and roster preview
 

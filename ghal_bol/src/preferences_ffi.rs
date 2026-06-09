@@ -25,7 +25,7 @@ unsafe fn utf8(c: *const c_char, ctx: &'static str) -> Result<String, String> {
         .map_err(|_| format!("utf-8 ({ctx})"))
 }
 
-/// `{ "ok": true, "base_url": "…"|null, "insecure_tls": bool }`
+/// `{ "ok": true, "base_urls": […], "insecure_tls": bool }`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_coord_settings_get(
     app_namespace_utf8: *const c_char,
@@ -37,11 +37,17 @@ pub unsafe extern "C" fn ghal_bol_ffi_coord_settings_get(
         };
         let cfg = resolved_storage_config(&ns);
         match crate::preferences_v1::coord_settings_get(&cfg) {
-            Ok((url, tls)) => json_ok(serde_json::json!({
-                "ok": true,
-                "base_url": url,
-                "insecure_tls": tls,
-            })),
+            Ok((url, tls)) => {
+                let urls: Vec<String> = url
+                    .as_deref()
+                    .map(crate::coord_runtime::parse_coord_urls)
+                    .unwrap_or_default();
+                json_ok(serde_json::json!({
+                    "ok": true,
+                    "base_urls": urls,
+                    "insecure_tls": tls,
+                }))
+            }
             Err(e) => json_err(format!("{e}")),
         }
     };

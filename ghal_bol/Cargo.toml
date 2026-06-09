@@ -48,7 +48,7 @@ libp2p = { version = "0.56", features = [
     "quic",
     "dns",
     "mdns",
-    "kad",
+    "ping",
     "rsa",
 ] }
 tokio = { version = "1", features = [
@@ -62,11 +62,40 @@ tokio = { version = "1", features = [
 ] }
 if-addrs = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+# Opus voice codec (vendored libopus build) for native call media.
+audiopus = "0.2"
+
+# Desktop microphone capture + speaker playback for native call media (P4).
+# Android audio (AAudio/Oboe) is added in P6; until then Android uses the silence backend.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+cpal = "0.15"
+# Native H.264 video codec (bundled OpenH264 source, built via cc — needs a C++
+# toolchain; `nasm` on PATH enables SIMD). Desktop-first; Android gets its codec
+# (MediaCodec / cross-built openh264) in its own phase. See docs/GHAL_BOL_VIDEO_NATIVE_V1.md.
+openh264 = "0.9"
+# Desktop camera capture for native video (V4L2 / AVFoundation / MSMF).
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+
+[features]
+default = []
+# CI / integration tests: compile-time TCP-only transport, no mDNS/UPnP (GHA stack limits).
+test-minimal-swarm = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust = "4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22", default-features = false }
 # reqwest/rustls on Android needs JVM hooks for system cert verification (coord HTTPS).
 rustls-platform-verifier = { version = "0.7", features = ["jni"] }
+# Android voice capture/playback via Oboe (AAudio/OpenSL) behind cpal (P6).
+# `oboe-shared-stdcxx` links libc++_shared.so (already shipped by the Flutter app).
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
+# Hands cpal/Oboe the JavaVM + Android Context (set once from the `:p2p` JNI init).
+ndk-context = "0.1"
+# Native H.264 video (OpenH264 bundled source, NDK C++ toolchain) — same codec as desktop
+# so Linux↔Android calls share one bitstream format. See docs/GHAL_BOL_VIDEO_NATIVE_V1.md.
+openh264 = "0.9"
 
 [dev-dependencies]
 libp2p = { version = "0.56", features = ["tcp"] }

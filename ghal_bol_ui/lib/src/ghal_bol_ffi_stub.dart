@@ -89,8 +89,8 @@ abstract final class GhalBolFfi {
 
   static bool get isCoordAvailable => false;
 
-  static Map<String, dynamic> coordSetBaseUrl({
-    required String baseUrl,
+  static Map<String, dynamic> coordSetBaseUrls({
+    required List<String> baseUrls,
     bool insecureTls = false,
   }) => {
     "ok": false,
@@ -156,6 +156,44 @@ abstract final class GhalBolFfi {
   };
 
   static Map<String, dynamic> p2pCallSignal(Map<String, dynamic> config) => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static Map<String, dynamic> p2pCallMedia(Map<String, dynamic> config) => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static Map<String, dynamic> p2pCallStatus(Map<String, dynamic> config) => {
+    "ok": true,
+    "active": false,
+  };
+
+  static Map<String, dynamic> p2pCallVideo(Map<String, dynamic> config) => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static Map<String, dynamic> p2pCallVideoFrame(Map<String, dynamic> config) => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static Map<String, dynamic> p2pCallVideoTexture(Map<String, dynamic> config) => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static Map<String, dynamic> p2pCallVideoPushCameraFrame(Map<String, dynamic> config) => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static Map<String, dynamic> callMediaKeyHex({
+    required String callId,
+    required String peerPublicKeyHex,
+  }) => {
     "ok": false,
     "error": loadErrorText ?? "unavailable",
   };

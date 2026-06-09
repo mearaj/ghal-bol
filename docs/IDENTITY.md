@@ -23,7 +23,14 @@ The system does not require phone numbers, email addresses, or centralized accou
 - Private: 64 hex chars (32-byte secret)
 - On disk: `keystore_v1.json` — Argon2id + ChaCha20-Poly1305 (`ghal_bol/src/keystore_v1.rs`)
 
-Storage root: `~/.local/share/com.ghalbol/` (Flutter namespace `com.ghalbol`).
+Storage root (Linux desktop):
+
+| Build | `app_namespace` | Path |
+|-------|-----------------|------|
+| `flutter run -d linux` (debug) | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` |
+| `flutter run --release -d linux` / shipped bundle | `com.ghalbol` | `~/.local/share/com.ghalbol/` |
+
+Android uses the same `app_namespace` values; debug/release differ by package id (`com.ghalbol.debug` vs `com.ghalbol`). Keystore: `app_flutter/com.ghalbol.debug/` (debug) or `app_flutter/` (release). Contacts/transcript: `app_flutter/ghal_bol/` on both (package id isolates debug vs release).
 
 ---
 
@@ -112,7 +119,7 @@ Ghal Bol identities are:
 - local-first
 - user-owned
 - cryptographic
-- infrastructure-independent for **Tier 1** coordination (see [COMMUNICATION_TIERS.md](COMMUNICATION_TIERS.md))
+- infrastructure-independent for direct P2P coordination (see [TRANSPORT.md](TRANSPORT.md))
 
 Servers assist presence and endpoint discovery; they do not issue or own messaging identities.
 
@@ -129,7 +136,7 @@ Servers assist presence and endpoint discovery; they do not issue or own messagi
 | Export backup | Identity → Export backup | `ghal_bol_ffi_export_keystore_json` |
 | Delete identity | Unlock / More | `ghal_bol_ffi_delete_keystore` |
 
-Rebuild native after API changes: `sync_ghal_bol_native_for_flutter.sh` (desktop) or `pack_android_workspace_jni_libs.sh` (Android). See [LOCAL_DEV_STACK.md](LOCAL_DEV_STACK.md).
+Rebuild native after API changes: `sync_ghal_bol_native_for_flutter.sh` (desktop) or `pack_android_workspace_jni_libs.sh` (Android). See [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Local dev stack.
 
 ---
 
@@ -150,5 +157,5 @@ Rebuild native after API changes: `sync_ghal_bol_native_for_flutter.sh` (desktop
 ## Related docs
 
 - [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) — paid Tier 3 relay, payment rails, membership vs identity
-- [PEER_DISCOVERY.md](PEER_DISCOVERY.md) — invites and coordination lookup
-- [COMMUNICATION_TIERS.md](COMMUNICATION_TIERS.md) — free vs paid transport paths
+- [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) — invites and coordination lookup
+- [TRANSPORT.md](TRANSPORT.md) — WAN/LAN dial policy

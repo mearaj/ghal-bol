@@ -66,7 +66,11 @@ check_one_target() {
       return 1
     fi
     echo "-- target: ${triple} (cargo-ndk ${abi}) --"
-    cargo ndk -t "${abi}" check --workspace --all-targets
+    local openh264_env=()
+    if [[ "$abi" == "x86" || "$abi" == "x86_64" ]]; then
+      openh264_env=(OPENH264_NO_ASM=1)
+    fi
+    env "${openh264_env[@]}" cargo ndk -t "${abi}" check --workspace --all-targets
     return 0
   fi
 

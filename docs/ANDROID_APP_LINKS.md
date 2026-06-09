@@ -37,7 +37,7 @@ Example (replace SHA-256 cert fingerprints if template):
 
 Play App Signing: use the **app signing key** fingerprint from Play Console → App integrity, not only your upload key.
 
-Dev installs (`com.ghalbol.debug` / `com.ghalbol.release`) need **their own** entries with debug/release keystore fingerprints, or test `ghalbol://connect/…` links (custom scheme, no `assetlinks`).
+Dev installs (`com.ghalbol.debug`) need **their own** `assetlinks` entry with the debug keystore fingerprint, or test `ghalbol://connect/…` links (custom scheme, no `assetlinks`). Release sideloads and Play use `com.ghalbol`.
 
 ## 3. Verify on device
 

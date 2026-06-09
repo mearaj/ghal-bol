@@ -24,12 +24,40 @@ pub fn router(app: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/v1/relay", get(get_relay))
         .route("/v1/register/challenge", post(register_challenge))
         .route("/v1/register", post(register))
         .route("/v1/heartbeat", post(heartbeat))
         .route("/v1/peers/{public_key_hex}", get(get_peer))
         .route("/v1/peers", get(list_peers))
         .with_state(state)
+}
+
+#[derive(Serialize)]
+struct RelayResponse {
+    /// Whether this coordinator runs a Circuit Relay v2 node.
+    enabled: bool,
+    /// Relay libp2p PeerId (stable across restarts).
+    peer_id: Option<String>,
+    /// Dialable base multiaddrs (without `/p2p/<id>`); clients append `/p2p/<peer_id>/p2p-circuit`.
+    addrs: Vec<String>,
+}
+
+/// Advertise the co-located relay so clients can reserve a circuit and register it in presence.
+async fn get_relay(State(state): State<Arc<RouteState>>) -> Json<RelayResponse> {
+    let info = state.app.relay_info.lock().ok().and_then(|g| g.clone());
+    match info {
+        Some(i) if !i.addrs.is_empty() => Json(RelayResponse {
+            enabled: true,
+            peer_id: Some(i.peer_id),
+            addrs: i.addrs,
+        }),
+        _ => Json(RelayResponse {
+            enabled: false,
+            peer_id: None,
+            addrs: Vec::new(),
+        }),
+    }
 }
 
 #[derive(Serialize)]

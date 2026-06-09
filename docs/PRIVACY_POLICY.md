@@ -61,7 +61,7 @@ When you send a message or place a call:
 
 **LAN discovery:** On local networks, the app may use **mDNS** to find configured contacts without using the coordination server.
 
-**NAT traversal:** If a direct connection is not possible, the app may use **libp2p relay circuits**, **Kademlia DHT**, or similar mechanisms. Traffic remains encrypted at the transport/protocol layers; relay operators in the public libp2p network are **third-party infrastructure**, not Ghal Bol chat servers.
+**NAT traversal:** If a direct connection is not possible, the app may use **libp2p relay circuits** on **Ghal Bol coordination servers** (co-located with `coord.ghalbol.com` or other configured coord hosts). Traffic remains encrypted at the transport/protocol layers. The app does **not** use public libp2p bootstrap peers or Kademlia DHT for peer discovery.
 
 ---
 
@@ -128,7 +128,7 @@ You can deny permissions; related features may not work (e.g. no QR scan without
 | Service | Role | Data involved |
 |---------|------|----------------|
 | **Ghal Bol coordination server** | Presence and endpoint lookup | Public key, endpoints, heartbeats (see above) |
-| **Public libp2p relays / DHT** (when needed) | Encrypted transit for connectivity | Encrypted P2P traffic; not message storage by Ghal Bol |
+| **Ghal Bol relay** (co-located with coord, when needed) | NAT traversal for encrypted P2P | Encrypted transit only; not message storage by Ghal Bol |
 | **Google STUN** (calls) | NAT address discovery for WebRTC | Standard STUN binding requests; no chat content |
 | **QR scanner plugin** (`mobile_scanner`) | Decode QR on device | Processing is **on-device**; may use platform camera/ML APIs per device vendor |
 

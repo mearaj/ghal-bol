@@ -45,7 +45,7 @@ Outputs:
 | APK | `ghal_bol_ui/build/app/outputs/flutter-apk/app-release.apk` |
 | AAB | `ghal_bol_ui/build/app/outputs/bundle/release/app-release.aab` |
 
-Release builds bundle `env/.env.production` → `GHAL_BOL_COORD_URL=https://coord.ghalbol.com`.
+Release builds bundle `env/.env.production` → `GHAL_BOL_COORD_URLS=["https://coord.ghalbol.com"]`.
 
 Without `key.properties`, Gradle signs with the debug key (fine for local install only).
 

@@ -19,7 +19,7 @@ struct TestPeer {
 impl TestPeer {
     fn new(seed: u8, host: &'static str, port: u16) -> Self {
         let secp = Secp256k1::new();
-        let secret = SecretKey::from_slice(&[seed; 32]).expect("test key");
+        let secret = SecretKey::from_byte_array([seed; 32]).expect("test key");
         let public_key_hex = hex::encode(secret.public_key(&secp).serialize());
         Self {
             secret,

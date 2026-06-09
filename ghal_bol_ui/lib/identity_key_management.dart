@@ -57,7 +57,7 @@ Future<void> showRevealPrivateKeyDialog(BuildContext context) async {
   final pw = await promptAppPassword(context, title: "App password required");
   if (pw == null) return;
   final r = GhalBolFfi.revealSecretKeyHex(
-    appNamespace: kGhalBolAndroidLibraryNamespace,
+    appNamespace: kGhalBolAppNamespace,
     password: pw,
   );
   if (!context.mounted) return;
@@ -120,7 +120,7 @@ Future<void> exportKeystoreBackup(BuildContext context) async {
   );
   if (!context.mounted || proceed != true) return;
 
-  final r = GhalBolFfi.exportKeystoreJson(appNamespace: kGhalBolAndroidLibraryNamespace);
+  final r = GhalBolFfi.exportKeystoreJson(appNamespace: kGhalBolAppNamespace);
   if (!context.mounted) return;
   if (!r.ok || r.keystoreJson == null) {
     _snack(context, r.error ?? "Export failed");
@@ -193,13 +193,13 @@ Future<void> importKeystoreBackup(BuildContext context, {required void Function(
   if (!context.mounted || go != true || json.isEmpty || pw.isEmpty) return;
 
   final r = GhalBolFfi.importKeystoreJson(
-    appNamespace: kGhalBolAndroidLibraryNamespace,
+    appNamespace: kGhalBolAppNamespace,
     password: pw,
     keystoreJson: json,
   );
   if (!context.mounted) return;
   if (!r.ok) {
-    GhalBolFfi.resetFirstTimeIdentity(appNamespace: kGhalBolAndroidLibraryNamespace);
+    GhalBolFfi.resetFirstTimeIdentity(appNamespace: kGhalBolAppNamespace);
     GhalBolFfi.lock();
     _snack(context, "${r.error ?? "Import failed"}${IdentitySetupCopy.firstTimeRetryHint}");
     return;

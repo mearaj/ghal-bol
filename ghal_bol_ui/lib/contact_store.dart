@@ -3,6 +3,7 @@ import "package:flutter/foundation.dart";
 import "app_log.dart";
 import "chat_transcript_store.dart";
 import "ghal_bol_ffi.dart";
+import "ghal_bol_p2p.dart";
 import "identity_display_name.dart";
 import "public_key_hex.dart";
 import "saved_contact.dart";
@@ -163,6 +164,11 @@ class ContactStore {
     required String appNamespace,
     required String publicKeyHex,
   }) async {
+    // :p2p merges peer_id on poll — UI only refreshes roster (no duplicate FFI write).
+    if (GhalBolP2p.usesDaemon) {
+      bumpListFromPoll();
+      return;
+    }
     if (GhalBolFfi.contactsMergeDiscovered(appNamespace, publicKeyHex, "")) {
       _bumpPreview();
     }

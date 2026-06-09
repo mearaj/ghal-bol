@@ -2,7 +2,7 @@
 //!
 //! Presence and endpoint discovery only — no chat transcripts or message payloads.
 
-use ghal_bol_server::{app, AppState, ServerConfig};
+use ghal_bol_server::{app, relay, AppState, RelayConfig, ServerConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -19,12 +19,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = ServerConfig::from_env();
+    // Bind coord HTTP first — if the port is taken, fail before starting the libp2p relay
+    // (otherwise logs show "relay started" then AddrInUse, which looks like a relay bug).
+    let listener = TcpListener::bind(config.listen).await?;
+
     let state = Arc::new(AppState::open(config.clone())?);
+
+    // Co-located Circuit Relay v2 node (NAT traversal). The HTTP API stays a lightweight
+    // phone book; the relay only carries brief NAT-traversal traffic until DCUtR upgrades
+    // clients to a direct connection. Advertised to clients at GET /v1/relay.
+    let relay_data_dir = config
+        .database_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    match relay::start(RelayConfig::from_env(&relay_data_dir)) {
+        Ok(Some(info)) => state.set_relay_info(info),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "relay node failed to start — continuing HTTP only"),
+    }
+
     let shutdown = Arc::new(Notify::new());
     let purge = spawn_purge_task(Arc::clone(&state), Arc::clone(&shutdown));
     let app = app(state);
 
-    let listener = TcpListener::bind(config.listen).await?;
     tracing::info!(
         listen = %config.listen,
         db = %config.database_path.display(),

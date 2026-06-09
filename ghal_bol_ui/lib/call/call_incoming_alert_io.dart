@@ -1,20 +1,32 @@
+import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 
 abstract final class CallIncomingAlert {
   static const MethodChannel _channel = MethodChannel("ghal_bol/incoming_call");
   static bool _handlerInstalled = false;
 
-  /// Wire platform → Dart when user taps the full-screen incoming-call notification.
-  static void installOpenedHandler(void Function() onOpened) {
+  /// Wire platform → Dart callbacks (notification tap, GTK close X).
+  static void installPlatformHandlers({
+    void Function()? onOpenedFromNotification,
+    void Function()? onWindowClosedByUser,
+  }) {
     if (_handlerInstalled) return;
     _handlerInstalled = true;
     _channel.setMethodCallHandler((call) async {
-      if (call.method == "openedFromNotification") {
-        onOpened();
+      switch (call.method) {
+        case "openedFromNotification":
+          onOpenedFromNotification?.call();
+        case "windowClosedByUser":
+          onWindowClosedByUser?.call();
       }
     });
   }
 
+  static void installOpenedHandler(void Function() onOpened) {
+    installPlatformHandlers(onOpenedFromNotification: onOpened);
+  }
+
+  /// OS notification (Android full-screen / Linux libnotify). Does not raise the window on Linux.
   static Future<void> show({
     required String displayName,
     required String publicKeyHex,
@@ -33,10 +45,37 @@ abstract final class CallIncomingAlert {
     } catch (_) {}
   }
 
-  /// Linux desktop: raise the window to the foreground.
+  /// Whether the main window is visible (Linux desktop).
+  static Future<bool> isWindowVisible() async {
+    if (defaultTargetPlatform != TargetPlatform.linux) return true;
+    try {
+      final v = await _channel.invokeMethod<bool>("isWindowVisible");
+      return v ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Raise the main window without posting a new notification.
   static Future<void> presentWindow() async {
     try {
       await _channel.invokeMethod<void>("present");
+    } catch (_) {}
+  }
+
+  /// Hide main window after active calls are torn down (GTK close X).
+  static Future<void> hideWindow() async {
+    if (defaultTargetPlatform != TargetPlatform.linux) return;
+    try {
+      await _channel.invokeMethod<void>("hideWindow");
+    } catch (_) {}
+  }
+
+  /// Exit the GTK app (Linux only) so `flutter run` terminates when idle.
+  static Future<void> quitApplication() async {
+    if (defaultTargetPlatform != TargetPlatform.linux) return;
+    try {
+      await _channel.invokeMethod<void>("quitApplication");
     } catch (_) {}
   }
 }

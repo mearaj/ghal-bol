@@ -62,8 +62,8 @@ abstract final class AppEnvConfig {
 
     AppLog.instance.d(
       "Env",
-      "no env file in bundle — add env/.env.development (see env/README.md), "
-      "or pass --dart-define=GHAL_BOL_COORD_URL=…",
+      "no env file in bundle — set GHAL_BOL_COORD_URLS in env/.env.development "
+      "or env/.env.production (see env/README.md)",
     );
   }
 

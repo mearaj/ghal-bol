@@ -86,8 +86,15 @@ pub fn base_data_dir(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageErro
         return Ok(d.clone());
     }
 
-    let dirs = project_dirs_for_library()?;
-    Ok(dirs.data_local_dir().to_path_buf())
+    #[cfg(target_os = "linux")]
+    {
+        return linux_install_data_root(&cfg.app_namespace);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let dirs = project_dirs_for_library()?;
+        Ok(dirs.data_local_dir().to_path_buf())
+    }
 }
 
 /// Directory for identity + prefs under [base_data_dir].
@@ -96,12 +103,25 @@ pub fn base_data_dir(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageErro
 /// is already `…/com.ghalbol/` — do not append the namespace segment again.
 pub fn namespace_data_dir(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageError> {
     sanitize_namespace(&cfg.app_namespace)?;
+    #[cfg(target_os = "linux")]
+    if cfg.override_data_dir.is_none() {
+        return linux_install_data_root(&cfg.app_namespace);
+    }
     let mut p = base_data_dir(cfg)?;
     let ns = cfg.app_namespace.trim();
     if ns != ANDROID_LIBRARY_NAMESPACE {
         p.push(ns);
     }
     Ok(p)
+}
+
+/// Linux desktop: one XDG root per install id (`com.ghalbol.debug` / `com.ghalbol`).
+#[cfg(target_os = "linux")]
+fn linux_install_data_root(ns: &str) -> Result<PathBuf, KeystoreStorageError> {
+    sanitize_namespace(ns)?;
+    ProjectDirs::from_path(PathBuf::from(ns.trim()))
+        .ok_or(KeystoreStorageError::NoDataDir)
+        .map(|dirs| dirs.data_local_dir().to_path_buf())
 }
 
 pub fn keystore_v1_path(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageError> {
@@ -330,6 +350,14 @@ mod tests {
             .with_override_data_dir(td.path());
         let path = keystore_v1_path(&cfg).unwrap();
         assert_eq!(path, td.path().join("dev.test").join("keystore_v1.json"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_debug_namespace_own_xdg_root_not_under_release() {
+        let path = linux_install_data_root("com.ghalbol.debug").unwrap();
+        assert!(path.ends_with("com.ghalbol.debug"));
+        assert!(!path.ends_with("com.ghalbol"));
     }
 }
 

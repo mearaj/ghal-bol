@@ -60,11 +60,6 @@ impl CallSigKind {
     }
 }
 
-/// Default invite payload: audio-only call (not a separate “video call” product).
-pub fn default_invite_payload() -> Value {
-    serde_json::json!({ "media": "audio" })
-}
-
 /// Same JSON shape as [`MsgEnvelope`] but different `ghalbol.share` / `kind` enum.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CallSigEnvelope {

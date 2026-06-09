@@ -31,10 +31,28 @@ pub fn clear_all_calls() {
     }
 }
 
+pub fn clear_peer(peer_pk_hex: &str) {
+    let key = peer_pk_hex.trim().to_ascii_lowercase();
+    if let Ok(mut g) = store().lock() {
+        g.remove(&key);
+    }
+}
+
+pub fn peer_call_phase(peer_pk_hex: &str) -> CallPhase {
+    let key = peer_pk_hex.trim().to_ascii_lowercase();
+    store()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&key).map(|c| c.phase))
+        .unwrap_or(CallPhase::Idle)
+}
+
+#[cfg(test)]
 pub fn phase_for_peer(peer_pk_hex: &str) -> CallPhase {
     snapshot_for_peer(peer_pk_hex).phase
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallSnapshot {
     pub phase: CallPhase,
@@ -42,6 +60,7 @@ pub struct CallSnapshot {
     pub video_enabled: bool,
 }
 
+#[cfg(test)]
 pub fn snapshot_for_peer(peer_pk_hex: &str) -> CallSnapshot {
     let key = peer_pk_hex.trim().to_ascii_lowercase();
     store()

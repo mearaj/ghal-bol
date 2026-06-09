@@ -21,6 +21,11 @@ ExecStart=/home/mearajbhagad/ghal_bol_server
 Environment=GHAL_BOL_SERVER_LISTEN=127.0.0.1:8765
 Environment=GHAL_BOL_SERVER_DB=/home/mearajbhagad/.local/share/com.ghalbol/ghalbol_server
 Environment=RUST_LOG=info
+# libp2p Circuit Relay v2 (NAT traversal). HTTP stays on loopback behind nginx, but the relay
+# is a RAW TCP port that clients dial directly — open it in the cloud firewall (e.g. GCP ingress
+# tcp:4002) and point GHAL_BOL_RELAY_PUBLIC_HOST at the public DNS that resolves to this VM.
+Environment=GHAL_BOL_RELAY_LISTEN=0.0.0.0:4002
+Environment=GHAL_BOL_RELAY_PUBLIC_HOST=coord.ghalbol.com
 Restart=on-failure
 RestartSec=5
 

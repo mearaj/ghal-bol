@@ -3,15 +3,15 @@ import "dart:math";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
+import "package:flutter/services.dart" show MethodChannel;
 import "package:permission_handler/permission_handler.dart";
 
 import "package:ghal_bol_ui/app_log.dart";
-import "package:flutter_webrtc/flutter_webrtc.dart";
-import "package:ghal_bol_ui/call/call_desktop_media.dart";
+import "package:ghal_bol_ui/call/call_desktop_native_camera.dart";
+import "package:ghal_bol_ui/call/call_video_texture_pool.dart";
 import "package:ghal_bol_ui/call/call_flow_log.dart";
 import "package:ghal_bol_ui/call/call_incoming_alert.dart";
 import "package:ghal_bol_ui/call/call_ringtone.dart";
-import "package:ghal_bol_ui/call/call_webrtc.dart";
 import "package:ghal_bol_ui/call/ghal_bol_call.dart";
 import "package:ghal_bol_ui/call/call_screen.dart";
 import "package:ghal_bol_ui/contact_store.dart";
@@ -22,6 +22,17 @@ import "package:ghal_bol_ui/p2p_event_bridge.dart";
 import "package:ghal_bol_ui/p2p_link_error_ui.dart";
 import "package:ghal_bol_ui/public_key_hex.dart";
 import "package:wakelock_plus/wakelock_plus.dart";
+
+/// Android native voice (Oboe via cpal + NDK opus, in `:p2p`). Native is the only
+/// voice path now (WebRTC removed). Audio is clean on a headset; speaker echo until
+/// hardware/SW AEC lands — see `docs/GHAL_BOL_CALL_NATIVE_V2.md`.
+const bool kAndroidNativeVoice = true;
+
+/// Platforms with hardware earpiece/speaker routing the user can toggle.
+bool get callSpeakerToggleSupported =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS);
 
 enum CallUiPhase {
   idle,
@@ -39,6 +50,25 @@ class CallController {
 
   static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
+  static final List<VoidCallback> _callEndedListeners = [];
+
+  /// Hub/chat reloads transcript after a call (native :p2p may have patched disk).
+  static void addCallEndedListener(VoidCallback listener) {
+    if (!_callEndedListeners.contains(listener)) {
+      _callEndedListeners.add(listener);
+    }
+  }
+
+  static void removeCallEndedListener(VoidCallback listener) {
+    _callEndedListeners.remove(listener);
+  }
+
+  static void _notifyCallEnded() {
+    for (final l in List<VoidCallback>.from(_callEndedListeners)) {
+      l();
+    }
+  }
+
   CallUiPhase phase = CallUiPhase.idle;
   String? callId;
   String? peerPublicKeyHex;
@@ -46,56 +76,273 @@ class CallController {
   bool isOutgoing = false;
   bool localVideoOn = false;
   bool remoteVideoOn = false;
+  /// Device-local PiP layout (main ↔ corner). Never sent to the peer.
+  bool videoMainShowsLocal = false;
   bool micMuted = false;
   bool speakerOn = false;
   bool onHold = false;
   String? statusMessage;
 
-  CallWebRtc? _webrtc;
   bool _acceptSent = false;
+  /// Set when [syncActiveCallFromNative] rebuilds UI after `:p2p` outlived the shell.
+  bool callRestoredFromNative = false;
   bool callScreenVisible = false;
-  bool _inviteSent = false;
+  bool _callScreenPushInFlight = false;
+
+  /// Voice-engine tag (see `docs/GHAL_BOL_CALL_NATIVE_V2.md`). Voice rides the Rust
+  /// media engine over the libp2p substream — the only voice path (no WebRTC).
+  static const String _nativeVoiceTag = "native_v2";
+  /// Video-engine tag (see `docs/GHAL_BOL_VIDEO_NATIVE_V1.md`). Video rides H.264
+  /// over `/ghal-bol/call-video/1.0.0` — the only video path (no WebRTC).
+  static const String _nativeVideoTag = "native_v1";
+  bool _nativeVoiceActive = false;
+  bool _nativeVideoActive = false;
+  bool _endingCall = false;
   Timer? _connectFallbackTimer;
   Timer? _connectPollTimer;
   Timer? _presentUiTimer;
-  final List<MapEntry<String, Map<String, dynamic>>> _deferredWebRtcSignals =
-      [];
+  Timer? _peerDropGraceTimer;
+  int _peerDropGraceEpoch = 0;
+  /// Android notification already shown for this `call_id` (one shot per invite).
+  String? _alertShownForCallId;
 
-  /// Wire Android notification tap → show call UI.
+  /// True when native voice media is running for the active call.
+  bool get nativeVoiceInCall => _nativeVoiceActive && inCallActive;
+
+  /// True when the native video engine is running (send and/or receive).
+  bool get nativeVideoInCall => _nativeVideoActive && inCallActive;
+
+  /// Wire platform notification tap → show call UI.
   static void install() {
-    CallIncomingAlert.installOpenedHandler(() {
-      instance.onAppForeground();
-    });
+    unawaited(CallIncomingAlert.dismiss());
+    CallIncomingAlert.installPlatformHandlers(
+      onOpenedFromNotification: () => instance.onAppForeground(),
+      onWindowClosedByUser: () => instance.onWindowClosedByUser(),
+    );
   }
 
-  /// App returned to foreground — show pending incoming call UI.
-  void onAppForeground() {
-    if (phase == CallUiPhase.incomingRinging ||
-        phase == CallUiPhase.outgoingRinging) {
-      unawaited(_presentIncomingCall());
-      _ensureCallScreenVisible();
+  bool _windowCloseInFlight = false;
+
+  /// Linux GTK **close (X)** — stop camera/media, notify peer, then hide window.
+  void onWindowClosedByUser() {
+    unawaited(_handleWindowClosedByUser());
+  }
+
+  Future<void> _handleWindowClosedByUser() async {
+    if (_windowCloseInFlight) return;
+    _windowCloseInFlight = true;
+    try {
+      CallFlowLog.step("window_closed_by_user", {"phase": phase.name});
+      if (phase != CallUiPhase.idle && phase != CallUiPhase.ended) {
+        final notifyRemote = phase == CallUiPhase.connected ||
+            phase == CallUiPhase.connecting ||
+            phase == CallUiPhase.outgoingRinging ||
+            (phase == CallUiPhase.incomingRinging && _acceptSent);
+        await _endLocal(notifyRemote: notifyRemote, awaitNativeStop: true);
+      } else {
+        await _stopNativeCallIfStillActive();
+      }
+      callScreenVisible = false;
+      await CallDesktopNativeCamera.stop();
+      await P2pEventBridge.instance.onLinuxWindowClosedByUser();
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+        await CallIncomingAlert.hideWindow();
+      }
+    } finally {
+      // Belt-and-suspenders: never leave camera/voice running after GTK close (X).
+      await _stopNativeCallIfStillActive();
+      _windowCloseInFlight = false;
     }
+  }
+
+  /// PiP tap — layout on this device only; no call signals or native RPC.
+  void toggleVideoMainLocal({
+    required bool remoteOn,
+    required bool localOn,
+  }) {
+    if (!remoteOn && !localOn) return;
+    if (remoteOn && localOn) {
+      videoMainShowsLocal = !videoMainShowsLocal;
+    } else if (localOn) {
+      videoMainShowsLocal = true;
+    } else {
+      videoMainShowsLocal = false;
+    }
+    _notify();
+  }
+
+  /// Call UI left the screen while media may still be up — stop camera and hang up.
+  Future<void> onCallScreenDismissedWhileLive() async {
+    if (_endingCall || phase == CallUiPhase.idle || phase == CallUiPhase.ended) {
+      return;
+    }
+    if (!inCallActive) return;
+    CallFlowLog.step("call_screen_dismissed_during_live", {"phase": phase.name});
+    await _endLocal(notifyRemote: true, awaitNativeStop: true);
+  }
+
+  /// Invites older than this are never shown (prevents stale poll replay after remote hangup).
+  static const int _maxLiveInviteAgeMs = 90 * 1000;
+
+  /// Window raised after close (notification tap / launcher) — not mere alt-tab focus.
+  void onAppForeground() {
+    P2pEventBridge.instance.onLinuxWindowRestoredFromClose();
+    unawaited(syncActiveCallFromNative().then((restored) {
+      if (!restored) {
+        if (inCallActive && phase == CallUiPhase.connected) {
+          _tryPushCallScreen();
+        } else if (phase == CallUiPhase.incomingRinging ||
+            phase == CallUiPhase.outgoingRinging) {
+          _ensureCallScreenVisible();
+        }
+      }
+      if (inCallActive && localVideoOn) {
+        final id = callId;
+        if (id != null) {
+          unawaited(CallDesktopNativeCamera.refreshCaptureBackend().then((_) async {
+            if (CallDesktopNativeCamera.usesFlutterCapture) {
+              await CallDesktopNativeCamera.start(callId: id);
+            }
+          }));
+        }
+      }
+    }));
     P2pEventBridge.instance.drainNow();
   }
 
-  CallWebRtc? get webrtc => _webrtc;
+  /// Reconcile in-memory UI state with `:p2p` when the native call outlived the UI process.
+  Future<bool> syncActiveCallFromNative() async {
+    try {
+      final r = await GhalBolP2p.callStatus();
+      if (r["ok"] != true || r["active"] != true) return false;
+      final id = r["call_id"]?.toString();
+      final pk = r["peer_public_key_hex"]?.toString().trim().toLowerCase();
+      final voice = r["voice_active"] == true;
+      final video = r["video_active"] == true;
+      if (id == null || id.isEmpty || pk == null || pk.length != 66) return false;
+      if (!voice && !video) return false;
 
-  bool get showRemoteVideo =>
-      remoteVideoOn || (_webrtc?.remoteVideoActive ?? false);
+      final cameraOn = r["camera_on"] == true;
+      final remoteOn = r["remote_video_on"] == true || video;
+      final sameCall = callId == id && inCallActive;
+
+      if (!sameCall) {
+        callRestoredFromNative = true;
+        callId = id;
+        CallFlowLog.bindCall(id);
+        peerPublicKeyHex = pk;
+        isOutgoing = false;
+        _acceptSent = true;
+        _setPhase(CallUiPhase.connected, "native_restore");
+        await _resolvePeerDisplayName(pk);
+        unawaited(_setWakelock(true));
+      }
+
+      _nativeVoiceActive = voice;
+      _nativeVideoActive = video;
+      localVideoOn = cameraOn;
+      remoteVideoOn = remoteOn;
+      if (!sameCall || statusMessage == null || statusMessage!.isEmpty) {
+        statusMessage = cameraOn
+            ? "Call in progress — your camera is on"
+            : "Call in progress";
+      }
+      CallFlowLog.step("call_restored_from_native", {
+        "call_id": id,
+        "voice": voice.toString(),
+        "video": video.toString(),
+        "camera_on": cameraOn.toString(),
+      });
+      if (video && cameraOn) {
+        await CallDesktopNativeCamera.refreshCaptureBackend();
+      }
+      _notify();
+      _tryPushCallScreen();
+      return true;
+    } catch (e) {
+      CallFlowLog.issue("call_restore_failed", detail: e.toString());
+      return false;
+    }
+  }
+
+  /// Platforms where the Rust-native voice engine is wired up.
+  bool get _supportsNativeVoice {
+    if (kIsWeb) return false;
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.linux:
+      case TargetPlatform.macOS:
+      case TargetPlatform.windows:
+        return true;
+      case TargetPlatform.android:
+        return kAndroidNativeVoice;
+      default:
+        return false;
+    }
+  }
+
+  /// Desktop + Android ship the native H.264 video engine (OpenH264 + Camera2/nokhwa).
+  bool get _supportsNativeVideo {
+    if (kIsWeb) return false;
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.linux:
+      case TargetPlatform.macOS:
+      case TargetPlatform.windows:
+      case TargetPlatform.android:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /// Native video is the only video path; available wherever the engine is wired.
+  bool get _willUseNativeVideo => _supportsNativeVideo;
+
+  bool get showRemoteVideo => remoteVideoOn;
 
   bool get showLocalPreview => localVideoOn;
 
+  /// Media is sealed with identity keys (native engine) from your private key ×
+  /// [peerPublicKeyHex]. Native voice/video is always E2E.
+  bool get callMediaE2eeActive => _nativeVoiceActive || _nativeVideoActive;
+
+  /// Short fingerprint of the contact public key used for call media E2EE.
+  String? get callMediaE2eePeerShort {
+    final peer = peerPublicKeyHex?.trim().toLowerCase();
+    if (peer == null || peer.isEmpty) return null;
+    return CallFlowLog.shortPk(peer);
+  }
+
+  /// One-line label for the in-call encryption chip.
+  String? get callMediaE2eeLabel {
+    if (!callMediaE2eeActive) return null;
+    final peer = callMediaE2eePeerShort;
+    if (peer == null) return "End-to-end encrypted";
+    return "End-to-end encrypted · contact key $peer";
+  }
+
   void handlePollEvent(Map<String, dynamic> ev) {
     final kind = ev["kind"]?.toString() ?? "";
+    if (kind == "call_media") {
+      _handleCallMediaPollEvent(ev);
+      return;
+    }
     if (kind == "call_signal") {
       _handleCallSignalEvent(ev);
       return;
     }
-    if (kind == "chat_ready" && isOutgoing && phase == CallUiPhase.outgoingRinging) {
+    if (kind == "chat_ready") {
       final pk = peerPublicKeyHex;
       if (pk != null && publicKeysEqual(publicKeyHexFromEvent(ev), pk)) {
-        statusMessage = "Ringing… (link ready)";
-        _notify();
+        if (inCallActive) {
+          final wasReconnecting = statusMessage == "Reconnecting…";
+          _cancelPeerDropGrace(clearStatus: true);
+          if (wasReconnecting) {
+            unawaited(_restartCallMediaAfterReconnect());
+          }
+        } else if (isOutgoing && phase == CallUiPhase.outgoingRinging) {
+          statusMessage = "Ringing… (link ready)";
+          _notify();
+        }
       }
     }
     if (kind == "dial_failed" && phase != CallUiPhase.idle) {
@@ -104,6 +351,107 @@ class CallController {
         statusMessage = shortUserP2pError(err) ?? "Call link failed";
         _notify();
       }
+    }
+    // Fallback — native `call_media` call_ended is authoritative (Phase E).
+    if (kind == "peer_disconnected" && inCallActive) {
+      final pk = streamContactKeyFromEvent(ev);
+      final peer = peerPublicKeyHex;
+      if (pk.isNotEmpty && peer != null && publicKeysEqual(pk, peer)) {
+        _schedulePeerDropGrace();
+      }
+    }
+  }
+
+  void _cancelPeerDropGrace({bool clearStatus = false}) {
+    _peerDropGraceEpoch++;
+    _peerDropGraceTimer?.cancel();
+    _peerDropGraceTimer = null;
+    if (clearStatus && statusMessage == "Reconnecting…") {
+      statusMessage = null;
+      _notify();
+    }
+  }
+
+  void _schedulePeerDropGrace() {
+    final epoch = ++_peerDropGraceEpoch;
+    _peerDropGraceTimer?.cancel();
+    statusMessage = "Reconnecting…";
+    _notify();
+    _peerDropGraceTimer = Timer(const Duration(seconds: 4), () async {
+      if (epoch != _peerDropGraceEpoch || !inCallActive) return;
+      final pk = peerPublicKeyHex;
+      if (pk != null && bridge.isStreamReady(pk)) {
+        _cancelPeerDropGrace(clearStatus: true);
+        return;
+      }
+      await _onPeerLinkLostDuringCall();
+    });
+  }
+
+  /// Native voice/video lifecycle from `:p2p` — UI reflects state only.
+  void _handleCallMediaPollEvent(Map<String, dynamic> ev) {
+    final state = ev["state"]?.toString() ?? "";
+    final pk = ev["peer_public_key_hex"]?.toString().trim().toLowerCase() ?? "";
+    final id = ev["call_id"]?.toString() ?? "";
+    final peer = peerPublicKeyHex?.trim().toLowerCase();
+    if (pk.isEmpty || peer == null || !publicKeysEqual(pk, peer)) return;
+    if (id.isNotEmpty && callId != null && id != callId) return;
+
+    switch (state) {
+      case "voice_started":
+        _nativeVoiceActive = true;
+        _notify();
+      case "voice_stopped":
+        _nativeVoiceActive = false;
+        _notify();
+      case "video_started":
+        _nativeVideoActive = true;
+        _notify();
+      case "video_stopped":
+        _nativeVideoActive = false;
+        localVideoOn = false;
+        unawaited(CallDesktopNativeCamera.stop());
+        _notify();
+      case "remote_video_on":
+        if (remoteVideoOn) break;
+        remoteVideoOn = true;
+        _notify();
+      case "remote_video_off":
+        if (!remoteVideoOn) break;
+        remoteVideoOn = false;
+        _notify();
+      case "call_ended":
+        if (!inCallActive) return;
+        if (ev["reason"]?.toString() == "peer_disconnected") {
+          _schedulePeerDropGrace();
+          return;
+        }
+        statusMessage = "Call ended";
+        _notify();
+        unawaited(_endLocal(notifyRemote: false));
+      default:
+        break;
+    }
+  }
+
+  Future<void> _onPeerLinkLostDuringCall() async {
+    if (!inCallActive) return;
+    CallFlowLog.step("peer_link_lost_during_call");
+    statusMessage = "Call ended — peer disconnected";
+    _notify();
+    await _endLocal(notifyRemote: false);
+  }
+
+  /// DM link blip during a call — reopen native voice/video on the fresh stream.
+  Future<void> _restartCallMediaAfterReconnect() async {
+    if (!inCallActive) return;
+    final hadVideo = localVideoOn || remoteVideoOn;
+    final camera = localVideoOn;
+    _nativeVoiceActive = false;
+    _nativeVideoActive = false;
+    await _startNativeVoice();
+    if (hadVideo) {
+      await _ensureNativeVideoEngine(startCamera: camera);
     }
   }
 
@@ -117,7 +465,22 @@ class CallController {
         ? Map<String, dynamic>.from(payload)
         : <String, dynamic>{};
 
-    unawaited(_onRemoteSignal(fromPk, remoteCallId, signal, pl));
+    final createdAtMs = _eventCreatedAtMs(ev);
+    unawaited(
+      _onRemoteSignal(fromPk, remoteCallId, signal, pl, createdAtMs: createdAtMs),
+    );
+  }
+
+  int? _eventCreatedAtMs(Map<String, dynamic> ev) {
+    final raw = ev["created_at_ms"];
+    if (raw is int) return raw;
+    return int.tryParse(raw?.toString() ?? "");
+  }
+
+  bool _isLiveInvite(int? createdAtMs) {
+    if (createdAtMs == null || createdAtMs <= 0) return true;
+    final age = DateTime.now().millisecondsSinceEpoch - createdAtMs;
+    return age >= 0 && age <= _maxLiveInviteAgeMs;
   }
 
   Future<void> startOutgoing({
@@ -146,7 +509,6 @@ class CallController {
     this.peerPublicKeyHex = pk;
     peerDisplayName = displayName;
     isOutgoing = true;
-    _inviteSent = false;
     CallFlowLog.step("user_start_outgoing", {
       "peer": CallFlowLog.shortPk(pk),
       "name": displayName,
@@ -161,33 +523,41 @@ class CallController {
 
   /// Runs after the call UI is shown — must not block on [Navigator.push].
   Future<void> _runOutgoingSetup(String pk, String id) async {
-    CallFlowLog.step("wait_stream_ready", {"peer": CallFlowLog.shortPk(pk)});
-    if (!await _waitForStreamReady(pk)) {
-      if (phase == CallUiPhase.outgoingRinging) {
-        CallFlowLog.issue(
-          "peer_not_reachable",
-          check: "chat must show connected; same network or coord",
-          detail: "stream_ready timeout",
-        );
-        statusMessage =
-            "Peer not reachable — wait until chat works, then try again.";
-        _notify();
-      }
-      return;
-    }
-    CallFlowLog.step("stream_ready", {"peer": CallFlowLog.shortPk(pk)});
     if (phase != CallUiPhase.outgoingRinging) return;
+    // If the DM stream dropped, nudge native reconnect (LAN/mDNS is usually <2s).
+    if (!bridge.isStreamReady(pk)) {
+      await GhalBolP2p.registerDmPeer(pk);
+      for (var i = 0; i < 8; i++) {
+        if (phase != CallUiPhase.outgoingRinging) return;
+        if (bridge.isStreamReady(pk)) break;
+        bridge.drainNow();
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+    }
+    // Native queues call_signal until the DM stream opens (same as chat outbox).
     statusMessage = "Ringing…";
     _notify();
     await _sendInvite(pk, id);
+    if (phase != CallUiPhase.outgoingRinging) return;
+    if (!bridge.isStreamReady(pk)) {
+      CallFlowLog.step("invite_queued_pending_stream", {
+        "peer": CallFlowLog.shortPk(pk),
+      });
+    }
   }
+
+  P2pEventBridge get bridge => P2pEventBridge.instance;
 
   Future<void> _sendInvite(String pk, String id) async {
     final r = await GhalBolCall.send(
       recipientPublicKeyHex: pk,
       callId: id,
       signal: "invite",
-      payload: {"media": "audio"},
+      payload: {
+        "media": "audio",
+        if (_supportsNativeVoice) "voice_engine": _nativeVoiceTag,
+        if (_supportsNativeVideo) "video_engine": _nativeVideoTag,
+      },
     );
     if (r["ok"] != true) {
       final err = r["error"]?.toString() ?? "Could not start call";
@@ -196,35 +566,33 @@ class CallController {
       _notify();
       return;
     }
-    _inviteSent = true;
     CallFlowLog.step("invite_sent", {"peer": CallFlowLog.shortPk(pk)});
     unawaited(CallRingtone.startOutgoing());
-  }
-
-  Future<bool> _waitForStreamReady(String publicKeyHex, {Duration timeout = const Duration(seconds: 45)}) async {
-    final bridge = P2pEventBridge.instance;
-    if (bridge.isStreamReady(publicKeyHex)) return true;
-    final deadline = DateTime.now().add(timeout);
-    while (DateTime.now().isBefore(deadline)) {
-      if (bridge.isStreamReady(publicKeyHex)) return true;
-      await Future<void>.delayed(const Duration(milliseconds: 400));
-      if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) return false;
-    }
-    return bridge.isStreamReady(publicKeyHex);
   }
 
   Future<void> _onRemoteSignal(
     String fromPk,
     String remoteCallId,
     String signal,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    int? createdAtMs,
+  }) async {
     CallFlowLog.step("signal_rx", {
       "signal": signal,
       "from": CallFlowLog.shortPk(fromPk),
     });
 
     if (signal == "invite") {
+      if (!_isLiveInvite(createdAtMs)) {
+        CallFlowLog.step("invite_stale_dropped", {
+          "from": CallFlowLog.shortPk(fromPk),
+          "call_id": remoteCallId,
+          "age_ms": createdAtMs == null
+              ? "?"
+              : (DateTime.now().millisecondsSinceEpoch - createdAtMs).toString(),
+        });
+        return;
+      }
       if (phase == CallUiPhase.outgoingRinging &&
           publicKeysEqual(peerPublicKeyHex, fromPk)) {
         final ours = callId;
@@ -240,11 +608,13 @@ class CallController {
           return;
         }
       }
-      if (phase != CallUiPhase.idle) {
+      if (phase != CallUiPhase.idle || inCallActive) {
         CallFlowLog.step("invite_rejected_busy", {
           "from": CallFlowLog.shortPk(fromPk),
           "phase": phase.name,
         });
+        unawaited(CallRingtone.stop());
+        unawaited(CallIncomingAlert.dismiss());
         await GhalBolCall.send(
           recipientPublicKeyHex: fromPk,
           callId: remoteCallId,
@@ -252,6 +622,22 @@ class CallController {
         );
         return;
       }
+      try {
+        final st = await GhalBolP2p.callStatus();
+        if (st["ok"] == true && st["active"] == true) {
+          CallFlowLog.step("invite_rejected_native_active", {
+            "from": CallFlowLog.shortPk(fromPk),
+          });
+          unawaited(CallRingtone.stop());
+          unawaited(CallIncomingAlert.dismiss());
+          await GhalBolCall.send(
+            recipientPublicKeyHex: fromPk,
+            callId: remoteCallId,
+            signal: "reject",
+          );
+          return;
+        }
+      } catch (_) {}
       await _beginIncomingRing(fromPk, remoteCallId);
       return;
     }
@@ -259,6 +645,9 @@ class CallController {
     if (callId == null ||
         remoteCallId != callId ||
         !publicKeysEqual(peerPublicKeyHex, fromPk)) {
+      if (signal == "hangup" || signal == "reject") {
+        await _endNativeCallIfSignalMatches(fromPk, remoteCallId);
+      }
       return;
     }
 
@@ -267,7 +656,7 @@ class CallController {
         if (isOutgoing &&
             (phase == CallUiPhase.outgoingRinging || phase == CallUiPhase.connecting)) {
           _enterConnecting();
-          await _startWebRtcAsCaller();
+          await _startNativeVoice();
         }
         break;
       case "reject":
@@ -280,70 +669,23 @@ class CallController {
         _notify();
         break;
       case "video_on":
+        if (remoteVideoOn) break;
         remoteVideoOn = true;
         CallFlowLog.step("remote_video_on");
-        await _webrtc?.refreshRemotePlayback();
-        if (localVideoOn && !(_webrtc?.localVideoEnabled ?? false)) {
-          unawaited(_webrtc?.enableVideo());
-        }
+        unawaited(_ensureNativeVideoEngine());
         _notify();
         break;
       case "video_off":
+        if (!remoteVideoOn) break;
         remoteVideoOn = false;
         CallFlowLog.step("remote_video_off");
         _notify();
-        break;
-      case "sdp_offer":
-      case "sdp_answer":
-      case "ice":
-        if (_shouldDeferWebRtcUntilAccept(signal)) {
-          _deferredWebRtcSignals.add(
-            MapEntry(signal, Map<String, dynamic>.from(payload)),
-          );
-          CallFlowLog.step("signal_deferred", {"signal": signal});
-          break;
-        }
-        await _deliverWebRtcSignal(signal, payload);
         break;
     }
   }
 
   bool get inCallActive =>
       phase == CallUiPhase.connecting || phase == CallUiPhase.connected;
-
-  bool _shouldDeferWebRtcUntilAccept(String signal) {
-    return !isOutgoing &&
-        phase == CallUiPhase.incomingRinging &&
-        !_acceptSent &&
-        (signal == "sdp_offer" || signal == "sdp_answer" || signal == "ice");
-  }
-
-  Future<void> _deliverWebRtcSignal(
-    String signal,
-    Map<String, dynamic> payload,
-  ) async {
-    if (_webrtc == null) {
-      if (!isOutgoing) {
-        await _initWebRtcCallee();
-      } else {
-        _webrtc ??= _newWebRtc();
-        await _webrtc!.initRenderers();
-      }
-    }
-    await _webrtc?.handleRemoteSignal(signal, payload);
-  }
-
-  Future<void> _flushDeferredWebRtcSignals() async {
-    if (_deferredWebRtcSignals.isEmpty) return;
-    final batch = List<MapEntry<String, Map<String, dynamic>>>.from(
-      _deferredWebRtcSignals,
-    );
-    _deferredWebRtcSignals.clear();
-    CallFlowLog.step("signal_flush", {"count": batch.length.toString()});
-    for (final entry in batch) {
-      await _deliverWebRtcSignal(entry.key, entry.value);
-    }
-  }
 
   void _enterConnecting() {
     if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) return;
@@ -368,10 +710,10 @@ class CallController {
       if (phase == CallUiPhase.connecting) {
         CallFlowLog.issue(
           "media_connect_timeout",
-          check: "grep Call/P2P wire_rx sdp_answer; Call/WebRTC ice_*",
-          detail: "no ICE connected after 20s",
+          check: "grep Call/P2P call_media substream; native call_media stats",
+          detail: "no native media connected after 20s",
         );
-        statusMessage = "No audio link — check App log for sdp_answer / ice_*";
+        statusMessage = "No audio link — check App log for call media";
         _notify();
       }
     });
@@ -380,14 +722,7 @@ class CallController {
 
   void _refreshConnectingStatus() {
     if (phase != CallUiPhase.connecting) return;
-    final w = _webrtc;
-    if (w == null || !w.remoteDescriptionSet) {
-      statusMessage = "Waiting for caller…";
-    } else if (!w.hasLocalAudio) {
-      statusMessage = "Opening microphone…";
-    } else {
-      statusMessage = "Connecting audio…";
-    }
+    statusMessage = "Connecting audio…";
   }
 
   void _markMediaConnected() {
@@ -401,6 +736,9 @@ class CallController {
     _connectFallbackTimer = null;
     _setPhase(CallUiPhase.connected, "media_ready");
     statusMessage = null;
+    if (_willUseNativeVideo) {
+      unawaited(_ensureNativeVideoEngine());
+    }
     _notify();
   }
 
@@ -448,10 +786,14 @@ class CallController {
     }
     _enterConnecting();
 
+    final acceptPayload = <String, dynamic>{};
+    if (_supportsNativeVoice) acceptPayload["voice_engine"] = _nativeVoiceTag;
+    if (_supportsNativeVideo) acceptPayload["video_engine"] = _nativeVideoTag;
     final r = await GhalBolCall.send(
       recipientPublicKeyHex: pk,
       callId: id,
       signal: "accept",
+      payload: acceptPayload,
     );
     if (r["ok"] != true) {
       final err = r["error"]?.toString() ?? "Accept failed";
@@ -461,11 +803,8 @@ class CallController {
       _notify();
       return;
     }
-    CallFlowLog.step("accept_sent");
-    await _initWebRtcCallee();
-    _refreshConnectingStatus();
-    await _flushDeferredWebRtcSignals();
-    _refreshConnectingStatus();
+    CallFlowLog.step("accept_sent", {"voice": "native"});
+    await _startNativeVoice();
   }
 
   Future<void> rejectIncoming() async {
@@ -478,172 +817,297 @@ class CallController {
   }
 
   Future<void> hangUp() async {
+    if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) {
+      await _dismissCallScreens();
+      return;
+    }
     CallFlowLog.step("user_hangup");
     await _endLocal(notifyRemote: true);
   }
 
   Future<void> toggleMute() async {
-    if (!inCallActive || _webrtc == null) return;
+    if (!inCallActive || !_nativeVoiceActive) return;
     micMuted = !micMuted;
-    await _webrtc!.setMicMuted(micMuted);
+    final id = callId;
+    if (id != null) {
+      await GhalBolP2p.callMediaSetMicMuted(callId: id, muted: micMuted);
+    }
     _notify();
   }
 
   Future<void> toggleSpeaker() async {
-    if (!inCallActive || _webrtc == null) return;
+    if (!inCallActive || !_nativeVoiceActive) return;
     if (!callSpeakerToggleSupported) return;
     speakerOn = !speakerOn;
-    await _webrtc!.setSpeakerOn(speakerOn);
+    final id = callId;
+    if (id != null) {
+      final r = await GhalBolP2p.callMediaSetSpeaker(
+        callId: id,
+        speakerOn: speakerOn,
+      );
+      if (r["ok"] != true) {
+        speakerOn = !speakerOn;
+        CallFlowLog.issue(
+          "native_speaker_toggle",
+          detail: r["error"]?.toString() ?? "set_speaker failed",
+        );
+      }
+    }
     _notify();
   }
 
   Future<void> toggleHold() async {
-    if (!inCallActive || _webrtc == null) return;
+    if (!inCallActive || !_nativeVoiceActive) return;
     onHold = !onHold;
-    await _webrtc!.setMicMuted(onHold);
-    await _webrtc!.setRemoteAudioPaused(onHold);
     micMuted = onHold;
+    final id = callId;
+    if (id != null) {
+      await GhalBolP2p.callMediaSetMicMuted(callId: id, muted: onHold);
+    }
     _notify();
   }
 
   Future<void> toggleVideo() async {
-    if (!inCallActive || _webrtc == null) return;
+    if (!inCallActive || !_nativeVoiceActive) return;
+    if (!_willUseNativeVideo) {
+      statusMessage =
+          "Video isn't available — both peers need a native video build.";
+      _notify();
+      return;
+    }
     if (localVideoOn) {
       CallFlowLog.step("user_video_off");
-      await _webrtc!.disableVideo();
+      final id = callId;
+      final pk = peerPublicKeyHex;
+      if (id != null) {
+        await GhalBolP2p.callVideoSetCameraEnabled(callId: id, enabled: false);
+      }
+      await CallDesktopNativeCamera.stop();
+      if (pk != null && id != null) {
+        await GhalBolCall.send(
+          recipientPublicKeyHex: pk,
+          callId: id,
+          signal: "video_off",
+        );
+      }
       localVideoOn = false;
+      statusMessage = null;
       _notify();
       return;
     }
     final ctx = navigatorKey.currentContext;
     if (ctx != null && !await _ensureCameraPermission(ctx)) return;
     CallFlowLog.step("user_video_on");
-    try {
-      await _webrtc!.enableVideo();
-      localVideoOn = true;
-      statusMessage = null;
-    } catch (e, st) {
-      _webrtc?.logError(e, st);
-      CallFlowLog.issue(
-        "camera_unavailable",
-        check: "camera permission; desktop webcam / PipeWire",
-        detail: e.toString(),
-      );
-      statusMessage = "Camera unavailable — check desktop camera / PipeWire";
-      localVideoOn = false;
+    await _ensureNativeVideoEngine(startCamera: true);
+    if (!_nativeVideoActive) {
+      statusMessage = "Video could not start — rebuild native lib and sync daemon";
+      _notify();
+      return;
     }
+    await CallDesktopNativeCamera.refreshCaptureBackend();
+    final id = callId;
+    final pk = peerPublicKeyHex;
+    if (CallDesktopNativeCamera.usesFlutterCapture && id != null) {
+      try {
+        await CallDesktopNativeCamera.start(callId: id);
+      } catch (_) {
+        statusMessage = "Camera unavailable — check webcam / PipeWire";
+        await GhalBolP2p.callVideoSetCameraEnabled(callId: id, enabled: false);
+        _notify();
+        return;
+      }
+    }
+    if (pk != null && id != null) {
+      await GhalBolCall.send(
+        recipientPublicKeyHex: pk,
+        callId: id,
+        signal: "video_on",
+      );
+    }
+    localVideoOn = true;
+    statusMessage = null;
     _notify();
   }
 
-  Future<void> _startWebRtcAsCaller() async {
-    if (!callWebRtcSupported) {
-      statusMessage = "WebRTC not supported on this platform";
-      _notify();
-      return;
-    }
-    _webrtc ??= _newWebRtc();
-    try {
-      await _webrtc!.initRenderers();
-      await _webrtc!.startAsCaller();
-    } catch (e, st) {
-      _webrtc?.logError(e, st);
-      CallFlowLog.issue(
-        "caller_media_failed",
-        check: "mic permission; Call/Media audio_route lines",
-      );
-      statusMessage = "Media error — check microphone permission";
-      _notify();
-    }
-  }
-
-  Future<void> _initWebRtcCallee() async {
-    if (!callWebRtcSupported) {
-      statusMessage = "WebRTC not supported on this platform";
-      _notify();
-      return;
-    }
-    _webrtc ??= _newWebRtc();
-    try {
-      await _webrtc!.warmupIncomingCallee();
-    } catch (e, st) {
-      _webrtc?.logError(e, st);
-      CallFlowLog.issue(
-        "callee_media_failed",
-        check: "mic permission; Call/Media audio_route lines",
-      );
-      statusMessage = "Media error — check microphone permission";
-      _notify();
-    }
-  }
-
-  CallWebRtc _newWebRtc() => CallWebRtc(
-        politePeer: !isOutgoing,
-        onSignal: _sendWebRtcSignal,
-        onStreamsChanged: () {
-          _refreshConnectingStatus();
-          if (_webrtc?.remoteVideoActive ?? false) {
-            remoteVideoOn = true;
-          }
-          _notify();
-        },
-        onIceConnectionState: _onIceState,
-      );
-
-  void _onIceState(RTCIceConnectionState state) {
-    if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) {
-      return;
-    }
-    final name = state.toString().split(".").last;
-    CallFlowLog.webrtc("ice_$name");
-    switch (state) {
-      case RTCIceConnectionState.RTCIceConnectionStateConnected:
-      case RTCIceConnectionState.RTCIceConnectionStateCompleted:
-        _markMediaConnected();
-        break;
-      case RTCIceConnectionState.RTCIceConnectionStateFailed:
-        if (!inCallActive) return;
-        CallFlowLog.issue(
-          "ice_failed",
-          check: "grep Call/WebRTC ice_; DM stream must be up",
-        );
-        statusMessage = "Audio connection failed";
-        break;
-      case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
-        if (!inCallActive) return;
-        CallFlowLog.issue("ice_disconnected", check: "peer left or network drop");
-        statusMessage = "Audio disconnected";
-        break;
-      default:
-        break;
-    }
-    _notify();
-  }
-
-  Future<void> _sendWebRtcSignal(String signal, Map<String, dynamic> payload) async {
+  /// Start the Rust-native voice engine for this call (no WebRTC). Both sides
+  /// open their own media substream; audio rides the existing libp2p link.
+  Future<void> _startNativeVoice() async {
     final pk = peerPublicKeyHex;
     final id = callId;
     if (pk == null || id == null) return;
-    final r = await GhalBolCall.send(
-      recipientPublicKeyHex: pk,
+    _nativeVoiceActive = true;
+    CallFlowLog.step("native_voice_start", {"peer": CallFlowLog.shortPk(pk)});
+    // Android: the engine records the mic from `:p2p`, which needs the microphone
+    // FGS type. Re-promote the service now that RECORD_AUDIO is granted (P6).
+    await _ensureAndroidMicForegroundService();
+    final r = await GhalBolP2p.callMediaStart(
       callId: id,
-      signal: signal,
-      payload: payload,
+      recipientPublicKeyHex: pk,
     );
     if (r["ok"] != true) {
+      _nativeVoiceActive = false;
+      final err = r["error"]?.toString() ?? "Could not start audio";
       CallFlowLog.issue(
-        "signal_tx_failed",
-        check: "DM stream up; grep Call/P2P wire_rx on peer",
-        detail: "$signal err=${r["error"]}",
+        "native_voice_failed",
+        check: "native lib rebuilt (ghal_bol_ffi_p2p_call_media); daemon synced",
+        detail: err,
       );
+      statusMessage = "Audio error — $err";
+      _notify();
+      return;
+    }
+    // No ICE handshake on the native path: the substream is already up, so the
+    // call is live. Audio flowing is confirmed by the native `call_media` stats log.
+    _markMediaConnected();
+  }
+
+  /// Start (or attach to) the native H.264 video engine. [startCamera] turns the
+  /// local camera on at start; otherwise receive-only until the user toggles video.
+  Future<void> _ensureNativeVideoEngine({bool startCamera = false}) async {
+    if (!_willUseNativeVideo) return;
+    final pk = peerPublicKeyHex;
+    final id = callId;
+    if (pk == null || id == null) return;
+    if (_nativeVideoActive) {
+      if (startCamera) {
+        await GhalBolP2p.callVideoSetCameraEnabled(callId: id, enabled: true);
+      }
+      return;
+    }
+    CallFlowLog.step("native_video_start", {
+      "peer": CallFlowLog.shortPk(pk),
+      "camera": startCamera.toString(),
+    });
+    if (CallDesktopNativeCamera.usesFlutterCapture) {
+      unawaited(CallDesktopNativeCamera.warmup());
+    }
+    await _ensureAndroidMicForegroundService();
+    final r = await GhalBolP2p.callVideoStart(
+      callId: id,
+      recipientPublicKeyHex: pk,
+      cameraEnabled: startCamera,
+    );
+    if (r["ok"] != true) {
+      final err = r["error"]?.toString() ?? "Could not start video";
+      CallFlowLog.issue(
+        "native_video_failed",
+        check: "native lib rebuilt (ghal_bol_ffi_p2p_call_video); daemon synced",
+        detail: err,
+      );
+      return;
+    }
+    await CallDesktopNativeCamera.refreshCaptureBackend();
+    if (startCamera && CallDesktopNativeCamera.usesFlutterCapture) {
+      try {
+        await CallDesktopNativeCamera.start(callId: id);
+      } catch (_) {}
+    }
+    _nativeVideoActive = true;
+    _notify();
+  }
+
+  /// Android only: nudge `GhalBolP2pService` to re-promote itself with the
+  /// microphone foreground-service type so the `:p2p` process may record audio.
+  /// No-op (and harmless) on other platforms. Idempotent — does not restart libp2p.
+  Future<void> _ensureAndroidMicForegroundService() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await const MethodChannel("ghal_bol/p2p_daemon")
+          .invokeMethod<String>("startP2pService");
+    } catch (e) {
+      CallFlowLog.issue("android_mic_fgs", detail: e.toString());
     }
   }
 
-  Future<void> _endLocal({required bool notifyRemote}) async {
+  /// UI state was lost (app restart) but `:p2p` may still be in the call — stop native + camera.
+  Future<void> _endNativeCallIfSignalMatches(
+    String fromPk,
+    String remoteCallId,
+  ) async {
+    try {
+      final r = await GhalBolP2p.callStatus();
+      if (r["ok"] != true || r["active"] != true) return;
+      final activeId = r["call_id"]?.toString() ?? "";
+      final activePk =
+          r["peer_public_key_hex"]?.toString().trim().toLowerCase() ?? "";
+      if (activeId.isEmpty || activeId != remoteCallId) return;
+      if (activePk.length == 66 && !publicKeysEqual(activePk, fromPk)) return;
+      CallFlowLog.step("native_call_end_orphan_signal", {
+        "call_id": activeId,
+        "from": CallFlowLog.shortPk(fromPk),
+      });
+      callId = activeId;
+      CallFlowLog.bindCall(activeId);
+      peerPublicKeyHex = activePk.isNotEmpty ? activePk : fromPk;
+      _nativeVoiceActive = r["voice_active"] == true;
+      _nativeVideoActive = r["video_active"] == true;
+      localVideoOn = r["camera_on"] == true;
+      remoteVideoOn = r["remote_video_on"] == true || _nativeVideoActive;
+      if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) {
+        _setPhase(CallUiPhase.connected, "native_orphan_hangup");
+      }
+      await _endLocal(notifyRemote: false, awaitNativeStop: true);
+      statusMessage = "Call ended";
+      _notify();
+    } catch (e) {
+      CallFlowLog.issue("native_call_end_orphan_failed", detail: e.toString());
+    }
+  }
+
+  Future<void> _stopNativeCallIfStillActive() async {
+    try {
+      final r = await GhalBolP2p.callStatus();
+      if (r["ok"] != true || r["active"] != true) return;
+      final activeId = r["call_id"]?.toString();
+      final activePk =
+          r["peer_public_key_hex"]?.toString().trim().toLowerCase();
+      if (activeId == null || activeId.isEmpty) return;
+      CallFlowLog.step("native_call_stop_window_close", {"call_id": activeId});
+      callId = activeId;
+      CallFlowLog.bindCall(activeId);
+      if (activePk != null && activePk.length == 66) {
+        peerPublicKeyHex = activePk;
+      }
+      _nativeVoiceActive = r["voice_active"] == true;
+      _nativeVideoActive = r["video_active"] == true;
+      localVideoOn = r["camera_on"] == true;
+      await GhalBolP2p.callMediaStop(callId: activeId);
+      await GhalBolP2p.callVideoStop(callId: activeId);
+      await CallDesktopNativeCamera.stop();
+      CallDesktopNativeCamera.resetCaptureBackend();
+      unawaited(CallVideoTexturePool.releaseCall(activeId));
+      if (peerPublicKeyHex != null) {
+        unawaited(
+          GhalBolCall.send(
+            recipientPublicKeyHex: peerPublicKeyHex!,
+            callId: activeId,
+            signal: "hangup",
+          ),
+        );
+      }
+    } catch (e) {
+      CallFlowLog.issue("native_call_stop_window_close_failed", detail: e.toString());
+    }
+  }
+
+  Future<void> _endLocal({
+    required bool notifyRemote,
+    bool awaitNativeStop = false,
+  }) async {
+    if (_endingCall) return;
+    if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) {
+      await _dismissCallScreens();
+      return;
+    }
+    _cancelPeerDropGrace();
+    _endingCall = true;
     final pk = peerPublicKeyHex;
     final id = callId;
-    if (notifyRemote && pk != null && id != null) {
-      await GhalBolCall.send(recipientPublicKeyHex: pk, callId: id, signal: "hangup");
-    }
+    final stopVoice = _nativeVoiceActive;
+    final stopVideo = _nativeVideoActive;
+    // Drop in-call media flags and end the UI immediately — never block on hangup RPC.
+    _nativeVoiceActive = false;
+    _nativeVideoActive = false;
     _connectFallbackTimer?.cancel();
     _connectFallbackTimer = null;
     _connectPollTimer?.cancel();
@@ -653,23 +1117,75 @@ class CallController {
     unawaited(CallRingtone.stop());
     unawaited(CallIncomingAlert.dismiss());
     unawaited(_setWakelock(false));
-    await _webrtc?.dispose();
-    _webrtc = null;
-    _deferredWebRtcSignals.clear();
-    CallDesktopMedia.clearCallSession();
-    _acceptSent = false;
-    _inviteSent = false;
     CallFlowLog.step("call_end", {"notify_remote": notifyRemote.toString()});
     _setPhase(CallUiPhase.ended, "end_local");
     _notify();
-    final nav = navigatorKey.currentState;
-    if (nav != null && nav.canPop()) {
-      nav.pop();
+    if (localVideoOn && notifyRemote && pk != null && id != null) {
+      unawaited(
+        GhalBolCall.send(
+          recipientPublicKeyHex: pk,
+          callId: id,
+          signal: "video_off",
+        ),
+      );
     }
+    if (notifyRemote && pk != null && id != null) {
+      final hangup = GhalBolCall.send(
+        recipientPublicKeyHex: pk,
+        callId: id,
+        signal: "hangup",
+      );
+      if (awaitNativeStop) {
+        await hangup;
+      } else {
+        unawaited(hangup);
+      }
+    }
+    if (stopVoice && id != null) {
+      final stop = GhalBolP2p.callMediaStop(callId: id);
+      if (awaitNativeStop) {
+        await stop;
+      } else {
+        unawaited(stop);
+      }
+    }
+    if (stopVideo && id != null) {
+      final stop = GhalBolP2p.callVideoStop(callId: id);
+      if (awaitNativeStop) {
+        await stop;
+      } else {
+        unawaited(stop);
+      }
+    }
+    await CallDesktopNativeCamera.stop();
+    CallDesktopNativeCamera.resetCaptureBackend();
+    if (id != null) {
+      unawaited(CallVideoTexturePool.releaseCall(id));
+    }
+    _acceptSent = false;
+    await _dismissCallScreens();
+    _notifyCallEnded();
     Future<void>.delayed(const Duration(milliseconds: 400), _reset);
   }
 
+  Future<void> _dismissCallScreens() async {
+    final nav = navigatorKey.currentState;
+    if (nav == null) return;
+    if (!callScreenPushLikelyOpen && !callScreenVisible) return;
+    for (var i = 0; i < 4 && nav.canPop(); i++) {
+      if (!callScreenVisible && i > 0) break;
+      nav.pop();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    _callScreenPushInFlight = false;
+  }
+
+  bool get callScreenPushLikelyOpen =>
+      callScreenVisible || _callScreenPushInFlight;
+
   void _reset() {
+    _endingCall = false;
+    callRestoredFromNative = false;
     _setPhase(CallUiPhase.idle, "reset");
     callId = null;
     CallFlowLog.bindCall(null);
@@ -678,10 +1194,14 @@ class CallController {
     isOutgoing = false;
     localVideoOn = false;
     remoteVideoOn = false;
+    videoMainShowsLocal = false;
     micMuted = false;
     speakerOn = false;
     onHold = false;
     statusMessage = null;
+    _alertShownForCallId = null;
+    _nativeVoiceActive = false;
+    _nativeVideoActive = false;
     _notify();
   }
 
@@ -697,8 +1217,9 @@ class CallController {
   }
 
   void _showCallScreen(BuildContext context) {
-    if (callScreenVisible) return;
+    if (callScreenPushLikelyOpen) return;
     final nav = CallController.navigatorKey.currentState ?? Navigator.of(context);
+    _callScreenPushInFlight = true;
     unawaited(
       nav
           .push<void>(
@@ -707,12 +1228,22 @@ class CallController {
               builder: (_) => const CallScreen(),
             ),
           )
+          .whenComplete(() {
+        _callScreenPushInFlight = false;
+      })
           .then((_) async {
         if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) return;
-        final notifyRemote = _inviteSent &&
-            (phase == CallUiPhase.connected ||
-                phase == CallUiPhase.connecting ||
-                phase == CallUiPhase.incomingRinging);
+        if (phase == CallUiPhase.connected || phase == CallUiPhase.connecting) {
+          await _endLocal(notifyRemote: true, awaitNativeStop: true);
+          return;
+        }
+        if (!inCallActive &&
+            phase != CallUiPhase.outgoingRinging &&
+            phase != CallUiPhase.incomingRinging) {
+          return;
+        }
+        final notifyRemote = phase == CallUiPhase.outgoingRinging ||
+            (phase == CallUiPhase.incomingRinging && _acceptSent);
         await _endLocal(notifyRemote: notifyRemote);
       }),
     );
@@ -728,10 +1259,12 @@ class CallController {
     _setPhase(CallUiPhase.incomingRinging, "invite");
     statusMessage = "Incoming call";
     unawaited(CallRingtone.startIncoming());
-    unawaited(_prewarmIncomingWebRtc());
     _notify();
     await _presentIncomingCall();
-    _ensureCallScreenVisible();
+    if (defaultTargetPlatform != TargetPlatform.linux ||
+        await CallIncomingAlert.isWindowVisible()) {
+      _ensureCallScreenVisible();
+    }
   }
 
   Future<void> _abandonOutgoingForGlare(String fromPk, String remoteCallId) async {
@@ -748,28 +1281,14 @@ class CallController {
         signal: "hangup",
       );
     }
-    _inviteSent = false;
-    await _webrtc?.dispose();
-    _webrtc = null;
     await _beginIncomingRing(fromPk, remoteCallId);
-  }
-
-  Future<void> _prewarmIncomingWebRtc() async {
-    if (!callWebRtcSupported) return;
-    try {
-      _webrtc ??= _newWebRtc();
-      await _webrtc!.warmupIncomingCallee();
-    } catch (e, st) {
-      CallFlowLog.issue("callee_prewarm_failed", detail: e.toString());
-      _webrtc?.logError(e, st);
-    }
   }
 
   Future<void> _resolvePeerDisplayName(String pk) async {
     if (peerDisplayName != null && peerDisplayName!.trim().isNotEmpty) return;
     try {
       final c = await ContactStore.findByPublicKey(
-        appNamespace: kGhalBolAndroidLibraryNamespace,
+        appNamespace: kGhalBolAppNamespace,
         publicKeyHex: pk,
       );
       peerDisplayName = ghalBolIdName(
@@ -781,18 +1300,33 @@ class CallController {
   }
 
   Future<void> _presentIncomingCall() async {
+    if (phase != CallUiPhase.incomingRinging) return;
     final pk = peerPublicKeyHex;
-    if (pk == null) return;
+    final id = callId;
+    if (pk == null || id == null) return;
+    if (_alertShownForCallId == id) return;
+
     await _resolvePeerDisplayName(pk);
     final name = peerDisplayName ?? "Contact";
-    unawaited(CallIncomingAlert.presentWindow());
-    unawaited(
-      CallIncomingAlert.show(displayName: name, publicKeyHex: pk),
-    );
+    _alertShownForCallId = id;
+
+    if (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      await CallIncomingAlert.show(displayName: name, publicKeyHex: pk);
+      return;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.linux) {
+      // Visible: in-app ring only. Hidden: `incoming_call_notify` in ghal_bol_daemon.
+      return;
+    }
+
+    // Other desktops: raise window (no separate OS notification layer yet).
+    await CallIncomingAlert.presentWindow();
   }
 
   void _ensureCallScreenVisible() {
-    if (callScreenVisible) return;
+    if (callScreenPushLikelyOpen) return;
     if (phase != CallUiPhase.incomingRinging &&
         phase != CallUiPhase.outgoingRinging) {
       return;
@@ -800,7 +1334,7 @@ class CallController {
     _presentUiTimer?.cancel();
     _tryPushCallScreen();
     _presentUiTimer = Timer.periodic(const Duration(milliseconds: 350), (_) {
-      if (callScreenVisible ||
+      if (callScreenPushLikelyOpen ||
           (phase != CallUiPhase.incomingRinging &&
               phase != CallUiPhase.outgoingRinging)) {
         _presentUiTimer?.cancel();
@@ -812,15 +1346,42 @@ class CallController {
   }
 
   void _tryPushCallScreen() {
-    if (callScreenVisible) return;
+    if (callScreenPushLikelyOpen) return;
     final nav = navigatorKey.currentState;
     if (nav == null) return;
-    nav.push<void>(
-      MaterialPageRoute<void>(
-        fullscreenDialog: true,
-        builder: (_) => const CallScreen(),
-      ),
-    );
+    final showForActiveCall =
+        inCallActive && phase == CallUiPhase.connected;
+    if (phase != CallUiPhase.incomingRinging &&
+        phase != CallUiPhase.outgoingRinging &&
+        !showForActiveCall) {
+      return;
+    }
+    _callScreenPushInFlight = true;
+    nav
+        .push<void>(
+          MaterialPageRoute<void>(
+            fullscreenDialog: true,
+            builder: (_) => const CallScreen(),
+          ),
+        )
+        .whenComplete(() {
+      _callScreenPushInFlight = false;
+    })
+        .then((_) async {
+      if (phase == CallUiPhase.idle || phase == CallUiPhase.ended) return;
+      if (phase == CallUiPhase.connected || phase == CallUiPhase.connecting) {
+        await _endLocal(notifyRemote: true, awaitNativeStop: true);
+        return;
+      }
+      if (!inCallActive &&
+          phase != CallUiPhase.outgoingRinging &&
+          phase != CallUiPhase.incomingRinging) {
+        return;
+      }
+      final notifyRemote = phase == CallUiPhase.outgoingRinging ||
+          (phase == CallUiPhase.incomingRinging && _acceptSent);
+      await _endLocal(notifyRemote: notifyRemote);
+    });
   }
 
   static String _newCallId() {

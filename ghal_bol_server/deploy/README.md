@@ -1,80 +1,173 @@
 # Deploy `ghal_bol_server`
 
-Run the coordination API locally; expose it with **nginx + TLS** (production) or **ngrok** (dev).
+Two setups — do not mix them up:
 
-```text
-Production:  Phones  →  https://coord.ghalbol.com  →  nginx :443  →  127.0.0.1:8765  →  ghal_bol_server
-Dev/staging: Phones  →  https://….ngrok-free.dev  →  ngrok  →  http://127.0.0.1:8765  →  ghal_bol_server
-```
+| | **Local dev** | **Production** (`coord.ghalbol.com` on Google Cloud) |
+|---|---------------|--------------------------------------------------------|
+| **Purpose** | Test on laptop + phone (different networks) | Live app / Play builds |
+| **Coord HTTP** | ngrok `http` → `127.0.0.1:8765` | nginx `:443` → `127.0.0.1:8765` |
+| **WAN relay** | **bore** tunnels local `:4002` (auto) | Public DNS + TCP `:4002` on the VM — **no bore** |
+| **Start** | `./ghal_bol_server/deploy/run_server.sh` | `sudo systemctl start ghal-bol-server` |
+| **App config** | `GHAL_BOL_COORD_URLS=https://….ngrok-free.dev` | `GHAL_BOL_COORD_URLS=https://coord.ghalbol.com` |
 
-| What | Default |
-|------|---------|
-| SQLite | `~/.local/share/com.ghalbol/ghalbol_server/coord.db` |
-| Listen | `0.0.0.0:8765` via `run_server.sh` (phones on Wi‑Fi) |
-| Binary | `target/release/ghal_bol_server` |
+> **Relay is raw libp2p TCP** — not carried by nginx `:443` or ngrok `http`. Clients dial it for WAN chat, voice, and video. HTTP API (register / lookup / `GET /v1/relay`) is separate.
 
-## 1. Build + run
+Production has used `coord.ghalbol.com` since the first GCP deploy. Bore was added only for **local** dev; the cloud VM was **not** updated for bore and does not need it.
 
-From workspace root:
+---
+
+## Local dev (laptop)
+
+WAN needs **two** tunnels:
+
+1. **Coord HTTP** — ngrok `http` (register, heartbeat, peer lookup, `/v1/relay` JSON).
+2. **Relay TCP** — **bore** (libp2p Circuit Relay v2 on port `4002`). ngrok free `tcp` breaks libp2p Noise; bore is the supported dev path.
+
+### One-time
 
 ```bash
-cargo build --release -p ghal_bol_server
-./ghal_bol_server/deploy/run_server.sh
-curl -s http://127.0.0.1:8765/health
+cargo install bore-cli
 ```
 
-## 2. Production VM (nginx + TLS)
+### Every session
 
-On the host running `ghal_bol_server`:
+**Terminal 1 — server** (builds if needed, starts bore, advertises relay at `/v1/relay`):
 
-1. Build and install the binary (listen on loopback only):
+```bash
+./ghal_bol_server/deploy/run_server.sh
+```
 
-   ```bash
-   cargo build --release -p ghal_bol_server
-   GHAL_BOL_SERVER_LISTEN=127.0.0.1:8765 ./target/release/ghal_bol_server
-   ```
-
-2. Copy and edit [nginx-coord.conf](nginx-coord.conf) — set `server_name` and certificate paths (certbot).
-
-3. Enable systemd (user or system unit) so the server survives reboot — see section 3 below, or install a system unit pointing at your binary path.
-
-4. Smoke from your laptop:
-
-   ```bash
-   COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
-   ```
-
-## 3. ngrok (dev)
+**Terminal 2 — coord HTTP**:
 
 ```bash
 ngrok http 8765
+# or: ngrok start coord_http
 ```
 
-Set the app coord URL to the ngrok `https://…` URL (`GHAL_BOL_COORD_URL` in `ghal_bol_ui/env/.env.development` or `--dart-define`).
+**App** — set `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` to the ngrok **https** URL (not `coord.ghalbol.com` unless you intentionally use prod relay).
 
-Smoke against the tunnel:
+### Verify
 
 ```bash
-COORD_URL=https://YOUR_SUBDOMAIN.ngrok-free.dev ./ghal_bol_server/deploy/smoke_coord.sh
+curl -s http://127.0.0.1:8765/health
+curl -s http://127.0.0.1:8765/v1/relay | jq
+# expect: "enabled": true, "addrs": ["/ip4/…/tcp/<bore-port>", …]
 ```
 
-## 4. Production VM systemd
+If `addrs` is empty: install `bore-cli`, check `run_server.sh` output, or you set `GHAL_BOL_RELAY_BORE=0` / `GHAL_BOL_RELAY_PUBLIC_*` which skips bore.
 
-For `coord.ghalbol.com` (binary on the VM, nginx on :443):
+### Local opt-outs
+
+| Env | Effect |
+|-----|--------|
+| `GHAL_BOL_RELAY_BORE=0` | Do not start bore (WAN across NAT will not work unless you set relay addrs another way) |
+| `GHAL_BOL_RELAY_PUBLIC_ADDRS=…` | Use your own public multiaddrs; bore skipped |
+| `GHAL_BOL_RELAY_ENABLE=0` | Disable relay node entirely |
+
+**Alternative:** point dev `GHAL_BOL_COORD_URLS` at `https://coord.ghalbol.com` and use the **production** relay (no local server). Handy for app-only work; not for server changes.
+
+**Paid ngrok only:** `run_server_ngrok.sh` sets relay addrs from an ngrok **tcp** tunnel — not viable on ngrok free.
+
+---
+
+## Production (Google Cloud — `coord.ghalbol.com`)
+
+Existing VM layout (unchanged by local bore work):
+
+```text
+Phones  →  https://coord.ghalbol.com     →  nginx :443  →  127.0.0.1:8765  →  ghal_bol_server (HTTP)
+Phones  →  coord.ghalbol.com:4002 (TCP)  ─────────────────────────────────→  ghal_bol_server (relay)
+```
+
+- **No bore** on the VM.
+- systemd unit sets `GHAL_BOL_RELAY_PUBLIC_HOST=coord.ghalbol.com` → `/v1/relay` advertises `/dns4/coord.ghalbol.com/tcp/4002`.
+- Relay identity: `~/.local/share/com.ghalbol/ghalbol_server/relay_ed25519.key` (stable PeerId across restarts).
+
+### Deploy / update binary on the VM
+
+On the VM (or build elsewhere and copy the binary):
+
+```bash
+cargo build --release -p ghal_bol_server
+# install binary where ExecStart points (see ghal-bol-server.service)
+sudo systemctl daemon-reload
+sudo systemctl restart ghal-bol-server
+```
+
+First-time or unit changes:
 
 ```bash
 sudo cp ghal_bol_server/deploy/ghal-bol-server.service /etc/systemd/system/
 # Edit User, ExecStart, GHAL_BOL_SERVER_DB if paths differ
 sudo systemctl daemon-reload
 sudo systemctl enable --now ghal-bol-server
-curl -s https://coord.ghalbol.com/health
 ```
 
-Reboot test: `sudo reboot` → confirm `/health` after reconnect.
+Unit env (production — no bore):
 
-See [../../docs/PRODUCTION_RELEASE.md](../../docs/PRODUCTION_RELEASE.md) P1.2.
+| Variable | Production value |
+|----------|------------------|
+| `GHAL_BOL_SERVER_LISTEN` | `127.0.0.1:8765` (nginx fronts HTTPS) |
+| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` |
+| `GHAL_BOL_RELAY_PUBLIC_HOST` | `coord.ghalbol.com` |
 
-## 5. Optional: user systemd (dev laptop)
+### Firewall (GCP)
+
+Relay TCP must be open (often done once at first deploy):
+
+```bash
+gcloud compute firewall-rules create ghalbol-relay \
+  --direction=INGRESS --action=ALLOW --rules=tcp:4002 \
+  --network=default --source-ranges=0.0.0.0/0
+```
+
+Also allow `4002/tcp` in the VM OS firewall (`ufw`, etc.) if enabled.
+
+### nginx + TLS
+
+Copy and edit [nginx-coord.conf](nginx-coord.conf) — `server_name coord.ghalbol.com`, certbot paths. HTTP API only; relay stays on `:4002` direct.
+
+### Verify production (from laptop)
+
+```bash
+curl -s https://coord.ghalbol.com/health
+curl -s https://coord.ghalbol.com/v1/relay | jq
+# {"enabled":true,"peer_id":"12D3…","addrs":["/dns4/coord.ghalbol.com/tcp/4002"]}
+
+nc -vz coord.ghalbol.com 4002
+
+COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
+```
+
+On the VM:
+
+```bash
+sudo journalctl -u ghal-bol-server -f | grep -E 'relay v2|relay listening|listening'
+```
+
+### When to redeploy production
+
+Redeploy the **binary** when server code changes (API, relay limits, SQLite, etc.). You do **not** need bore, `run_server.sh`, or ngrok on the VM. Local bore changes do not require a production deploy unless you also changed `ghal_bol_server` Rust code you want live.
+
+---
+
+## Reference
+
+| What | Default |
+|------|---------|
+| SQLite | `~/.local/share/com.ghalbol/ghalbol_server/coord.db` |
+| Local listen (`run_server.sh`) | `0.0.0.0:8765` |
+| Relay listen | `0.0.0.0:4002` |
+| Binary (local build) | `build/ghal_bol_server-target/release/ghal_bol_server` |
+
+| Env (server) | Local dev | Production |
+|--------------|-----------|------------|
+| `GHAL_BOL_RELAY_ENABLE` | `1` | `1` |
+| `GHAL_BOL_RELAY_PUBLIC_HOST` | unset (bore sets addrs) | `coord.ghalbol.com` |
+| `GHAL_BOL_RELAY_PUBLIC_ADDRS` | set by bore | unset |
+| bore | auto via `run_server.sh` | not used |
+
+## Optional: user systemd (dev laptop)
 
 ```bash
 WS="$(pwd)"
@@ -85,11 +178,14 @@ systemctl --user daemon-reload
 systemctl --user enable --now ghal-bol-server
 ```
 
+For daily dev, `run_server.sh` + ngrok is simpler (includes bore).
+
 ## Smoke (no Flutter)
 
 ```bash
 ./ghal_bol_server/deploy/smoke_coord.sh
 COORD_URL=http://127.0.0.1:8765 ./ghal_bol_server/deploy/smoke_coord.sh
+COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 ```
 
 See [../../docs/COORDINATION_SERVER.md](../../docs/COORDINATION_SERVER.md).

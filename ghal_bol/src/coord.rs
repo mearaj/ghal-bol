@@ -125,6 +125,32 @@ impl CoordHttpClient {
         serde_json::from_value(v["peer"].clone()).map_err(|e| e.to_string())
     }
 
+    /// Fetch the coordinator's co-located Circuit Relay v2 coordinates.
+    /// Returns `(peer_id, base_addrs)`; empty when the server runs no relay.
+    pub fn get_relay(&self) -> Result<(String, Vec<String>), String> {
+        let url = format!("{}/v1/relay", self.base);
+        let resp = self.http.get(&url).send().map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("relay HTTP {}", resp.status()));
+        }
+        let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+        if v.get("enabled") == Some(&serde_json::Value::Bool(false)) {
+            return Ok((String::new(), Vec::new()));
+        }
+        let peer_id = v["peer_id"].as_str().unwrap_or_default().trim().to_string();
+        let addrs = v["addrs"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok((peer_id, addrs))
+    }
+
     pub fn lookup(&self, public_key_hex: &str) -> Result<CoordPeerRecord, String> {
         let pk = public_key_hex.trim().to_ascii_lowercase();
         let url = format!("{}/v1/peers/{}", self.base, pk);

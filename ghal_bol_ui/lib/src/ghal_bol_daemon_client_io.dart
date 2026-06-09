@@ -230,11 +230,17 @@ class GhalBolDaemonClient {
     return last ?? {"ok": false, "error": "daemon unlock failed"};
   }
 
+  static bool _loggedDaemonAlreadyUp = false;
+
   static Future<void> _ensureDaemonRunningOnce() async {
     if (await probeDaemon()) {
-      SessionFlowLog.daemon("ensure_running", {"state": "already_up"});
+      if (!_loggedDaemonAlreadyUp) {
+        _loggedDaemonAlreadyUp = true;
+        SessionFlowLog.daemon("ensure_running", {"state": "already_up"});
+      }
       return;
     }
+    _loggedDaemonAlreadyUp = false;
 
     SessionFlowLog.daemon("ensure_running", {"state": "starting"});
     if (Platform.isAndroid) {
@@ -416,6 +422,8 @@ class GhalBolDaemonClient {
   }
 
   static DateTime? _lastPollRpcFailureLogAt;
+  static DateTime? _lastVideoFrameRpcLogAt;
+  static DateTime? _lastCameraPushRpcLogAt;
 
   void _logRpcResult(
     String method,
@@ -436,6 +444,22 @@ class GhalBolDaemonClient {
         }
       }
       return;
+    }
+    if (method == "p2p_call_video_frame" ||
+        method == "p2p_call_video_push_camera_frame") {
+      final now = DateTime.now();
+      final last = method == "p2p_call_video_push_camera_frame"
+          ? _lastCameraPushRpcLogAt
+          : _lastVideoFrameRpcLogAt;
+      // Throttle noisy success logs only — failures always log.
+      if (ok && last != null && now.difference(last).inMilliseconds < 1000) {
+        return;
+      }
+      if (method == "p2p_call_video_push_camera_frame") {
+        _lastCameraPushRpcLogAt = now;
+      } else {
+        _lastVideoFrameRpcLogAt = now;
+      }
     }
     AppLog.instance.rpc(
       "Daemon",

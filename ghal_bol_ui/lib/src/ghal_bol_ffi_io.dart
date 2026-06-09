@@ -83,6 +83,13 @@ abstract final class GhalBolFfi {
   static _NativeTwoStringsToPtrDart? _p2pRegisterDmPeer;
   static _NativeThreeStringsToPtrDart? _p2pSendAckDm;
   static _NativePtrToPtrDart? _p2pCallSignal;
+  static _NativePtrToPtrDart? _p2pCallMedia;
+  static _NativePtrToPtrDart? _p2pCallStatus;
+  static _NativePtrToPtrDart? _p2pCallVideo;
+  static _NativePtrToPtrDart? _p2pCallVideoFrame;
+  static _NativePtrToPtrDart? _p2pCallVideoTexture;
+  static _NativePtrToPtrDart? _p2pCallVideoPushCameraFrame;
+  static _NativePtrToPtrDart? _callMediaKeyHex;
   static _NativePtrToPtrDart? _p2pSetForegroundPeer;
   static Pointer<Utf8> Function(int)? _p2pSetAppAckReadEnabled;
   static _NativePollPtrDart? _p2pPollEvent;
@@ -171,6 +178,55 @@ abstract final class GhalBolFfi {
           _p2pCallSignal = null;
         }
         try {
+          _p2pCallMedia = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_call_media",
+          );
+        } catch (_) {
+          _p2pCallMedia = null;
+        }
+        try {
+          _p2pCallStatus = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_call_status",
+          );
+        } catch (_) {
+          _p2pCallStatus = null;
+        }
+        try {
+          _p2pCallVideo = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_call_video",
+          );
+        } catch (_) {
+          _p2pCallVideo = null;
+        }
+        try {
+          _p2pCallVideoFrame = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_call_video_frame",
+          );
+        } catch (_) {
+          _p2pCallVideoFrame = null;
+        }
+        try {
+          _p2pCallVideoTexture = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_call_video_texture",
+          );
+        } catch (_) {
+          _p2pCallVideoTexture = null;
+        }
+        try {
+          _p2pCallVideoPushCameraFrame = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_call_video_push_camera_frame",
+          );
+        } catch (_) {
+          _p2pCallVideoPushCameraFrame = null;
+        }
+        try {
+          _callMediaKeyHex = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_call_media_key_hex",
+          );
+        } catch (_) {
+          _callMediaKeyHex = null;
+        }
+        try {
           _p2pSetForegroundPeer = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
             "ghal_bol_ffi_p2p_set_foreground_peer",
           );
@@ -196,6 +252,10 @@ abstract final class GhalBolFfi {
         _p2pRegisterDmPeer = null;
         _p2pSendAckDm = null;
         _p2pCallSignal = null;
+        _p2pCallMedia = null;
+        _p2pCallVideo = null;
+        _p2pCallVideoFrame = null;
+        _p2pCallVideoTexture = null;
         _p2pSetForegroundPeer = null;
         _p2pSetAppAckReadEnabled = null;
         _p2pPollEvent = null;
@@ -303,7 +363,11 @@ abstract final class GhalBolFfi {
       _loadError = null;
       AppLog.instance.i("FFI", "libghal_bol loaded (${Platform.operatingSystem})");
     } catch (e, st) {
-      AppLog.instance.e("FFI", "libghal_bol load failed", e, st);
+      // `flutter test` on CI has no bundled `libghal_bol.so` — expected, not an error.
+      final inFlutterTest = Platform.environment["FLUTTER_TEST"] == "true";
+      if (!inFlutterTest) {
+        AppLog.instance.e("FFI", "libghal_bol load failed", e, st);
+      }
       _lib = null;
       _stringFree = null;
       _p2pStart = null;
@@ -313,6 +377,10 @@ abstract final class GhalBolFfi {
       _p2pRegisterDmPeer = null;
       _p2pSendAckDm = null;
       _p2pCallSignal = null;
+      _p2pCallMedia = null;
+      _p2pCallVideo = null;
+      _p2pCallVideoFrame = null;
+      _p2pCallVideoTexture = null;
       _p2pPollEvent = null;
       _p2pIsRunning = null;
       _verifyGhalBolConnectInvite = null;
@@ -331,8 +399,10 @@ abstract final class GhalBolFfi {
       _resetFirstTimeIdentity = null;
       _clearServiceSymbols();
       assert(() {
-        // ignore: avoid_print
-        print("GhalBolFfi failed to load: $e\n$st");
+        if (!inFlutterTest) {
+          // ignore: avoid_print
+          print("GhalBolFfi failed to load: $e\n$st");
+        }
         return true;
       }());
       var err = "$e";
@@ -758,8 +828,8 @@ abstract final class GhalBolFfi {
   static bool get isCoordAvailable =>
       _loaded && _coordSetBaseUrl != null && _coordLookupPeer != null;
 
-  static Map<String, dynamic> coordSetBaseUrl({
-    required String baseUrl,
+  static Map<String, dynamic> coordSetBaseUrls({
+    required List<String> baseUrls,
     bool insecureTls = false,
   }) {
     _ensure();
@@ -769,7 +839,7 @@ abstract final class GhalBolFfi {
       return {"ok": false, "error": "coord not available in this build"};
     }
     final j = jsonEncode({
-      "base_url": baseUrl,
+      "base_urls": baseUrls,
       "insecure_tls": insecureTls,
     });
     final p = j.toNativeUtf8();
@@ -1032,6 +1102,127 @@ abstract final class GhalBolFfi {
     final p = j.toNativeUtf8();
     try {
       return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pCallMedia(Map<String, dynamic> config) {
+    _ensure();
+    final send = _p2pCallMedia;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": false, "error": "native call media not available in this build"};
+    }
+    final j = jsonEncode(config);
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pCallStatus(Map<String, dynamic> config) {
+    _ensure();
+    final send = _p2pCallStatus;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": true, "active": false};
+    }
+    final j = jsonEncode(config);
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pCallVideo(Map<String, dynamic> config) {
+    _ensure();
+    final send = _p2pCallVideo;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": false, "error": "native call video not available in this build"};
+    }
+    final j = jsonEncode(config);
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pCallVideoFrame(Map<String, dynamic> config) {
+    _ensure();
+    final send = _p2pCallVideoFrame;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": false, "error": "native call video frame pull not available in this build"};
+    }
+    final j = jsonEncode(config);
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pCallVideoTexture(Map<String, dynamic> config) {
+    _ensure();
+    final send = _p2pCallVideoTexture;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": false, "error": "native call video texture not available in this build"};
+    }
+    final j = jsonEncode(config);
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pCallVideoPushCameraFrame(Map<String, dynamic> config) {
+    _ensure();
+    final send = _p2pCallVideoPushCameraFrame;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": false, "error": "native call video push frame not available in this build"};
+    }
+    final j = jsonEncode(config);
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> callMediaKeyHex({
+    required String callId,
+    required String peerPublicKeyHex,
+  }) {
+    _ensure();
+    final derive = _callMediaKeyHex;
+    final free = _stringFree;
+    if (derive == null || free == null) {
+      return {
+        "ok": false,
+        "error": "call media key not available (rebuild native lib)",
+      };
+    }
+    final j = jsonEncode({
+      "call_id": callId,
+      "peer_public_key_hex": peerPublicKeyHex,
+    });
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(derive(p), free);
     } finally {
       calloc.free(p);
     }

@@ -20,8 +20,9 @@ use crate::call_state;
 use crate::msg_v1::MsgKind;
 use crate::p2p::{
     native_log, queue_read_ack_catchup,
-    run_gossip_chat_node_with_std_io, sync_foreground_peer_now,
-    DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, DEFAULT_GOSSIP_TOPIC,
+    run_gossip_chat_node_with_std_io, set_drop_pending_call_invite_hook,
+    sync_foreground_peer_now, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd,
+    DEFAULT_GOSSIP_TOPIC,
 };
 
 struct P2pHolder {
@@ -57,6 +58,27 @@ fn clear_pending_p2p_events() {
     if let Ok(mut q) = pending_p2p_events_mx().lock() {
         q.clear();
     }
+}
+
+/// Drop buffered `invite` poll events so a late UI poll cannot ring after remote hangup.
+pub fn drop_pending_call_invite(call_id: &str) {
+    let cid = call_id.trim();
+    if cid.is_empty() {
+        return;
+    }
+    let Ok(mut q) = pending_p2p_events_mx().lock() else {
+        return;
+    };
+    q.retain(|ev| {
+        !matches!(
+            ev,
+            GossipChatEvent::CallSignal {
+                call_id: c,
+                signal,
+                ..
+            } if c == cid && signal == "invite"
+        )
+    });
 }
 
 fn drain_holder_events_into_pending(h: &P2pHolder) {
@@ -215,6 +237,22 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             "created_at_ms": created_at_ms,
             "payload": payload,
         }),
+        GossipChatEvent::CallMedia {
+            call_id,
+            peer_public_key_hex,
+            state,
+            camera_on,
+            remote_video_on,
+            reason,
+        } => serde_json::json!({
+            "kind": "call_media",
+            "call_id": call_id,
+            "peer_public_key_hex": peer_public_key_hex,
+            "state": state,
+            "camera_on": camera_on,
+            "remote_video_on": remote_video_on,
+            "reason": reason,
+        }),
         GossipChatEvent::NodeReady => serde_json::json!({ "kind": "node_ready" }),
         GossipChatEvent::NodeStopped { error } => serde_json::json!({
             "kind": "node_stopped",
@@ -253,19 +291,14 @@ fn parse_dm_peers(v: &Value) -> Vec<DmPeer> {
 }
 
 fn apply_coord_from_config(config: &Value) {
-    let Some(url) = config
-        .get("coord_base_url")
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return;
-    };
     let tls = config
         .get("coord_insecure_tls")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    crate::coord_runtime::set_coord_base_url(url, tls);
+    let urls = crate::coord_runtime::coord_urls_from_json_value(config);
+    if !urls.is_empty() {
+        crate::coord_runtime::set_coord_base_urls(&urls, tls);
+    }
 }
 
 pub fn p2p_dial_bootstrap_peers(addrs: &[DmDialAddr]) -> Value {
@@ -296,6 +329,7 @@ fn dial_bootstrap_on_running_node(addrs: Vec<DmDialAddr>) {
 
 /// Start libp2p DM node in a background thread.
 pub fn p2p_start(config: &Value) -> Value {
+    set_drop_pending_call_invite_hook(drop_pending_call_invite);
     apply_coord_from_config(config);
     let topic = config
         .get("topic")
@@ -351,6 +385,7 @@ pub fn p2p_start(config: &Value) -> Value {
         );
         if let Some(ns) = gossip_cfg.app_namespace.as_deref() {
             set_p2p_handler_context(ns);
+            crate::incoming_call_notify::set_desktop_app_id(ns);
         }
         for dm in &gossip_cfg.dm_peers {
             let pk = dm
@@ -364,6 +399,9 @@ pub fn p2p_start(config: &Value) -> Value {
             let _ = p2p_register_dm_peer(pk);
         }
         dial_bootstrap_on_running_node(bootstrap_for_hot_dial);
+        if crate::coord_runtime::coord_is_configured() {
+            crate::p2p::notify_relay_refresh();
+        }
         return json_ok(serde_json::json!({ "ok": true, "already_running": true }));
     }
 
@@ -394,6 +432,7 @@ pub fn p2p_start(config: &Value) -> Value {
 
     if let Some(ns) = gossip_cfg.app_namespace.as_deref() {
         set_p2p_handler_context(ns);
+        crate::incoming_call_notify::set_desktop_app_id(ns);
     }
 
     clear_pending_p2p_events();
@@ -575,6 +614,391 @@ pub fn p2p_call_signal(config: &Value) -> Value {
         "signal_id": signal_id,
         "queued": true,
     }))
+}
+
+/// Native voice **media** control plane. One entrypoint, `action`-dispatched, so
+/// the FFI/RPC surface stays small. See `docs/GHAL_BOL_CALL_NATIVE_V2.md`.
+///
+/// - `{"action":"start","call_id":..,"recipient_public_key_hex":..}` — open media.
+/// - `{"action":"stop","call_id":..}` — tear down media.
+/// - `{"action":"set_mic_muted","call_id":..,"muted":bool}` — mute/unmute mic.
+/// - `{"action":"set_speaker","call_id":..,"speaker_on":bool}` — Android speakerphone.
+pub fn p2p_call_media(config: &Value) -> Value {
+    let action = config
+        .get("action")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let call_id = match config
+        .get("call_id")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => return json_err("call_id required"),
+    };
+
+    let cmd = match action {
+        "start" => {
+            let recipient = match config
+                .get("recipient_public_key_hex")
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| s.len() == 66)
+            {
+                Some(s) => s.to_string(),
+                None => return json_err("recipient_public_key_hex required (66 hex)"),
+            };
+            OutboundCmd::CallMediaStart {
+                call_id: call_id.clone(),
+                peer_public_key_hex: recipient,
+            }
+        }
+        "stop" => OutboundCmd::CallMediaStop {
+            call_id: call_id.clone(),
+        },
+        "set_mic_muted" => {
+            let muted = config
+                .get("muted")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            OutboundCmd::CallMediaSetMicMuted {
+                call_id: call_id.clone(),
+                muted,
+            }
+        }
+        "set_speaker" => {
+            let speaker_on = config
+                .get("speaker_on")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            OutboundCmd::CallMediaSetSpeaker {
+                call_id: call_id.clone(),
+                speaker_on,
+            }
+        }
+        other => return json_err(format!("unknown call media action: {other}")),
+    };
+
+    let out_tx = {
+        let g = match p2p_mx().lock() {
+            Ok(g) => g,
+            Err(_) => return json_err("p2p mutex poisoned"),
+        };
+        let Some(h) = g.as_ref() else {
+            return json_err("p2p not running");
+        };
+        h.out_tx.clone()
+    };
+    if out_tx.send(cmd).is_err() {
+        return json_err("p2p send failed (node stopped?)");
+    }
+    json_ok(serde_json::json!({
+        "ok": true,
+        "call_id": call_id,
+        "action": action,
+        "queued": true,
+    }))
+}
+
+/// Read-only transcript merge — same process as `:p2p` poll writes (avoids UI FFI file races).
+pub fn p2p_transcript_load_merged(config: &Value) -> Value {
+    let ns = config
+        .get("app_namespace")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(ns) = ns else {
+        return json_err("app_namespace required");
+    };
+    let keys: Vec<String> = config
+        .get("conversation_keys")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return json_err("conversation_keys required");
+    }
+    let from_peer = config
+        .get("match_inbound_from_peer_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match crate::dm_transcript_store::load_merged(ns, &keys, from_peer) {
+        Ok(lines) => json_ok(serde_json::json!({
+            "ok": true,
+            "lines": lines.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
+        })),
+        Err(e) => json_err(format!("{e}")),
+    }
+}
+
+/// Snapshot of the active native voice/video session (for UI re-sync after process restart).
+pub fn p2p_call_status(_config: &Value) -> Value {
+    match crate::p2p::call_active::snapshot() {
+        Some(s) => json_ok(serde_json::json!({
+            "ok": true,
+            "active": true,
+            "call_id": s.call_id,
+            "peer_public_key_hex": s.peer_public_key_hex,
+            "voice_active": s.voice_active,
+            "video_active": s.video_active,
+            "camera_on": s.camera_on,
+            "remote_video_on": s.remote_video_on,
+        })),
+        None => json_ok(serde_json::json!({
+            "ok": true,
+            "active": false,
+        })),
+    }
+}
+
+/// Native **video** control plane (parallel to [`p2p_call_media`]).
+///
+/// - `{"action":"start","call_id":..,"recipient_public_key_hex":..}` — open video.
+/// - `{"action":"stop","call_id":..}` — tear down video.
+/// - `{"action":"set_camera_enabled","call_id":..,"enabled":bool}` — camera on/off.
+pub fn p2p_call_video(config: &Value) -> Value {
+    let action = config
+        .get("action")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let call_id = match config
+        .get("call_id")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => return json_err("call_id required"),
+    };
+
+    let cmd = match action {
+        "start" => {
+            let recipient = match config
+                .get("recipient_public_key_hex")
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| s.len() == 66)
+            {
+                Some(s) => s.to_string(),
+                None => return json_err("recipient_public_key_hex required (66 hex)"),
+            };
+            let camera_enabled = config
+                .get("camera_enabled")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            OutboundCmd::CallVideoStart {
+                call_id: call_id.clone(),
+                peer_public_key_hex: recipient,
+                camera_enabled,
+            }
+        }
+        "stop" => OutboundCmd::CallVideoStop {
+            call_id: call_id.clone(),
+        },
+        "set_camera_enabled" => {
+            let enabled = config.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+            OutboundCmd::CallVideoSetCameraEnabled {
+                call_id: call_id.clone(),
+                enabled,
+            }
+        }
+        "capture_backend" => {
+            return json_ok(serde_json::json!({
+                "ok": true,
+                "backend": crate::call_video::desktop_capture_backend(),
+            }));
+        }
+        other => return json_err(format!("unknown call video action: {other}")),
+    };
+
+    let out_tx = {
+        let g = match p2p_mx().lock() {
+            Ok(g) => g,
+            Err(_) => return json_err("p2p mutex poisoned"),
+        };
+        let Some(h) = g.as_ref() else {
+            return json_err("p2p not running");
+        };
+        h.out_tx.clone()
+    };
+    if out_tx.send(cmd).is_err() {
+        return json_err("p2p send failed (node stopped?)");
+    }
+    json_ok(serde_json::json!({
+        "ok": true,
+        "call_id": call_id,
+        "action": action,
+        "queued": true,
+    }))
+}
+
+/// Push one I420 camera frame from the Flutter UI into the desktop video engine.
+/// Used on Linux/macOS/Windows where the daemon cannot open the webcam directly.
+pub fn p2p_call_video_push_camera_frame(config: &Value) -> Value {
+    use base64::Engine as _;
+    let call_id = config
+        .get("call_id")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let width = config.get("width").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let height = config.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let b64 = match config.get("data_base64").and_then(|x| x.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return json_err("data_base64 required"),
+    };
+    let data = match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(d) => d,
+        Err(e) => return json_err(format!("data_base64 decode: {e}")),
+    };
+    // `format`: `i420` (default, already planar) or packed `rgba`/`bgra` straight from
+    // the camera — packed is converted to I420 natively (no Dart per-pixel loop).
+    let format = config
+        .get("format")
+        .and_then(|x| x.as_str())
+        .unwrap_or("i420")
+        .to_ascii_lowercase();
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        let frame = match format.as_str() {
+            "rgba" | "bgra" => {
+                let stride = config
+                    .get("stride")
+                    .and_then(|x| x.as_u64())
+                    .map(|s| s as usize)
+                    .unwrap_or((width as usize) * 4);
+                match crate::call_video::packed_to_i420(
+                    &data,
+                    stride,
+                    width,
+                    height,
+                    format == "rgba",
+                ) {
+                    Some(f) => f,
+                    None => return json_err("packed frame: bad dimensions/stride"),
+                }
+            }
+            _ => crate::call_video::RawVideoFrame { width, height, data },
+        };
+        crate::call_video::push_camera_frame(frame);
+        return json_ok(serde_json::json!({
+            "ok": true,
+            "call_id": call_id,
+            "accepted": true,
+        }));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (call_id, width, height, data, format);
+        json_err("push camera frame only supported on desktop")
+    }
+}
+
+/// Texture registration: shm path + display dimensions for GPU render (no pixels in JSON).
+pub fn p2p_call_video_texture(config: &Value) -> Value {
+    let call_id = match config
+        .get("call_id")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => return json_err("call_id required"),
+    };
+    let track = config
+        .get("track")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .unwrap_or("remote");
+    match crate::call_video::texture_shm_info(&call_id, track) {
+        Some(info) => json_ok(serde_json::json!({
+            "ok": true,
+            "ready": true,
+            "shm_path": info.path,
+            "width": info.width,
+            "height": info.height,
+            "generation": info.generation,
+        })),
+        None => json_ok(serde_json::json!({
+            "ok": true,
+            "ready": false,
+        })),
+    }
+}
+
+/// Render pull: latest decoded frame for `call_id` if newer than `since_generation`.
+/// Returns the frame as base64 I420 plus its dimensions and monotonic `generation`
+/// (the UI passes the last `generation` back so duplicates are skipped). I420 keeps
+/// the payload ~⅔ the size of RGB and matches the camera/codec format.
+pub fn p2p_call_video_frame(config: &Value) -> Value {
+    use base64::Engine as _;
+    let call_id = match config
+        .get("call_id")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => return json_err("call_id required"),
+    };
+    let since = config
+        .get("since_generation")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let track = config
+        .get("track")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .unwrap_or("remote");
+    // `rgba` (default): native I420→RGBA conversion so the Flutter UI isolate does no
+    // per-pixel work — it feeds the bytes straight to `decodeImageFromPixels`. `i420`
+    // keeps the raw planar payload for callers that convert themselves.
+    let want_rgba = config
+        .get("format")
+        .and_then(|x| x.as_str())
+        .map(|f| f.eq_ignore_ascii_case("rgba"))
+        .unwrap_or(true);
+    // Downscale display pulls (default 360 px longest edge) — full-res encode/send
+    // is unchanged; this only shrinks the UI poll payload (~4× less base64/decode).
+    let max_edge = config
+        .get("max_edge")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(360) as u32;
+    let pulled = match track {
+        "local" => crate::call_video::latest_local_preview(&call_id, since),
+        _ => crate::call_video::latest_decoded_frame(&call_id, since),
+    };
+    match pulled {
+        Some((frame, generation)) => {
+            let (format, bytes, out_w, out_h) = if want_rgba {
+                let (rgba, w, h) = crate::call_video::i420_to_rgba_max_edge(&frame, max_edge);
+                ("rgba", rgba, w, h)
+            } else {
+                ("i420", frame.data.clone(), frame.width, frame.height)
+            };
+            json_ok(serde_json::json!({
+                "ok": true,
+                "has_frame": true,
+                "width": out_w,
+                "height": out_h,
+                "generation": generation,
+                "format": format,
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }))
+        }
+        None => json_ok(serde_json::json!({ "ok": true, "has_frame": false })),
+    }
 }
 
 fn enqueue_send_text_dm(

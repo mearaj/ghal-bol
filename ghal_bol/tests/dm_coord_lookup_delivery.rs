@@ -3,6 +3,8 @@
 //! Mirrors production: host registers TCP endpoint on `ghal_bol_server`, guest has
 //! `public_key_hex` from invite and dials after coord lookup / upkeep.
 
+mod common;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
@@ -23,11 +25,8 @@ fn coord_base_url() -> String {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("coord rt");
+        common::spawn_p2p_thread("coord-test-server", move || {
+            let rt = common::p2p_tokio_runtime();
             rt.block_on(async {
                 let listener = TcpListener::bind("127.0.0.1:0")
                     .await
@@ -104,6 +103,7 @@ fn pick_loopback_or_lan_dm(addrs: &[DmDialAddr]) -> DmDialAddr {
 
 #[test]
 fn guest_dials_host_via_coord_lookup() {
+    common::init_integration_env();
     let url = coord_base_url();
     coord_runtime::set_coord_base_url(&url, false);
 
@@ -118,14 +118,11 @@ fn guest_dials_host_via_coord_lookup() {
     let (ev_host_tx, ev_host_rx) = mpsc::channel();
 
     let stop_host_t = Arc::clone(&stop_host);
-    let host_thread = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _ = rt.block_on(run_gossip_chat_node_with_std_io(
+    let host_thread = common::spawn_p2p_thread("coord-test-host", move || {
+        common::block_on_local(run_gossip_chat_node_with_std_io(
             cfg_host, id_host, out_host_rx, ev_host_tx, stop_host_t,
-        ));
+        ))
+        .expect("host gossip node");
     });
 
     let dm_listen = wait_tcp_listen(&ev_host_rx);
@@ -148,14 +145,11 @@ fn guest_dials_host_via_coord_lookup() {
     let (ev_guest_tx, ev_guest_rx) = mpsc::channel();
 
     let stop_guest_t = Arc::clone(&stop_guest);
-    let guest_thread = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _ = rt.block_on(run_gossip_chat_node_with_std_io(
+    let guest_thread = common::spawn_p2p_thread("coord-test-guest", move || {
+        common::block_on_local(run_gossip_chat_node_with_std_io(
             cfg_guest, id_guest, out_guest_rx, ev_guest_tx, stop_guest_t,
-        ));
+        ))
+        .expect("guest gossip node");
     });
 
     // No DialBootstrapPeers — guest must reach host via coord lookup / upkeep.

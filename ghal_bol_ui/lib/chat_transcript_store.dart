@@ -1,5 +1,6 @@
 import "app_log.dart";
 import "ghal_bol_ffi.dart";
+import "ghal_bol_p2p.dart";
 
 /// One persisted chat row (user-visible messages only).
 class StoredChatLine {
@@ -63,11 +64,16 @@ class StoredChatLine {
   }
 }
 
-/// Local transcript — persisted in **`ghal_bol`** ([`GhalBolFfi.transcriptLoadMerged`]).
+/// Local transcript — persisted in **`ghal_bol`**.
+///
+/// **Daemon platforms (Android/Linux):** `:p2p` / `ghal_bol_daemon` owns all
+/// transcript **writes** on poll; UI loads read-only via [GhalBolP2p.transcriptLoadMerged].
 class ChatTranscriptStore {
   ChatTranscriptStore._();
 
   static final Map<String, List<StoredChatLine>> _threadMemoryCache = {};
+
+  static bool get _backgroundOwnsWrites => GhalBolP2p.usesDaemon;
 
   static String _threadCacheKey(String appNamespace, Set<String> conversationKeys) {
     final keys = conversationKeys.map((e) => e.trim()).where((e) => e.isNotEmpty).toList()..sort();
@@ -140,11 +146,11 @@ class ChatTranscriptStore {
     /// When set, also cache under this single key (for hub warm + peek by canonical conv).
     String? cacheUnderConversationKey,
   }) async {
-    final raw = GhalBolFfi.transcriptLoadMerged(appNamespace, {
-      "conversation_keys": conversationKeys.toList(),
-      if (matchInboundFromPeerId != null && matchInboundFromPeerId.trim().isNotEmpty)
-        "match_inbound_from_peer_id": matchInboundFromPeerId.trim(),
-    });
+    final raw = await GhalBolP2p.transcriptLoadMerged(
+      appNamespace: appNamespace,
+      conversationKeys: conversationKeys.toList(),
+      matchInboundFromPeerId: matchInboundFromPeerId,
+    );
     final lines = raw.map(StoredChatLine.fromJson).whereType<StoredChatLine>().toList();
     final cached = List<StoredChatLine>.from(lines);
     _threadMemoryCache[_threadCacheKey(appNamespace, conversationKeys)] = cached;
@@ -166,6 +172,7 @@ class ChatTranscriptStore {
     required String conversationKey,
     required StoredChatLine line,
   }) async {
+    if (_backgroundOwnsWrites) return;
     final ok = GhalBolFfi.transcriptAppendIfNew(
       appNamespace,
       conversationKey,
@@ -182,6 +189,7 @@ class ChatTranscriptStore {
     required String conversationKey,
     required String messageId,
   }) async {
+    if (_backgroundOwnsWrites) return;
     GhalBolFfi.transcriptPatchInboundReadAckSent(
       appNamespace,
       conversationKey: conversationKey,
@@ -195,6 +203,7 @@ class ChatTranscriptStore {
     required String messageId,
     required String delivery,
   }) async {
+    if (_backgroundOwnsWrites) return;
     GhalBolFfi.transcriptPatchOutgoingDelivery(
       appNamespace,
       conversationKey: conversationKey,
@@ -210,6 +219,7 @@ class ChatTranscriptStore {
     required String conversationKey,
     required List<StoredChatLine> lines,
   }) async {
+    if (_backgroundOwnsWrites) return;
     GhalBolFfi.transcriptSave(
       appNamespace,
       conversationKey,

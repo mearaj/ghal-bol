@@ -74,7 +74,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
 
   GhalBolIdentityResult get _s => widget.session;
 
-  String get _appNs => _s.appNamespace ?? kGhalBolAndroidLibraryNamespace;
+  String get _appNs => _s.appNamespace ?? kGhalBolAppNamespace;
 
   /// Custom display name from [IdentityAliasStore]; `null` means use signing-key hex default.
   String? _storedCustomAlias;
@@ -187,6 +187,26 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   /// Native `ack_read` only while the chat **room** is visible (DESIGN.md).
   int _foregroundSyncEpoch = 0;
 
+  /// Read acks only while the chat room is on screen — not after GTK close (X).
+  /// Minimize and unfocus do not set [linuxWindowClosedByUser].
+  bool _nativeForegroundRoomOpen(BuildContext context) {
+    if (!_isHubChatRoomOpen(context)) return false;
+    if (!kIsWeb &&
+        Platform.isLinux &&
+        P2pEventBridge.instance.linuxWindowClosedByUser) {
+      return false;
+    }
+    return true;
+  }
+
+  void _onLinuxWindowCloseChanged(bool closedByUser) {
+    if (closedByUser) {
+      _foregroundSyncEpoch++;
+      _layoutSyncedRoomOpen = false;
+    }
+    _syncNativeForegroundPeer();
+  }
+
   /// Last [_isHubChatRoomOpen] we pushed to native — detect resize list-only without a tap.
   bool? _layoutSyncedRoomOpen;
 
@@ -230,7 +250,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   Future<void> _syncNativeForegroundPeerAsync() async {
     final epoch = ++_foregroundSyncEpoch;
     final split = ghalBolUseChatShellSplit(context);
-    final roomOpen = _isHubChatRoomOpen(context);
+    final roomOpen = _nativeForegroundRoomOpen(context);
     if (!roomOpen) {
       AppLog.instance.flow(
         "Hub",
@@ -276,9 +296,15 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     }).toList();
   }
 
+  late final VoidCallback _onCallEndedReloadChat;
+
   @override
   void initState() {
     super.initState();
+    _onCallEndedReloadChat = () {
+      _attachedHubChat?.onHubReattached(reloadTranscript: true);
+    };
+    CallController.addCallEndedListener(_onCallEndedReloadChat);
     _hubHistory.reset(_hubHistorySnapshot());
     WidgetsBinding.instance.addObserver(this);
     _loadStoredAlias();
@@ -286,6 +312,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     ContactStore.changeCount.addListener(_onContactsUiChanged);
     ContactStore.previewChangeCount.addListener(_onPreviewPollChanged);
     P2pEventBridge.instance.addListener(_routeHubP2pEvent);
+    P2pEventBridge.instance.addLinuxWindowCloseListener(_onLinuxWindowCloseChanged);
     InviteDeepLink.onInviteUri = (uri) {
       if (mounted) unawaited(_joinFromUri(uri));
     };
@@ -299,7 +326,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
         AppLog.instance.flow("Hub", "lifecycle resumed");
         unawaited(GhalBolBackground.onAppResumed());
         _syncNativeForegroundPeer();
-        _attachedHubChat?.onHubReattached(reloadTranscript: false);
+        _attachedHubChat?.onHubReattached(reloadTranscript: true);
         P2pEventBridge.instance.drainNow();
       case AppLifecycleState.inactive:
         // Android: IME, notification shade, brief focus loss — not "app paused".
@@ -313,6 +340,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   Future<void> _onAppBackgrounded(AppLifecycleState state) async {
+    // Linux desktop: paused/hidden can mean minimize — not "left chat". Close (X) is separate.
+    if (!kIsWeb && Platform.isLinux) {
+      AppLog.instance.flow(
+        "Hub",
+        "lifecycle $state on Linux — read acks unchanged (close X clears room)",
+      );
+      return;
+    }
     AppLog.instance.flow(
       "Hub",
       "lifecycle $state → drain read acks, clear foreground, then disable ack_read",
@@ -324,10 +359,12 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
 
   @override
   void dispose() {
+    CallController.removeCallEndedListener(_onCallEndedReloadChat);
     if (InviteDeepLink.onInviteUri != null) {
       InviteDeepLink.onInviteUri = null;
     }
     P2pEventBridge.instance.removeListener(_routeHubP2pEvent);
+    P2pEventBridge.instance.removeLinuxWindowCloseListener(_onLinuxWindowCloseChanged);
     P2pEventBridge.instance.setForegroundConversation(null);
     unawaited(() async {
       await P2pEventBridge.instance.awaitForegroundApplied();
@@ -735,7 +772,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     final pk = _s.publicKeyHex?.trim();
     if (!isValidPublicKeyHex(pk)) return;
     final v = await IdentityAliasStore.read(
-      appNamespace: _s.appNamespace ?? kGhalBolAndroidLibraryNamespace,
+      appNamespace: _s.appNamespace ?? kGhalBolAppNamespace,
       publicKeyHex: pk!,
     );
     if (!mounted) return;
@@ -1207,7 +1244,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                           isValidPublicKeyHex(_s.publicKeyHex)) ...[
                         const Divider(height: 28),
                         IdentityAliasForm(
-                          appNamespace: _s.appNamespace ?? kGhalBolAndroidLibraryNamespace,
+                          appNamespace: _s.appNamespace ?? kGhalBolAppNamespace,
                           publicKeyHex: _s.publicKeyHex!.trim(),
                           onSaved: (v) {
                             setState(() {
@@ -1265,7 +1302,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) => BlockedPeersScreen(
-                    appNamespace: _s.appNamespace ?? kGhalBolAndroidLibraryNamespace,
+                    appNamespace: _s.appNamespace ?? kGhalBolAppNamespace,
                   ),
                 ),
               );
@@ -1353,7 +1390,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     passCtrl.dispose();
     if (!context.mounted || go != true || pw.isEmpty) return;
     await GhalBolBackground.stopForLogout();
-    final ns = _s.appNamespace ?? kGhalBolAndroidLibraryNamespace;
+    final ns = _s.appNamespace ?? kGhalBolAppNamespace;
     final r = GhalBolFfi.deleteKeystoreVerified(appNamespace: ns, password: pw);
     if (!context.mounted) return;
     if (!r.ok) {

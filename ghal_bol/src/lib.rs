@@ -7,7 +7,7 @@
 //! only to unlock local storage; it is never shared.
 //!
 //! On **native** targets (non-Wasm), [`p2p`] runs a **libp2p DM node** with **coord lookup**,
-//! **Kademlia/mDNS**, and optional **bootstrap dial addrs** from connect invites
+//! **mDNS/LAN**, and optional **bootstrap dial addrs** from connect invites
 //! ([`p2p::GossipChatConfig::bootstrap_peers`]). The keystore compiles on Wasm without the P2P stack.
 //!
 //! **Android:** the Flutter app and [`ANDROID_LIBRARY_NAMESPACE`] both use **`com.ghalbol`**
@@ -31,7 +31,15 @@ mod msg_v1;
 #[cfg(not(target_arch = "wasm32"))]
 mod call_sig_v1;
 #[cfg(not(target_arch = "wasm32"))]
+mod call_media_key;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_ffi;
+#[cfg(not(target_arch = "wasm32"))]
 mod call_state;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_media;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_video;
 mod peer_id_util;
 mod public_key_util;
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,8 +58,12 @@ mod p2p_ffi;
 mod session_runtime;
 #[cfg(all(not(target_arch = "wasm32"), unix))]
 pub mod daemon;
+#[cfg(not(target_arch = "wasm32"))]
+mod incoming_call_notify;
 #[cfg(target_os = "android")]
 mod android_daemon;
+#[cfg(target_os = "android")]
+mod android_jni_cache;
 #[cfg(not(target_arch = "wasm32"))]
 mod transcript_ffi;
 mod storage;

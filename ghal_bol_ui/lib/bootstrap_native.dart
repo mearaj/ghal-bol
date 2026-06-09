@@ -224,7 +224,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
   void _refreshKeystoreOnDisk() {
     if (!mounted) return;
     setState(() {
-      _keystoreOnDisk = GhalBolFfi.keystoreExists(appNamespace: kGhalBolAndroidLibraryNamespace);
+      _keystoreOnDisk = GhalBolFfi.keystoreExists(appNamespace: kGhalBolAppNamespace);
     });
   }
 
@@ -275,7 +275,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
   static const String _firstTimeRetryHint = IdentitySetupCopy.firstTimeRetryHint;
 
   Future<void> _recoverFirstTimeSetupFailed() async {
-    GhalBolFfi.resetFirstTimeIdentity(appNamespace: kGhalBolAndroidLibraryNamespace);
+    GhalBolFfi.resetFirstTimeIdentity(appNamespace: kGhalBolAppNamespace);
     GhalBolFfi.lock();
     if (GhalBolDaemon.isSupported) {
       await GhalBolDaemon.stopSession();
@@ -365,7 +365,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
       _busy = true;
       _last = null;
     });
-    const ns = kGhalBolAndroidLibraryNamespace;
+    final ns = kGhalBolAppNamespace;
     SessionFlowLog.step("ui_lock_resume");
     try {
       final ffi = GhalBolFfi.createOrUnlockIdentity(appNamespace: ns, password: password);
@@ -427,7 +427,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
       }
       return;
     }
-    const ns = kGhalBolAndroidLibraryNamespace;
+    final ns = kGhalBolAppNamespace;
     final firstTimeSetup = _keystoreOnDisk == false;
     SessionFlowLog.step("login_submit", {
       "first_time": firstTimeSetup.toString(),
@@ -558,7 +558,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
     try {
       await GhalBolBackground.stopForLogout();
       final r = GhalBolFfi.deleteKeystoreVerified(
-        appNamespace: kGhalBolAndroidLibraryNamespace,
+        appNamespace: kGhalBolAppNamespace,
         password: pw,
       );
       if (!context.mounted) return;
@@ -784,7 +784,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            "Unlocked (${r.appNamespace ?? kGhalBolAndroidLibraryNamespace})",
+            "Unlocked (${r.appNamespace ?? kGhalBolAppNamespace})",
             style: Theme.of(context).textTheme.titleSmall,
           ),
           const SizedBox(height: 8),
@@ -798,7 +798,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
               onPressed: () async {
                 final pk = r.publicKeyHex?.trim() ?? "";
                 if (!isValidPublicKeyHex(pk)) return;
-                final ns = r.appNamespace ?? kGhalBolAndroidLibraryNamespace;
+                final ns = r.appNamespace ?? kGhalBolAppNamespace;
                 final alias = await IdentityAliasStore.read(
                   appNamespace: ns,
                   publicKeyHex: pk,
@@ -819,7 +819,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
             ),
             const SizedBox(height: 20),
             IdentityAliasForm(
-              appNamespace: r.appNamespace ?? kGhalBolAndroidLibraryNamespace,
+              appNamespace: r.appNamespace ?? kGhalBolAppNamespace,
               publicKeyHex: r.publicKeyHex!.trim(),
               onSaved: (_) {},
             ),
@@ -836,7 +836,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
                             builder: (_) => ChatScreen(
                               libp2pPeerId: r.publicKeyHex!.trim(),
                               publicKeyHex: r.publicKeyHex,
-                              appNamespace: r.appNamespace ?? kGhalBolAndroidLibraryNamespace,
+                              appNamespace: r.appNamespace ?? kGhalBolAppNamespace,
                             ),
                           ),
                         );

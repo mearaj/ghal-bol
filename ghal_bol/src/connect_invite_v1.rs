@@ -151,6 +151,7 @@ pub fn connect_invite_https_uri_from_wire_map(v: &Value) -> Result<String, Strin
 }
 
 /// `ghalbol://connect/<public_key_hex>`
+#[cfg(test)]
 pub fn connect_invite_app_uri_from_wire_map(v: &Value) -> Result<String, String> {
     verify_ghal_bol_connect_invite_value(v)?;
     let pk = v

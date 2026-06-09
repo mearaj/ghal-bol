@@ -1,14 +1,15 @@
 # Environment (`env/.env.*`)
 
-Coordination server URL and related flags for **all platforms**, including **Android APKs**.
+Coordination server URLs and related flags for **all platforms**, including **Android APKs**.
 
-## Resolution order (coord URL)
+## Resolution order (coord URLs)
 
-1. **`--dart-define=GHAL_BOL_COORD_URL=…`** (compile-time; also `--dart-define-from-file=env/.env.development`)
-2. **OS environment** — `export GHAL_BOL_COORD_URL=…` before `flutter run` (desktop; adb shell rarely used)
-3. **Bundled `env/.env.*`** — copied into the app at build time (`pubspec.yaml` lists `env/`)
-4. **Platform default** — desktop: `http://127.0.0.1:8765`; Android emulator: `http://10.0.2.2:8765` when `GHAL_BOL_ANDROID_EMULATOR=true`
-5. **Native preferences** — last URL applied via `GhalBolCoord.setBaseUrl` (Rust only)
+1. **Bundled `env/.env.*`** — `env/.env.development` (debug) or `env/.env.production` (release), copied at build time (`pubspec.yaml` lists `env/`)
+2. **`--dart-define=GHAL_BOL_COORD_URLS=…`** (compile-time override)
+3. **OS environment** — `export GHAL_BOL_COORD_URLS=…` before `flutter run`
+4. **Native preferences** — last URLs applied via `GhalBolCoord.setBaseUrls` (Rust only)
+
+There are **no** hardcoded coord URLs in the app — configure `env/.env.development` and `env/.env.production`.
 
 Invite QR / links are **public key only** (optional `?alias=`). No `?coord=` in URIs.
 
@@ -17,7 +18,7 @@ Invite QR / links are **public key only** (optional `?alias=`). No `?coord=` in 
 ```bash
 cd ghal_bol_ui
 cp env/.env.development.example env/.env.development
-# edit GHAL_BOL_COORD_URL (LAN IP for a physical phone, not 127.0.0.1)
+# edit GHAL_BOL_COORD_URLS (LAN IP for a physical phone, not 127.0.0.1)
 flutter pub get
 flutter run -d android
 ```
@@ -27,7 +28,7 @@ flutter run -d android
 Alternative without editing the file:
 
 ```bash
-flutter run --dart-define=GHAL_BOL_COORD_URL=http://192.168.1.10:8765
+flutter run --dart-define=GHAL_BOL_COORD_URLS='["http://192.168.1.10:8765"]'
 ```
 
 Or:
@@ -69,8 +70,14 @@ COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 
 | Key | Purpose |
 |-----|---------|
-| `GHAL_BOL_COORD_URL` | Coordination server base URL (no trailing slash) |
+| `GHAL_BOL_COORD_URLS` | Coord server list — JSON array or comma-separated (no trailing slashes) |
 | `GHAL_BOL_COORD_INSECURE_TLS` | `true` / `1` for self-signed HTTPS |
-| `GHAL_BOL_ANDROID_EMULATOR` | `true` when using Android emulator (default coord `10.0.2.2:8765`) |
 
-Storage paths are owned by **`ghal_bol`** (Rust). Flutter does not choose data directories.
+Storage paths are owned by **`ghal_bol`** (Rust). Flutter passes `app_namespace` only:
+
+| Platform / build | Namespace | Linux path (example) |
+|------------------|-----------|----------------------|
+| `flutter run -d linux` | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` |
+| `flutter run --release -d linux` / `flutter build linux` | `com.ghalbol` | `~/.local/share/com.ghalbol/` |
+| Android `flutter run` | `com.ghalbol.debug` | `app_flutter/com.ghalbol.debug/` (keystore); `app_flutter/ghal_bol/` (stores) |
+| Android release / Play | `com.ghalbol` | `app_flutter/` (keystore); `app_flutter/ghal_bol/` (stores) |

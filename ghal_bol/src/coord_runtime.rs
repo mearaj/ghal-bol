@@ -11,11 +11,15 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 const MAX_COORD_ENDPOINTS: usize = 16;
+/// Max coord/relay servers in the configured list (STORY.md).
+const MAX_COORD_SERVERS: usize = 8;
 
 struct CoordGlobals {
-    base_url: Mutex<Option<String>>,
+    base_urls: Mutex<Vec<String>>,
     insecure_tls: AtomicBool,
     endpoints: Mutex<Vec<CoordEndpoint>>,
+    /// Coord servers where the last register+heartbeat cycle succeeded.
+    registered_on: Mutex<HashSet<String>>,
     /// Bootstrap relay we last reserved on (prefer matching circuit for coord register).
     preferred_relay_peer_id: Mutex<Option<String>>,
     heartbeat_stop: AtomicBool,
@@ -62,13 +66,91 @@ fn coord_reg_http_lock() -> &'static Mutex<()> {
 
 fn coord_globals() -> &'static CoordGlobals {
     COORD.get_or_init(|| CoordGlobals {
-        base_url: Mutex::new(None),
+        base_urls: Mutex::new(Vec::new()),
         insecure_tls: AtomicBool::new(false),
         endpoints: Mutex::new(Vec::new()),
+        registered_on: Mutex::new(HashSet::new()),
         preferred_relay_peer_id: Mutex::new(None),
         heartbeat_stop: AtomicBool::new(false),
         heartbeat_join: Mutex::new(None),
     })
+}
+
+fn normalize_coord_url(url: &str) -> Option<String> {
+    let t = url.trim().trim_end_matches('/');
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+fn is_coord_url_delimiter(c: char) -> bool {
+    c == ',' || c == ';' || c.is_ascii_whitespace()
+}
+
+/// Parse one URL, JSON array, or a delimiter-separated list.
+///
+/// Delimiters may be comma, semicolon, tab, space, newline, or any mix.
+pub fn parse_coord_urls(input: &str) -> Vec<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.starts_with('[') {
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
+            return arr
+                .into_iter()
+                .filter_map(|s| normalize_coord_url(&s))
+                .take(MAX_COORD_SERVERS)
+                .collect();
+        }
+    }
+    trimmed
+        .split(is_coord_url_delimiter)
+        .filter_map(|s| normalize_coord_url(s))
+        .take(MAX_COORD_SERVERS)
+        .collect()
+}
+
+/// Parse coord URL(s) from daemon RPC / FFI / `p2p_start` JSON (new + legacy keys).
+pub fn coord_urls_from_json_value(v: &serde_json::Value) -> Vec<String> {
+    for key in ["base_urls", "coord_base_urls"] {
+        if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
+            let urls: Vec<String> = arr
+                .iter()
+                .filter_map(|x| x.as_str())
+                .filter_map(|s| normalize_coord_url(s))
+                .take(MAX_COORD_SERVERS)
+                .collect();
+            if !urls.is_empty() {
+                return urls;
+            }
+        }
+    }
+    for key in ["base_url", "coord_base_url", "url"] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+            if let Some(u) = normalize_coord_url(s) {
+                return vec![u];
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Configured coord/relay server base URLs (register on all; lookup in order).
+pub fn coord_base_urls() -> Vec<String> {
+    coord_globals()
+        .base_urls
+        .lock()
+        .ok()
+        .map(|v| v.clone())
+        .unwrap_or_default()
+}
+
+fn client_for(base: &str) -> Result<CoordHttpClient, String> {
+    CoordHttpClient::new(base, coord_globals().insecure_tls.load(Ordering::Relaxed))
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn has_coord_endpoints() -> bool {
@@ -100,8 +182,8 @@ pub fn coord_note_relay_reservation(relay_peer_id: libp2p::PeerId) {
     }
 }
 
-/// Coord URL is set — try server lookup first; DHT/mDNS still used when coord misses.
-/// Public DHT bootnodes are always dialed so relay circuits can be reserved and registered.
+/// Coord URL is set — WAN peer discovery requires coord/relay lookup (STORY.md).
+/// mDNS/LAN still works without coord; coord HTTP retries continue in the background.
 pub fn wan_discovery_via_coord_only() -> bool {
     coord_is_configured()
 }
@@ -111,9 +193,9 @@ pub fn schedule_register_presence_force() {
     spawn_register_presence_inner(true);
 }
 
-/// Drop coord registration state after a network handover (stale relay/LAN endpoints).
+/// Clear stale endpoint snapshot after a network handover. Keeps coord presence + heartbeats
+/// alive until a new relay circuit re-registers (STORY.md — seamless LAN↔WAN, no 404 gap).
 pub fn coord_invalidate_presence_on_network_change() {
-    suspend_coord_presence_waiting_endpoints();
     if let Ok(mut v) = coord_globals().endpoints.lock() {
         v.clear();
     }
@@ -122,14 +204,147 @@ pub fn coord_invalidate_presence_on_network_change() {
     }
 }
 
-/// True when a coordination server URL was configured (LAN/WAN endpoint lookup).
+/// Fetch the coordinator's co-located relay (`GET /v1/relay`): `(peer_id, base_addrs)`.
+///
+/// Blocking HTTP — call from a blocking context (e.g. `spawn_blocking`). A few quick retries
+/// absorb a transient coord hiccup at startup.
+///
+/// Resilience (the relay must survive coord-HTTP outages, not just the happy path):
+/// - **Found** → persist to `cache_path` and return it.
+/// - **Reachable but relay not advertised yet** → keep using disk cache if present (STORY.md).
+/// - **Unreachable** (HTTP error / flaky mobile data at launch) → fall back to the last cached
+///   relay if present, so we still prefer our reliable relay over the flaky public bootstraps.
+///
+/// The relay PeerId is stable, so a previously cached entry stays valid across restarts and
+/// network handovers (wifi ⇄ mobile ⇄ LAN). Returns `None` when no coord URL is set.
+fn fetch_ghalbol_relay_for_base(
+    base: &str,
+    cache_path: Option<&std::path::Path>,
+) -> Option<(String, Vec<String>)> {
+    let client = client_for(base).ok()?;
+    for attempt in 0..3 {
+        match client.get_relay() {
+            Ok((peer, addrs)) if !peer.is_empty() && !addrs.is_empty() => {
+                write_relay_cache(cache_path, &peer, &addrs);
+                return Some((peer, addrs));
+            }
+            Ok(_) => {
+                if let Some(cached) = read_relay_cache(cache_path) {
+                    crate::flow_log::warn(
+                        "relay",
+                        format!(
+                            "coord {base} GET /v1/relay empty — using cached relay {} ({} addr(s))",
+                            &cached.0[..cached.0.len().min(12)],
+                            cached.1.len()
+                        ),
+                    );
+                    return Some(cached);
+                }
+                crate::flow_log::warn(
+                    "relay",
+                    format!(
+                        "coord {base} GET /v1/relay: no relay advertised yet (WAN blocked until server exposes relay)"
+                    ),
+                );
+                return None;
+            }
+            Err(_) if attempt + 1 < 3 => std::thread::sleep(Duration::from_millis(500)),
+            Err(_) => return read_relay_cache(cache_path),
+        }
+    }
+    read_relay_cache(cache_path)
+}
+
+/// Fetch `/v1/relay` from **every** configured coord server (one relay per host).
+pub fn fetch_all_ghalbol_relays(
+    cache_path: Option<std::path::PathBuf>,
+) -> Vec<(String, Vec<String>)> {
+    let urls = coord_base_urls();
+    if urls.is_empty() {
+        return relay_after_http_miss(cache_path.as_deref())
+            .into_iter()
+            .collect();
+    }
+    let mut out = Vec::new();
+    let mut seen_peer = HashSet::new();
+    for (i, base) in urls.iter().enumerate() {
+        let per_host_cache = cache_path.as_ref().map(|p| {
+            if urls.len() == 1 {
+                p.clone()
+            } else {
+                p.parent().map_or_else(
+                    || p.with_file_name(format!("ghalbol_relay_{i}.json")),
+                    |dir| dir.join(format!("ghalbol_relay_{i}.json")),
+                )
+            }
+        });
+        if let Some((peer, addrs)) =
+            fetch_ghalbol_relay_for_base(base, per_host_cache.as_deref())
+        {
+            if seen_peer.insert(peer.clone()) {
+                out.push((peer, addrs));
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(fallback) = relay_after_http_miss(cache_path.as_deref()) {
+            out.push(fallback);
+        }
+    }
+    out
+}
+
+fn relay_after_http_miss(cache_path: Option<&std::path::Path>) -> Option<(String, Vec<String>)> {
+    read_relay_cache(cache_path)
+}
+
+fn read_relay_cache(path: Option<&std::path::Path>) -> Option<(String, Vec<String>)> {
+    let path = path?;
+    let bytes = std::fs::read(path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let peer = v["peer_id"].as_str()?.trim().to_string();
+    let addrs: Vec<String> = v["addrs"]
+        .as_array()?
+        .iter()
+        .filter_map(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if peer.is_empty() || addrs.is_empty() {
+        return None;
+    }
+    crate::flow_log::info(
+        "relay",
+        format!("using cached ghalbol relay {peer} ({} addr(s))", addrs.len()),
+    );
+    Some((peer, addrs))
+}
+
+fn write_relay_cache(path: Option<&std::path::Path>, peer: &str, addrs: &[String]) {
+    let Some(path) = path else { return };
+    let body = serde_json::json!({
+        "peer_id": peer,
+        "addrs": addrs,
+        "cached_at_ms": unix_ms_now(),
+    });
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string(&body) {
+        let _ = std::fs::write(path, s);
+    }
+}
+
+#[cfg(test)]
+fn clear_relay_cache(path: Option<&std::path::Path>) {
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// True when at least one coordination server URL was configured.
 pub fn coord_is_configured() -> bool {
-    coord_globals()
-        .base_url
-        .lock()
-        .ok()
-        .and_then(|u| u.as_ref().cloned())
-        .is_some_and(|s| !s.is_empty())
+    !coord_base_urls().is_empty()
 }
 
 /// True after a successful `POST /v1/peers/register` for this session.
@@ -149,15 +364,53 @@ pub fn coord_link_recently_ok() -> bool {
     last > 0 && unix_ms_now().saturating_sub(last) < PRESENCE_STALE_MS
 }
 
+/// Coord URL is set and we have publishable endpoints, but HTTP register/heartbeat has not
+/// succeeded recently — LAN + cached coord dial addrs only; keep retrying coord HTTP
+/// (STORY.md / TRANSPORT.md § coord down ≠ offline, no Kademlia fallback).
+pub fn coord_http_degraded() -> bool {
+    if !coord_is_configured() {
+        return false;
+    }
+    if !COORD_REGISTERED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if COORD_CONSEC_FAILS.load(Ordering::Relaxed) >= 1 {
+        return true;
+    }
+    let last = COORD_LAST_OK_MS.load(Ordering::Relaxed);
+    last == 0 || unix_ms_now().saturating_sub(last) >= PRESENCE_STALE_MS
+}
+
+/// Record a coord HTTP transport failure (lookup/register/heartbeat) — flips degraded quickly.
+pub(crate) fn note_coord_transport_failure() {
+    COORD_CONSEC_FAILS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Single-server helper (integration tests + legacy callers).
 pub fn set_coord_base_url(url: &str, insecure_tls: bool) {
+    set_coord_base_urls(&[url.to_string()], insecure_tls);
+}
+
+pub fn set_coord_base_urls(urls: &[String], insecure_tls: bool) {
+    let urls: Vec<String> = urls
+        .iter()
+        .filter_map(|u| normalize_coord_url(u))
+        .take(MAX_COORD_SERVERS)
+        .collect();
     let g = coord_globals();
-    if let Ok(mut u) = g.base_url.lock() {
-        *u = Some(url.trim().trim_end_matches('/').to_string());
+    if let Ok(mut u) = g.base_urls.lock() {
+        *u = urls.clone();
+    }
+    if let Ok(mut r) = g.registered_on.lock() {
+        r.clear();
     }
     g.insecure_tls.store(insecure_tls, Ordering::Relaxed);
     COORD_REGISTERED.store(false, Ordering::Relaxed);
     COORD_LAST_OK_MS.store(0, Ordering::Relaxed);
-    crate::flow_log::info("coord", format!("base_url set to {}", url.trim()));
+    crate::flow_log::info(
+        "coord",
+        format!("base_urls set ({} server(s)): {urls:?}", urls.len()),
+    );
     schedule_register_presence();
 }
 
@@ -166,18 +419,6 @@ fn unix_ms_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn client() -> Result<CoordHttpClient, String> {
-    let g = coord_globals();
-    let base = g
-        .base_url
-        .lock()
-        .map_err(|_| "coord mutex poisoned")?
-        .clone()
-        .ok_or("coord base url not set")?;
-    let tls = g.insecure_tls.load(Ordering::Relaxed);
-    CoordHttpClient::new(&base, tls)
 }
 
 /// Host field for coord TCP endpoints — public routable IPv4 only (LAN uses mDNS, not coord).
@@ -193,7 +434,7 @@ fn is_coord_publishable_host(host: &str) -> bool {
         return false;
     }
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-        return crate::p2p::dht_bootstrap::is_public_bootstrap_ipv4(ip);
+        return crate::p2p::network_transport::is_public_bootstrap_ipv4(ip);
     }
     false
 }
@@ -221,25 +462,25 @@ fn ipv4_field_rank(host: &str) -> u8 {
 
 fn is_coord_lan_tcp_fallback(ma: &Multiaddr) -> bool {
     is_coord_presence_tcp_fallback(ma)
-        && crate::p2p::dht_bootstrap::ipv4_from_ma_str(&ma.to_string())
-            .is_some_and(|ip| ip.is_private() && !crate::p2p::dht_bootstrap::is_cgnat_ipv4(ip))
+        && crate::p2p::network_transport::ipv4_from_ma_str(&ma.to_string())
+            .is_some_and(|ip| ip.is_private() && !crate::p2p::network_transport::is_cgnat_ipv4(ip))
 }
 
 /// Any non-loopback DM TCP listen (RFC1918, CGNAT, or public) — coord presence when WAN TCP is absent.
 fn is_coord_presence_tcp_fallback(ma: &Multiaddr) -> bool {
-    if crate::p2p::dht_bootstrap::is_relay_circuit_multiaddr(ma) {
+    if crate::p2p::network_transport::is_relay_circuit_multiaddr(ma) {
         return false;
     }
-    let Some(ip) = crate::p2p::dht_bootstrap::ipv4_from_ma_str(&ma.to_string()) else {
+    let Some(ip) = crate::p2p::network_transport::ipv4_from_ma_str(&ma.to_string()) else {
         return false;
     };
-    !ip.is_loopback() && crate::p2p::dht_bootstrap::is_dm_dial_multiaddr(ma)
+    !ip.is_loopback() && crate::p2p::network_transport::is_dm_dial_multiaddr(ma)
 }
 
 fn listen_addrs_to_coord_endpoints(addrs: &[Multiaddr]) -> Vec<CoordEndpoint> {
     let has_relay = addrs
         .iter()
-        .any(crate::p2p::dht_bootstrap::is_coord_relay_tcp_circuit_multiaddr);
+        .any(crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr);
     let mut eps = Vec::new();
     for ma in addrs {
         eps.extend(multiaddr_to_coord_endpoints(ma));
@@ -251,8 +492,8 @@ fn listen_addrs_to_coord_endpoints(addrs: &[Multiaddr]) -> Vec<CoordEndpoint> {
                 continue;
             }
             // RFC1918 is LAN-only — mDNS, not coord (misleading for WAN peers).
-            if let Some(ip) = crate::p2p::dht_bootstrap::ipv4_from_ma_str(&ma.to_string()) {
-                if ip.is_private() && !crate::p2p::dht_bootstrap::is_cgnat_ipv4(ip) {
+            if let Some(ip) = crate::p2p::network_transport::ipv4_from_ma_str(&ma.to_string()) {
+                if ip.is_private() && !crate::p2p::network_transport::is_cgnat_ipv4(ip) {
                     continue;
                 }
             }
@@ -323,20 +564,25 @@ fn spawn_register_presence_inner(force: bool) {
     COORD_LAST_REG_ATTEMPT_MS.store(unix_ms_now(), Ordering::Relaxed);
     if std::thread::Builder::new()
         .name("ghalbol-coord-reg".into())
+        // Blocking HTTP + TLS on the default 2 MiB thread stack overflowed on CI runners.
+        .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             struct BusyGuard;
             impl Drop for BusyGuard {
                 fn drop(&mut self) {
                     COORD_REG_WORKER_BUSY.store(false, Ordering::Release);
-                    if COORD_REG_PENDING.swap(false, Ordering::AcqRel)
-                        && !COORD_REGISTERED.load(Ordering::Relaxed)
-                    {
-                        spawn_register_presence_inner(false);
-                    }
+                    // `COORD_REG_PENDING` is drained on the next `coord_register_tick` (libp2p
+                    // 1s loop). Do not call `spawn_register_presence_inner` from `Drop` — that
+                    // chained synchronous spawns on a shallow exiting stack and caused SIGABRT on
+                    // GitHub Actions integration tests.
                 }
             }
             let _busy = BusyGuard;
             if let Err(e) = try_register_presence() {
+                let es = e.to_string();
+                if !es.contains("no listen endpoints") {
+                    note_coord_transport_failure();
+                }
                 crate::flow_log::warn("coord", format!("register: {e}"));
             }
         })
@@ -352,14 +598,14 @@ pub fn schedule_register_presence() {
 }
 
 fn multiaddr_to_coord_endpoints(ma: &Multiaddr) -> Vec<CoordEndpoint> {
-    if crate::p2p::dht_bootstrap::is_coord_relay_tcp_circuit_multiaddr(ma) {
+    if crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr(ma) {
         return vec![CoordEndpoint {
             scheme: "libp2p".into(),
             host: ma.to_string(),
             port: 0,
         }];
     }
-    if !crate::p2p::dht_bootstrap::is_coord_register_tcp_multiaddr(ma) {
+    if !crate::p2p::network_transport::is_coord_register_tcp_multiaddr(ma) {
         return Vec::new();
     }
     if let Some(dm) = DmDialAddr::parse(&ma.to_string()) {
@@ -380,7 +626,7 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
     }
     let has_relay = addrs
         .iter()
-        .any(crate::p2p::dht_bootstrap::is_coord_relay_tcp_circuit_multiaddr);
+        .any(crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr);
     let publishable: Vec<Multiaddr> = addrs
         .iter()
         .filter(|ma| {
@@ -388,11 +634,11 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
                 return false;
             }
             if has_relay || coord_is_configured() {
-                return crate::p2p::dht_bootstrap::is_coord_relay_tcp_circuit_multiaddr(ma)
-                    || crate::p2p::dht_bootstrap::is_coord_register_tcp_multiaddr(ma);
+                return crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr(ma)
+                    || crate::p2p::network_transport::is_coord_register_tcp_multiaddr(ma);
             }
-            crate::p2p::dht_bootstrap::is_coord_relay_tcp_circuit_multiaddr(ma)
-                || crate::p2p::dht_bootstrap::is_coord_register_tcp_multiaddr(ma)
+            crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr(ma)
+                || crate::p2p::network_transport::is_coord_register_tcp_multiaddr(ma)
                 || is_coord_presence_tcp_fallback(ma)
         })
         .cloned()
@@ -405,19 +651,17 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
     if eps.is_empty() {
         let cgnat_only = !has_relay
             && addrs.iter().any(|ma| {
-                crate::p2p::dht_bootstrap::ipv4_from_ma_str(&ma.to_string())
-                    .is_some_and(crate::p2p::dht_bootstrap::is_cgnat_ipv4)
+                crate::p2p::network_transport::ipv4_from_ma_str(&ma.to_string())
+                    .is_some_and(crate::p2p::network_transport::is_cgnat_ipv4)
             });
         let g = coord_globals();
-        let mut cleared = false;
         if let Ok(mut v) = g.endpoints.lock() {
             if !v.is_empty() {
                 v.clear();
-                cleared = true;
             }
         }
         let was_registered = COORD_REGISTERED.load(Ordering::Relaxed);
-        if cleared || was_registered {
+        if !was_registered {
             suspend_coord_presence_waiting_endpoints();
             if cgnat_only {
                 crate::flow_log::info(
@@ -430,6 +674,11 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
                     "waiting for relay/public listen endpoint before coord register",
                 );
             }
+        } else {
+            crate::flow_log::info(
+                "coord",
+                "waiting for new relay circuit — keeping coord presence alive during handover",
+            );
         }
         return;
     }
@@ -474,6 +723,8 @@ pub fn coord_register_tick(listen_snapshot: &[Multiaddr]) {
         return;
     }
     if !COORD_REGISTERED.load(Ordering::Relaxed) {
+        spawn_register_presence_inner(false);
+    } else if COORD_REG_PENDING.swap(false, Ordering::AcqRel) {
         spawn_register_presence_inner(false);
     }
 }
@@ -525,7 +776,7 @@ fn coord_endpoints_to_dial_multiaddrs(endpoints: &[CoordEndpoint]) -> Vec<Multia
             continue;
         }
         if let Ok(ma) = ep.host.trim().parse::<Multiaddr>() {
-            if crate::p2p::dht_bootstrap::is_coord_relay_tcp_circuit_multiaddr(&ma) {
+            if crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr(&ma) {
                 out.push(ma);
             }
         }
@@ -547,13 +798,13 @@ fn coord_endpoints_to_dial_multiaddrs(endpoints: &[CoordEndpoint]) -> Vec<Multia
         }
         let dm = DmDialAddr::new(ep.host.clone(), ep.port);
         if let Ok(ma) = dm.to_multiaddr_string().parse::<Multiaddr>() {
-            if crate::p2p::dht_bootstrap::is_dm_dial_multiaddr(&ma) {
+            if crate::p2p::network_transport::is_dm_dial_multiaddr(&ma) {
                 out.push(ma);
             }
         }
     }
-    let out = crate::p2p::dht_bootstrap::filter_coord_dial_addrs(out);
-    crate::p2p::dht_bootstrap::filter_coord_relay_dial_platform(out)
+    let out = crate::p2p::network_transport::filter_coord_dial_addrs(out);
+    crate::p2p::network_transport::filter_coord_relay_dial_platform(out)
 }
 
 fn pick_coord_libp2p_endpoints(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
@@ -598,27 +849,12 @@ fn endpoints_for_coord_register(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
     }
 }
 
-fn try_register_presence() -> Result<(), String> {
-    let _http = coord_reg_http_lock()
-        .lock()
-        .map_err(|_| "coord register http mutex poisoned")?;
-    let ident = match crate::session_runtime::unlocked_identity_clone() {
-        Ok(i) => i,
-        Err(_) => return Err("identity not unlocked".into()),
-    };
-    let pk = ident.public_key_hex();
-    let secret = ident.secp256k1_secret().clone();
-    // Re-read under the register lock so a slow thread cannot publish stale CGNAT after relay.
-    let endpoints = endpoints_for_coord_register(
-        coord_globals()
-            .endpoints
-            .lock()
-            .map_err(|_| "coord mutex poisoned")?
-            .clone(),
-    );
-    if endpoints.is_empty() {
-        return Err("no listen endpoints for coord register yet".into());
-    }
+fn try_register_on_server(
+    base: &str,
+    secret: &secp256k1::SecretKey,
+    pk: &str,
+    endpoints: &[CoordEndpoint],
+) -> Result<(), String> {
     let ipv4 = endpoints
         .iter()
         .filter(|e| e.scheme == "tcp" && !e.host.contains(':'))
@@ -631,18 +867,38 @@ fn try_register_presence() -> Result<(), String> {
         .min_by_key(|e| ipv4_field_rank(&e.host))
         .map(|e| e.host.as_str())
         .map(str::to_string);
-
-    let client = client()?;
-    client.register(
-        &secret,
-        &pk,
-        &endpoints,
-        ipv4.as_deref(),
-        ipv6.as_deref(),
-    )?;
+    let client = client_for(base)?;
+    client.register(secret, pk, endpoints, ipv4.as_deref(), ipv6.as_deref())?;
     client
-        .lookup(&pk)
+        .lookup(pk)
         .map_err(|e| format!("register HTTP ok but GET /v1/peers failed: {e}"))?;
+    Ok(())
+}
+
+fn try_register_presence() -> Result<(), String> {
+    let _http = coord_reg_http_lock()
+        .lock()
+        .map_err(|_| "coord register http mutex poisoned")?;
+    let ident = match crate::session_runtime::unlocked_identity_clone() {
+        Ok(i) => i,
+        Err(_) => return Err("identity not unlocked".into()),
+    };
+    let pk = ident.public_key_hex();
+    let secret = ident.secp256k1_secret().clone();
+    let endpoints = endpoints_for_coord_register(
+        coord_globals()
+            .endpoints
+            .lock()
+            .map_err(|_| "coord mutex poisoned")?
+            .clone(),
+    );
+    if endpoints.is_empty() {
+        return Err("no listen endpoints for coord register yet".into());
+    }
+    let urls = coord_base_urls();
+    if urls.is_empty() {
+        return Err("coord base url not set".into());
+    }
     let ep_summary: String = endpoints
         .iter()
         .map(|e| {
@@ -654,15 +910,40 @@ fn try_register_presence() -> Result<(), String> {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    crate::flow_log::info(
-        "coord",
-        format!(
-            "registered {} endpoint(s) for {} [{}]",
-            endpoints.len(),
-            &pk[..8.min(pk.len())],
-            ep_summary
-        ),
-    );
+    let mut any_ok = false;
+    let mut registered = HashSet::new();
+    let mut last_err = String::new();
+    for base in &urls {
+        match try_register_on_server(base, &secret, &pk, &endpoints) {
+            Ok(()) => {
+                any_ok = true;
+                registered.insert(base.clone());
+                crate::flow_log::info(
+                    "coord",
+                    format!(
+                        "registered on {base} — {} endpoint(s) for {} [{}]",
+                        endpoints.len(),
+                        &pk[..8.min(pk.len())],
+                        ep_summary
+                    ),
+                );
+            }
+            Err(e) => {
+                last_err = e;
+                crate::flow_log::warn("coord", format!("register on {base} failed: {last_err}"));
+            }
+        }
+    }
+    if !any_ok {
+        return Err(if last_err.is_empty() {
+            "coord register failed on all servers".into()
+        } else {
+            last_err
+        });
+    }
+    if let Ok(mut r) = coord_globals().registered_on.lock() {
+        *r = registered;
+    }
     COORD_REGISTERED.store(true, Ordering::Relaxed);
     COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
     COORD_LAST_OK_MS.store(unix_ms_now(), Ordering::Relaxed);
@@ -690,36 +971,47 @@ fn start_heartbeat_loop(public_key_hex: String) {
                     }
                     std::thread::sleep(Duration::from_secs(1));
                 }
-                let Ok(c) = client() else {
+                let servers: Vec<String> = coord_globals()
+                    .registered_on
+                    .lock()
+                    .ok()
+                    .map(|g| g.iter().cloned().collect())
+                    .unwrap_or_else(coord_base_urls);
+                if servers.is_empty() {
                     continue;
-                };
+                }
                 if !COORD_REGISTERED.load(Ordering::Relaxed) {
                     spawn_register_presence_inner(true);
                     continue;
                 }
-                if c.heartbeat(&public_key_hex).is_err() {
-                    crate::flow_log::warn(
-                        "coord",
-                        format!(
-                            "heartbeat failed for {} — scheduling re-register",
-                            &public_key_hex[..8.min(public_key_hex.len())]
-                        ),
-                    );
-                    let fails = COORD_CONSEC_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
-                    // Keep `coord_registered=true` through brief cellular route changes.
-                    // Clearing it immediately makes the peer vanish and leads to 404 lookups.
-                    if fails >= 3 {
-                        COORD_REGISTERED.store(false, Ordering::Relaxed);
+                let mut any_ok = false;
+                for base in &servers {
+                    let Ok(c) = client_for(base) else {
+                        continue;
+                    };
+                    if c.heartbeat(&public_key_hex).is_err() {
+                        crate::flow_log::warn(
+                            "coord",
+                            format!(
+                                "heartbeat failed on {base} for {} — scheduling re-register",
+                                &public_key_hex[..8.min(public_key_hex.len())]
+                            ),
+                        );
+                        continue;
                     }
-                    spawn_register_presence_inner(true);
-                } else if c.lookup(&public_key_hex).is_err() {
-                    crate::flow_log::warn(
-                        "coord",
-                        format!(
-                            "GET /v1/peers/{} failed after heartbeat — re-registering",
-                            &public_key_hex[..8.min(public_key_hex.len())]
-                        ),
-                    );
+                    if c.lookup(&public_key_hex).is_err() {
+                        crate::flow_log::warn(
+                            "coord",
+                            format!(
+                                "GET /v1/peers/{} failed on {base} after heartbeat — re-registering",
+                                &public_key_hex[..8.min(public_key_hex.len())]
+                            ),
+                        );
+                        continue;
+                    }
+                    any_ok = true;
+                }
+                if !any_ok {
                     let fails = COORD_CONSEC_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
                     if fails >= 3 {
                         COORD_REGISTERED.store(false, Ordering::Relaxed);
@@ -751,15 +1043,31 @@ pub fn stop_coord_presence() {
 }
 
 pub fn lookup_bootstrap_multiaddrs(public_key_hex: &str) -> Result<Vec<String>, String> {
-    let client = client()?;
-    let record = client.lookup(public_key_hex)?;
-    let mut addrs = endpoints_to_dial_multiaddr_strings(&record.endpoints);
-    for ma in coord_endpoints_to_dial_multiaddrs(&record.endpoints) {
-        addrs.push(ma.to_string());
+    let urls = coord_base_urls();
+    if urls.is_empty() {
+        return Err("coord base url not set".into());
     }
-    let mut seen = HashSet::new();
-    addrs.retain(|a| seen.insert(a.clone()));
-    Ok(addrs)
+    let mut last_err = "coord lookup failed".to_string();
+    for base in &urls {
+        let Ok(client) = client_for(base) else {
+            continue;
+        };
+        match client.lookup(public_key_hex) {
+            Ok(record) => {
+                let mut addrs = endpoints_to_dial_multiaddr_strings(&record.endpoints);
+                for ma in coord_endpoints_to_dial_multiaddrs(&record.endpoints) {
+                    addrs.push(ma.to_string());
+                }
+                let mut seen = HashSet::new();
+                addrs.retain(|a| seen.insert(a.clone()));
+                if !addrs.is_empty() {
+                    return Ok(addrs);
+                }
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(last_err)
 }
 
 pub fn coord_lookup_peer_json(public_key_hex: &str) -> serde_json::Value {
@@ -813,16 +1121,39 @@ pub fn coord_lookup_peer_json(public_key_hex: &str) -> serde_json::Value {
     }
 }
 
+/// Legacy single-URL FFI/daemon response shape.
 pub fn coord_set_base_url_json(url: &str, insecure_tls: bool) -> serde_json::Value {
-    if url.trim().is_empty() {
+    coord_set_base_urls_json(&[url.to_string()], insecure_tls)
+}
+
+/// Where coord URL prefs are persisted — Android path is unchanged (always release namespace).
+fn coord_prefs_storage_config() -> crate::storage::StorageConfig {
+    #[cfg(target_os = "android")]
+    {
+        crate::app_paths::storage_config_for_namespace(crate::ANDROID_LIBRARY_NAMESPACE)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let ns = crate::dm_event_handler::active_app_namespace()
+            .unwrap_or_else(|| crate::ANDROID_LIBRARY_NAMESPACE.to_string());
+        crate::app_paths::storage_config_for_namespace(&ns)
+    }
+}
+
+pub fn coord_set_base_urls_json(urls: &[String], insecure_tls: bool) -> serde_json::Value {
+    if urls.is_empty() {
         return serde_json::json!({ "ok": false, "error": "url empty" });
     }
-    set_coord_base_url(url, insecure_tls);
-    let cfg = crate::app_paths::storage_config_for_namespace(crate::ANDROID_LIBRARY_NAMESPACE);
-    if let Err(e) = crate::preferences_v1::coord_settings_set(&cfg, url, insecure_tls) {
+    set_coord_base_urls(urls, insecure_tls);
+    let cfg = coord_prefs_storage_config();
+    let joined = urls.join(",");
+    if let Err(e) = crate::preferences_v1::coord_settings_set(&cfg, &joined, insecure_tls) {
         return serde_json::json!({ "ok": false, "error": format!("{e}") });
     }
-    serde_json::json!({ "ok": true, "base_url": url.trim() })
+    serde_json::json!({
+        "ok": true,
+        "base_urls": urls,
+    })
 }
 
 /// Non-blocking: schedules HTTP register on a background thread. Never call
@@ -853,21 +1184,52 @@ pub fn coord_register_now_json() -> serde_json::Value {
     serde_json::json!({ "ok": true, "scheduled": true })
 }
 
-pub fn coord_client_for_lookup() -> Result<CoordHttpClient, String> {
-    client()
-}
-
 pub fn lookup_dial_addrs_for_public_key(public_key_hex: &str) -> Result<Vec<DmDialAddr>, String> {
-    let client = client()?;
-    let record = client.lookup(public_key_hex)?;
-    Ok(coord_endpoints_to_dial_addrs(&record.endpoints))
+    let urls = coord_base_urls();
+    if urls.is_empty() {
+        return Err("coord base url not set".into());
+    }
+    let mut last_err = "coord lookup failed".to_string();
+    for base in &urls {
+        let Ok(client) = client_for(base) else {
+            continue;
+        };
+        match client.lookup(public_key_hex) {
+            Ok(record) => {
+                let addrs = coord_endpoints_to_dial_addrs(&record.endpoints);
+                if !addrs.is_empty() {
+                    return Ok(addrs);
+                }
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(last_err)
 }
 
 /// Coord lookup → ranked/filtered libp2p multiaddrs (relay + public TCP before RFC1918).
+/// Tries configured servers in order; stops on first success (STORY.md).
 pub fn lookup_dial_multiaddrs_for_public_key(public_key_hex: &str) -> Result<Vec<Multiaddr>, String> {
-    let client = client()?;
-    let record = client.lookup(public_key_hex)?;
-    Ok(coord_endpoints_to_dial_multiaddrs(&record.endpoints))
+    let urls = coord_base_urls();
+    if urls.is_empty() {
+        return Err("coord base url not set".into());
+    }
+    let mut last_err = "coord lookup failed".to_string();
+    for base in &urls {
+        let Ok(client) = client_for(base) else {
+            continue;
+        };
+        match client.lookup(public_key_hex) {
+            Ok(record) => {
+                let addrs = coord_endpoints_to_dial_multiaddrs(&record.endpoints);
+                if !addrs.is_empty() {
+                    return Ok(addrs);
+                }
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(last_err)
 }
 
 /// [`lookup_dial_multiaddrs_for_public_key`] on the blocking thread pool (safe from tokio tasks).
@@ -895,6 +1257,30 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[test]
+    fn relay_cache_round_trips_and_clears() {
+        let dir = std::env::temp_dir().join(format!("ghalbol_relay_cache_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ghalbol_relay.json");
+
+        // Empty cache → None.
+        assert!(read_relay_cache(Some(&path)).is_none());
+
+        // Write then read back.
+        let peer = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X".to_string();
+        let addrs = vec!["/dns4/coord.ghalbol.com/tcp/4002".to_string()];
+        write_relay_cache(Some(&path), &peer, &addrs);
+        let got = read_relay_cache(Some(&path)).expect("cached relay");
+        assert_eq!(got.0, peer);
+        assert_eq!(got.1, addrs);
+
+        // Clearing removes it (server explicitly disabled the relay).
+        clear_relay_cache(Some(&path));
+        assert!(read_relay_cache(Some(&path)).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     static COORD_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     /// Serializes tests that touch process-wide coord globals.
@@ -909,8 +1295,11 @@ mod tests {
 
     fn reset_coord_globals_for_test() {
         let g = coord_globals();
-        if let Ok(mut u) = g.base_url.lock() {
-            *u = None;
+        if let Ok(mut u) = g.base_urls.lock() {
+            u.clear();
+        }
+        if let Ok(mut r) = g.registered_on.lock() {
+            r.clear();
         }
         g.insecure_tls.store(false, Ordering::Relaxed);
         if let Ok(mut e) = g.endpoints.lock() {
@@ -927,10 +1316,90 @@ mod tests {
     }
 
     #[test]
+    fn parse_coord_urls_accepts_mixed_delimiters() {
+        let urls = parse_coord_urls(
+            "https://a.test/,https://b.test/\thttps://c.test/\nhttps://d.test/  https://e.test/",
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://a.test".to_string(),
+                "https://b.test".to_string(),
+                "https://c.test".to_string(),
+                "https://d.test".to_string(),
+                "https://e.test".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_coord_urls_json_array_still_works() {
+        let urls = parse_coord_urls(r#"["https://x.test", "https://y.test"]"#);
+        assert_eq!(
+            urls,
+            vec!["https://x.test".to_string(), "https://y.test".to_string()]
+        );
+    }
+
+    #[test]
+    fn coord_urls_from_json_value_accepts_legacy_and_new_keys() {
+        let legacy = serde_json::json!({
+            "base_url": "https://legacy.test/",
+            "insecure_tls": false
+        });
+        assert_eq!(
+            coord_urls_from_json_value(&legacy),
+            vec!["https://legacy.test".to_string()]
+        );
+        let modern = serde_json::json!({
+            "base_urls": ["https://a.test", "https://b.test"]
+        });
+        assert_eq!(
+            coord_urls_from_json_value(&modern),
+            vec!["https://a.test".to_string(), "https://b.test".to_string()]
+        );
+        let p2p_start = serde_json::json!({
+            "coord_base_url": "https://p2p.test"
+        });
+        assert_eq!(
+            coord_urls_from_json_value(&p2p_start),
+            vec!["https://p2p.test".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_coord_urls_plain_without_brackets() {
+        assert_eq!(
+            parse_coord_urls("https://only.test/"),
+            vec!["https://only.test".to_string()]
+        );
+        assert_eq!(
+            parse_coord_urls("https://a.test, https://b.test"),
+            vec!["https://a.test".to_string(), "https://b.test".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_coord_urls_semicolon_and_mixed_whitespace() {
+        let urls = parse_coord_urls(
+            "https://a.test/\n\thttps://b.test/, https://z.test/;\t https://f.test/",
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://a.test".to_string(),
+                "https://b.test".to_string(),
+                "https://z.test".to_string(),
+                "https://f.test".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn wan_filter_skips_lan_when_public_present() {
         let lan: Multiaddr = "/ip4/192.168.1.2/tcp/4001".parse().unwrap();
         let wan: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().unwrap();
-        let out = crate::p2p::dht_bootstrap::filter_wan_preferred_dm_dial_addrs(vec![lan.clone(), wan.clone()]);
+        let out = crate::p2p::network_transport::filter_wan_preferred_dm_dial_addrs(vec![lan.clone(), wan.clone()]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], wan);
     }
@@ -938,8 +1407,8 @@ mod tests {
     #[test]
     fn coord_register_skips_rfc1918_tcp() {
         let lan: Multiaddr = "/ip4/192.168.1.38/tcp/38505".parse().unwrap();
-        assert!(!crate::p2p::dht_bootstrap::is_coord_register_tcp_multiaddr(&lan));
-        let out = crate::p2p::dht_bootstrap::filter_coord_dial_addrs(vec![lan]);
+        assert!(!crate::p2p::network_transport::is_coord_register_tcp_multiaddr(&lan));
+        let out = crate::p2p::network_transport::filter_coord_dial_addrs(vec![lan]);
         assert!(out.is_empty());
     }
 
@@ -947,14 +1416,14 @@ mod tests {
     fn coord_dial_skips_lan_and_cgnat() {
         let lan: Multiaddr = "/ip4/192.168.1.38/tcp/38505".parse().unwrap();
         let cgnat: Multiaddr = "/ip4/100.73.97.100/tcp/33881".parse().unwrap();
-        let out = crate::p2p::dht_bootstrap::filter_coord_dial_addrs(vec![lan, cgnat]);
+        let out = crate::p2p::network_transport::filter_coord_dial_addrs(vec![lan, cgnat]);
         assert!(out.is_empty());
     }
 
     #[test]
     fn coord_skips_cgnat_only_when_coord_url_set() {
         let _guard = coord_test_setup();
-        set_coord_base_url("https://example.test", false);
+        set_coord_base_urls(&["https://example.test".to_string()], false);
         let cgnat: Multiaddr = "/ip4/100.104.255.165/tcp/40993".parse().unwrap();
         let eps = listen_addrs_to_coord_endpoints(&[cgnat]);
         assert!(eps.is_empty());
@@ -1043,11 +1512,11 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_clears_stale_coord_presence_when_no_registerable_endpoints() {
+    fn rebuild_keeps_coord_presence_during_handover_without_registerable_endpoints() {
         let _guard = coord_test_setup();
         let g = coord_globals();
-        if let Ok(mut u) = g.base_url.lock() {
-            *u = Some("https://example.test".into());
+        if let Ok(mut u) = g.base_urls.lock() {
+            *u = vec!["https://example.test".into()];
         }
         if let Ok(mut e) = g.endpoints.lock() {
             e.push(CoordEndpoint {
@@ -1065,7 +1534,8 @@ mod tests {
 
         let endpoints = g.endpoints.lock().unwrap().clone();
         assert!(endpoints.is_empty());
-        assert!(!COORD_REGISTERED.load(Ordering::Relaxed));
-        assert!(g.heartbeat_stop.load(Ordering::Relaxed));
+        // STORY.md: seamless handover — heartbeats + presence stay until new circuit registers.
+        assert!(COORD_REGISTERED.load(Ordering::Relaxed));
+        assert!(!g.heartbeat_stop.load(Ordering::Relaxed));
     }
 }

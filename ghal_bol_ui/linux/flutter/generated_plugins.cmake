@@ -4,7 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
-  flutter_webrtc
+  camera_desktop
   gtk
   url_launcher_linux
 )

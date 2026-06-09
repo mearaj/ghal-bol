@@ -28,6 +28,49 @@ pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_initRustlsPlatfor
         });
 }
 
+/// Set exactly once per process: `ndk_context::initialize_android_context` asserts the context
+/// was never set before (panics on a second call). The `:p2p` `onStartCommand` runs more than
+/// once (daemon-start + listener-start + call re-promote), so guard against re-entry here.
+static ANDROID_AUDIO_INITED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Hand cpal/Oboe the JavaVM + Android Context so native voice can open the mic /
+/// speaker in the `:p2p` process. Safe to call repeatedly; only the first call wins.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_initAndroidAudio<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    context: JObject<'local>,
+) {
+    // Claim the one-shot slot before touching `ndk_context`/leaking a global ref.
+    if ANDROID_AUDIO_INITED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return;
+    }
+    let _ = unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            crate::android_jni_cache::cache_daemon_native_class(env, &_class)?;
+            let vm = env.get_java_vm()?;
+            // `into_raw` keeps the global ref alive for the process lifetime (never dropped).
+            let global = env.new_global_ref(context)?;
+            let vm_ptr = vm.get_raw() as *mut std::ffi::c_void;
+            let ctx_ptr = global.into_raw() as *mut std::ffi::c_void;
+            unsafe {
+                ndk_context::initialize_android_context(vm_ptr, ctx_ptr);
+            }
+            crate::call_media::set_android_audio_ready();
+            Ok(())
+        })
+        .resolve_with::<LogContextErrorAndDefault, _>(|| "ghal_bol initAndroidAudio".to_string());
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_configureDataDirectory<'local>(
     mut unowned_env: EnvUnowned<'local>,

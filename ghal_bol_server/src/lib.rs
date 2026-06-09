@@ -7,15 +7,17 @@ mod config;
 mod db;
 mod error;
 mod presence;
+pub mod relay;
 mod routes;
 
 pub use auth::registration_message_digest;
 pub use config::ServerConfig;
 pub use error::ServerError;
 pub use presence::{PeerEndpoint, PeerRecord, PresenceStore};
+pub use relay::{RelayConfig, RelayInfo};
 
 use axum::Router;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
@@ -26,6 +28,8 @@ pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 pub struct AppState {
     pub config: ServerConfig,
     pub presence: Arc<PresenceStore>,
+    /// Relay coordinates advertised at `GET /v1/relay` (set once the relay node starts).
+    pub relay_info: Mutex<Option<RelayInfo>>,
 }
 
 impl AppState {
@@ -35,6 +39,7 @@ impl AppState {
         Ok(Self {
             config,
             presence: Arc::new(presence),
+            relay_info: Mutex::new(None),
         })
     }
 
@@ -44,7 +49,15 @@ impl AppState {
         Ok(Self {
             config,
             presence: Arc::new(presence),
+            relay_info: Mutex::new(None),
         })
+    }
+
+    /// Publish the relay coordinates returned by [`relay::start`].
+    pub fn set_relay_info(&self, info: RelayInfo) {
+        if let Ok(mut g) = self.relay_info.lock() {
+            *g = Some(info);
+        }
     }
 }
 

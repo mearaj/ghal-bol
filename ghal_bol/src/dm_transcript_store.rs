@@ -316,20 +316,20 @@ pub fn save_thread(
     })?;
     let deduped = dedupe_lines(lines);
     // UI full-save must not downgrade delivery/read ticks already written by :p2p on poll.
-    let disk_rows = load_merged(app_namespace, &[conversation_key.to_string()], None)
-        .unwrap_or_default();
+    let expanded = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
+    let disk_rows = load_merged(app_namespace, &expanded, None).unwrap_or_default();
     let disk_by_mid: HashMap<String, StoredChatLine> = disk_rows
-        .into_iter()
+        .iter()
         .filter_map(|r| {
             let mid = r.message_id.as_deref().unwrap_or("").trim();
             if mid.is_empty() {
                 None
             } else {
-                Some((mid.to_string(), r))
+                Some((mid.to_string(), r.clone()))
             }
         })
         .collect();
-    let merged: Vec<StoredChatLine> = deduped
+    let mut merged: Vec<StoredChatLine> = deduped
         .into_iter()
         .map(|line| {
             let mid = line.message_id.as_deref().unwrap_or("").trim();
@@ -342,6 +342,40 @@ pub fn save_thread(
             }
         })
         .collect();
+    let ui_mids: HashSet<String> = merged
+        .iter()
+        .filter_map(|l| {
+            let mid = l.message_id.as_deref().unwrap_or("").trim();
+            if mid.is_empty() {
+                None
+            } else {
+                Some(mid.to_string())
+            }
+        })
+        .collect();
+    // Keep inbound rows :p2p wrote on poll that the UI shell has not merged yet.
+    for disk_line in disk_rows {
+        let mid = disk_line
+            .message_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !mid.is_empty() {
+            if ui_mids.contains(&mid) {
+                continue;
+            }
+            merged.push(disk_line);
+            continue;
+        }
+        let dup = merged.iter().any(|u| {
+            u.message_id.as_deref().unwrap_or("").trim().is_empty()
+                && u.local_id == disk_line.local_id
+        });
+        if !dup {
+            merged.push(disk_line);
+        }
+    }
     let deduped = dedupe_lines(merged);
     let arr: Vec<Value> = deduped.iter().map(|l| l.to_json()).collect();
     let ns_entry = root

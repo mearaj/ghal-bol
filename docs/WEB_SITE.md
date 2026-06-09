@@ -138,7 +138,7 @@ cd .. && firebase emulators:start --only hosting
 
 **Android Chrome:** programmatic `window.location` to `ghalbol://` or `intent://` is blocked unless the user taps a native `<a>` — do not use `location.assign` from Flutter `onPressed` alone. The invite page uses `WebInviteOpenButton` (`Link` widget). Dev APKs use `com.ghalbol.debug` — intent URLs must not hard-code `package=com.ghalbol` only.
 
-Details: [ANDROID_APP_LINKS.md](ANDROID_APP_LINKS.md), [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md), [PEER_DISCOVERY.md](PEER_DISCOVERY.md).
+Details: [ANDROID_APP_LINKS.md](ANDROID_APP_LINKS.md), [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md), [TRANSPORT.md](TRANSPORT.md).
 
 ## Configuring public URLs
 

@@ -175,12 +175,224 @@ abstract final class GhalBolP2p {
   /// Voice/video call signaling (`invite`, `accept`, `sdp_offer`, `ice`, `video_on`, …).
   static Future<Map<String, dynamic>> callSignal(Map<String, dynamic> config) async {
     if (usesDaemon) {
-      return GhalBolDaemonClient.instance.call(
+      // State socket — must not queue behind `p2p_call_video_frame` polls on main (~60/s in-call).
+      return GhalBolDaemonClient.instance.callState(
         "p2p_call_signal",
         params: config,
       );
     }
     return GhalBolFfi.p2pCallSignal(config);
+  }
+
+  /// Native voice **media** control plane (Rust-owned Opus over libp2p substream).
+  /// `action`: `start` (needs `recipient_public_key_hex`), `stop`, `set_mic_muted`.
+  static Future<Map<String, dynamic>> callMedia(Map<String, dynamic> config) async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_call_media",
+        params: config,
+      );
+    }
+    return GhalBolFfi.p2pCallMedia(config);
+  }
+
+  static Future<Map<String, dynamic>> callMediaStart({
+    required String callId,
+    required String recipientPublicKeyHex,
+  }) {
+    return callMedia({
+      "action": "start",
+      "call_id": callId,
+      "recipient_public_key_hex": recipientPublicKeyHex,
+    });
+  }
+
+  static Future<Map<String, dynamic>> callMediaStop({required String callId}) {
+    return callMedia({"action": "stop", "call_id": callId});
+  }
+
+  static Future<Map<String, dynamic>> callMediaSetMicMuted({
+    required String callId,
+    required bool muted,
+  }) {
+    return callMedia({
+      "action": "set_mic_muted",
+      "call_id": callId,
+      "muted": muted,
+    });
+  }
+
+  static Future<Map<String, dynamic>> callMediaSetSpeaker({
+    required String callId,
+    required bool speakerOn,
+  }) {
+    return callMedia({
+      "action": "set_speaker",
+      "call_id": callId,
+      "speaker_on": speakerOn,
+    });
+  }
+
+  /// Active native voice/video session snapshot (`:p2p` may outlive the UI on Android).
+  static Future<Map<String, dynamic>> callStatus() async {
+    const config = <String, dynamic>{};
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_call_status",
+        params: config,
+      );
+    }
+    return GhalBolFfi.p2pCallStatus(config);
+  }
+
+  /// Read-only transcript merge via background `:p2p` (same process that writes on poll).
+  static Future<List<Map<String, dynamic>>> transcriptLoadMerged({
+    required String appNamespace,
+    required List<String> conversationKeys,
+    String? matchInboundFromPeerId,
+  }) async {
+    final params = <String, dynamic>{
+      "app_namespace": appNamespace,
+      "conversation_keys": conversationKeys,
+      if (matchInboundFromPeerId != null && matchInboundFromPeerId.trim().isNotEmpty)
+        "match_inbound_from_peer_id": matchInboundFromPeerId.trim(),
+    };
+    if (usesDaemon) {
+      final r = await GhalBolDaemonClient.instance.callState(
+        "p2p_transcript_load_merged",
+        params: params,
+      );
+      if (r["ok"] != true) return [];
+      final lines = r["lines"];
+      if (lines is! List) return [];
+      return lines
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    }
+    return GhalBolFfi.transcriptLoadMerged(appNamespace, params);
+  }
+
+  /// Native **video** control plane (H.264 over `/ghal-bol/call-video/1.0.0`).
+  static Future<Map<String, dynamic>> callVideo(Map<String, dynamic> config) async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_call_video",
+        params: config,
+      );
+    }
+    return GhalBolFfi.p2pCallVideo(config);
+  }
+
+  static Future<Map<String, dynamic>> callVideoStart({
+    required String callId,
+    required String recipientPublicKeyHex,
+    bool cameraEnabled = false,
+  }) {
+    return callVideo({
+      "action": "start",
+      "call_id": callId,
+      "recipient_public_key_hex": recipientPublicKeyHex,
+      "camera_enabled": cameraEnabled,
+    });
+  }
+
+  static Future<Map<String, dynamic>> callVideoStop({required String callId}) {
+    return callVideo({"action": "stop", "call_id": callId});
+  }
+
+  static Future<Map<String, dynamic>> callVideoSetCameraEnabled({
+    required String callId,
+    required bool enabled,
+  }) {
+    return callVideo({
+      "action": "set_camera_enabled",
+      "call_id": callId,
+      "enabled": enabled,
+    });
+  }
+
+  /// Desktop capture path after video start: `nokhwa` (daemon) or `flutter` (UI inject).
+  static Future<Map<String, dynamic>> callVideoCaptureBackend() {
+    return callVideo({"action": "capture_backend", "call_id": "probe"});
+  }
+
+  /// Push one camera frame from the UI into the desktop native video engine.
+  /// `format` `i420` (planar) or packed `rgba`/`bgra` (converted to I420 natively in
+  /// Rust — no Dart per-pixel loop); `stride` is the packed source row length in bytes.
+  static Future<Map<String, dynamic>> callVideoPushCameraFrame({
+    required String callId,
+    required int width,
+    required int height,
+    required String dataBase64,
+    String format = "i420",
+    int? stride,
+  }) async {
+    final config = {
+      "call_id": callId,
+      "width": width,
+      "height": height,
+      "data_base64": dataBase64,
+      "format": format,
+      "stride": stride ?? width * 4,
+    };
+    if (usesDaemon) {
+      // State socket — must not queue behind chat/poll on the main socket (~30 fps).
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_call_video_push_camera_frame",
+        params: config,
+        ensureDaemon: false,
+      );
+    }
+    return GhalBolFfi.p2pCallVideoPushCameraFrame(config);
+  }
+
+  /// Shm path + dimensions for GPU texture registration (`track`: `remote` or `local`).
+  static Future<Map<String, dynamic>> callVideoTexture({
+    required String callId,
+    String track = "remote",
+  }) async {
+    final config = {
+      "call_id": callId,
+      "track": track,
+    };
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_call_video_texture",
+        params: config,
+        ensureDaemon: false,
+      );
+    }
+    return GhalBolFfi.p2pCallVideoTexture(config);
+  }
+
+  /// Pull the latest decoded frame for rendering (`track`: `remote` or `local`).
+  /// `format` `rgba` (default) returns packed RGBA8888 converted natively in Rust so
+  /// the Flutter UI isolate does no per-pixel work; `i420` returns the raw planar payload.
+  /// [maxEdge] downscales the display pull in Rust (encode/send stays full-res).
+  static Future<Map<String, dynamic>> callVideoFrame({
+    required String callId,
+    int sinceGeneration = 0,
+    String track = "remote",
+    String format = "rgba",
+    int maxEdge = 360,
+  }) async {
+    final config = {
+      "call_id": callId,
+      "since_generation": sinceGeneration,
+      "track": track,
+      "format": format,
+      if (maxEdge > 0) "max_edge": maxEdge,
+    };
+    if (usesDaemon) {
+      // State socket — must not queue behind desktop camera push on the main socket.
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_call_video_frame",
+        params: config,
+        ensureDaemon: false,
+      );
+    }
+    return GhalBolFfi.p2pCallVideoFrame(config);
   }
 
   static Future<Map<String, dynamic>> sendAckDm({

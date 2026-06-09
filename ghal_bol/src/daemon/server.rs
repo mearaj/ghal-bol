@@ -155,6 +155,27 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
         "p2p_call_signal" => {
             Ok(p2p_runtime::p2p_call_signal(params))
         }
+        "p2p_call_media" => {
+            Ok(p2p_runtime::p2p_call_media(params))
+        }
+        "p2p_call_status" => {
+            Ok(p2p_runtime::p2p_call_status(params))
+        }
+        "p2p_transcript_load_merged" => {
+            Ok(p2p_runtime::p2p_transcript_load_merged(params))
+        }
+        "p2p_call_video" => {
+            Ok(p2p_runtime::p2p_call_video(params))
+        }
+        "p2p_call_video_frame" => {
+            Ok(p2p_runtime::p2p_call_video_frame(params))
+        }
+        "p2p_call_video_texture" => {
+            Ok(p2p_runtime::p2p_call_video_texture(params))
+        }
+        "p2p_call_video_push_camera_frame" => {
+            Ok(p2p_runtime::p2p_call_video_push_camera_frame(params))
+        }
         "p2p_requeue_outbound_dm" => {
             let message_id = param_str(params, "message_id")?;
             let recipient = param_str(params, "recipient_public_key_hex")?;
@@ -205,12 +226,15 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
             Ok(p2p_runtime::p2p_set_foreground_peer(pk))
         }
         "coord_set_base_url" => {
-            let url = param_str(params, "base_url")?;
             let insecure = params
                 .get("insecure_tls")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            Ok(coord_runtime::coord_set_base_url_json(&url, insecure))
+            let urls = coord_runtime::coord_urls_from_json_value(params);
+            if urls.is_empty() {
+                return Err("base_url or base_urls required".to_string());
+            }
+            Ok(coord_runtime::coord_set_base_urls_json(&urls, insecure))
         }
         "coord_lookup_peer" => {
             let pk = param_str(params, "public_key_hex")?;

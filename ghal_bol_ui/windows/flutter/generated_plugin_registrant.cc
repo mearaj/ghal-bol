@@ -8,7 +8,7 @@
 
 #include <app_links/app_links_plugin_c_api.h>
 #include <audioplayers_windows/audioplayers_windows_plugin.h>
-#include <flutter_webrtc/flutter_web_r_t_c_plugin.h>
+#include <camera_desktop/camera_desktop_plugin.h>
 #include <permission_handler_windows/permission_handler_windows_plugin.h>
 #include <share_plus/share_plus_windows_plugin_c_api.h>
 #include <url_launcher_windows/url_launcher_windows.h>
@@ -18,8 +18,8 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("AppLinksPluginCApi"));
   AudioplayersWindowsPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("AudioplayersWindowsPlugin"));
-  FlutterWebRTCPluginRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("FlutterWebRTCPlugin"));
+  CameraDesktopPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("CameraDesktopPlugin"));
   PermissionHandlerWindowsPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("PermissionHandlerWindowsPlugin"));
   SharePlusWindowsPluginCApiRegisterWithRegistrar(

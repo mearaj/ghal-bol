@@ -3,5 +3,5 @@
 mod paths;
 mod server;
 
-pub use paths::default_socket_path;
+pub use paths::{default_socket_path, touch_incoming_call_wake};
 pub use server::{probe_existing_daemon, run_daemon, socket_path_from_env_or_default};

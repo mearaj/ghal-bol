@@ -46,10 +46,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 // Play: `flutter build appbundle` → bundleRelease → com.ghalbol
-// Dev on device: flutter run → com.ghalbol.debug | flutter run --release → com.ghalbol.release
-val gradleTasks = gradle.startParameter.taskNames.joinToString(" ").lowercase()
-val isPlayAppBundle = gradleTasks.contains("bundle")
-
+// Dev on device: `flutter run` → com.ghalbol.debug | `flutter run --release` → com.ghalbol
 android {
     namespace = "com.ghalbol"
     compileSdk = flutter.compileSdkVersion
@@ -67,12 +64,31 @@ android {
         }
     }
 
+    // We bundle the NDK libc++_shared.so (needed by libghal_bol.so / Oboe). If any
+    // other dependency ever ships it too, keep the first instead of failing the merge.
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libc++_shared.so"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.ghalbol"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Must match scripts/pack_android_workspace_jni_libs.sh (four standard ABIs).
+        // Dev fast path: -Pghalbol.arm64Only=true after PACK_ANDROID_ARM64_ONLY=1 pack.
+        ndk {
+            val abis =
+                if (project.findProperty("ghalbol.arm64Only") == "true") {
+                    listOf("arm64-v8a")
+                } else {
+                    listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+                }
+            abiFilters.addAll(abis)
+        }
     }
 
     signingConfigs {
@@ -91,9 +107,6 @@ android {
             applicationIdSuffix = ".debug"
         }
         release {
-            if (!isPlayAppBundle) {
-                applicationIdSuffix = ".release"
-            }
             signingConfig =
                 if (keystorePropertiesFile.exists()) {
                     signingConfigs.getByName("release")
@@ -103,6 +116,34 @@ android {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
+            )
+        }
+    }
+}
+
+// Fail fast when Flutter is built without a full native pack (all four ABIs).
+val ghalBolJniRoot = rootProject.file("../../build/android-native-ndk")
+val ghalBolRequiredAbis =
+    listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+tasks.named("preBuild").configure {
+    doFirst {
+        val arm64Only = project.findProperty("ghalbol.arm64Only") == "true"
+        val required = if (arm64Only) listOf("arm64-v8a") else ghalBolRequiredAbis
+        val missing =
+            required.filter { abi ->
+                !File(ghalBolJniRoot, "$abi/libghal_bol.so").isFile ||
+                    !File(ghalBolJniRoot, "$abi/libc++_shared.so").isFile
+            }
+        if (missing.isNotEmpty()) {
+            val hint =
+                if (arm64Only) {
+                    "PACK_ANDROID_ARM64_ONLY=1 ./scripts/pack_android_workspace_jni_libs.sh"
+                } else {
+                    "./scripts/pack_android_workspace_jni_libs.sh"
+                }
+            throw GradleException(
+                "Missing libghal_bol.so / libc++_shared.so for: ${missing.joinToString()}. " +
+                    "From workspace root run: $hint",
             )
         }
     }

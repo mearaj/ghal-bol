@@ -7,7 +7,12 @@ project(runner LANGUAGES CXX)
 set(BINARY_NAME "ghal_bol_ui")
 # The unique GTK application identifier for this application. See:
 # https://wiki.gnome.org/HowDoI/ChooseApplicationID
-set(APPLICATION_ID "com.ghalbol")
+# Must match [kGhalBolAppNamespace] in lib/ghal_bol_constants.dart (Debug vs Release).
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(APPLICATION_ID "com.ghalbol.debug")
+else()
+  set(APPLICATION_ID "com.ghalbol")
+endif()
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -54,6 +59,7 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
+pkg_check_modules(LIBNOTIFY REQUIRED IMPORTED_TARGET libnotify)
 
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
@@ -103,7 +109,11 @@ if(EXISTS "${_APP_ICON}")
   install(FILES "${_APP_ICON}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/icons"
     RENAME "app_icon.png" COMPONENT Runtime)
 endif()
-set(_DESKTOP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/data/com.ghalbol.desktop")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_DESKTOP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/data/com.ghalbol.debug.desktop")
+else()
+  set(_DESKTOP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/data/com.ghalbol.desktop")
+endif()
 if(EXISTS "${_DESKTOP_FILE}")
   install(FILES "${_DESKTOP_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
     COMPONENT Runtime)

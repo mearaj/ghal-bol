@@ -1,3 +1,4 @@
+import "dart:async";
 import "dart:io";
 
 import "package:flutter/material.dart";
@@ -134,27 +135,44 @@ class _AppLogScreenState extends State<AppLogScreen> {
     return "ghalbol-app-log-${DateTime.now().millisecondsSinceEpoch}-$_exportSeq.txt";
   }
 
-  Future<File?> _writeVisibleLogFile({required Directory directory}) async {
-    final visible = _visible;
+  /// Stream lines to disk — never build one giant `join` string (OOM on desktop/Android).
+  Future<String?> _writeVisibleLogFile({
+    required String directoryPath,
+    required String action,
+  }) async {
+    final visible = List<AppLogEntry>.from(_visible);
     if (visible.isEmpty) return null;
-    final file = File("${directory.path}/${_logFileName()}");
+    final path = "$directoryPath/${_logFileName()}";
+    final file = File(path);
     IOSink? sink;
     try {
       sink = file.openWrite();
+      sink.writeln(
+        "### Ghal Bol log $action ${DateTime.now().toIso8601String()} "
+        "visible=${visible.length} total=${AppLog.instance.entries.length}",
+      );
+      var n = 0;
       for (final e in visible) {
         sink.writeln(e.formatLine());
+        n++;
+        // Yield so the UI isolate can breathe; avoids freeze/OOM during big exports.
+        if (n % 48 == 0) {
+          await sink.flush();
+          await Future<void>.delayed(Duration.zero);
+        }
       }
       await sink.flush();
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.instance.e("AppLog", "export_write_failed action=$action", e, st);
       try {
         if (await file.exists()) await file.delete();
       } catch (_) {}
-      rethrow;
+      return null;
     } finally {
       await sink?.close();
     }
     if (!await file.exists() || await file.length() == 0) return null;
-    return file;
+    return path;
   }
 
   Future<Directory> _downloadDirectory() async {
@@ -180,54 +198,80 @@ class _AppLogScreenState extends State<AppLogScreen> {
     );
   }
 
-  /// Save filtered log lines to the device Downloads folder (or app documents fallback).
-  Future<void> _downloadAll() async {
-    if (_exportBusy) return;
+  Future<T?> _runExport<T>({
+    required String action,
+    required Future<T?> Function() run,
+  }) async {
+    if (_exportBusy) return null;
     if (_visible.isEmpty) {
       _snack("Nothing to save — widen filters or use the app to generate log lines.");
-      return;
+      return null;
     }
-    _exportBusy = true;
+    setState(() => _exportBusy = true);
+    AppLog.instance.removeListener(_onLog);
+    AppLog.instance.i(
+      "AppLog",
+      "export_start action=$action visible=${_visible.length} "
+      "total=${AppLog.instance.entries.length}",
+    );
     try {
-      final dir = await _downloadDirectory();
-      final file = await _writeVisibleLogFile(directory: dir);
-      if (file == null) {
-        _snack("Save failed — no file written.");
-        return;
-      }
-      _snack("Saved to ${file.path}");
-    } catch (e) {
-      _snack("Download failed: $e");
+      return await run();
+    } catch (e, st) {
+      AppLog.instance.e("AppLog", "export_failed action=$action", e, st);
+      if (mounted) _snack("$action failed: $e");
+      return null;
     } finally {
-      _exportBusy = false;
+      AppLog.instance.addListener(_onLog);
+      if (mounted) setState(() => _exportBusy = false);
     }
   }
 
+  /// Save filtered log lines to the device Downloads folder (or app documents fallback).
+  Future<void> _downloadAll() async {
+    await _runExport<void>(
+      action: "download",
+      run: () async {
+        final dir = await _downloadDirectory();
+        final path = await _writeVisibleLogFile(
+          directoryPath: dir.path,
+          action: "download",
+        );
+        if (!mounted) return;
+        if (path == null) {
+          AppLog.instance.w("AppLog", "export_done action=download ok=false");
+          _snack("Save failed — no file written.");
+          return;
+        }
+        AppLog.instance.i("AppLog", "export_done action=download ok=true path=$path");
+        _snack("Saved to $path");
+      },
+    );
+  }
+
   Future<void> _shareAll() async {
-    if (_exportBusy) return;
-    if (_visible.isEmpty) {
-      _snack("Nothing to share — widen filters or use the app to generate log lines.");
-      return;
-    }
-    _exportBusy = true;
-    try {
-      final dir = await getTemporaryDirectory();
-      final file = await _writeVisibleLogFile(directory: dir);
-      if (file == null) {
-        _snack("Share failed — no file written.");
-        return;
-      }
-      await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(file.path, mimeType: "text/plain")],
-          subject: "Ghal Bol app log",
-        ),
-      );
-    } catch (e) {
-      _snack("Share failed: $e");
-    } finally {
-      _exportBusy = false;
-    }
+    await _runExport<void>(
+      action: "share",
+      run: () async {
+        final dir = await getTemporaryDirectory();
+        final path = await _writeVisibleLogFile(
+          directoryPath: dir.path,
+          action: "share",
+        );
+        if (!mounted) return;
+        if (path == null) {
+          AppLog.instance.w("AppLog", "export_done action=share ok=false");
+          _snack("Share failed — no file written.");
+          return;
+        }
+        AppLog.instance.i("AppLog", "export_done action=share ok=true path=$path");
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [XFile(path, mimeType: "text/plain")],
+            subject: "Ghal Bol app log",
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _confirmClear() async {
@@ -243,9 +287,12 @@ class _AppLogScreenState extends State<AppLogScreen> {
       ),
     );
     if (go != true || !mounted) return;
+    AppLog.instance.removeListener(_onLog);
+    AppLog.instance.clear();
+    AppLog.instance.addListener(_onLog);
+    if (!mounted) return;
     _resetScrollToTop();
     setState(() => _followTail = true);
-    AppLog.instance.clear();
   }
 
   @override
@@ -503,19 +550,13 @@ class _LogLineTile extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
-      child: SelectableText.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: "${entry.formatLine()}\n",
-              style: TextStyle(
-                fontFamily: "monospace",
-                fontSize: 11.5,
-                height: 1.35,
-                color: cs.onSurface,
-              ),
-            ),
-          ],
+      child: Text(
+        entry.formatLine(),
+        style: TextStyle(
+          fontFamily: "monospace",
+          fontSize: 11.5,
+          height: 1.35,
+          color: cs.onSurface,
         ),
       ),
     );

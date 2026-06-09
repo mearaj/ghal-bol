@@ -25,10 +25,20 @@ fn android_data_dir_mx() -> &'static Mutex<Option<PathBuf>> {
 }
 
 /// Same paths as [`ghal_bol_ffi_configure_android_data_directory`] (P2P `:p2p` process).
+#[cfg(any(target_os = "android", test))]
 pub(crate) fn configure_android_data_directory(path: &str) {
     if let Ok(mut g) = android_data_dir_mx().lock() {
         *g = Some(PathBuf::from(path));
     }
+}
+
+/// Android / `:p2p` data root when configured (shared with UI via `app_flutter`).
+#[cfg(target_os = "android")]
+pub(crate) fn optional_android_data_dir() -> Option<PathBuf> {
+    android_data_dir_mx()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
 }
 
 pub(crate) fn resolved_storage_config(ns: &str) -> crate::StorageConfig {

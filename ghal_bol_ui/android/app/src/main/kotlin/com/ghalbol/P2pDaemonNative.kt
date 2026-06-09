@@ -19,6 +19,29 @@ object P2pDaemonNative {
         initRustlsPlatformVerifier(context.applicationContext)
     }
 
+    /** Hand cpal/Oboe the JavaVM + Context so native voice can open mic/speaker in `:p2p`. */
+    @JvmStatic
+    external fun initAndroidAudio(context: Context)
+
+    /** Camera2 I420 frames from `:p2p` → native video engine (called from Kotlin). */
+    @JvmStatic
+    external fun pushCameraFrame(data: ByteArray, width: Int, height: Int)
+
+    @JvmStatic
+    fun startCameraCapture(context: Context) {
+        AndroidVideoCapture.start(context.applicationContext)
+    }
+
+    @JvmStatic
+    fun stopCameraCapture() {
+        AndroidVideoCapture.stop()
+    }
+
+    @JvmStatic
+    fun initAudio(context: Context) {
+        initAndroidAudio(context.applicationContext)
+    }
+
     @JvmStatic
     external fun configureDataDirectory(absolutePath: String)
 

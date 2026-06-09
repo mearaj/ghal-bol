@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn roundtrip_sign_verify() {
         let secp = Secp256k1::new();
-        let sk = SecretKey::from_slice(&[1u8; 32]).expect("test key");
+        let sk = SecretKey::from_byte_array([1u8; 32]).expect("test key");
         let pk_hex = hex::encode(sk.public_key(&secp).serialize());
         let nonce = [7u8; 32];
         let msg = registration_message_digest(&nonce, &pk_hex);

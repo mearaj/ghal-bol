@@ -49,6 +49,18 @@ String contactPublicKeyHexFromEvent(Map<String, dynamic> ev) {
   return "";
 }
 
+/// Contact key for stream-ready / call gating from a connect event.
+/// Resolves libp2p `peer_id` → 66-hex when the poll JSON only carried wire id.
+String streamContactKeyFromEvent(Map<String, dynamic> ev) {
+  final pk = contactPublicKeyHexFromEvent(ev);
+  if (isValidPublicKeyHex(pk)) return pk.toLowerCase();
+  final wire = libp2pWirePeerIdFromEvent(ev);
+  if (wire.isEmpty) return "";
+  final resolved = GhalBolFfi.publicKeyHexFromPeerId(wire)?.trim().toLowerCase() ?? "";
+  if (isValidPublicKeyHex(resolved)) return resolved;
+  return "";
+}
+
 /// libp2p transport id from event (`from` / `peer_id`) — not a contact key.
 String libp2pWirePeerIdFromEvent(Map<String, dynamic> ev) {
   for (final key in <String>["from", "peer_id"]) {

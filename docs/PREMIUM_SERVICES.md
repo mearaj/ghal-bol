@@ -4,7 +4,7 @@
 
 Ghal Bol’s **core messaging** (Tier 1 direct sync, optional Tier 2 peer relay) stays independent of payment systems and blockchain infrastructure. Optional **premium infrastructure** (Tier 3 backup relay) is a separate product layer.
 
-See [COMMUNICATION_TIERS.md](COMMUNICATION_TIERS.md) for transport tiers. See [IDENTITY.md](IDENTITY.md) for cryptographic identity (create, import, export).
+**Tiers:** Tier 1 = direct P2P + coord (free, shipping); Tier 2 = peer blob relay (planned); Tier 3 = paid backup relay (this doc). See [TRANSPORT.md](TRANSPORT.md) and [IDENTITY.md](IDENTITY.md).
 
 ---
 
@@ -24,7 +24,7 @@ Premium does **not** change who owns transcripts or private keys. It only change
 
 ## What premium may include (planned)
 
-Examples aligned with **Tier 3** in [COMMUNICATION_TIERS.md](COMMUNICATION_TIERS.md):
+Examples aligned with **Tier 3** (paid backup relay):
 
 - durable backup relay (encrypted blobs, bounded TTL)
 - longer retention windows for delayed sync

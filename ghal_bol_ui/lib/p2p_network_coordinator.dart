@@ -3,6 +3,7 @@ import "dart:convert";
 import "dart:io" show Platform;
 
 import "app_log.dart";
+import "call/call_controller.dart";
 import "user_flow_log.dart";
 import "chat_transcript_store.dart";
 import "ghal_bol_coord.dart";
@@ -139,7 +140,7 @@ class P2pNetworkCoordinator {
     if (_dmPeersFingerprint(contacts) == "[]") return;
     final bootstrap = await _lookupCoordBootstrap(contacts);
     if (bootstrap.isEmpty) {
-      P2pFlowLog.coord("dial_skip", {"reason": "no_bootstrap_addrs"});
+      P2pFlowLog.coord("dial_skip", {"reason": "no_coord_addrs"});
       return;
     }
     P2pFlowLog.coord("dial_start", {"addrs": bootstrap.length.toString()});
@@ -250,6 +251,7 @@ class P2pNetworkCoordinator {
       if (contacts.any((c) => isValidPublicKeyHex(_effectivePublicKeyHex(c)))) {
         unawaited(refreshCoordDial(contacts, appNamespace: ns));
       }
+      unawaited(CallController.instance.syncActiveCallFromNative());
       P2pFlowLog.step("sync_contacts_skip", {"reason": "hot_register_only"});
       return {"ok": true, "already_running": true};
     }
@@ -284,6 +286,7 @@ class P2pNetworkCoordinator {
       if (contacts.any((c) => isValidPublicKeyHex(_effectivePublicKeyHex(c)))) {
         unawaited(refreshCoordDial(contacts, appNamespace: ns));
       }
+      unawaited(CallController.instance.syncActiveCallFromNative());
     } else {
       P2pFlowLog.issue("p2p_start_failed", detail: r["error"]?.toString());
     }

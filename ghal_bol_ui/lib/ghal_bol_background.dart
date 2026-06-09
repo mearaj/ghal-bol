@@ -45,7 +45,7 @@ class GhalBolBackground {
   static Future<void> stopForLogout() async {
     SessionFlowLog.step("logout_stop");
     SessionCredentials.clear();
-    P2pEventBridge.instance.stop();
+    await P2pEventBridge.instance.stop();
     P2pNetworkCoordinator.invalidate();
     await ghalBolListenerForegroundStop();
     if (GhalBolDaemon.isSupported) {

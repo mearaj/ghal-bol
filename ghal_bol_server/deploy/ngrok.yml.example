@@ -1,0 +1,38 @@
+# ngrok agent config (v3) for Ghal Bol DEBUG — two endpoints from one free agent.
+#
+# Your installed agent uses config version 3 (the `agent:` + `endpoints:` schema).
+# One free agent can run both endpoints at once with `ngrok start --all`
+# (free allows up to 3 online endpoints).
+#
+#   - coord_http : the HTTP API (8765), pinned to your stable free dev domain so the HTTPS URL
+#                  matches ghal_bol_ui/env/.env.development and never changes between runs.
+#   - relay_tcp  : the RAW libp2p relay (4002). TCP gets a random N.tcp.ngrok.io:PORT each run.
+#
+# IMPORTANT: `tcp` endpoints on the ngrok FREE plan require a verified payment method on your
+# account (still $0 — card is verification only, no charge). Add it once at
+# https://dashboard.ngrok.com/  →  Billing  →  add payment method. Without it the TCP endpoint
+# is rejected and only the HTTP one comes up.
+#
+# Install:
+#   1) Path:   ngrok config check   (yours: ~/.config/ngrok/ngrok.yml)
+#   2) Add the `endpoints:` block below to that file, keeping your existing `agent.authtoken`.
+#   3) Start both:   ngrok start --all
+#   4) ngrok prints https://shuffling-…ngrok-free.dev (API) and tcp://N.tcp.ngrok.io:PORT (relay).
+
+version: 3
+
+agent:
+  authtoken: <keep your existing token from ~/.config/ngrok/ngrok.yml>
+
+endpoints:
+  - name: coord_http
+    # Pin your free dev domain (https://dashboard.ngrok.com/domains) so the URL is stable.
+    url: https://shuffling-glandular-traverse.ngrok-free.dev
+    upstream:
+      url: http://127.0.0.1:8765
+  - name: relay_tcp
+    # `tcp://` (scheme only) on the PUBLIC url = randomly assigned public TCP address each run.
+    # The upstream url must be a plain host:port (NO scheme) or ngrok errors "too many colons".
+    url: tcp://
+    upstream:
+      url: 127.0.0.1:4002

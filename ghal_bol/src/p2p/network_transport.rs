@@ -1,36 +1,12 @@
-//! Public libp2p/IPFS Kademlia bootstrap + invite address seeding for WAN reachability.
+//! Network profile detection, relay/coord dial helpers, and listen-address utilities (no Kademlia).
 
 use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
-use std::time::Duration;
 
-use libp2p::kad;
 use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 
 use super::native_log;
-
-/// libp2p IPFS Kademlia bootstrap peers — each has its own DNS host (see `_dnsaddr.bootstrap.libp2p.io`).
-const PUBLIC_DHT_BOOTSTRAP: [(&str, &str); 4] = [
-    (
-        "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-        "sv15.bootstrap.libp2p.io",
-    ),
-    (
-        "QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-        "ny5.bootstrap.libp2p.io",
-    ),
-    (
-        "QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-        "am6.bootstrap.libp2p.io",
-    ),
-    (
-        "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-        "sg1.bootstrap.libp2p.io",
-    ),
-];
-
-const BOOTSTRAP_TCP_PORT: u16 = 4001;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LocalNetworkProfile {
@@ -69,17 +45,21 @@ pub(crate) struct NetworkHandoverKey {
 }
 
 impl LocalNetworkProfile {
-    /// Wi‑Fi or tether LAN is active — prefer mDNS/direct TCP; do not treat as cellular-only.
+    /// Wi‑Fi, tether, or wired LAN — prefer mDNS/direct TCP; do not treat as cellular-only.
     pub(crate) fn has_active_lan(&self) -> bool {
         if self.has_rfc1918_ipv4
             && (self.has_wifi_iface || self.has_tether_iface || self.has_usb_iface)
         {
             return true;
         }
+        // Desktop wired Ethernet (and similar): RFC1918 without a cellular-only path.
+        if self.has_rfc1918_ipv4 && !self.on_mobile_data_path() {
+            return true;
+        }
         false
     }
 
-    /// Skip blind `DialOpts::peer_id` dials; use coord/KAD/mDNS explicit multiaddrs instead.
+    /// Skip blind `DialOpts::peer_id` dials; use coord/mDNS explicit multiaddrs instead.
     /// Phones on Wi‑Fi still have a cellular iface — that must not disable LAN routed dials.
     pub(crate) fn avoid_blind_routed_dial(&self) -> bool {
         if self.has_active_lan() {
@@ -120,7 +100,7 @@ impl LocalNetworkProfile {
         if self.has_rfc1918_ipv4 && !self.has_public_ipv4 {
             return "prioritize mDNS/LAN TCP";
         }
-        "use coord + DHT + mDNS"
+        "use coord + mDNS"
     }
 
     /// Cellular/CGNAT without an active LAN — needs relay for coord when URL is set.
@@ -221,71 +201,73 @@ pub(crate) fn is_public_bootstrap_ipv4(ip: std::net::Ipv4Addr) -> bool {
         && !is_cgnat_ipv4(ip)
 }
 
-/// Resolve bootstrap DNS via the OS resolver and dial `/ip4/.../tcp/4001/p2p/<peer>`.
-/// Avoids libp2p `/dns/...` returning docker-bridge IPs (e.g. 172.17.0.1 → "Unexpected peer ID").
-fn public_dht_bootstrap_resolved_ip_multiaddrs() -> Vec<(PeerId, Multiaddr)> {
+/// Resolve a Ghal Bol relay advertised by coord (`GET /v1/relay`) into concrete TCP dial
+/// multiaddrs `(PeerId, /ip4/<public-ip>/tcp/<port>/p2p/<id>)`.
+pub(crate) fn resolve_relay_bootnodes(peer_str: &str, addrs: &[String]) -> Vec<(PeerId, Multiaddr)> {
+    let Ok(peer) = PeerId::from_str(peer_str) else {
+        native_log::warn("relay", format!("ghalbol relay bad peer id: {peer_str}"));
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for (peer_str, host) in &PUBLIC_DHT_BOOTSTRAP {
-        let Ok(peer) = PeerId::from_str(peer_str) else {
-            continue;
-        };
-        let target = format!("{host}:{BOOTSTRAP_TCP_PORT}");
-        let Ok(addrs) = target.to_socket_addrs() else {
-            native_log::warn("kad", format!("bootstrap DNS resolve failed: {host}"));
-            continue;
-        };
-        let mut pushed = false;
-        for addr in addrs {
-            let IpAddr::V4(ip) = addr.ip() else {
-                continue;
-            };
-            if !is_public_bootstrap_ipv4(ip) {
-                native_log::warn(
-                    "kad",
-                    format!("bootstrap {host} skipped non-public {ip} (docker/LAN DNS?)"),
-                );
-                continue;
+    let mut seen = std::collections::HashSet::new();
+    let ip4_only: Vec<&String> = addrs.iter().filter(|a| a.contains("/ip4/")).collect();
+    let bases: Vec<&String> = if ip4_only.is_empty() {
+        addrs.iter().collect()
+    } else {
+        ip4_only
+    };
+    for addr in bases {
+        for ma in relay_base_addr_to_dial_multiaddrs(addr, peer) {
+            if seen.insert(ma.to_string()) {
+                out.push((peer, ma));
             }
-            let ma_str = format!("/ip4/{ip}/tcp/{BOOTSTRAP_TCP_PORT}/p2p/{peer}");
-            let Ok(ma) = ma_str.parse::<Multiaddr>() else {
-                continue;
-            };
-            native_log::debug("kad", format!("bootstrap {peer} via {ma}"));
-            out.push((peer, ma));
-            pushed = true;
-        }
-        if !pushed {
-            native_log::warn("kad", format!("bootstrap DNS resolve: no public IPv4 for {host}"));
         }
     }
     out
 }
 
-/// Bootstrap list for Kademlia seeding + dial (async hook kept for call sites).
-pub(crate) async fn resolve_public_dht_bootnodes() -> Vec<(PeerId, Multiaddr)> {
-    let out = public_dht_bootstrap_resolved_ip_multiaddrs();
-
-    native_log::info(
-        "kad",
-        format!(
-            "public DHT bootstrap: {} dial address(es) for {} peer(s)",
-            out.len(),
-            PUBLIC_DHT_BOOTSTRAP.len()
-        ),
-    );
+fn relay_base_addr_to_dial_multiaddrs(addr: &str, peer: PeerId) -> Vec<Multiaddr> {
+    let segs: Vec<&str> = addr.trim().split('/').filter(|s| !s.is_empty()).collect();
+    let mut host: Option<(String, bool)> = None;
+    let mut port: Option<u16> = None;
+    let mut i = 0;
+    while i + 1 < segs.len() {
+        match segs[i] {
+            "ip4" => host = Some((segs[i + 1].to_string(), false)),
+            "dns4" | "dns" | "dns6" => host = Some((segs[i + 1].to_string(), true)),
+            "tcp" => port = segs[i + 1].parse().ok(),
+            _ => {}
+        }
+        i += 1;
+    }
+    let (Some((h, is_dns)), Some(p)) = (host, port) else {
+        native_log::warn("relay", format!("ghalbol relay addr not TCP host/port: {addr}"));
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if is_dns {
+        let Ok(resolved) = format!("{h}:{p}").to_socket_addrs() else {
+            native_log::warn("relay", format!("ghalbol relay DNS resolve failed: {h}"));
+            return Vec::new();
+        };
+        for sa in resolved {
+            if let IpAddr::V4(ip) = sa.ip() {
+                if !is_public_bootstrap_ipv4(ip) {
+                    continue;
+                }
+                if let Ok(ma) = format!("/ip4/{ip}/tcp/{p}/p2p/{peer}").parse::<Multiaddr>() {
+                    out.push(ma);
+                }
+            }
+        }
+    } else if let Ok(ip) = h.parse::<std::net::Ipv4Addr>() {
+        if is_public_bootstrap_ipv4(ip) {
+            if let Ok(ma) = format!("/ip4/{ip}/tcp/{p}/p2p/{peer}").parse::<Multiaddr>() {
+                out.push(ma);
+            }
+        }
+    }
     out
-}
-
-pub(crate) type KadBehaviour = kad::Behaviour<kad::store::MemoryStore>;
-
-pub(crate) fn new_kademlia_behaviour(local_peer_id: PeerId) -> KadBehaviour {
-    let mut cfg = kad::Config::new(kad::PROTOCOL_NAME);
-    cfg.set_query_timeout(Duration::from_secs(60));
-    let store = kad::store::MemoryStore::new(local_peer_id);
-    let mut kad = kad::Behaviour::with_config(local_peer_id, store, cfg);
-    // Client: query the public DHT without maintaining connections to every routing-table peer.
-    kad.set_mode(Some(kad::Mode::Client));
-    kad
 }
 
 pub(crate) fn ipv4_from_ma_str(s: &str) -> Option<std::net::Ipv4Addr> {
@@ -360,7 +342,7 @@ pub(crate) fn is_dm_dial_multiaddr(ma: &Multiaddr) -> bool {
 }
 
 /// TCP multiaddrs for DHT publish + DM dial (LAN + relay `/tcp/.../p2p-circuit`, no QUIC/WebRTC/WSS).
-pub(crate) fn is_kad_publish_tcp_multiaddr(ma: &Multiaddr) -> bool {
+pub(crate) fn is_dm_listen_tcp_multiaddr(ma: &Multiaddr) -> bool {
     if is_relay_circuit_multiaddr(ma) {
         return true;
     }
@@ -377,22 +359,12 @@ pub(crate) fn is_kad_publish_tcp_multiaddr(ma: &Multiaddr) -> bool {
 pub(crate) fn tcp_dm_publish_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     addrs
         .into_iter()
-        .filter(|ma| is_kad_publish_tcp_multiaddr(ma))
+        .filter(|ma| is_dm_listen_tcp_multiaddr(ma))
         .collect()
 }
 
-/// DHT publish when a coord URL is set: relay circuit + public TCP only (never CGNAT/LAN).
-pub(crate) fn tcp_dm_publish_addrs_coord_mode(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
-    addrs
-        .into_iter()
-        .filter(|ma| {
-            is_coord_relay_tcp_circuit_multiaddr(ma) || is_coord_register_tcp_multiaddr(ma)
-        })
-        .collect()
-}
-
-/// Inbound DHT records to dial when coord is primary (WAN paths only).
-pub(crate) fn wan_kad_record_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
+/// Inbound coord lookup addrs to dial when coord is primary (WAN paths only).
+pub(crate) fn wan_coord_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     let filtered: Vec<Multiaddr> = addrs
         .into_iter()
         .filter(|ma| {
@@ -459,8 +431,9 @@ pub(crate) fn rank_dm_dial_addrs_for_peer(
     }
 }
 
-/// When a routable public IP is present, skip RFC1918 LAN (coord/DHT often list both).
+/// When a routable public IP is present, skip RFC1918 LAN (coord often lists both).
 /// LAN + relay only: keep both — try direct TCP before relay circuit.
+#[cfg(test)]
 pub(crate) fn filter_wan_preferred_dm_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     let sorted = sort_dm_dial_addrs(addrs);
     let has_routable_public = sorted.iter().any(|ma| {
@@ -485,7 +458,7 @@ pub(crate) fn filter_wan_preferred_dm_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<M
 
 /// Coord registration: public routable TCP only (not RFC1918 — mDNS covers LAN per DESIGN.md).
 pub(crate) fn is_coord_register_tcp_multiaddr(ma: &Multiaddr) -> bool {
-    if !is_kad_publish_tcp_multiaddr(ma) || is_relay_circuit_multiaddr(ma) {
+    if !is_dm_listen_tcp_multiaddr(ma) || is_relay_circuit_multiaddr(ma) {
         return false;
     }
     ipv4_from_ma_str(&ma.to_string())
@@ -493,7 +466,7 @@ pub(crate) fn is_coord_register_tcp_multiaddr(ma: &Multiaddr) -> bool {
         .unwrap_or(false)
 }
 
-/// Legacy DHT-style filter: public TCP + relay only (drops RFC1918/CGNAT).
+/// WAN coord dial filter: public TCP + relay only (drops RFC1918/CGNAT).
 pub(crate) fn filter_coord_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     sort_coord_dial_multiaddrs(
         addrs
@@ -539,34 +512,6 @@ pub(crate) fn filter_coord_relay_dial_platform(mut addrs: Vec<Multiaddr>) -> Vec
     addrs
 }
 
-/// Dial addrs from GET /v1/peers — use what the peer registered (CGNAT, LAN, relay).
-/// Skips loopback and docker bridge junk only; WAN-prefers when a true public IP exists.
-pub(crate) fn filter_coord_presence_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
-    let sorted = sort_dm_dial_addrs(addrs);
-    let filtered: Vec<Multiaddr> = sorted
-        .into_iter()
-        .filter(|ma| {
-            if !is_dm_dial_multiaddr(ma) {
-                return false;
-            }
-            if is_relay_circuit_multiaddr(ma) {
-                return true;
-            }
-            if let Some(ip) = ipv4_from_ma_str(&ma.to_string()) {
-                return !ip.is_loopback() && !is_docker_or_link_local_ipv4(ip);
-            }
-            true
-        })
-        .collect();
-    filtered
-}
-
-pub(crate) fn kad_publish_fingerprint(addrs: &[Multiaddr]) -> String {
-    let mut lines: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
-    lines.sort();
-    lines.join("\n")
-}
-
 fn local_ipv4_addrs() -> Vec<std::net::Ipv4Addr> {
     let mut out = Vec::new();
     let Ok(ifs) = if_addrs::get_if_addrs() else {
@@ -590,7 +535,7 @@ fn local_ipv4_addrs() -> Vec<std::net::Ipv4Addr> {
     out
 }
 
-/// docker0 / podman / common CNI bridges — not reachable for DM or DHT (see user logs: 172.17–172.20).
+/// docker0 / podman / common CNI bridges — not reachable for DM dial (see user logs: 172.17–172.20).
 fn is_docker_or_link_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
     let o = ip.octets();
     (o[0] == 169 && o[1] == 254) || (o[0] == 172 && (17..=20).contains(&o[1]))
@@ -604,7 +549,7 @@ pub(crate) fn is_trusted_bootstrap_dial_addr(ma: &Multiaddr) -> bool {
     ipv4_from_ma_str(&ma.to_string()).is_some_and(is_public_bootstrap_ipv4)
 }
 
-/// Expand `0.0.0.0` / `::` listeners into concrete LAN addresses for DHT + peerstore.
+/// Expand `0.0.0.0` / `::` listeners into concrete LAN addresses for coord/mDNS peerstore.
 pub(crate) fn expand_listen_addresses(addr: &Multiaddr) -> Vec<Multiaddr> {
     let s = addr.to_string();
     if s.contains("/ip4/0.0.0.0/") {
@@ -638,108 +583,6 @@ pub(crate) fn expand_listen_addresses(addr: &Multiaddr) -> Vec<Multiaddr> {
     }
 }
 
-const ADDR_RECORD_PREFIX: &[u8] = b"ghal_bol_peer_addrs_v1\n";
-
-pub(crate) fn kad_peer_record_key(peer: &PeerId) -> kad::RecordKey {
-    kad::RecordKey::new(&peer.to_bytes())
-}
-
-fn encode_addr_record(addrs: &[Multiaddr]) -> Vec<u8> {
-    let mut v = ADDR_RECORD_PREFIX.to_vec();
-    for ma in addrs {
-        v.extend_from_slice(ma.to_string().as_bytes());
-        v.push(b'\n');
-    }
-    v
-}
-
-pub(crate) fn decode_addr_record(bytes: &[u8]) -> Vec<Multiaddr> {
-    if !bytes.starts_with(ADDR_RECORD_PREFIX) {
-        return Vec::new();
-    }
-    let text = match std::str::from_utf8(&bytes[ADDR_RECORD_PREFIX.len()..]) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .filter_map(|l| l.parse::<Multiaddr>().ok())
-        .filter(|ma| is_dm_dial_multiaddr(ma))
-        .collect()
-}
-
-pub(crate) fn peer_id_from_record_key(key: &kad::RecordKey) -> Option<PeerId> {
-    PeerId::from_bytes(key.as_ref()).ok()
-}
-
-/// Publish dialable multiaddrs for [peer] (DHT record + provider).
-pub(crate) fn kad_publish_peer_record(kad: &mut KadBehaviour, peer: &PeerId, addrs: Vec<Multiaddr>) {
-    let addrs = tcp_dm_publish_addrs(addrs);
-    if addrs.is_empty() {
-        return;
-    }
-    for ma in &addrs {
-        kad.add_address(peer, ma.clone());
-    }
-    let key = kad_peer_record_key(peer);
-    let record = kad::Record::new(key.clone(), encode_addr_record(&addrs));
-    match kad.put_record(record, kad::Quorum::One) {
-        Ok(_) => native_log::info(
-            "kad",
-            format!("put_record {peer} ({} tcp addr(s))", addrs.len()),
-        ),
-        Err(e) => native_log::warn("kad", format!("put_record {peer}: {e}")),
-    }
-    if let Err(e) = kad.start_providing(key) {
-        native_log::debug("kad", format!("start_providing {peer}: {e}"));
-    }
-}
-
-/// Walk the DHT toward [peer].
-pub(crate) fn kad_find_peer(kad: &mut KadBehaviour, peer: PeerId) {
-    kad.get_closest_peers(peer);
-}
-
-/// Secondary hints (custom addr record + provider); not relied on for first connect.
-pub(crate) fn kad_lookup_peer(kad: &mut KadBehaviour, peer: PeerId) {
-    kad_find_peer(kad, peer);
-    let key = kad_peer_record_key(&peer);
-    kad.get_providers(key.clone());
-    kad.get_record(key);
-}
-
-/// Seed the routing table with public DHT bootnodes and dial hints from connect invites.
-pub(crate) fn seed_kad_routing_table(
-    kad: &mut KadBehaviour,
-    invite_bootstrap: &[Multiaddr],
-    resolved_public: &[(PeerId, Multiaddr)],
-) {
-    for (peer, addr) in resolved_public {
-        kad.add_address(peer, addr.clone());
-    }
-
-    for ma in invite_bootstrap {
-        if ma.is_empty() {
-            continue;
-        }
-        let Some(peer) = peer_id_from_multiaddr(ma) else {
-            continue;
-        };
-        kad.add_address(&peer, ma.clone());
-    }
-}
-
-/// Join the public DHT (no-op if routing table has no known peers yet).
-pub(crate) fn bootstrap_kad(kad: &mut KadBehaviour) {
-    if let Err(e) = kad.bootstrap() {
-        native_log::info("kad", format!("kad bootstrap skipped: {e}"));
-    } else {
-        native_log::info("kad", "kad bootstrap started");
-    }
-}
-
 pub(crate) fn peer_id_from_multiaddr(ma: &Multiaddr) -> Option<PeerId> {
     ma.iter().find_map(|p| {
         if let Protocol::P2p(pid) = p {
@@ -767,6 +610,29 @@ mod tests {
     fn publishable_allows_lan_192_168() {
         let ma: Multiaddr = "/ip4/192.168.1.42/tcp/4001".parse().unwrap();
         assert!(is_publishable_listen_addr(&ma));
+    }
+
+    #[test]
+    fn relay_bootnode_ip4_base_builds_dialable_circuit_addr() {
+        let peer = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X";
+        let nodes = resolve_relay_bootnodes(peer, &["/ip4/203.0.113.7/tcp/4002".to_string()]);
+        assert_eq!(nodes.len(), 1, "public ip4 relay base should resolve to 1 addr");
+        let (p, ma) = &nodes[0];
+        assert_eq!(p.to_string(), peer);
+        assert_eq!(ma.to_string(), format!("/ip4/203.0.113.7/tcp/4002/p2p/{peer}"));
+        // The resulting addr must be trusted for dialing like any other bootstrap.
+        assert!(is_trusted_bootstrap_dial_addr(ma));
+    }
+
+    #[test]
+    fn relay_bootnode_rejects_private_and_bad_inputs() {
+        let peer = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X";
+        // RFC1918 base is not a public relay endpoint.
+        assert!(resolve_relay_bootnodes(peer, &["/ip4/192.168.1.5/tcp/4002".to_string()]).is_empty());
+        // Bad peer id.
+        assert!(resolve_relay_bootnodes("not-a-peer", &["/ip4/203.0.113.7/tcp/4002".to_string()]).is_empty());
+        // Missing tcp/port.
+        assert!(resolve_relay_bootnodes(peer, &["/ip4/203.0.113.7".to_string()]).is_empty());
     }
 
     #[test]
@@ -846,14 +712,4 @@ mod tests {
         assert_eq!(out[0], relay);
     }
 
-    #[test]
-    fn coord_mode_publish_skips_cgnat_keeps_relay() {
-        let cgnat: Multiaddr = "/ip4/100.104.255.165/tcp/40993".parse().unwrap();
-        let relay: Multiaddr = "/ip4/51.81.93.51/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa/p2p-circuit/p2p/16Uiu2HAm699TtKnm9LHXoS6MbVp8ehX7U8hyomVhivz9KuVKsYis"
-            .parse()
-            .unwrap();
-        let out = tcp_dm_publish_addrs_coord_mode(vec![cgnat, relay.clone()]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0], relay);
-    }
 }

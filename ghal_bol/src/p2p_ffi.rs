@@ -189,6 +189,114 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_signal(config_json_utf8: *const c
     run()
 }
 
+/// Native voice-call media control. JSON config — see `p2p_runtime::p2p_call_media`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_media(config_json_utf8: *const c_char) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "call media config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("call media config json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_call_media(&v))
+    };
+    run()
+}
+
+/// Active call snapshot for UI re-sync. JSON config — see `p2p_runtime::p2p_call_status`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_status(config_json_utf8: *const c_char) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "call status config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(_) => serde_json::json!({}),
+        };
+        json_ok(p2p_runtime::p2p_call_status(&v))
+    };
+    run()
+}
+
+/// Native video-call control. JSON config — see `p2p_runtime::p2p_call_video`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video(config_json_utf8: *const c_char) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "call video config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("call video config json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_call_video(&v))
+    };
+    run()
+}
+
+/// Push one I420 camera frame from the UI (desktop capture). JSON config — see
+/// `p2p_runtime::p2p_call_video_push_camera_frame`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video_push_camera_frame(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "call video push frame config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("call video push frame config json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_call_video_push_camera_frame(&v))
+    };
+    run()
+}
+
+/// GPU texture shm metadata. JSON config — see `p2p_runtime::p2p_call_video_texture`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video_texture(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "call video texture config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("call video texture config json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_call_video_texture(&v))
+    };
+    run()
+}
+
+/// Pull the latest decoded video frame (render path). JSON config — see
+/// `p2p_runtime::p2p_call_video_frame`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video_frame(config_json_utf8: *const c_char) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "call video frame config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("call video frame config json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_call_video_frame(&v))
+    };
+    run()
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_p2p_poll_event() -> *mut c_char {
     match p2p_runtime::p2p_poll_event() {
