@@ -74,8 +74,8 @@ flutter:
     - assets/for-feature-graphic-1.png
     - assets/call/incoming_ring.wav
     - assets/call/ringback.wav
-    - env/.env.development.example
-    - env/.env.production.example
+    - env/.env.development
+    - env/.env.production
     - env/README.md
 
   # An image asset can refer to one or more resolution-specific "variants", see

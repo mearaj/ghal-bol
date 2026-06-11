@@ -5,70 +5,55 @@ import "package:flutter/services.dart";
 
 import "app_log.dart";
 
-/// Loads `env/.env.*` bundled in the APK/IPA/desktop bundle (see `pubspec.yaml` `env/`).
+/// Loads bundled `env/.env.development` (debug) or `env/.env.production` (release).
 ///
-/// [get] checks [Platform.environment] first, then values parsed from those files.
-/// Works on **Android, iOS, Linux, macOS, Windows** — not only desktop repo paths.
+/// [get] checks [Platform.environment] first, then values from that file.
 abstract final class AppEnvConfig {
   static final Map<String, String> _fromFile = {};
   static bool _loaded = false;
+
+  static String get _envAssetPath =>
+      kDebugMode ? "env/.env.development" : "env/.env.production";
 
   static Future<void> load() async {
     if (_loaded) return;
     _loaded = true;
 
-    final assetPaths = kDebugMode
-        ? <String>[
-            "env/.env.development",
-            "env/.env.development.example",
-            "env/.env.production",
-            "env/.env.production.example",
-          ]
-        : <String>[
-            "env/.env.production",
-            "env/.env.production.example",
-            "env/.env.development",
-            "env/.env.development.example",
-          ];
+    final path = _envAssetPath;
 
-    for (final path in assetPaths) {
-      try {
-        final raw = await rootBundle.loadString(path);
-        _parseEnvFile(raw, merge: true);
-        if (_fromFile.isNotEmpty) {
-          AppLog.instance.i("Env", "loaded asset $path (${_fromFile.length} keys)");
-          return;
-        }
-      } catch (_) {
-        continue;
+    try {
+      final raw = await rootBundle.loadString(path);
+      _parseEnvFile(raw);
+      if (_fromFile.isNotEmpty) {
+        AppLog.instance.i("Env", "loaded asset $path (${_fromFile.length} keys)");
+        return;
       }
-    }
+    } catch (_) {}
 
-    // `flutter run` on desktop: read repo files when not already bundled.
+    // Desktop `flutter run`: same file from repo when asset bundle is stale/missing.
     if (!Platform.isAndroid && !Platform.isIOS) {
-      final filePaths = kDebugMode
-          ? <String>["env/.env.development", "ghal_bol_ui/env/.env.development"]
-          : <String>["env/.env.production", "ghal_bol_ui/env/.env.production"];
-      for (final path in filePaths) {
-        final f = File(path);
+      for (final filePath in [path, "ghal_bol_ui/$path"]) {
+        final f = File(filePath);
         if (!await f.exists()) continue;
-        _parseEnvFile(await f.readAsString(), merge: true);
+        _parseEnvFile(await f.readAsString());
         if (_fromFile.isNotEmpty) {
-          AppLog.instance.i("Env", "loaded ${f.absolute.path} (${_fromFile.length} keys)");
+          AppLog.instance.i(
+            "Env",
+            "loaded ${f.absolute.path} (${_fromFile.length} keys)",
+          );
           return;
         }
       }
     }
 
-    AppLog.instance.d(
+    AppLog.instance.w(
       "Env",
-      "no env file in bundle — set GHAL_BOL_COORD_URLS in env/.env.development "
-      "or env/.env.production (see env/README.md)",
+      "missing $path — set GHAL_BOL_COORD_URLS in that file (see env/README.md)",
     );
   }
 
-  static void _parseEnvFile(String raw, {bool merge = false}) {
-    if (!merge) _fromFile.clear();
+  static void _parseEnvFile(String raw) {
+    _fromFile.clear();
     for (final line in raw.split("\n")) {
       var s = line.trim();
       if (s.isEmpty || s.startsWith("#")) continue;

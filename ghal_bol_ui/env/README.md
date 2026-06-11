@@ -1,71 +1,50 @@
 # Environment (`env/.env.*`)
 
-Coordination server URLs and related flags for **all platforms**, including **Android APKs**.
+Coordination server URLs for **all platforms**, including **Android APKs**.
+
+## Files
+
+| File | In git | When used |
+|------|--------|-----------|
+| `env/.env.development` | **Yes** (tracked) | `flutter run` (debug) |
+| `env/.env.production` | **No** (gitignored) | `flutter build --release` |
+
+The app loads **only** these two paths — not `*.example`. Both are listed in `pubspec.yaml` and bundled at build time. Create `env/.env.production` locally before a release build (see Production below).
 
 ## Resolution order (coord URLs)
 
-1. **Bundled `env/.env.*`** — `env/.env.development` (debug) or `env/.env.production` (release), copied at build time (`pubspec.yaml` lists `env/`)
+1. **Bundled `env/.env.development` or `env/.env.production`** (from `pubspec.yaml`)
 2. **`--dart-define=GHAL_BOL_COORD_URLS=…`** (compile-time override)
 3. **OS environment** — `export GHAL_BOL_COORD_URLS=…` before `flutter run`
-4. **Native preferences** — last URLs applied via `GhalBolCoord.setBaseUrls` (Rust only)
+4. **Native preferences** — only when (1–3) did not set URLs
 
-There are **no** hardcoded coord URLs in the app — configure `env/.env.development` and `env/.env.production`.
+Edit `GHAL_BOL_COORD_URLS` in `env/.env.development` for debug, then **rebuild** the app (hot reload does not rebundle assets).
 
-Invite QR / links are **public key only** (optional `?alias=`). No `?coord=` in URIs.
-
-## Android / iOS setup
+## Android / iOS
 
 ```bash
 cd ghal_bol_ui
-cp env/.env.development.example env/.env.development
-# edit GHAL_BOL_COORD_URLS (LAN IP for a physical phone, not 127.0.0.1)
+# edit env/.env.development (default: https://coord.ghalbol.com)
 flutter pub get
 flutter run -d android
 ```
 
-`env/.env.development` and `env/.env.production` are **gitignored** (only `*.example` is tracked). `git checkout` will not touch your local URLs.
-
-`env/.env.development` is bundled into the APK because `pubspec.yaml` lists it as an asset. Rebuild after changing the file.
-
-Alternative without editing the file:
-
-```bash
-flutter run --dart-define=GHAL_BOL_COORD_URLS='["http://192.168.1.10:8765"]'
-```
-
-Or:
-
-```bash
-flutter run --dart-define-from-file=env/.env.development
-```
-
-## Desktop setup
-
-Same `env/.env.development` file; debug builds also read it from disk if you run from the repo.
-
-Pick the device explicitly — `flutter run` does **not** auto-select Linux:
+## Desktop
 
 ```bash
 flutter devices
 flutter run -d linux
-flutter run -d android
 ```
 
-## Production coord + release builds
+## Production
 
-Production server: **`https://coord.ghalbol.com`** (set in `env/.env.production`).
-
-| Goal | Command |
-|------|---------|
-| Linux release test | `./scripts/sync_ghal_bol_native_for_flutter.sh` then `cd ghal_bol_ui && flutter run --release -d linux` |
-| Linux release bundle | `flutter build linux --release` |
-| Android release APK | `./scripts/pack_android_workspace_jni_libs.sh` then `cd ghal_bol_ui && flutter build apk --release` |
-| Debug against prod coord | `flutter run -d linux --dart-define-from-file=env/.env.production` |
-
-Smoke the live server from repo root:
+`env/.env.production` is **gitignored** — create it on your machine (never commit secrets or machine-specific URLs):
 
 ```bash
-COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
+cd ghal_bol_ui
+printf 'GHAL_BOL_COORD_URLS=https://coord.ghalbol.com\n' > env/.env.production
+./scripts/pack_android_workspace_jni_libs.sh
+flutter build apk --release
 ```
 
 ## Keys
@@ -74,12 +53,3 @@ COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 |-----|---------|
 | `GHAL_BOL_COORD_URLS` | Coord server list — JSON array or comma-separated (no trailing slashes) |
 | `GHAL_BOL_COORD_INSECURE_TLS` | `true` / `1` for self-signed HTTPS |
-
-Storage paths are owned by **`ghal_bol`** (Rust). Flutter passes `app_namespace` only:
-
-| Platform / build | Namespace | Linux path (example) |
-|------------------|-----------|----------------------|
-| `flutter run -d linux` | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` |
-| `flutter run --release -d linux` / `flutter build linux` | `com.ghalbol` | `~/.local/share/com.ghalbol/` |
-| Android `flutter run` | `com.ghalbol.debug` | `app_flutter/com.ghalbol.debug/` (keystore); `app_flutter/ghal_bol/` (stores) |
-| Android release / Play | `com.ghalbol` | `app_flutter/` (keystore); `app_flutter/ghal_bol/` (stores) |

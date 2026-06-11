@@ -6,12 +6,11 @@
 /build/
 /dist/
 
-# Local secrets at repo root or in members (templates stay tracked as `.env.example`)
+# Local secrets at repo root or in members
 .env
 .env.local
 .env.*.local
-# Flutter coord config — copy from `env/*.example`; never commit machine-specific URLs
-ghal_bol_ui/env/.env.development
+# Flutter release coord config — local only; never commit
 ghal_bol_ui/env/.env.production
 
 # Optional local keystores — not wired into default debug Gradle; ignore if unused
