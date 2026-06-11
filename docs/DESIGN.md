@@ -2,7 +2,7 @@
 
 This document is the **single design reference** for how Ghal Bol is meant to work: layers, messaging state, chat-room semantics, and P2P lifecycle. Wire-level detail lives in [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md); invites in [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
 
-**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. **Connectivity / discovery policy:** [STORY.md](STORY.md) overrides conflicting guidance. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md).
+**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md). **[STORY.md](STORY.md) is human-authored** — agents read it for connectivity policy (overrides conflicting guidance here) but **must not edit or revert it**; change this file and code instead.
 
 ## Goals
 
@@ -315,9 +315,76 @@ mark_read_ack_confirmed(X)
 - **Hub `previewChangeCount` → full `mergeTranscriptFromNative`** while the open chat already handles the same events in `ingestP2pEvent`.
 - Treating duplicate read acks as expected — fix the confirm loop and retry cadence instead.
 
+## UI session contract (integrator app ↔ native P2P)
+
+**Scope:** `ghal_bol` (and `:p2p` / daemon) — **not** `ghal_bol_server`. The coord server never knows whether the UI is foreground; it only stores dialable endpoints. Any app integrating `ghal_bol` must drive this contract.
+
+**Problem this solves:** Read receipts, foreground peer, and “app visible” were three separate RPC flags (`set_app_ack_read_enabled`, `set_foreground_peer`, `set_app_ui_visible`). They could drift (P2P recover re-enabled read without visibility; Android `inactive` left read on; defaults were `ack_read=true`). That caused **regressions** — wrong blue ticks, leave drain broken, or ack storms when one flag was fixed in isolation.
+
+### Single native gate for **new** read receipts
+
+Rust `may_send_in_room_read_ack(peer)` requires **all** of:
+
+| Flag | Meaning |
+|------|---------|
+| `app_ui_visible` | App interactive (resumed; not inactive/paused/hidden) |
+| `app_ack_read_enabled` | Read gate on (derived when room open + visible) |
+| `foreground_peer == peer` | Hub has this conversation open |
+
+**Leave backlog** (`pending_read_acks` retries after the user left the room) is **not** gated on `app_ui_visible` — mail seen while the room was open still gets `ack_read` until the sender confirms.
+
+**Delivery** (`ack_received`) is **never** gated on UI — `:p2p` may outlive the UI process.
+
+### Atomic integrator API
+
+Flutter calls **`p2p_sync_ui_session`** (state RPC) with:
+
+- `ui_visible` — lifecycle (resumed vs inactive/paused)
+- `room_public_key_hex` — open conversation, or omit/`null` when no room
+
+Native applies in one place (`p2p_sync_ui_session` in `p2p_runtime.rs`):
+
+| Transition | Order |
+|------------|--------|
+| **Close room** | `SetForegroundPeer(null)` → leave drain → `app_ack_read_enabled=false` |
+| **Open room** (visible) | `app_ack_read_enabled=true` → `SetForegroundPeer(peer)` → enter catch-up |
+| **Inactive** (room still in UI stack) | `app_ack_read_enabled=false`; room peer unchanged in Flutter desired state |
+
+**Safe default:** `app_ack_read_enabled` starts **`false`** until the integrator syncs an open, visible room.
+
+### Flutter ownership (`GhalBolUiSession` only)
+
+**Integrator rule:** UI code must call **`GhalBolUiSession`** (`ghal_bol_ui_session.dart`) — not `GhalBolP2p.setForegroundPeer`, `setAppAckReadEnabled`, or `setAppUiVisible` (deprecated).
+
+| API | When | Native (`p2p_sync_ui_session`) |
+|-----|------|----------------------------------|
+| `GhalBolUiSession.setVisible(true/false)` | `resumed` / `inactive` / `paused` | `app_ui_visible` + read gate |
+| `GhalBolUiSession.setRoom(pk/null)` | Hub room open/close | foreground peer + leave drain on `null` |
+| `GhalBolUiSession.awaitApplied()` | After close/open ordering | wait for state RPC |
+
+`P2pEventBridge` coalesces desired state and issues one `syncUiSession` per change. **Poll events** (`peer_connected`, `chat_ready`, `node_ready`) are display hints only — never used for ack or send policy.
+
+### Lifecycle (Android)
+
+| State | Hub / bridge behaviour |
+|-------|-------------------------|
+| `resumed` | `setUiVisible(true)` + re-sync room if open |
+| `inactive` | `setUiVisible(false)` — **no new read**; room desired state unchanged (shade / task switcher) |
+| `paused` / `hidden` / `detached` | `setUiVisible(false)` + `setForegroundConversation(null)` — full close + leave drain |
+
+Linux desktop: `paused`/`hidden` do **not** clear the room (minimize ≠ leave); GTK **close (X)** uses `notifyNativeUiExited`.
+
+### Anti-patterns (caused wrong read ticks)
+
+- Split RPCs without `p2p_sync_ui_session` — flags drift after recover / node_ready.
+- `app_ack_read_enabled` default **true** — read ticks before hub opens a room.
+- Gating read on foreground only, ignoring `app_ui_visible` — Android `inactive` sends blue ticks.
+- `set_app_ack_read_enabled(false)` clearing foreground before `SetForegroundPeer(null)` — breaks leave drain.
+- P2P recover blindly re-enabling read when `_foregroundDesired` is set but app is backgrounded.
+
 ## Flutter: who sets foreground
 
-`ChatHubScreen` owns foreground when it polls P2P (`hubPollsEvents: true` on embedded `ChatScreen`).
+`ChatHubScreen` owns room + lifecycle signals when it polls P2P (`hubPollsEvents: true` on embedded `ChatScreen`).
 
 | Layout | Room “open” when |
 |--------|------------------|
@@ -326,20 +393,21 @@ mark_read_ack_confirmed(X)
 
 `ChatScreen` **must not** call `p2pSetForegroundPeer` when `hubPollsEvents` is true (IndexedStack keeps chat mounted off-room).
 
-On **pause / background**, hub uses the **same close order** as leaving a room: `setForegroundConversation(null)` first, then `setAppAckReadEnabled(false)`. Delivery acks continue in `:p2p`; read gate off only blocks **new** in-room read.
+On **pause / background**, hub clears room via `setForegroundConversation(null)` inside `syncUiSession`. On **inactive**, only `setUiVisible(false)` — room stays desired until pause or explicit leave.
 
-Native applies foreground **synchronously** via `sync_foreground_peer_now` when FFI/RPC sets peer — inbound handler uses **`live_foreground_peer`** for the in-room `ack_read` gate. **`last_room_peer`** is updated whenever foreground is set to a peer (for leave drain).
+Native applies foreground **synchronously** via `sync_foreground_peer_now` when FFI/RPC sets peer — inbound handler uses **`may_send_in_room_read_ack`**. **`last_room_peer`** is updated whenever foreground is set to a peer (for leave drain).
 
-On Linux/Android, **foreground** and **`set_app_ack_read_enabled`** use a **dedicated RPC socket** so they are not queued behind `send_text_dm` or bulk sync. **`p2p_poll`** uses the same dedicated socket so UI events are not starved by sends.
+UI session RPCs use the **dedicated state socket** so they are not queued behind `send_text_dm` or bulk sync.
 
 ### Room open vs closed — decision table
 
-| User situation | `app_ack_read_enabled` | `live_foreground_peer` | Inbound **new** text | Backlog from while room was open |
-|----------------|------------------------|-------------------------|----------------------|----------------------------------|
-| In conversation UI (hub room open) | `true` | that peer | `ack_received` + `ack_read` | Retries until confirm |
-| Contact selected, list only / split not engaged | `false` | `none` or stale | `ack_received` only | Drain may still run on leave |
-| Left room / other tab / paused | `false` | `none` (after hub close) | `ack_received` only | **`ack_read` retries continue** |
-| App background, `:p2p` alive | `false` | `none` | `ack_received` only | Same backlog rule |
+| User situation | `app_ui_visible` | Read gate + foreground | Inbound **new** text | Backlog from while room was open |
+|----------------|------------------|------------------------|----------------------|----------------------------------|
+| In conversation UI, app resumed | `true` | gate on + foreground peer | `ack_received` + `ack_read` | Retries until confirm |
+| Room open but `inactive` (shade) | `false` | gate off | `ack_received` only | Retries continue |
+| Contact selected, list only / split not engaged | `true`/`false` | no room | `ack_received` only | — |
+| Left room / paused | `false` | no room | `ack_received` only | **`ack_read` retries continue** |
+| App background, `:p2p` alive | `false` | no room | `ack_received` only | Same backlog rule |
 
 Selecting a row in the roster is **not** “room open”. Only the hub rules in the table above count.
 
@@ -412,12 +480,13 @@ Rules:
 
 1. **Always try WAN/coord** for configured contacts while the network is up. Do not prefer RFC1918 addrs from coord presence for a peer who is not on your LAN.
 2. **LAN path is opt-in by discovery** — mDNS sighting (or an explicit same-LAN signal), not “both devices use 192.168.1.x”.
-3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): skip blind `DialOpts::peer_id` dials; dial explicit coord relay multiaddrs only.
+3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): skip blind `DialOpts::peer_id` dials; dial explicit coord relay multiaddrs only (throttled). If bootstrap TCP is still pending, use probe-style `listen_on(…/p2p-circuit)` — see [TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”.
 4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally.
+5. **Outbound dial to peer’s relay circuit** (coord lookup result): proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Own circuit is for **registering** your WAN addr so peers can find you; it is not a prerequisite for dialing an already-registered peer. Per-peer throttle: `should_routed_dial` in `dial_dm_peer_addr` ([TRANSPORT.md](TRANSPORT.md) § “Outbound peer relay dials vs own reservation”).
 
 Coord register/lookup on a **5s** tick; send-text triggers an immediate coord lookup when not connected. Throttles: coord `peer_not_on_server` backoff, 1–2s between dials per peer.
 
-**Anti-patterns (caused multi-minute stalls):** Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer.
+**Anti-patterns (caused multi-minute stalls):** Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer; **uncoordinated coord-relay dial spam on CGNAT** (many `coord relay dial` per second — prevents bootstrap TCP from completing); **removing probe-style relay reservation on mobile-data** while Wi‑Fi tests still pass ([TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”); **blocking peer relay dials until own circuit listens** (`skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` — ~40s dead WAN on phones; use `should_routed_dial` only).
 
 **Network watch:** Android connectivity + profile poll → WAN relay recovery when coord URL is set. UI lock does not stop `:p2p` / daemon / poll.
 
@@ -428,6 +497,51 @@ When two contacts are both online the link must stay **steady** and recover inst
 - **Keepalive ping** keeps an idle DM/relay connection alive (ping interval **15s** < `idle_connection_timeout` 45s/300s), so the next message reuses the live link instead of paying a reconnect.
 - **Urgent reconnect** after `dm connection closed`: the peer’s key is urgent for ~30s — coord lookup **skips** the `peer_not_on_server` backoff and the 1s upkeep tick retries immediately (`mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent`), cleared on reconnect.
 - **Reserve on all configured coord relays in parallel, throttled per relay** (`try_relay_reservations` / `try_relay_reservation`, per-relay `RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or WAN peer discovery ([STORY.md](STORY.md)). The anti-pattern is re-issuing `listen_on` **every tick** (a 1s storm), **not** covering all relays once — serializing onto a single relay let one pending-but-never-accepted reservation block the others and stalled WAN for minutes. See [TRANSPORT.md](TRANSPORT.md) § “Steady connection”.
+- **CGNAT/mobile:** throttle bootstrap relay dials (`issue_bootstrap_dials`); probe-style `listen_on` at startup and when bootstrap TCP is not up yet — § “CGNAT / mobile-data relay reservation” in TRANSPORT.md. **Both peers** must `reservation accepted` + coord register for **bidirectional** coord visibility; one-sided success still means no chat. **Outbound** dial to a peer’s relay circuit after coord lookup does **not** wait for own reservation — see TRANSPORT.md § “Outbound peer relay dials vs own reservation”.
+
+## Call UI lifecycle and privacy (do not regress)
+
+**Product invariant:** there must **never** be an active voice/video call (native media up, peer still in-call) when the user has **no UI session** to see or control it. This is a privacy and safety requirement — fixes have regressed when other call features landed; treat any orphan call as **P0**.
+
+### Process split (same on Linux and Android)
+
+| Layer | Linux desktop | Android |
+|-------|---------------|---------|
+| **UI** | Flutter main process | Flutter main process |
+| **P2P + calls** | `ghal_bol_daemon` (`libexec/`) | `:p2p` (`GhalBolP2pService`) |
+| **Survives UI exit?** | **Yes** — daemon keeps libp2p for DM/acks | **Yes** — `:p2p` keeps libp2p for DM/acks |
+| **Must end call when UI gone?** | **Yes** | **Yes** |
+
+**Dev confusion:** `flutter run` **Ctrl+C** kills the **Flutter UI only**; the daemon / `:p2p` **stay running** (by design — DM and acks continue). That is **not** permission to keep a call alive: when the last UI RPC socket closes, native **`p2p_force_end_active_call`** must stop media and send **`hangup`**.
+
+### Teardown paths (all required)
+
+| User action | Expected behaviour |
+|-------------|-------------------|
+| **Linux GTK close (X)** during call | Flutter `onWindowClosedByUser` → `_endLocal` + `_stopNativeCallIfStillActive`; hide window (app may stay in tray) |
+| **Leave call screen** (back / pop) while connected | `onCallScreenDismissedWhileLive` → hang up + stop media |
+| **Ctrl+C / UI process kill** | UI sockets EOF → daemon `:p2p` **`ui_session_ended`** → `p2p_force_end_active_call` |
+| **`AppLifecycleState.detached`** (best-effort) | Flutter `notifyUiProcessExiting` → same force-end |
+| **Login unlock socket reconnect** | `ui_session_prepare_reconnect` suppresses hangup for ~5s (transient EOF only) |
+| **Logout / identity delete** | `p2p_stop` clears call state |
+
+Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p2p_force_end_active_call` (media stop + hangup + `call_active` / `call_state` clear + dismiss OS notification).
+
+### Incoming call while UI hidden (Linux)
+
+- OS notification is shown by **daemon** (`incoming_call_notify.rs`), not only GTK in Flutter.
+- Tap must **present** the window: D-Bus `Application.Activate` + **`incoming_call_wake`** file under `$XDG_RUNTIME_DIR/ghalbol/`.
+- Flutter poll bridge **consumes** the wake file (`p2p_take_incoming_call_wake`) and calls `CallIncomingAlert.presentWindow()` + `CallController.onAppForeground()`.
+
+### Regression checklist (manual — two devices)
+
+1. Connected **video** call → Linux **X** → peer must see hangup within seconds; no camera/mic on either side.
+2. Same with **`flutter run` Ctrl+C** during call (UI only) — daemon must hang up; Android peer must not stay in-call.
+3. Pop call screen during connected call → hangup on both sides.
+4. Incoming call with app hidden → notification tap → call UI visible and answerable.
+5. Login unlock (UI lock, not logout) during call → call **continues** (suppress window applies).
+
+Wire detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § “UI session and privacy”.
 
 ## Contacts and roster preview
 
@@ -540,6 +654,27 @@ Details: [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
 | Keystore | Encrypted identity under app namespace |
 
 Transcript survives restart; native re-seeds outbox and read-ack queues from disk.
+
+### On-disk store ownership (single writer — do not overlap)
+
+**`ghal_bol` owns product state.** Flutter is a **read-mostly view** plus explicit user edits (alias, trust, composer). Two processes must not perform competing read-modify-write on the same JSON file.
+
+| Store | Android / Linux (`:p2p` / daemon) | In-process FFI (dev / tests) |
+|-------|-----------------------------------|------------------------------|
+| **`chat_transcript_v1.json`** | **`:p2p` only** writes (poll `dm_event_handler`, `send_text_dm` append, ack patches, read-ack confirm). UI loads via **`p2p_transcript_load_merged`** (state RPC) — never `transcript_save` / `append` from Dart. | UI may append/save via FFI when no daemon; still use `dm_transcript_store` in Rust. |
+| **`contacts_v1.json`** | **`:p2p`** writes inbound preview/unread/merge on poll. UI writes **user intent** only (alias, trust, manual add/remove) via FFI. | Same split. |
+
+**Rust rule:** every transcript read/write goes through **`dm_transcript_store`** (in-process mutex + `chat_transcript_v1.json.lock` flock). Do **not** open `chat_transcript_v1.json` from `dm_transcript_v1` or `chat_server` without that lock — concurrent append + `read_ack_sent` patch used to **clobber** rows (messages vanished on disk).
+
+**Flutter rules (daemon platforms):**
+
+| Do | Do not |
+|----|--------|
+| `mergeTranscriptFromNative` / `transcriptLoadMerged` to **display** native state | `ChatTranscriptStore.save` / `appendIfNew` / delivery patches (no-ops on daemon — keep call sites hub-gated) |
+| `ingestP2pEvent` for the open room | Full transcript reload on every `previewChangeCount` (hub reloads roster only) |
+| Keep visible lines when reload returns **0 rows** during same-room refresh | `force: true` empty reload that clears persisted bubbles |
+
+**Symptom if broken:** chat lines disappear while the hub preview still shows text; or outbound/inbound rows vanish after read-ack confirm while another append was in flight. Fix native locking and UI wipe guards — not “merge harder in Dart”.
 
 ## What we explicitly do **not** do
 

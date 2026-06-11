@@ -4,8 +4,7 @@
 /// System back / toolbar back pops one snapshot at a time, like the browser Back button.
 ///
 /// **Chat / acks:** This stack only stores hub chrome flags. Every pop/apply must still
-/// call [ChatHubScreenState]'s native foreground sync (`setForegroundConversation` then
-/// `set_app_ack_read_enabled` per DESIGN.md) — history does not replace that path.
+/// call [ChatHubScreenState]'s native session sync via [GhalBolUiSession] — history does not replace that path.
 class HubHistoryEntry {
   const HubHistoryEntry({
     required this.navTab,

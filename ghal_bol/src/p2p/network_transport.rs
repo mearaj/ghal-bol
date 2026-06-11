@@ -22,9 +22,11 @@ pub(crate) struct LocalNetworkProfile {
     pub primary_cgnat_ipv4: Option<std::net::Ipv4Addr>,
     /// RFC1918 address on Wi‑Fi/LAN when present.
     pub primary_rfc1918_ipv4: Option<std::net::Ipv4Addr>,
+    /// Direct public IPv4 on an interface (VPS / rare home WAN).
+    pub primary_public_ipv4: Option<std::net::Ipv4Addr>,
 }
 
-/// Detects Wi‑Fi ↔ mobile and CGNAT IP changes (same mode, new carrier address).
+/// Detects Wi‑Fi ↔ mobile, CGNAT/LAN IP changes, and direct public IPv4 churn.
 pub(crate) fn network_handover_key(p: &LocalNetworkProfile) -> NetworkHandoverKey {
     NetworkHandoverKey {
         active_lan: p.has_active_lan(),
@@ -32,6 +34,7 @@ pub(crate) fn network_handover_key(p: &LocalNetworkProfile) -> NetworkHandoverKe
         mode: p.mode_label(),
         cgnat: p.primary_cgnat_ipv4,
         lan_v4: p.primary_rfc1918_ipv4,
+        public_v4: p.primary_public_ipv4,
     }
 }
 
@@ -42,6 +45,21 @@ pub(crate) struct NetworkHandoverKey {
     pub mode: &'static str,
     pub cgnat: Option<std::net::Ipv4Addr>,
     pub lan_v4: Option<std::net::Ipv4Addr>,
+    pub public_v4: Option<std::net::Ipv4Addr>,
+}
+
+/// Sorted WAN-relevant listen addrs (relay circuit + public TCP) for drift detection.
+pub(crate) fn wan_coord_listen_fingerprint(addrs: &[Multiaddr]) -> Vec<String> {
+    let mut keys: Vec<String> = addrs
+        .iter()
+        .filter(|ma| {
+            is_coord_relay_tcp_circuit_multiaddr(ma) || is_coord_register_tcp_multiaddr(ma)
+        })
+        .map(|ma| ma.to_string())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 impl LocalNetworkProfile {
@@ -169,6 +187,7 @@ pub(crate) fn detect_local_network_profile() -> LocalNetworkProfile {
                     p.primary_rfc1918_ipv4 = Some(ip);
                 } else if is_public_bootstrap_ipv4(ip) {
                     p.has_public_ipv4 = true;
+                    p.primary_public_ipv4 = Some(ip);
                 }
             }
             if_addrs::IfAddr::V6(v6) => {
@@ -668,6 +687,21 @@ mod tests {
         assert_eq!(p.mode_label(), "lan");
         assert!(!p.avoid_blind_routed_dial());
         assert!(!p.on_mobile_data_path());
+    }
+
+    #[test]
+    fn network_handover_key_changes_public_ipv4() {
+        let a = LocalNetworkProfile {
+            has_public_ipv4: true,
+            primary_public_ipv4: Some(std::net::Ipv4Addr::new(203, 0, 113, 10)),
+            ..Default::default()
+        };
+        let b = LocalNetworkProfile {
+            has_public_ipv4: true,
+            primary_public_ipv4: Some(std::net::Ipv4Addr::new(203, 0, 113, 11)),
+            ..Default::default()
+        };
+        assert_ne!(network_handover_key(&a), network_handover_key(&b));
     }
 
     #[test]

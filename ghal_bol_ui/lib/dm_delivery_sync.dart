@@ -6,7 +6,7 @@
 /// Intent: recipient decides delivery/read; sender and recipient views may differ; no cross-device
 /// tick sync. Delivered always (`ack_received` from `:p2p`); read only with hub room open for
 /// **new** inbound; after leave, still retry read for in-room backlog; new mail = delivered only.
-/// Hub close: `setForegroundConversation(null)` then `setAppAckReadEnabled(false)`.
+/// Hub / lifecycle: [GhalBolUiSession] only — native owns ack policy.
 /// See `docs/DESIGN.md` § “Truthful status in the UI”, “Leave / backlog”, “Room open vs closed”.
 ///
 /// Do not implement ack send or outbox logic in Dart.

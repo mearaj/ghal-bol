@@ -2,6 +2,8 @@
 
 Thin UI over **`ghal_bol`** (Rust): unlock, hub, chat, QR invites, calls, delivery ticks from native transcript state. Product logic stays in Rust — see [AGENTS.md](../AGENTS.md) and [docs/DESIGN.md](../docs/DESIGN.md).
 
+**Session signals:** use **`GhalBolUiSession`** (`lib/ghal_bol_ui_session.dart`) only — `setVisible` + `setRoom` → native `p2p_sync_ui_session`. Do not call deprecated `GhalBolP2p.setForegroundPeer` / `setAppAckReadEnabled` from product code.
+
 | Target | Entry | P2P |
 |--------|--------|-----|
 | Android | `bootstrap_native.dart` | `:p2p` process + JNI |

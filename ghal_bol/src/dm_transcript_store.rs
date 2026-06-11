@@ -1,16 +1,16 @@
 //! Full read/write access to `chat_transcript_v1.json` (Flutter [ChatTranscriptStore]).
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use fs4::fs_std::FileExt;
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::app_paths::{chat_transcript_v1_path, storage_config_for_namespace};
 use crate::contacts_v1::{find_by_peer_id, find_by_public_key, is_valid_public_key_hex};
-use crate::dm_transcript_v1::mark_inbound_read_ack_sent;
 use crate::flow_log;
 use crate::public_key_util::{
     legacy_libp2p_peer_id_str_from_public_key_hex, legacy_public_key_from_peer_id_str,
@@ -21,6 +21,53 @@ static IO_CHAIN: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn io_chain() -> &'static Mutex<()> {
     IO_CHAIN.get_or_init(|| Mutex::new(()))
+}
+
+/// One in-process mutex + cross-process flock for the duration of a read/modify/write.
+struct TranscriptIoGuard {
+    _process: MutexGuard<'static, ()>,
+    _lock_file: File,
+}
+
+impl TranscriptIoGuard {
+    fn acquire(path: &Path) -> Result<Self, TranscriptStoreError> {
+        let process = io_chain().lock().map_err(|_| {
+            TranscriptStoreError::Io(std::io::Error::other("transcript io mutex poisoned"))
+        })?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock_path = path.with_extension("json.lock");
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        lock_file.lock_exclusive().map_err(|e| {
+            TranscriptStoreError::Io(std::io::Error::other(format!(
+                "transcript flock {lock_path:?}: {e}"
+            )))
+        })?;
+        Ok(Self {
+            _process: process,
+            _lock_file: lock_file,
+        })
+    }
+
+    fn for_namespace(app_namespace: &str) -> Result<(Self, PathBuf), TranscriptStoreError> {
+        let path = resolve_transcript_path(app_namespace)?;
+        Ok((Self::acquire(&path)?, path))
+    }
+}
+
+/// Serialize transcript reads/writes that take an explicit on-disk path (`chat_server` upkeep).
+pub(crate) fn with_transcript_path<T>(
+    path: &Path,
+    f: impl FnOnce(&Path) -> Result<T, TranscriptStoreError>,
+) -> Result<T, TranscriptStoreError> {
+    let _guard = TranscriptIoGuard::acquire(path)?;
+    f(path)
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +172,7 @@ fn decode_root_lenient(raw: &str) -> Option<Value> {
     best
 }
 
-fn read_root(path: &Path) -> Result<Value, TranscriptStoreError> {
+pub(crate) fn read_root_unlocked(path: &Path) -> Result<Value, TranscriptStoreError> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
@@ -133,7 +180,7 @@ fn read_root(path: &Path) -> Result<Value, TranscriptStoreError> {
     Ok(decode_root_lenient(&raw).unwrap_or_else(|| serde_json::json!({})))
 }
 
-fn write_root(path: &Path, root: &Value) -> Result<(), TranscriptStoreError> {
+fn write_root_unlocked(path: &Path, root: &Value) -> Result<(), TranscriptStoreError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -242,13 +289,13 @@ fn expand_conversation_keys(app_namespace: &str, conversation_keys: &[String]) -
     out.into_iter().collect()
 }
 
-pub fn load_merged(
+fn load_merged_unlocked(
     app_namespace: &str,
     conversation_keys: &[String],
     match_inbound_from_peer_id: Option<&str>,
+    path: &Path,
 ) -> Result<Vec<StoredChatLine>, TranscriptStoreError> {
-    let path = resolve_transcript_path(app_namespace)?;
-    let all = read_root(&path)?;
+    let all = read_root_unlocked(path)?;
     let ns = all.get(app_namespace);
     let Some(ns_obj) = ns.and_then(|v| v.as_object()) else {
         return Ok(Vec::new());
@@ -301,23 +348,36 @@ pub fn load_merged(
     ))
 }
 
+pub fn load_merged(
+    app_namespace: &str,
+    conversation_keys: &[String],
+    match_inbound_from_peer_id: Option<&str>,
+) -> Result<Vec<StoredChatLine>, TranscriptStoreError> {
+    let path = resolve_transcript_path(app_namespace)?;
+    let _guard = TranscriptIoGuard::acquire(&path)?;
+    load_merged_unlocked(
+        app_namespace,
+        conversation_keys,
+        match_inbound_from_peer_id,
+        &path,
+    )
+}
+
 pub fn save_thread(
     app_namespace: &str,
     conversation_key: &str,
     lines: Vec<StoredChatLine>,
 ) -> Result<(), TranscriptStoreError> {
-    let _guard = io_chain().lock().map_err(|_| {
-        TranscriptStoreError::Io(std::io::Error::other("transcript io mutex poisoned"))
-    })?;
-    let path = resolve_transcript_path(app_namespace)?;
-    let mut all = read_root(&path)?;
+    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
+    let mut all = read_root_unlocked(&path)?;
     let root = all.as_object_mut().ok_or_else(|| {
         TranscriptStoreError::Io(std::io::Error::other("transcript root not object"))
     })?;
     let deduped = dedupe_lines(lines);
     // UI full-save must not downgrade delivery/read ticks already written by :p2p on poll.
     let expanded = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
-    let disk_rows = load_merged(app_namespace, &expanded, None).unwrap_or_default();
+    let disk_rows =
+        load_merged_unlocked(app_namespace, &expanded, None, &path).unwrap_or_default();
     let disk_by_mid: HashMap<String, StoredChatLine> = disk_rows
         .iter()
         .filter_map(|r| {
@@ -384,7 +444,7 @@ pub fn save_thread(
     if let Some(obj) = ns_entry.as_object_mut() {
         obj.insert(conversation_key.to_string(), Value::Array(arr));
     }
-    write_root(&path, &all)
+    write_root_unlocked(&path, &all)
 }
 
 pub fn append_if_new(
@@ -395,11 +455,8 @@ pub fn append_if_new(
     if conversation_key.trim().is_empty() {
         return Ok(());
     }
-    let _guard = io_chain().lock().map_err(|_| {
-        TranscriptStoreError::Io(std::io::Error::other("transcript io mutex poisoned"))
-    })?;
-    let path = resolve_transcript_path(app_namespace)?;
-    let mut all = read_root(&path)?;
+    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
+    let mut all = read_root_unlocked(&path)?;
     let ns_obj = all
         .as_object_mut()
         .and_then(|r| r.get_mut(app_namespace))
@@ -413,7 +470,7 @@ pub fn append_if_new(
         if let Some(root) = all.as_object_mut() {
             root.insert(app_namespace.to_string(), Value::Object(threads));
         }
-        write_root(&path, &all)?;
+        write_root_unlocked(&path, &all)?;
         return Ok(());
     };
     let mut existing: Vec<StoredChatLine> = ns_obj
@@ -453,7 +510,7 @@ pub fn append_if_new(
             "append line conv={conversation_key} mid={mid} outgoing={outgoing} len={text_len}",
         ),
     );
-    write_root(&path, &all)
+    write_root_unlocked(&path, &all)
 }
 
 pub fn patch_outgoing_delivery(
@@ -470,11 +527,8 @@ pub fn patch_outgoing_delivery(
     if target_rank < 2 {
         return Ok(false);
     }
-    let _guard = io_chain().lock().map_err(|_| {
-        TranscriptStoreError::Io(std::io::Error::other("transcript io mutex poisoned"))
-    })?;
-    let path = resolve_transcript_path(app_namespace)?;
-    let mut all = read_root(&path)?;
+    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
+    let mut all = read_root_unlocked(&path)?;
     let Some(ns_obj) = all
         .get_mut(app_namespace)
         .and_then(|v| v.as_object_mut())
@@ -506,7 +560,7 @@ pub fn patch_outgoing_delivery(
             "Transcript",
             format!("patched outgoing delivery={delivery} mid={mid} conv={conversation_key}"),
         );
-        write_root(&path, &all)?;
+        write_root_unlocked(&path, &all)?;
     } else {
         flow_log::debug(
             "Transcript",
@@ -527,11 +581,8 @@ pub fn patch_inbound_read_ack_sent_for_thread(
     if mid.is_empty() || conversation_key.trim().is_empty() {
         return Ok(false);
     }
-    let _guard = io_chain().lock().map_err(|_| {
-        TranscriptStoreError::Io(std::io::Error::other("transcript io mutex poisoned"))
-    })?;
-    let path = resolve_transcript_path(app_namespace)?;
-    let mut all = read_root(&path)?;
+    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
+    let mut all = read_root_unlocked(&path)?;
     let Some(ns_obj) = all
         .get_mut(app_namespace)
         .and_then(|v| v.as_object_mut())
@@ -560,13 +611,72 @@ pub fn patch_inbound_read_ack_sent_for_thread(
         }
     }
     if changed {
-        write_root(&path, &all)?;
+        write_root_unlocked(&path, &all)?;
     }
     Ok(changed)
 }
 
-pub fn patch_inbound_read_ack_sent_global(app_namespace: &str, message_id: &str) -> Result<(), TranscriptStoreError> {
+fn patch_inbound_read_ack_sent_all_threads(
+    all: &mut Value,
+    app_namespace: &str,
+    message_id: &str,
+) -> bool {
+    let mid = message_id.trim();
+    if mid.is_empty() {
+        return false;
+    }
+    let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
+        return false;
+    };
+    let mut changed = false;
+    for thread in ns_obj.values_mut() {
+        let Some(lines) = thread.as_array_mut() else {
+            continue;
+        };
+        for item in lines.iter_mut() {
+            let Some(parsed) = StoredChatLine::from_json(item) else {
+                continue;
+            };
+            if parsed.outgoing
+                || parsed.message_id.as_deref().unwrap_or("").trim() != mid
+                || parsed.read_ack_sent
+            {
+                continue;
+            }
+            let mut next = parsed;
+            next.read_ack_sent = true;
+            *item = next.to_json();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Search every thread under [app_namespace] (read-ack confirm from `chat_server`).
+pub fn patch_inbound_read_ack_sent_at_path(
+    path: &Path,
+    app_namespace: &str,
+    message_id: &str,
+) -> Result<bool, TranscriptStoreError> {
+    with_transcript_path(path, |path| {
+        let mid = message_id.trim();
+        if mid.is_empty() || !path.exists() {
+            return Ok(false);
+        }
+        let mut all = read_root_unlocked(path)?;
+        let changed = patch_inbound_read_ack_sent_all_threads(&mut all, app_namespace, mid);
+        if changed {
+            write_root_unlocked(path, &all)?;
+        }
+        Ok(changed)
+    })
+}
+
+pub fn patch_inbound_read_ack_sent_global(
+    app_namespace: &str,
+    message_id: &str,
+) -> Result<(), TranscriptStoreError> {
     let path = resolve_transcript_path(app_namespace)?;
-    let _ = mark_inbound_read_ack_sent(&path, app_namespace, message_id)?;
+    let _ = patch_inbound_read_ack_sent_at_path(&path, app_namespace, message_id)?;
     Ok(())
 }

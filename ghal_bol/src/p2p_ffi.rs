@@ -148,6 +148,11 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_set_app_ack_read_enabled(enabled: u8) 
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_set_app_ui_visible(visible: u8) -> *mut c_char {
+    json_ok(p2p_runtime::p2p_set_app_ui_visible(visible != 0))
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_p2p_set_foreground_peer(
     public_key_hex_utf8: *const c_char,
 ) -> *mut c_char {
@@ -221,6 +226,45 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_status(config_json_utf8: *const c
         json_ok(p2p_runtime::p2p_call_status(&v))
     };
     run()
+}
+
+/// Dismiss OS incoming-call alert in `:p2p`. JSON config ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_dismiss_incoming_call_alert(
+    _config_json_utf8: *const c_char,
+) -> *mut c_char {
+    json_ok(p2p_runtime::p2p_dismiss_incoming_call_alert())
+}
+
+/// Force-end active call (media + hangup). JSON: `{ "reason": "..." }`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_force_end_active_call(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "force end call config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(_) => serde_json::json!({}),
+        };
+        let reason = v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("ffi");
+        json_ok(p2p_runtime::p2p_force_end_active_call(reason))
+    };
+    run()
+}
+
+/// Take incoming-call wake marker. JSON config ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_take_incoming_call_wake(
+    _config_json_utf8: *const c_char,
+) -> *mut c_char {
+    json_ok(p2p_runtime::p2p_take_incoming_call_wake())
 }
 
 /// Native video-call control. JSON config — see `p2p_runtime::p2p_call_video`.

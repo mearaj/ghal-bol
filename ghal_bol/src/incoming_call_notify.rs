@@ -105,7 +105,9 @@ mod linux {
             .body(&body)
             .hint(Hint::DesktopEntry(app_id.into()))
             .hint(Hint::Urgency(Urgency::Critical))
-            .timeout(Timeout::Never)
+            .timeout(Timeout::Milliseconds(
+                crate::call_state::MAX_LIVE_CALL_INVITE_AGE_MS as u32,
+            ))
             .action("default", "Open Ghal Bol")
             .show()
         else {
@@ -116,6 +118,18 @@ mod linux {
         if let Ok(mut g) = ACTIVE.lock() {
             *g = Some((ring_id.clone(), id));
         }
+        let ring_id_auto = ring_id.clone();
+        thread::spawn(move || {
+            let auto_dismiss_ms = crate::call_state::MAX_LIVE_CALL_INVITE_AGE_MS as u64;
+            thread::sleep(std::time::Duration::from_millis(auto_dismiss_ms));
+            let _ = ACTIVE.lock().map(|mut g| {
+                if g.as_ref().is_some_and(|(cid, _)| cid == &ring_id_auto) {
+                    if let Some((_, id)) = g.take() {
+                        close_notification_by_id(id);
+                    }
+                }
+            });
+        });
         thread::spawn(move || {
             handle.wait_for_action(move |action| {
                 let programmatic = DISMISSING.swap(false, Ordering::AcqRel);
@@ -175,8 +189,18 @@ pub fn dismiss_incoming_call() {
     linux::dismiss();
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "android")]
+pub fn show_incoming_call(peer_public_key_hex: &str, call_id: &str) {
+    crate::incoming_call_android::show(peer_public_key_hex, call_id);
+}
+
+#[cfg(target_os = "android")]
+pub fn dismiss_incoming_call() {
+    crate::incoming_call_android::dismiss();
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn show_incoming_call(_peer_public_key_hex: &str, _call_id: &str) {}
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn dismiss_incoming_call() {}

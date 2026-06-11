@@ -74,9 +74,7 @@ flutter:
     - assets/for-feature-graphic-1.png
     - assets/call/incoming_ring.wav
     - assets/call/ringback.wav
-    - env/.env.development
     - env/.env.development.example
-    - env/.env.production
     - env/.env.production.example
     - env/README.md
 

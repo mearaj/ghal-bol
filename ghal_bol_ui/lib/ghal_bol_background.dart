@@ -6,6 +6,7 @@ import "package:ghal_bol_ui/ghal_bol_coord.dart";
 import "package:ghal_bol_ui/ghal_bol_daemon.dart";
 import "package:ghal_bol_ui/ghal_bol_listener_foreground.dart";
 import "package:ghal_bol_ui/ghal_bol_p2p.dart";
+import "package:ghal_bol_ui/ghal_bol_ui_session.dart";
 import "package:ghal_bol_ui/p2p_event_bridge.dart";
 import "package:ghal_bol_ui/p2p_network_coordinator.dart";
 import "package:ghal_bol_ui/session_credentials.dart";
@@ -31,6 +32,7 @@ class GhalBolBackground {
   /// Foreground service + drain when the process resumes (hub may be absent after UI lock).
   static Future<void> onAppResumed() async {
     if (!SessionCredentials.hasPassword) return;
+    GhalBolUiSession.setVisible(true);
     CallController.instance.onAppForeground();
     if (await GhalBolP2p.isRunning()) {
       unawaited(ghalBolListenerForegroundEnsureStarted());

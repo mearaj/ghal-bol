@@ -62,61 +62,6 @@ class P2pNetworkCoordinator {
     };
   }
 
-  static void _logCoordReachabilityHint(String err) {
-    final e = err.toLowerCase();
-    if (!e.contains("error sending request") &&
-        !e.contains("connection refused") &&
-        !e.contains("timed out") &&
-        !e.contains("failed to connect")) {
-      return;
-    }
-    P2pFlowLog.issue(
-      "coord_unreachable",
-      detail: err,
-      check: "coord URL reachable from this device (HTTPS/ngrok); retry when network stable",
-    );
-  }
-
-  static Future<List<String>> _lookupCoordBootstrap(List<SavedContact> contacts) async {
-    if (!GhalBolCoord.isLookupEnabled) return [];
-    final bootstrap = <String>{};
-    for (final c in contacts) {
-      final pk = _effectivePublicKeyHex(c);
-      if (!isValidPublicKeyHex(pk)) continue;
-      final lookup = await GhalBolCoord.lookupPeer(pk!);
-      if (lookup["ok"] == true) {
-        final addrs = lookup["bootstrap_peers"];
-        if (addrs is List) {
-          for (final a in addrs) {
-            final s = a?.toString().trim() ?? "";
-            if (s.isNotEmpty) bootstrap.add(s);
-          }
-        }
-      } else {
-        final err = lookup["error"]?.toString() ?? "lookup failed";
-        final e = err.toLowerCase();
-        if (e.contains("coord base url not set")) {
-          P2pFlowLog.coord("lookup_skip", {
-            "peer": P2pFlowLog.shortPk(pk),
-            "reason": "coord_url_not_set",
-          });
-        } else if (e.contains("404") || e.contains("not found")) {
-          P2pFlowLog.coord("lookup_miss", {
-            "peer": P2pFlowLog.shortPk(pk),
-            "reason": "peer_not_on_server",
-          });
-        } else {
-          P2pFlowLog.coord("lookup_fail", {
-            "peer": P2pFlowLog.shortPk(pk),
-            "error": err,
-          });
-          _logCoordReachabilityHint(err);
-        }
-      }
-    }
-    return bootstrap.toList();
-  }
-
   static Future<Map<String, dynamic>> _configWithNamespace(
     Map<String, dynamic> cfg,
     String appNamespace,
@@ -131,25 +76,16 @@ class P2pNetworkCoordinator {
     return cfg;
   }
 
-  /// Coord lookup + hot dial only (no dm_peers fingerprint churn). Call after peer may have registered.
+  /// Nudge native DM discovery after a peer may have registered on coord.
+  /// HTTP coord lookup + dial live in Rust (`chat_server.rs` / `coord_runtime.rs`) only.
   static Future<void> refreshCoordDial(
     List<SavedContact> contacts, {
     required String appNamespace,
   }) async {
     if (!GhalBolP2p.isAvailable || !await GhalBolP2p.isRunning()) return;
     if (_dmPeersFingerprint(contacts) == "[]") return;
-    final bootstrap = await _lookupCoordBootstrap(contacts);
-    if (bootstrap.isEmpty) {
-      P2pFlowLog.coord("dial_skip", {"reason": "no_coord_addrs"});
-      return;
-    }
-    P2pFlowLog.coord("dial_start", {"addrs": bootstrap.length.toString()});
-    final r = await GhalBolP2p.dialBootstrapPeers(bootstrap);
-    if (r["ok"] != true) {
-      P2pFlowLog.issue("coord_dial_failed", detail: r["error"]?.toString());
-    } else {
-      P2pFlowLog.coord("dial_ok");
-    }
+    await registerContacts(contacts);
+    P2pFlowLog.coord("discovery_kick", {"reason": "native_register_dm_peer"});
   }
 
   static Future<void> registerContacts(Iterable<SavedContact> contacts) async {
@@ -176,18 +112,13 @@ class P2pNetworkCoordinator {
   static Future<Map<String, dynamic>> syncContacts(
     List<SavedContact> contacts, {
     required String appNamespace,
-    bool lookupBootstrap = false,
   }) async {
     final inFlight = _syncInFlight;
     if (inFlight != null) {
       AppLog.instance.d("P2P", "sync_contacts: coalesced (start in flight)");
       return inFlight;
     }
-    final run = _syncContactsImpl(
-      contacts,
-      appNamespace: appNamespace,
-      lookupBootstrap: lookupBootstrap,
-    );
+    final run = _syncContactsImpl(contacts, appNamespace: appNamespace);
     _syncInFlight = run;
     try {
       return await run;
@@ -201,7 +132,6 @@ class P2pNetworkCoordinator {
   static Future<Map<String, dynamic>> _syncContactsImpl(
     List<SavedContact> contacts, {
     required String appNamespace,
-    bool lookupBootstrap = false,
   }) async {
     if (!GhalBolP2p.isAvailable) {
       P2pFlowLog.issue("p2p_unavailable");
@@ -216,18 +146,8 @@ class P2pNetworkCoordinator {
     }
 
     final dmFp = _dmPeersFingerprint(contacts);
-    // Start the native node first (mDNS browse + listen). Coord lookup is fallback only —
-    // do not block p2p_start on HTTP (often fails on phone before the peer is registered).
-    var bootstrap = <String>[];
-    if (dmFp != "[]" && lookupBootstrap) {
-      bootstrap = await _lookupCoordBootstrap(contacts);
-      P2pFlowLog.coord("lookup_done", {
-        "peers": contacts.length.toString(),
-        "bootstrap": bootstrap.length.toString(),
-      });
-    }
-
-    var cfg = await _buildConfig(contacts, bootstrapPeers: bootstrap);
+    // Peer coord lookup + dial live only in ghal_bol (`chat_server.rs` / `coord_runtime.rs`).
+    var cfg = await _buildConfig(contacts);
     cfg = await _configWithNamespace(cfg, appNamespace);
 
     final ns = appNamespace.trim();
@@ -236,7 +156,6 @@ class P2pNetworkCoordinator {
       "total": contacts.length.toString(),
       "with_pk": withPk.toString(),
       "ns": ns,
-      "lookup_bootstrap": lookupBootstrap.toString(),
     });
 
     await ghalBolListenerForegroundEnsureStarted();

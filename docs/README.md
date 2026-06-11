@@ -5,11 +5,12 @@ Canonical index — read [DESIGN.md](DESIGN.md) before changing P2P, acks, invit
 | Document | Contents |
 |----------|----------|
 | [DESIGN.md](DESIGN.md) | **Canonical** layers, truthful UI ticks, message state, room open/close, transcript keys, contact trust |
-| [STORY.md](STORY.md) | Connectivity / discovery policy (coord-required WAN, LAN per-peer, no KAD fallback) |
-| [TRANSPORT.md](TRANSPORT.md) | libp2p transport stack, discovery, WAN/LAN dial policy, relay |
+| [STORY.md](STORY.md) | **Human-only** connectivity / discovery story (agents: read, never edit) |
+| [TRANSPORT.md](TRANSPORT.md) | libp2p transport stack, discovery, WAN/LAN dial policy, relay, **§ CGNAT / mobile-data relay reservation**, **§ Outbound peer relay dials vs own reservation** |
 | [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) | Wire format, `ack_received` / `ack_read`, upkeep |
 | [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Connect invites: `ghalbol.com`, `ghalbol://` |
-| [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Run/test `ghal_bol_server`, local dev stack, prod `coord.ghalbol.com` |
+| [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Run/test `ghal_bol_server`, local dev stack, prod `coord.ghalbol.com`, **WAN troubleshooting** |
+| [../ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md) | Dev server + bore/ngrok; **§ Regression prevention** (relay TCP vs coord HTTP) |
 | [IDENTITY.md](IDENTITY.md) | Local identity: create/import, export, ownership |
 | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional paid Tier 3 relay (separate from messaging keys) |
 | [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) | Call signaling + WebRTC media (fallback) |

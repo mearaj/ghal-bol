@@ -52,6 +52,36 @@ fn lookup_backoff_map() -> &'static Mutex<HashMap<String, CoordLookupBackoff>> {
     COORD_LOOKUP_BACKOFF.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Keep FFI/Dart `coord_lookup_peer` backoff aligned with `:p2p` session backoff.
+pub fn clear_coord_lookup_backoff_for_pk(public_key_hex: &str) {
+    let pk = public_key_hex.trim();
+    if pk.len() != 66 {
+        return;
+    }
+    if let Ok(mut m) = lookup_backoff_map().lock() {
+        m.remove(pk);
+    }
+}
+
+/// Mirror `:p2p` `note_coord_lookup_not_found` so duplicate Dart lookups do not fight native upkeep.
+pub fn sync_coord_lookup_peer_not_found(public_key_hex: &str, step_ms: u64, now_ms: i64) {
+    let pk = public_key_hex.trim();
+    if pk.len() != 66 {
+        return;
+    }
+    let step = step_ms.clamp(500, 5_000);
+    let next = (now_ms as u64).saturating_add(step);
+    if let Ok(mut m) = lookup_backoff_map().lock() {
+        m.insert(
+            pk.to_string(),
+            CoordLookupBackoff {
+                next_allowed_ms: next,
+                step_ms: step,
+            },
+        );
+    }
+}
+
 /// Min gap between full challenge+register cycles when already registered (reduces ngrok 401 storms).
 const MIN_REGISTER_INTERVAL_MS: u64 = 10_000;
 /// Retry sooner when never successfully registered.
@@ -337,6 +367,15 @@ fn write_relay_cache(path: Option<&std::path::Path>, peer: &str, addrs: &[String
 
 #[cfg(test)]
 fn clear_relay_cache(path: Option<&std::path::Path>) {
+    clear_relay_cache_file(path);
+}
+
+/// Drop stale on-disk relay coordinates (e.g. bore port changed or tunnel died).
+pub fn invalidate_cached_ghalbol_relay(cache_path: Option<&std::path::Path>) {
+    clear_relay_cache_file(cache_path);
+}
+
+fn clear_relay_cache_file(path: Option<&std::path::Path>) {
     if let Some(path) = path {
         let _ = std::fs::remove_file(path);
     }
@@ -364,9 +403,8 @@ pub fn coord_link_recently_ok() -> bool {
     last > 0 && unix_ms_now().saturating_sub(last) < PRESENCE_STALE_MS
 }
 
-/// Coord URL is set and we have publishable endpoints, but HTTP register/heartbeat has not
-/// succeeded recently — LAN + cached coord dial addrs only; keep retrying coord HTTP
-/// (STORY.md / TRANSPORT.md § coord down ≠ offline, no Kademlia fallback).
+/// Coord URL is set but HTTP register/heartbeat/lookup has not succeeded recently — LAN/mDNS
+/// still works; keep retrying live coord HTTP (STORY.md — no stale peer dial cache).
 pub fn coord_http_degraded() -> bool {
     if !coord_is_configured() {
         return false;
@@ -1098,14 +1136,14 @@ pub fn coord_lookup_peer_json(public_key_hex: &str) -> serde_json::Value {
             // Exponential backoff on 404/not-found; shorter backoff on transient reachability errors.
             let es = e.to_string();
             let mut step = if es.contains("404") || es.contains("peer_not_on_server") {
-                2_000u64
+                800u64
             } else {
                 5_000u64
             };
             let mut next = now.saturating_add(step);
             if let Ok(mut m) = lookup_backoff_map().lock() {
                 if let Some(prev) = m.get(pk).copied() {
-                    step = (prev.step_ms.saturating_mul(2)).min(30_000);
+                    step = (prev.step_ms.saturating_mul(2)).min(5_000);
                     next = now.saturating_add(step);
                 }
                 m.insert(

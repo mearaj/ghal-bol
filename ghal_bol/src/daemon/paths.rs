@@ -33,3 +33,18 @@ pub fn touch_incoming_call_wake() {
         .unwrap_or_else(|_| "1".to_string());
     let _ = std::fs::write(path, ts);
 }
+
+/// True when the daemon wrote [incoming_call_wake_path] and the UI has not consumed it yet.
+pub fn take_incoming_call_wake() -> bool {
+    let path = incoming_call_wake_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => false,
+    }
+}
+
+/// Drop stale wake marker (previous session notification tap).
+pub fn clear_incoming_call_wake() {
+    let _ = std::fs::remove_file(incoming_call_wake_path());
+}

@@ -8,6 +8,7 @@ import "package:flutter/services.dart";
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/call/call_controller.dart";
 import "package:ghal_bol_ui/ghal_bol_p2p.dart";
+import "package:ghal_bol_ui/ghal_bol_ui_session.dart";
 import "package:ghal_bol_ui/ghal_bol_listener_foreground.dart";
 import "package:ghal_bol_ui/ghalbol_connect_invite.dart";
 import "package:ghal_bol_ui/identity_alias_store.dart";
@@ -380,9 +381,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (widget.hubPollsEvents) return;
     if (!await GhalBolP2p.isRunning()) return;
     final pk = _recipientPublicKeyHex();
-    await GhalBolP2p.setForegroundPeer(
-      isValidPublicKeyHex(pk) ? pk : null,
-    );
+    GhalBolUiSession.setRoom(isValidPublicKeyHex(pk) ? pk : null);
   }
 
   void _drainP2pAfterFrame() {
@@ -1248,9 +1247,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         final optimistic = _lines
             .where((l) => l._persisted && l.outgoing && (l.messageId?.trim().isEmpty ?? true))
             .toList();
-        // On room switch always replace; only keep old lines on empty FFI during same-room refresh.
+        // On room switch always replace. Never wipe visible rows when native returns empty
+        // during same-room refresh (transient read / daemon cold start) — that looked like
+        // sudden message deletion.
         final sameRoom = _transcriptLoadedKey == key || _transcriptLoadedKey == null;
-        if (loaded.isNotEmpty || !hasVisibleLines || force || !sameRoom) {
+        if (loaded.isNotEmpty || !hasVisibleLines || !sameRoom) {
           _lines.removeWhere((l) => l._persisted);
           _lines.addAll(loaded);
         }
@@ -1958,7 +1959,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     ContactStore.changeCount.removeListener(_onContactsStoreChanged);
     WidgetsBinding.instance.removeObserver(this);
     if (!widget.hubPollsEvents) {
-      unawaited(GhalBolP2p.setForegroundPeer(null));
+      GhalBolUiSession.setRoom(null);
     }
     _saveTranscriptDebounce?.cancel();
     _fullTranscriptSaveTimer?.cancel();

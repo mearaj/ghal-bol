@@ -10,6 +10,9 @@
 .env
 .env.local
 .env.*.local
+# Flutter coord config — copy from `env/*.example`; never commit machine-specific URLs
+ghal_bol_ui/env/.env.development
+ghal_bol_ui/env/.env.production
 
 # Optional local keystores — not wired into default debug Gradle; ignore if unused
 ghal_bol_ui/keystore/

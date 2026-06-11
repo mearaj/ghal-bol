@@ -3,6 +3,7 @@ import "dart:async";
 import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
+import "package:ghal_bol_ui/call/call_incoming_alert.dart";
 import "package:ghal_bol_ui/call/call_controller.dart";
 import "package:ghal_bol_ui/contact_store.dart";
 import "package:ghal_bol_ui/ghal_bol_constants.dart";
@@ -22,6 +23,7 @@ class P2pEventBridge {
 
   Timer? _poll;
   Timer? _heartbeat;
+  Timer? _incomingCallWakePoll;
   Timer? _coordDialDebounce;
   Future<void>? _coordDialInFlight;
   String _appNs = kGhalBolAppNamespace;
@@ -41,8 +43,12 @@ class P2pEventBridge {
 
   /// Latest hub room target; pump applies until it matches native (coalesces rapid enter/leave).
   String? _foregroundDesired;
-  Future<void>? _foregroundPumpFuture;
-  bool? _appAckReadDesired;
+  Future<void>? _uiSessionPumpFuture;
+  /// App interactive + visible (resumed, not inactive/paused). Gates read receipts with room.
+  bool _uiVisibleDesired = false;
+
+  /// Poll-derived display hints only — never use for ack/dial/send policy (native owns that).
+  bool get isNodeReady => _nodeReady;
 
   /// Linux only: user pressed window **close (X)** — not minimize, not alt-tab unfocus.
   bool _linuxWindowClosedByUser = false;
@@ -68,8 +74,6 @@ class P2pEventBridge {
   }
 
   bool get isRunning => _poll != null;
-  /// True after native `node_ready` (DM transport up). Used for share QR — not listen addrs.
-  bool get isNodeReady => _nodeReady;
   /// Best LAN IPv4 from `listening` events (diagnostics / future use).
   String? get primaryLanIpv4 => _pickBestLanIpv4(_lanIpv4Candidates);
   String get appNamespace => _appNs;
@@ -109,36 +113,66 @@ class P2pEventBridge {
       });
     }
     _foregroundDesired = wantPeer;
-    final pump = (_foregroundPumpFuture ?? Future<void>.value()).then((_) async {
-      while (true) {
-        final want = _foregroundDesired;
-        await _applyForegroundPeer(want);
-        if (_foregroundDesired == want) break;
-      }
-    });
-    _foregroundPumpFuture = pump.catchError((_) {});
+    _scheduleUiSessionApply();
   }
 
-  /// Wait until [setForegroundConversation] has applied in native (ordering for ack_read gate).
-  Future<void> awaitForegroundApplied() async {
-    final f = _foregroundPumpFuture;
+  /// App resumed / paused / inactive — gates **new** read receipts without clearing room on brief inactive.
+  void setUiVisible(bool visible) {
+    if (_uiVisibleDesired == visible) return;
+    SessionFlowLog.step("ui_visible_desired", {"visible": visible.toString()});
+    _uiVisibleDesired = visible;
+    _scheduleUiSessionApply();
+  }
+
+  /// Wait until [setForegroundConversation] / [setUiVisible] has applied in native.
+  Future<void> awaitForegroundApplied() => awaitUiSessionApplied();
+
+  Future<void> awaitUiSessionApplied() async {
+    final f = _uiSessionPumpFuture;
     if (f != null) await f.catchError((_) {});
   }
 
-  Future<void> _applyForegroundPeer(String? publicKeyHex) async {
+  void _scheduleUiSessionApply() {
+    final pump = (_uiSessionPumpFuture ?? Future<void>.value()).then((_) async {
+      while (true) {
+        // Coalesce hub startup close→open (and layout flicker) into one native snapshot.
+        await Future<void>.delayed(Duration.zero);
+        var wantRoom = _foregroundDesired;
+        var wantVisible = _uiVisibleDesired;
+        if (wantRoom == null) {
+          await Future<void>.delayed(const Duration(milliseconds: 32));
+          if (_foregroundDesired != null) {
+            wantRoom = _foregroundDesired;
+            wantVisible = _uiVisibleDesired;
+          }
+        }
+        await _applyUiSession(wantVisible, wantRoom);
+        if (_foregroundDesired == wantRoom && _uiVisibleDesired == wantVisible) break;
+      }
+    });
+    _uiSessionPumpFuture = pump.catchError((_) {});
+  }
+
+  Future<void> _applyUiSession(bool uiVisible, String? roomPublicKeyHex) async {
     if (!GhalBolP2p.isAvailable) return;
     if (GhalBolP2p.usesDaemon && !await GhalBolDaemonClient.probeDaemon()) {
+      if (!uiVisible && roomPublicKeyHex == null) return;
       await GhalBolDaemonClient.ensureDaemonRunning();
     }
     if (!await GhalBolP2p.isRunning()) return;
-    final r = await GhalBolP2p.setForegroundPeer(publicKeyHex);
+    final r = await GhalBolP2p.syncUiSession(
+      uiVisible: uiVisible,
+      roomPublicKeyHex: roomPublicKeyHex,
+    );
     if (r["ok"] != true) {
-      P2pFlowLog.issue("set_foreground_failed", detail: r["error"]?.toString());
+      P2pFlowLog.issue("sync_ui_session_failed", detail: r["error"]?.toString());
     } else {
-      SessionFlowLog.step("foreground_applied", {
-        "pk": publicKeyHex != null && isValidPublicKeyHex(publicKeyHex)
-            ? P2pFlowLog.shortPk(publicKeyHex)
+      SessionFlowLog.step("ui_session_applied", {
+        "visible": uiVisible.toString(),
+        "room": roomPublicKeyHex != null && isValidPublicKeyHex(roomPublicKeyHex)
+            ? P2pFlowLog.shortPk(roomPublicKeyHex)
             : "(none)",
+        "read": r["read_receipts"]?.toString() ?? "?",
       });
     }
   }
@@ -163,6 +197,9 @@ class P2pEventBridge {
     _heartbeat ??= Timer.periodic(const Duration(minutes: 2), (_) {
       unawaited(_logSessionHeartbeat());
     });
+    _startIncomingCallWakePollIfNeeded();
+    _uiVisibleDesired = true;
+    _scheduleUiSessionApply();
     if (_networkBootstrapOk) return;
     if (_bootstrapFuture != null) return;
     _bootstrapFuture = _bootstrapNetworkOnce().whenComplete(() {
@@ -202,41 +239,14 @@ class P2pEventBridge {
     }
   }
 
-  /// Re-run hub foreground / ack_read after P2P comes up (unlock is not blocked on this).
+  /// Re-run hub UI session after P2P comes up (unlock is not blocked on this).
   void _reapplyDeferredSessionRpc() {
-    unawaited(() async {
-      if (_appAckReadDesired != null) {
-        await _applyAppAckReadEnabled();
-      }
-      final fg = _foregroundDesired;
-      if (fg != null) {
-        await _applyForegroundPeer(fg);
-      }
-    }());
+    unawaited(_scheduleUiSessionApplyAndWait());
   }
 
-  /// Protonet-style gate: no read receipts while backgrounded or hub UI torn down.
-  Future<void> setAppAckReadEnabled(bool enabled) async {
-    SessionFlowLog.step("ack_read_desired", {"enabled": enabled.toString()});
-    _appAckReadDesired = enabled;
-    await _applyAppAckReadEnabled();
-  }
-
-  Future<void> _applyAppAckReadEnabled() async {
-    final enabled = _appAckReadDesired;
-    if (enabled == null) return;
-    if (!GhalBolP2p.isAvailable) return;
-    if (GhalBolP2p.usesDaemon && !await GhalBolDaemonClient.probeDaemon()) {
-      if (!enabled) return;
-      await GhalBolDaemonClient.ensureDaemonRunning();
-    }
-    if (!await GhalBolP2p.isRunning()) return;
-    final r = await GhalBolP2p.setAppAckReadEnabled(enabled);
-    if (r["ok"] != true) {
-      P2pFlowLog.issue("set_ack_read_failed", detail: r["error"]?.toString());
-    } else {
-      SessionFlowLog.step("ack_read_applied", {"enabled": enabled.toString()});
-    }
+  Future<void> _scheduleUiSessionApplyAndWait() async {
+    _scheduleUiSessionApply();
+    await awaitUiSessionApplied();
   }
 
   Future<void> _logSessionHeartbeat() async {
@@ -298,11 +308,7 @@ class P2pEventBridge {
         _networkBootstrapOk = ready;
         if (ready) {
           P2pFlowLog.step("recover_ok");
-          final fg = _foregroundDesired;
-          if (fg != null && fg.isNotEmpty) {
-            await setAppAckReadEnabled(true);
-            setForegroundConversation(fg);
-          }
+          _reapplyDeferredSessionRpc();
         } else {
           P2pFlowLog.issue("recover_node_not_ready");
         }
@@ -320,9 +326,10 @@ class P2pEventBridge {
 
   /// Linux window hide / bridge stop — DESIGN close order (hub owns normal room leave).
   Future<void> notifyNativeUiExited() async {
-    setForegroundConversation(null);
-    await awaitForegroundApplied();
-    await setAppAckReadEnabled(false);
+    _uiVisibleDesired = false;
+    _foregroundDesired = null;
+    _scheduleUiSessionApply();
+    await awaitUiSessionApplied();
   }
 
   /// GTK **close (X)** only (`delete-event` → hide). Minimize/unfocus do not call this.
@@ -343,6 +350,8 @@ class P2pEventBridge {
         _linuxWindowClosedByUser) {
       _linuxWindowClosedByUser = false;
       SessionFlowLog.step("linux_window_restored_from_close");
+      _uiVisibleDesired = true;
+      _scheduleUiSessionApply();
       _notifyLinuxWindowCloseListeners(false);
     }
   }
@@ -357,14 +366,16 @@ class P2pEventBridge {
     _poll = null;
     _heartbeat?.cancel();
     _heartbeat = null;
+    _incomingCallWakePoll?.cancel();
+    _incomingCallWakePoll = null;
     _coordDialDebounce?.cancel();
     _coordDialDebounce = null;
     _coordDialInFlight = null;
     _networkBootstrapOk = false;
     _bootstrapFuture = null;
     _foregroundDesired = null;
-    _foregroundPumpFuture = null;
-    _appAckReadDesired = null;
+    _uiSessionPumpFuture = null;
+    _uiVisibleDesired = false;
     _streamReadyPeers.clear();
     _identifiedPeersHotRegistered.clear();
     _listeners.clear();
@@ -421,6 +432,27 @@ class P2pEventBridge {
     final next = (_drainChain ?? Future<void>.value()).then((_) => run());
     _drainChain = next.catchError((_) {});
     return next;
+  }
+
+  /// Linux only: daemon libnotify tap writes `incoming_call_wake` — poll when D-Bus activate misses.
+  void _startIncomingCallWakePollIfNeeded() {
+    if (_incomingCallWakePoll != null) return;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.linux) return;
+    if (!GhalBolP2p.usesDaemon) return;
+    _incomingCallWakePoll = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_maybeHandleIncomingCallWake());
+    });
+  }
+
+  Future<void> _maybeHandleIncomingCallWake() async {
+    if (!GhalBolP2p.usesDaemon) return;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.linux) return;
+    try {
+      if (!await GhalBolP2p.takeIncomingCallWake()) return;
+      SessionFlowLog.step("incoming_call_wake", {"source": "daemon_notify"});
+      await CallIncomingAlert.presentWindow();
+      CallController.instance.onAppForeground();
+    } catch (_) {}
   }
 
   /// Called from [GhalBolP2p.pollEventMap] so [waitNodeReady] cannot steal `node_ready`.

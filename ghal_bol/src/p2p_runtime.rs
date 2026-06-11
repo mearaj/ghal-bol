@@ -1,7 +1,7 @@
 //! In-process native DM worker (shared by FFI and the Unix-socket daemon).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Duration;
@@ -60,6 +60,21 @@ fn clear_pending_p2p_events() {
     }
 }
 
+static LAST_POLL_MAINTENANCE_MS: AtomicI64 = AtomicI64::new(0);
+const POLL_MAINTENANCE_INTERVAL_MS: i64 = 5_000;
+
+fn maybe_maintain_poll_queue(now_ms: i64) {
+    let last = LAST_POLL_MAINTENANCE_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < POLL_MAINTENANCE_INTERVAL_MS {
+        return;
+    }
+    LAST_POLL_MAINTENANCE_MS.store(now_ms, Ordering::Relaxed);
+    purge_stale_pending_call_invites(now_ms);
+    if call_state::expire_stale_ringing(now_ms) {
+        crate::incoming_call_notify::dismiss_incoming_call();
+    }
+}
+
 /// Drop buffered `invite` poll events so a late UI poll cannot ring after remote hangup.
 pub fn drop_pending_call_invite(call_id: &str) {
     let cid = call_id.trim();
@@ -79,6 +94,95 @@ pub fn drop_pending_call_invite(call_id: &str) {
             } if c == cid && signal == "invite"
         )
     });
+}
+
+/// Drop invite poll events older than [call_state::MAX_LIVE_CALL_INVITE_AGE_MS].
+pub fn purge_stale_pending_call_invites(now_ms: i64) {
+    let Ok(mut q) = pending_p2p_events_mx().lock() else {
+        return;
+    };
+    q.retain(|ev| {
+        match ev {
+            GossipChatEvent::CallSignal { signal, created_at_ms, .. } if signal == "invite" => {
+                call_state::call_invite_is_live(*created_at_ms, now_ms)
+            }
+            _ => true,
+        }
+    });
+}
+
+/// Dismiss OS incoming-call alert in `:p2p` / daemon (Linux libnotify, Android full-screen).
+pub fn p2p_dismiss_incoming_call_alert() -> Value {
+    let _ = call_state::expire_stale_ringing(call_state::now_ms());
+    crate::incoming_call_notify::dismiss_incoming_call();
+    json_ok(serde_json::json!({ "ok": true }))
+}
+
+/// Tear down native voice/video and send hangup when the UI session ends (privacy invariant).
+pub fn p2p_force_end_active_call(reason: &str) -> Value {
+    native_log::info("call", &format!("force_end_active_call reason={reason}"));
+    let had_active = crate::p2p::call_active::snapshot().is_some()
+        || call_state::first_incoming_ringing().is_some();
+
+    let out_tx = {
+        let g = match p2p_mx().lock() {
+            Ok(g) => g,
+            Err(_) => {
+                crate::p2p::call_active::clear();
+                call_state::clear_all_calls();
+                crate::incoming_call_notify::dismiss_incoming_call();
+                return json_ok(serde_json::json!({
+                    "ok": true,
+                    "ended": had_active,
+                    "reason": reason,
+                }));
+            }
+        };
+        g.as_ref().map(|h| h.out_tx.clone())
+    };
+
+    if let Some(out_tx) = out_tx {
+        let mut hangup_targets = std::collections::HashSet::new();
+        if let Some(s) = crate::p2p::call_active::snapshot() {
+            hangup_targets.insert((s.peer_public_key_hex.clone(), s.call_id.clone()));
+            let _ = out_tx.send(OutboundCmd::CallMediaStop {
+                call_id: s.call_id.clone(),
+            });
+            let _ = out_tx.send(OutboundCmd::CallVideoStop {
+                call_id: s.call_id.clone(),
+            });
+        }
+        if let Ok(g) = call_state::store_for_teardown() {
+            for (pk, call_id) in g {
+                hangup_targets.insert((pk, call_id));
+            }
+        }
+        for (pk, call_id) in hangup_targets {
+            drop_pending_call_invite(&call_id);
+            let _ = out_tx.send(OutboundCmd::SendCallSignal {
+                recipient_public_key_hex: pk,
+                call_id,
+                signal_kind: CallSigKind::Hangup,
+                payload: serde_json::json!({}),
+                signal_id: crate::p2p::chat_server::new_msg_id_for_ffi(),
+            });
+        }
+    }
+
+    crate::p2p::call_active::clear();
+    call_state::clear_all_calls();
+    crate::incoming_call_notify::dismiss_incoming_call();
+    json_ok(serde_json::json!({
+        "ok": true,
+        "ended": had_active,
+        "reason": reason,
+    }))
+}
+
+/// Consume daemon incoming-call wake marker (Linux notification tap → present UI).
+pub fn p2p_take_incoming_call_wake() -> Value {
+    let wake = crate::daemon::take_incoming_call_wake();
+    json_ok(serde_json::json!({ "ok": true, "wake": wake }))
 }
 
 fn drain_holder_events_into_pending(h: &P2pHolder) {
@@ -237,6 +341,16 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             "created_at_ms": created_at_ms,
             "payload": payload,
         }),
+        GossipChatEvent::CallSignalSent {
+            call_id,
+            signal,
+            recipient_public_key_hex,
+        } => serde_json::json!({
+            "kind": "call_signal_sent",
+            "call_id": call_id,
+            "signal": signal,
+            "recipient_public_key_hex": recipient_public_key_hex,
+        }),
         GossipChatEvent::CallMedia {
             call_id,
             peer_public_key_hex,
@@ -330,6 +444,8 @@ fn dial_bootstrap_on_running_node(addrs: Vec<DmDialAddr>) {
 /// Start libp2p DM node in a background thread.
 pub fn p2p_start(config: &Value) -> Value {
     set_drop_pending_call_invite_hook(drop_pending_call_invite);
+    // Stale notification-tap marker must not fire presentWindow on next UI login.
+    crate::daemon::clear_incoming_call_wake();
     apply_coord_from_config(config);
     let topic = config
         .get("topic")
@@ -544,6 +660,7 @@ pub fn p2p_stop() {
     crate::p2p::set_app_ack_read_enabled(false);
     stop_p2p_node(Duration::from_secs(3));
     call_state::clear_all_calls();
+    crate::incoming_call_notify::dismiss_incoming_call();
     clear_p2p_handler_context();
     native_log::set_sink(None);
 }
@@ -741,10 +858,14 @@ pub fn p2p_transcript_load_merged(config: &Value) -> Value {
     }
 }
 
-/// Snapshot of the active native voice/video session (for UI re-sync after process restart).
+/// Snapshot of native call signaling/media (UI re-sync when the app was backgrounded or killed).
 pub fn p2p_call_status(_config: &Value) -> Value {
-    match crate::p2p::call_active::snapshot() {
-        Some(s) => json_ok(serde_json::json!({
+    let now = call_state::now_ms();
+    if call_state::expire_stale_ringing(now) {
+        crate::incoming_call_notify::dismiss_incoming_call();
+    }
+    if let Some(s) = crate::p2p::call_active::snapshot() {
+        return json_ok(serde_json::json!({
             "ok": true,
             "active": true,
             "call_id": s.call_id,
@@ -753,12 +874,24 @@ pub fn p2p_call_status(_config: &Value) -> Value {
             "video_active": s.video_active,
             "camera_on": s.camera_on,
             "remote_video_on": s.remote_video_on,
-        })),
-        None => json_ok(serde_json::json!({
+        }));
+    }
+    if let Some((pk, call_id)) = crate::call_state::first_incoming_ringing() {
+        let ring_age_ms = call_state::incoming_ring_age_ms(now).unwrap_or(0);
+        return json_ok(serde_json::json!({
             "ok": true,
             "active": false,
-        })),
+            "ringing": true,
+            "phase": "incoming_ringing",
+            "call_id": call_id,
+            "peer_public_key_hex": pk,
+            "ring_age_ms": ring_age_ms,
+        }));
     }
+    json_ok(serde_json::json!({
+        "ok": true,
+        "active": false,
+    }))
 }
 
 /// Native **video** control plane (parallel to [`p2p_call_media`]).
@@ -1205,6 +1338,68 @@ pub fn p2p_set_app_ack_read_enabled(enabled: bool) -> Value {
     json_ok(serde_json::json!({ "ok": true, "enabled": enabled }))
 }
 
+pub fn p2p_set_app_ui_visible(visible: bool) -> Value {
+    native_log::info("session", format!("app_ui_visible={visible}"));
+    crate::p2p::set_app_ui_visible(visible);
+    json_ok(serde_json::json!({ "ok": true, "visible": visible }))
+}
+
+/// Atomically sync integrator UI state → native read-receipt policy.
+///
+/// The coord server and relay never see this; only `ghal_bol` uses it to decide when
+/// `ack_read` is allowed for **new** inbound mail. Leave backlog drain still runs via
+/// `SetForegroundPeer(null)` when [room_public_key_hex] is cleared.
+///
+/// Close order: room `None` → foreground leave drain → read gate off.
+/// Open order: ui visible + room set → read gate on → foreground peer (enter catch-up).
+pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) -> Value {
+    let room = room_public_key_hex
+        .map(str::trim)
+        .filter(|s| s.len() == 66);
+    native_log::info(
+        "session",
+        format!(
+            "sync_ui_session ui_visible={ui_visible} room={}",
+            room.map(|_| "<pk>").unwrap_or("(none)")
+        ),
+    );
+    crate::p2p::set_app_ui_visible(ui_visible);
+    if room.is_none() {
+        let r = p2p_set_foreground_peer(None);
+        if r.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            return r;
+        }
+        crate::p2p::set_app_ack_read_enabled(false);
+        return json_ok(serde_json::json!({
+            "ok": true,
+            "ui_visible": ui_visible,
+            "room": null,
+            "read_receipts": false,
+        }));
+    }
+    if ui_visible {
+        crate::p2p::set_app_ack_read_enabled(true);
+        let r = p2p_set_foreground_peer(room);
+        if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            return json_ok(serde_json::json!({
+                "ok": true,
+                "ui_visible": true,
+                "room": room,
+                "read_receipts": true,
+            }));
+        }
+        return r;
+    }
+    // Room still open in UI stack but app not interactive (Android inactive, etc.).
+    crate::p2p::set_app_ack_read_enabled(false);
+    json_ok(serde_json::json!({
+        "ok": true,
+        "ui_visible": false,
+        "room": room,
+        "read_receipts": false,
+    }))
+}
+
 /// DM + libp2p connectivity — forward to Flutter App log (`Native/…` tags in export).
 fn native_log_should_forward_to_ui(line: &native_log::NativeLogLine) -> bool {
     if line.level == "warn" || line.level == "error" {
@@ -1257,8 +1452,12 @@ pub fn p2p_set_foreground_peer(public_key_hex: Option<&str>) -> Value {
             .ok()
             .and_then(|s| s.parse().ok())
     });
+    let generation = crate::p2p::chat_server::bump_foreground_peer_cmd_gen();
     if out_tx
-        .send(OutboundCmd::SetForegroundPeer { peer_id })
+        .send(OutboundCmd::SetForegroundPeer {
+            peer_id,
+            generation,
+        })
         .is_err()
     {
         return json_err("p2p send failed (node stopped?)");
@@ -1267,6 +1466,8 @@ pub fn p2p_set_foreground_peer(public_key_hex: Option<&str>) -> Value {
 }
 
 pub fn p2p_poll_event() -> Option<Value> {
+    maybe_maintain_poll_queue(call_state::now_ms());
+    let now = call_state::now_ms();
     loop {
         let Some(ev) = poll_next_p2p_event() else {
             return None;
@@ -1311,6 +1512,15 @@ pub fn p2p_poll_event() -> Option<Value> {
         }
         if kind == "peer_identified" {
             return Some(j);
+        }
+        if kind == "call_signal" {
+            let signal = j.get("signal").and_then(|v| v.as_str()).unwrap_or("");
+            if signal == "invite" {
+                let created = j.get("created_at_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+                if !call_state::call_invite_is_live(created, now) {
+                    continue;
+                }
+            }
         }
         return Some(j);
     }

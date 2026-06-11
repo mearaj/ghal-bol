@@ -11,6 +11,6 @@ pub mod native_log;
 pub use chat_server::{
     last_room_peer, live_foreground_peer_for_catchup, notify_network_change,
     notify_relay_refresh, queue_read_ack_catchup, run_gossip_chat_node_with_std_io,
-    set_app_ack_read_enabled, set_drop_pending_call_invite_hook, sync_foreground_peer_now,
+    set_app_ack_read_enabled, set_app_ui_visible, set_drop_pending_call_invite_hook, sync_foreground_peer_now,
     ChatServerError, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, DEFAULT_GOSSIP_TOPIC,
 };

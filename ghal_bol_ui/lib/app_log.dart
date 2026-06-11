@@ -242,6 +242,7 @@ class AppLog extends ChangeNotifier {
     "p2p_send_text_dm",
     "p2p_set_foreground_peer",
     "p2p_set_app_ack_read_enabled",
+    "p2p_sync_ui_session",
     "p2p_register_dm_peer",
     "p2p_call_signal",
   };

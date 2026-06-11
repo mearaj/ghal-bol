@@ -116,7 +116,10 @@ class CallController {
   static void install() {
     unawaited(CallIncomingAlert.dismiss());
     CallIncomingAlert.installPlatformHandlers(
-      onOpenedFromNotification: () => instance.onAppForeground(),
+      onOpenedFromNotification: ({publicKeyHex, displayName}) => instance.onAppForeground(
+        publicKeyHex: publicKeyHex,
+        displayName: displayName,
+      ),
       onWindowClosedByUser: () => instance.onWindowClosedByUser(),
     );
   }
@@ -173,21 +176,33 @@ class CallController {
 
   /// Call UI left the screen while media may still be up — stop camera and hang up.
   Future<void> onCallScreenDismissedWhileLive() async {
-    if (_endingCall || phase == CallUiPhase.idle || phase == CallUiPhase.ended) {
+    if (_endingCall) return;
+    if (inCallActive) {
+      CallFlowLog.step("call_screen_dismissed_during_live", {"phase": phase.name});
+      await _endLocal(notifyRemote: true, awaitNativeStop: true);
       return;
     }
-    if (!inCallActive) return;
-    CallFlowLog.step("call_screen_dismissed_during_live", {"phase": phase.name});
-    await _endLocal(notifyRemote: true, awaitNativeStop: true);
+    if (phase == CallUiPhase.incomingRinging ||
+        phase == CallUiPhase.outgoingRinging) {
+      CallFlowLog.step("call_screen_dismissed_during_ring", {"phase": phase.name});
+      final notifyRemote = phase == CallUiPhase.outgoingRinging ||
+          (phase == CallUiPhase.incomingRinging && _acceptSent);
+      await _endLocal(notifyRemote: notifyRemote, awaitNativeStop: true);
+      return;
+    }
+    await _stopNativeCallIfStillActive();
   }
 
   /// Invites older than this are never shown (prevents stale poll replay after remote hangup).
-  static const int _maxLiveInviteAgeMs = 90 * 1000;
+  static const int _maxLiveInviteAgeMs = 45 * 1000;
 
   /// Window raised after close (notification tap / launcher) — not mere alt-tab focus.
-  void onAppForeground() {
+  void onAppForeground({String? publicKeyHex, String? displayName}) {
     P2pEventBridge.instance.onLinuxWindowRestoredFromClose();
-    unawaited(syncActiveCallFromNative().then((restored) {
+    unawaited(syncActiveCallFromNative(
+      hintPublicKeyHex: publicKeyHex,
+      hintDisplayName: displayName,
+    ).then((restored) {
       if (!restored) {
         if (inCallActive && phase == CallUiPhase.connected) {
           _tryPushCallScreen();
@@ -211,10 +226,39 @@ class CallController {
   }
 
   /// Reconcile in-memory UI state with `:p2p` when the native call outlived the UI process.
-  Future<bool> syncActiveCallFromNative() async {
+  Future<bool> syncActiveCallFromNative({
+    String? hintPublicKeyHex,
+    String? hintDisplayName,
+  }) async {
     try {
       final r = await GhalBolP2p.callStatus();
-      if (r["ok"] != true || r["active"] != true) return false;
+      if (r["ok"] != true) return false;
+      if (r["ringing"] == true && r["phase"]?.toString() == "incoming_ringing") {
+        final id = r["call_id"]?.toString();
+        final pk = (r["peer_public_key_hex"]?.toString() ?? hintPublicKeyHex ?? "")
+            .trim()
+            .toLowerCase();
+        final ringAge = r["ring_age_ms"];
+        final ringAgeMs = ringAge is int ? ringAge : int.tryParse("$ringAge");
+        if (ringAgeMs != null && ringAgeMs > _maxLiveInviteAgeMs) {
+          CallFlowLog.step("incoming_ring_stale_native", {
+            "age_ms": ringAgeMs.toString(),
+          });
+          unawaited(CallIncomingAlert.dismiss());
+          return false;
+        }
+        if (id != null &&
+            id.isNotEmpty &&
+            pk.length == 66 &&
+            phase == CallUiPhase.idle) {
+          if (hintDisplayName != null && hintDisplayName.trim().isNotEmpty) {
+            peerDisplayName = hintDisplayName.trim();
+          }
+          await _beginIncomingRing(pk, id);
+          return true;
+        }
+      }
+      if (r["active"] != true) return false;
       final id = r["call_id"]?.toString();
       final pk = r["peer_public_key_hex"]?.toString().trim().toLowerCase();
       final voice = r["voice_active"] == true;
@@ -328,6 +372,10 @@ class CallController {
     }
     if (kind == "call_signal") {
       _handleCallSignalEvent(ev);
+      return;
+    }
+    if (kind == "call_signal_sent") {
+      _handleCallSignalSentEvent(ev);
       return;
     }
     if (kind == "chat_ready") {
@@ -478,7 +526,7 @@ class CallController {
   }
 
   bool _isLiveInvite(int? createdAtMs) {
-    if (createdAtMs == null || createdAtMs <= 0) return true;
+    if (createdAtMs == null || createdAtMs <= 0) return false;
     final age = DateTime.now().millisecondsSinceEpoch - createdAtMs;
     return age >= 0 && age <= _maxLiveInviteAgeMs;
   }
@@ -534,16 +582,9 @@ class CallController {
         await Future<void>.delayed(const Duration(milliseconds: 250));
       }
     }
-    // Native queues call_signal until the DM stream opens (same as chat outbox).
-    statusMessage = "Ringing…";
+    statusMessage = "Calling…";
     _notify();
     await _sendInvite(pk, id);
-    if (phase != CallUiPhase.outgoingRinging) return;
-    if (!bridge.isStreamReady(pk)) {
-      CallFlowLog.step("invite_queued_pending_stream", {
-        "peer": CallFlowLog.shortPk(pk),
-      });
-    }
   }
 
   P2pEventBridge get bridge => P2pEventBridge.instance;
@@ -566,8 +607,21 @@ class CallController {
       _notify();
       return;
     }
-    CallFlowLog.step("invite_sent", {"peer": CallFlowLog.shortPk(pk)});
+    CallFlowLog.step("invite_queued", {"peer": CallFlowLog.shortPk(pk)});
+  }
+
+  void _handleCallSignalSentEvent(Map<String, dynamic> ev) {
+    final signal = ev["signal"]?.toString() ?? "";
+    final sentCallId = ev["call_id"]?.toString() ?? "";
+    final pk = ev["recipient_public_key_hex"]?.toString() ?? "";
+    if (signal != "invite") return;
+    if (callId == null || sentCallId != callId) return;
+    if (!publicKeysEqual(peerPublicKeyHex, pk)) return;
+    if (phase != CallUiPhase.outgoingRinging) return;
+    CallFlowLog.step("invite_on_wire", {"peer": CallFlowLog.shortPk(pk)});
+    statusMessage = "Ringing…";
     unawaited(CallRingtone.startOutgoing());
+    _notify();
   }
 
   Future<void> _onRemoteSignal(
@@ -655,6 +709,9 @@ class CallController {
       case "accept":
         if (isOutgoing &&
             (phase == CallUiPhase.outgoingRinging || phase == CallUiPhase.connecting)) {
+          unawaited(CallRingtone.stop());
+          statusMessage = "Answered";
+          _notify();
           _enterConnecting();
           await _startNativeVoice();
         }
@@ -1310,11 +1367,11 @@ class CallController {
     final name = peerDisplayName ?? "Contact";
     _alertShownForCallId = id;
 
-    if (defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
       await CallIncomingAlert.show(displayName: name, publicKeyHex: pk);
       return;
     }
+    // Android: full-screen notification is posted from `:p2p` when the invite arrives.
 
     if (defaultTargetPlatform == TargetPlatform.linux) {
       // Visible: in-app ring only. Hidden: `incoming_call_notify` in ghal_bol_daemon.

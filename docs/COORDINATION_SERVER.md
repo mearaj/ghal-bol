@@ -73,7 +73,29 @@ COORD_URL=https://YOUR.ngrok-free.dev ./ghal_bol_server/deploy/smoke_coord.sh
 
 Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256k1 ECDSA DER).
 
-`GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` when no relay runs.
+`GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` or empty `addrs` when no public relay is configured (dev: bore not running).
+
+## Troubleshooting
+
+### Interpreting coord HTTP access logs
+
+| Pattern | Likely cause | Action |
+|---------|--------------|--------|
+| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | `nc -zv` on `/v1/relay` addr; restart `run_server.sh`; restart apps |
+| `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but bore skipped or relay disabled | See deploy README bore-skip reasons |
+| `peer registered` in **server** logs but lookup 404 | TTL expired (~90s) or wrong coord URL in app | Heartbeat/register failing; check app `coord_registered` |
+| Works after second `run_server.sh` start | First start had no bore | Always confirm `Starting bore:` line appears |
+
+### Dev session checklist
+
+1. Terminal 1: `./ghal_bol_server/deploy/run_server.sh` — keep running  
+2. Terminal 2: `ngrok http 8765`  
+3. `curl -s http://127.0.0.1:8765/v1/relay | jq` — enabled + addrs  
+4. `nc -zv <relay-ip> <relay-port>` — must connect  
+5. App `GHAL_BOL_COORD_URLS` = ngrok **https** URL  
+6. Rebuild native + restart apps after **every** server restart (bore port change)
+
+Full detail: [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md) § “Regression prevention”, [TRANSPORT.md](TRANSPORT.md) § “WAN prerequisites”.
 
 ## Environment
 
@@ -119,7 +141,7 @@ Two-device test: server running → desktop `flutter run` + QR → phone scan �
 
 ## Related
 
-- [STORY.md](STORY.md) — connectivity / discovery policy (overrides conflicting guidance)
+- [STORY.md](STORY.md) — human-authored connectivity policy (agents: read only, never edit)
 - [TRANSPORT.md](TRANSPORT.md) — WAN/LAN dial policy, invites, multiple coord servers
 - [ghal_bol_server/README.md](../ghal_bol_server/README.md)
 - [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md)

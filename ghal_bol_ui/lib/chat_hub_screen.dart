@@ -20,6 +20,7 @@ import "identity_alias_form.dart";
 import "identity_key_management.dart";
 import "invite_scan_screen.dart";
 import "package:share_plus/share_plus.dart";
+import "ghal_bol_ui_session.dart";
 import "p2p_event_bridge.dart";
 import "p2p_network_coordinator.dart";
 import "saved_contact.dart";
@@ -249,18 +250,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
 
   Future<void> _syncNativeForegroundPeerAsync() async {
     final epoch = ++_foregroundSyncEpoch;
-    final split = ghalBolUseChatShellSplit(context);
     final roomOpen = _nativeForegroundRoomOpen(context);
     if (!roomOpen) {
       AppLog.instance.flow(
         "Hub",
-        "room closed → drain in-room read acks, then clear foreground (tab=$_navTab split=$split engaged=$_splitChatEngaged narrow=$_narrowShowRoom)",
+        "room closed → sync ui session (no room, leave drain)",
       );
-      // DESIGN: mail seen while the room was open still gets ack_read after leave.
-      P2pEventBridge.instance.setForegroundConversation(null);
-      await P2pEventBridge.instance.awaitForegroundApplied();
-      if (!mounted || epoch != _foregroundSyncEpoch) return;
-      await P2pEventBridge.instance.setAppAckReadEnabled(false);
+      GhalBolUiSession.setRoom(null);
+      await GhalBolUiSession.awaitApplied();
       if (mounted && epoch == _foregroundSyncEpoch) {
         _layoutSyncedRoomOpen = false;
       }
@@ -270,15 +267,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     final pk = c.publicKeyHex.trim().toLowerCase();
     AppLog.instance.flow(
       "Hub",
-      "room open → foreground pk=${pk.length > 16 ? "${pk.substring(0, 8)}…" : pk}",
+      "room open → sync ui session pk=${pk.length > 16 ? "${pk.substring(0, 8)}…" : pk}",
     );
-    // Read gate before foreground cmd: SetForegroundPeer on the outbound queue may run
-    // before this RPC returns; native must not skip enter-room catch-up (DESIGN.md).
-    await P2pEventBridge.instance.setAppAckReadEnabled(true);
-    if (!mounted || epoch != _foregroundSyncEpoch) return;
     unawaited(ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c));
-    P2pEventBridge.instance.setForegroundConversation(pk);
-    await P2pEventBridge.instance.awaitForegroundApplied();
+    GhalBolUiSession.setRoom(pk);
+    await GhalBolUiSession.awaitApplied();
     if (mounted && epoch == _foregroundSyncEpoch) {
       _layoutSyncedRoomOpen = true;
     }
@@ -324,14 +317,15 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     switch (state) {
       case AppLifecycleState.resumed:
         AppLog.instance.flow("Hub", "lifecycle resumed");
+        GhalBolUiSession.setVisible(true);
         unawaited(GhalBolBackground.onAppResumed());
         _syncNativeForegroundPeer();
         _attachedHubChat?.onHubReattached(reloadTranscript: true);
         P2pEventBridge.instance.drainNow();
       case AppLifecycleState.inactive:
-        // Android: IME, notification shade, brief focus loss — not "app paused".
-        // DESIGN.md read gate follows room open; do not clear foreground here.
-        AppLog.instance.flow("Hub", "lifecycle inactive (foreground unchanged)");
+        // Android: shade, task switcher, brief focus loss — stop **new** read receipts.
+        AppLog.instance.flow("Hub", "lifecycle inactive → ui not visible (room unchanged)");
+        GhalBolUiSession.setVisible(false);
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
@@ -350,11 +344,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     }
     AppLog.instance.flow(
       "Hub",
-      "lifecycle $state → drain read acks, clear foreground, then disable ack_read",
+      "lifecycle $state → close room + ui session off",
     );
-    P2pEventBridge.instance.setForegroundConversation(null);
-    await P2pEventBridge.instance.awaitForegroundApplied();
-    await P2pEventBridge.instance.setAppAckReadEnabled(false);
+    GhalBolUiSession.setVisible(false);
+    GhalBolUiSession.setRoom(null);
+    await GhalBolUiSession.awaitApplied();
   }
 
   @override
@@ -365,10 +359,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     }
     P2pEventBridge.instance.removeListener(_routeHubP2pEvent);
     P2pEventBridge.instance.removeLinuxWindowCloseListener(_onLinuxWindowCloseChanged);
-    P2pEventBridge.instance.setForegroundConversation(null);
+    GhalBolUiSession.setRoom(null);
     unawaited(() async {
-      await P2pEventBridge.instance.awaitForegroundApplied();
-      await P2pEventBridge.instance.setAppAckReadEnabled(false);
+      await GhalBolUiSession.awaitApplied();
+      GhalBolUiSession.setVisible(false);
+      await GhalBolUiSession.awaitApplied();
     }());
     WidgetsBinding.instance.removeObserver(this);
     _rosterSyncDebounce?.cancel();
@@ -509,7 +504,6 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   Future<void> _reloadContactsAndSyncP2pIfNeeded({
     bool awaitP2p = false,
     bool forceSync = false,
-    bool lookupBootstrap = false,
   }) async {
     final fpBefore = P2pNetworkCoordinator.dmPeersFingerprint(_contacts);
     final countBefore = _contacts.length;
@@ -526,7 +520,6 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     final sync = P2pNetworkCoordinator.syncContacts(
       _contacts,
       appNamespace: _appNs,
-      lookupBootstrap: lookupBootstrap,
     );
     if (awaitP2p) {
       await sync;
@@ -536,11 +529,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   Future<void> _reloadContactsAndSyncP2p({bool awaitP2p = false}) =>
-      _reloadContactsAndSyncP2pIfNeeded(
-        awaitP2p: awaitP2p,
-        forceSync: true,
-        lookupBootstrap: true,
-      );
+      _reloadContactsAndSyncP2pIfNeeded(awaitP2p: awaitP2p, forceSync: true);
 
   Future<SavedContact?> _onContactJoined(SavedContact contact) async {
     final saved = await ContactStore.upsertContact(appNamespace: _appNs, contact: contact);

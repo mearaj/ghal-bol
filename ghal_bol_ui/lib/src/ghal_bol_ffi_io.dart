@@ -85,6 +85,9 @@ abstract final class GhalBolFfi {
   static _NativePtrToPtrDart? _p2pCallSignal;
   static _NativePtrToPtrDart? _p2pCallMedia;
   static _NativePtrToPtrDart? _p2pCallStatus;
+  static _NativePtrToPtrDart? _p2pDismissIncomingCallAlert;
+  static _NativePtrToPtrDart? _p2pForceEndActiveCall;
+  static _NativePtrToPtrDart? _p2pTakeIncomingCallWake;
   static _NativePtrToPtrDart? _p2pCallVideo;
   static _NativePtrToPtrDart? _p2pCallVideoFrame;
   static _NativePtrToPtrDart? _p2pCallVideoTexture;
@@ -92,6 +95,7 @@ abstract final class GhalBolFfi {
   static _NativePtrToPtrDart? _callMediaKeyHex;
   static _NativePtrToPtrDart? _p2pSetForegroundPeer;
   static Pointer<Utf8> Function(int)? _p2pSetAppAckReadEnabled;
+  static Pointer<Utf8> Function(int)? _p2pSetAppUiVisible;
   static _NativePollPtrDart? _p2pPollEvent;
   static _NativePollPtrDart? _p2pIsRunning;
   static _NativePtrToPtrDart? _coordSetBaseUrl;
@@ -192,6 +196,28 @@ abstract final class GhalBolFfi {
           _p2pCallStatus = null;
         }
         try {
+          _p2pDismissIncomingCallAlert = lib.lookupFunction<
+              _NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_dismiss_incoming_call_alert",
+          );
+        } catch (_) {
+          _p2pDismissIncomingCallAlert = null;
+        }
+        try {
+          _p2pForceEndActiveCall = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_force_end_active_call",
+          );
+        } catch (_) {
+          _p2pForceEndActiveCall = null;
+        }
+        try {
+          _p2pTakeIncomingCallWake = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_ffi_p2p_take_incoming_call_wake",
+          );
+        } catch (_) {
+          _p2pTakeIncomingCallWake = null;
+        }
+        try {
           _p2pCallVideo = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
             "ghal_bol_ffi_p2p_call_video",
           );
@@ -240,6 +266,14 @@ abstract final class GhalBolFfi {
           >("ghal_bol_ffi_p2p_set_app_ack_read_enabled");
         } catch (_) {
           _p2pSetAppAckReadEnabled = null;
+        }
+        try {
+          _p2pSetAppUiVisible = lib.lookupFunction<
+            Pointer<Utf8> Function(Uint8),
+            Pointer<Utf8> Function(int)
+          >("ghal_bol_ffi_p2p_set_app_ui_visible");
+        } catch (_) {
+          _p2pSetAppUiVisible = null;
         }
         _p2pPollEvent = lib.lookupFunction<_NativePollPtr, _NativePollPtrDart>(
           "ghal_bol_ffi_p2p_poll_event",
@@ -1070,6 +1104,17 @@ abstract final class GhalBolFfi {
     return _parseSmallJson(out, free);
   }
 
+  static Map<String, dynamic> p2pSetAppUiVisible(bool visible) {
+    _ensure();
+    final set = _p2pSetAppUiVisible;
+    final free = _stringFree;
+    if (set == null || free == null) {
+      return {"ok": true, "visible": visible};
+    }
+    final out = set(visible ? 1 : 0);
+    return _parseSmallJson(out, free);
+  }
+
   static Map<String, dynamic> p2pSetForegroundPeer(String? libp2pPeerId) {
     _ensure();
     final set = _p2pSetForegroundPeer;
@@ -1132,6 +1177,50 @@ abstract final class GhalBolFfi {
     }
     final j = jsonEncode(config);
     final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Future<void> p2pDismissIncomingCallAlert() async {
+    _ensure();
+    final send = _p2pDismissIncomingCallAlert;
+    final free = _stringFree;
+    if (send == null || free == null) return;
+    final p = "{}".toNativeUtf8();
+    try {
+      _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pForceEndActiveCall(Map<String, dynamic> config) {
+    _ensure();
+    final send = _p2pForceEndActiveCall;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": true, "ended": false};
+    }
+    final j = jsonEncode(config);
+    final p = j.toNativeUtf8();
+    try {
+      return _parseSmallJson(send(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pTakeIncomingCallWake() {
+    _ensure();
+    final send = _p2pTakeIncomingCallWake;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {"ok": true, "wake": false};
+    }
+    final p = "{}".toNativeUtf8();
     try {
       return _parseSmallJson(send(p), free);
     } finally {

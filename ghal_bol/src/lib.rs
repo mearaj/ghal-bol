@@ -61,6 +61,8 @@ pub mod daemon;
 #[cfg(not(target_arch = "wasm32"))]
 mod incoming_call_notify;
 #[cfg(target_os = "android")]
+mod incoming_call_android;
+#[cfg(target_os = "android")]
 mod android_daemon;
 #[cfg(target_os = "android")]
 mod android_jni_cache;

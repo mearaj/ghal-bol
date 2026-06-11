@@ -55,6 +55,11 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
+      - name: Local env files for analyze (gitignored; copy from tracked examples)
+        run: |
+          cp -n env/.env.development.example env/.env.development
+          cp -n env/.env.production.example env/.env.production
+
       - name: dart analyze
         run: dart analyze --fatal-warnings
 

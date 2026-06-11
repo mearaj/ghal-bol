@@ -52,4 +52,15 @@ object P2pDaemonNative {
     /** Hint libp2p that Wi‑Fi/mobile/default route changed (call from `:p2p` process). */
     @JvmStatic
     external fun notifyNetworkChange()
+
+    /** Full-screen incoming call when UI process is dead (`:p2p` receives invite). */
+    @JvmStatic
+    fun showIncomingCall(context: Context, displayName: String, publicKeyHex: String) {
+        IncomingCallNotifier.show(context.applicationContext, displayName, publicKeyHex)
+    }
+
+    @JvmStatic
+    fun dismissIncomingCall(context: Context) {
+        IncomingCallNotifier.dismiss(context.applicationContext)
+    }
 }

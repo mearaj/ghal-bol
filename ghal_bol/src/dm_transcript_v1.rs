@@ -1,6 +1,9 @@
 //! Reads the Flutter `chat_transcript_v1.json` format so native P2P can restore outbound work
 //! without the UI walking history on the main isolate.
 //!
+//! All file access goes through [`crate::dm_transcript_store`] locking — do not read/write this
+//! path directly (concurrent append/patch in `:p2p` used to clobber rows).
+//!
 //! ## Outbound delivery vs read (see `docs/GHAL_BOL_DM_MSG_V1.md`)
 //!
 //! Native P2P rescans this file on a ~1s tick and resends rows still needing **`ack_received`**.
@@ -12,11 +15,12 @@
 //! | `delivered`                      | peer got the text | no          |
 //! | `read`                           | peer read the text| no          |
 
-use std::fs;
 use std::path::Path;
 
 use serde_json::Value;
 use thiserror::Error;
+
+use crate::dm_transcript_store::{patch_inbound_read_ack_sent_at_path, read_root_unlocked, with_transcript_path};
 
 #[derive(Clone, Debug)]
 pub struct PendingInboundReadAckRow {
@@ -45,19 +49,10 @@ pub enum TranscriptError {
     NotObject,
 }
 
-/// Pending outbound rows for [app_namespace] (all conversations), newest first per thread.
-pub fn pending_outbound_rows(
-    path: &Path,
+fn pending_outbound_from_root(
+    root: &Value,
     app_namespace: &str,
 ) -> Result<Vec<PendingOutboundRow>, TranscriptError> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = fs::read_to_string(path)?;
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let root: Value = serde_json::from_str(&raw)?;
     let Some(ns_obj) = root.get(app_namespace) else {
         return Ok(Vec::new());
     };
@@ -84,7 +79,6 @@ pub fn pending_outbound_rows(
             if delivery == "delivered" || delivery == "read" {
                 continue;
             }
-            // Include pending, failed, and sent — all need delivery to the peer.
             let message_id = obj
                 .get("message_id")
                 .and_then(|v| v.as_str())
@@ -117,19 +111,10 @@ pub fn pending_outbound_rows(
     Ok(out)
 }
 
-/// Inbound rows still needing `ack_read` (`read_ack_sent` = peer confirmed our read receipt).
-pub fn pending_inbound_read_ack_rows(
-    path: &Path,
+fn pending_inbound_read_ack_from_root(
+    root: &Value,
     app_namespace: &str,
 ) -> Result<Vec<PendingInboundReadAckRow>, TranscriptError> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = fs::read_to_string(path)?;
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let root: Value = serde_json::from_str(&raw)?;
     let Some(ns_obj) = root.get(app_namespace) else {
         return Ok(Vec::new());
     };
@@ -169,53 +154,47 @@ pub fn pending_inbound_read_ack_rows(
     Ok(out)
 }
 
+/// Pending outbound rows for [app_namespace] (all conversations), newest first per thread.
+pub fn pending_outbound_rows(
+    path: &Path,
+    app_namespace: &str,
+) -> Result<Vec<PendingOutboundRow>, TranscriptError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    with_transcript_path(path, |path| {
+        let root = read_root_unlocked(path)?;
+        pending_outbound_from_root(&root, app_namespace).map_err(|e| {
+            crate::dm_transcript_store::TranscriptStoreError::Io(std::io::Error::other(e.to_string()))
+        })
+    })
+    .map_err(|e| TranscriptError::Io(std::io::Error::other(e.to_string())))
+}
+
+/// Inbound rows still needing `ack_read` (`read_ack_sent` = peer confirmed our read receipt).
+pub fn pending_inbound_read_ack_rows(
+    path: &Path,
+    app_namespace: &str,
+) -> Result<Vec<PendingInboundReadAckRow>, TranscriptError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    with_transcript_path(path, |path| {
+        let root = read_root_unlocked(path)?;
+        pending_inbound_read_ack_from_root(&root, app_namespace).map_err(|e| {
+            crate::dm_transcript_store::TranscriptStoreError::Io(std::io::Error::other(e.to_string()))
+        })
+    })
+    .map_err(|e| TranscriptError::Io(std::io::Error::other(e.to_string())))
+}
+
 /// Mark one inbound row as read-acked on disk (best-effort; keeps Flutter/native in sync after restart).
+#[allow(dead_code)] // path-based API; prefer `dm_transcript_store::patch_inbound_read_ack_sent_at_path`
 pub fn mark_inbound_read_ack_sent(
     path: &Path,
     app_namespace: &str,
     message_id: &str,
 ) -> Result<bool, TranscriptError> {
-    let mid = message_id.trim();
-    if mid.is_empty() || !path.exists() {
-        return Ok(false);
-    }
-    let raw = fs::read_to_string(path)?;
-    if raw.trim().is_empty() {
-        return Ok(false);
-    }
-    let mut root: Value = serde_json::from_str(&raw)?;
-    let Some(ns_obj) = root.get_mut(app_namespace) else {
-        return Ok(false);
-    };
-    let Some(threads) = ns_obj.as_object_mut() else {
-        return Err(TranscriptError::NotObject);
-    };
-    let mut changed = false;
-    for thread in threads.values_mut() {
-        let Some(lines) = thread.as_array_mut() else {
-            continue;
-        };
-        for line in lines.iter_mut() {
-            let Some(obj) = line.as_object_mut() else {
-                continue;
-            };
-            if obj.get("outgoing").and_then(|v| v.as_bool()) == Some(true) {
-                continue;
-            }
-            if obj.get("message_id").and_then(|v| v.as_str()).unwrap_or("").trim() != mid {
-                continue;
-            }
-            if obj.get("read_ack_sent").and_then(|v| v.as_bool()) != Some(true) {
-                obj.insert("read_ack_sent".to_string(), Value::Bool(true));
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(&root)?)?;
-        fs::rename(tmp, path)?;
-    }
-    Ok(changed)
+    patch_inbound_read_ack_sent_at_path(path, app_namespace, message_id)
+        .map_err(|e| TranscriptError::Io(std::io::Error::other(e.to_string())))
 }
-

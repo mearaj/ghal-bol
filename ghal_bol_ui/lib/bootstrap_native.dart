@@ -7,6 +7,7 @@ import "package:flutter/services.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 
 import "call/call_controller.dart";
+import "ghal_bol_p2p.dart";
 import "chat_hub_screen.dart";
 import "chat_screen.dart";
 import "ghal_bol_background.dart";
@@ -113,6 +114,8 @@ class _GhalBolRootState extends State<GhalBolRoot> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       CallController.instance.onAppForeground();
+    } else if (state == AppLifecycleState.detached) {
+      unawaited(GhalBolP2p.notifyUiProcessExiting());
     }
   }
 

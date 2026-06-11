@@ -3,6 +3,7 @@ import "dart:io" show Platform;
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 import "package:ghal_bol_ui/p2p_event_log.dart";
+import "package:ghal_bol_ui/public_key_hex.dart";
 import "package:ghal_bol_ui/session_credentials.dart";
 import "package:ghal_bol_ui/src/ghal_bol_daemon_client_io.dart"
     if (dart.library.html) "package:ghal_bol_ui/src/ghal_bol_daemon_client_stub.dart";
@@ -148,7 +149,38 @@ abstract final class GhalBolP2p {
     );
   }
 
-  /// When false, native must not send `ack_read` (app background / UI destroyed).
+  /// Atomically sync UI visibility + open room → native read-receipt policy (DESIGN.md § UI session).
+  static Future<Map<String, dynamic>> syncUiSession({
+    required bool uiVisible,
+    String? roomPublicKeyHex,
+  }) async {
+    final pk = roomPublicKeyHex?.trim().toLowerCase() ?? "";
+    final params = <String, dynamic>{"ui_visible": uiVisible};
+    if (pk.length == kSecp256k1PublicKeyHexLen) {
+      params["room_public_key_hex"] = pk;
+    }
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_sync_ui_session",
+        params: params,
+        ensureDaemon: true,
+      );
+    }
+    await setAppUiVisible(uiVisible);
+    if (pk.length != kSecp256k1PublicKeyHexLen) {
+      await setForegroundPeer(null);
+      return setAppAckReadEnabled(false);
+    }
+    if (uiVisible) {
+      await setAppAckReadEnabled(true);
+      return setForegroundPeer(pk);
+    }
+    await setAppAckReadEnabled(false);
+    return {"ok": true, "ui_visible": uiVisible, "read_receipts": false};
+  }
+
+  /// **Integrators:** use [GhalBolUiSession] / [syncUiSession] only — not this RPC.
+  @Deprecated("Use GhalBolUiSession or syncUiSession")
   static Future<Map<String, dynamic>> setAppAckReadEnabled(bool enabled) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
@@ -160,6 +192,19 @@ abstract final class GhalBolP2p {
     return GhalBolFfi.p2pSetAppAckReadEnabled(enabled);
   }
 
+  @Deprecated("Use GhalBolUiSession.setVisible or syncUiSession")
+  static Future<Map<String, dynamic>> setAppUiVisible(bool visible) async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_set_app_ui_visible",
+        params: {"visible": visible},
+        ensureDaemon: true,
+      );
+    }
+    return GhalBolFfi.p2pSetAppUiVisible(visible);
+  }
+
+  @Deprecated("Use GhalBolUiSession.setRoom or syncUiSession")
   static Future<Map<String, dynamic>> setForegroundPeer(String? publicKeyHex) async {
     if (usesDaemon) {
       final pk = publicKeyHex?.trim() ?? "";
@@ -243,6 +288,62 @@ abstract final class GhalBolP2p {
       );
     }
     return GhalBolFfi.p2pCallStatus(config);
+  }
+
+  /// Dismiss OS incoming-call alert owned by `:p2p` (Linux libnotify / Android full-screen).
+  static Future<void> dismissIncomingCallAlert() async {
+    if (usesDaemon) {
+      await GhalBolDaemonClient.instance.callState(
+        "p2p_dismiss_incoming_call_alert",
+        params: const {},
+      );
+      return;
+    }
+    await GhalBolFfi.p2pDismissIncomingCallAlert();
+  }
+
+  /// Privacy: stop native media and hang up when the UI session ends.
+  static Future<Map<String, dynamic>> forceEndActiveCall({
+    String reason = "ui_exit",
+  }) async {
+    final params = <String, dynamic>{"reason": reason};
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_force_end_active_call",
+        params: params,
+      );
+    }
+    return GhalBolFfi.p2pForceEndActiveCall(params);
+  }
+
+  /// Linux daemon notification tap → present call UI (consumes wake marker).
+  static Future<bool> takeIncomingCallWake() async {
+    if (usesDaemon) {
+      final r = await GhalBolDaemonClient.instance.callState(
+        "p2p_take_incoming_call_wake",
+        params: const {},
+      );
+      return r["wake"] == true;
+    }
+    return GhalBolFfi.p2pTakeIncomingCallWake()["wake"] == true;
+  }
+
+  /// Best-effort before UI socket reconnect (login unlock) — avoids hangup on transient EOF.
+  static Future<void> suppressUiExitHangup({int suppressMs = 5000}) async {
+    if (!usesDaemon) return;
+    await GhalBolDaemonClient.instance.call(
+      "ui_session_prepare_reconnect",
+      params: {"suppress_ms": suppressMs},
+    );
+  }
+
+  /// Best-effort before process exit (Ctrl+C may skip this; daemon uses socket EOF).
+  static Future<void> notifyUiProcessExiting() async {
+    if (usesDaemon) {
+      await GhalBolDaemonClient.instance.call("ui_process_exiting");
+      return;
+    }
+    await forceEndActiveCall(reason: "ui_process_exiting");
   }
 
   /// Read-only transcript merge via background `:p2p` (same process that writes on poll).

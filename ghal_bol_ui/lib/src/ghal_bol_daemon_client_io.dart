@@ -138,6 +138,13 @@ class GhalBolDaemonClient {
   /// Drop stale UI RPC sockets only — does **not** stop the `:p2p` process (keeps libp2p up).
   static Future<void> reconnectDaemon() async {
     if (!_usesOutOfProcessP2p) return;
+    try {
+      await instance.call(
+        "ui_session_prepare_reconnect",
+        params: {"suppress_ms": 5000},
+        ensureDaemon: false,
+      );
+    } catch (_) {}
     await instance.disconnect();
     invalidateProbeCache();
     await ensureDaemonRunning();
@@ -434,8 +441,11 @@ class GhalBolDaemonClient {
     if (method == "ping") return;
     final ok = result["ok"] == true;
     final err = result["error"]?.toString();
-    if (method == "p2p_poll" || method == "p2p_is_running") {
-      if (!ok) {
+    if (method == "p2p_poll" ||
+        method == "p2p_is_running" ||
+        method == "p2p_take_incoming_call_wake") {
+      if (!ok &&
+          (method == "p2p_poll" || method == "p2p_is_running")) {
         final now = DateTime.now();
         final last = _lastPollRpcFailureLogAt;
         if (last == null || now.difference(last).inSeconds >= 30) {

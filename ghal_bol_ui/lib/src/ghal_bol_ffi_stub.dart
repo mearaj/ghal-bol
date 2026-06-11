@@ -170,6 +170,18 @@ abstract final class GhalBolFfi {
     "active": false,
   };
 
+  static Future<void> p2pDismissIncomingCallAlert() async {}
+
+  static Map<String, dynamic> p2pForceEndActiveCall(Map<String, dynamic> config) => {
+    "ok": true,
+    "ended": false,
+  };
+
+  static Map<String, dynamic> p2pTakeIncomingCallWake() => {
+    "ok": true,
+    "wake": false,
+  };
+
   static Map<String, dynamic> p2pCallVideo(Map<String, dynamic> config) => {
     "ok": false,
     "error": loadErrorText ?? "unavailable",
@@ -212,6 +224,8 @@ abstract final class GhalBolFfi {
   static Map<String, dynamic> p2pSetForegroundPeer(String? libp2pPeerId) => {"ok": true};
 
   static Map<String, dynamic> p2pSetAppAckReadEnabled(bool enabled) => {"ok": true};
+
+  static Map<String, dynamic> p2pSetAppUiVisible(bool visible) => {"ok": true, "visible": visible};
 
   static Map<String, dynamic> sealUtf8ToPublicKeyHex({
     required String recipientPublicKeyHex,

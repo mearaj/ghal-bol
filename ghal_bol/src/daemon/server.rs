@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::coord_runtime;
 use crate::daemon::paths::default_socket_path;
+use crate::daemon::ui_session::{suppress_ui_exit_hangup_ms, ui_process_exiting, UiSessionGuard};
 use crate::p2p_runtime;
 use crate::session_runtime;
 
@@ -49,6 +50,7 @@ pub fn run_daemon(socket_path: &Path) -> Result<(), String> {
 }
 
 fn handle_client(stream: UnixStream, shutting_down: Arc<AtomicBool>) -> Result<(), String> {
+    let _ui_session = UiSessionGuard::begin();
     let stream = Arc::new(Mutex::new(stream));
     let reader_stream = Arc::clone(&stream);
     let reader = BufReader::new(UnixStreamReader(reader_stream));
@@ -161,6 +163,29 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
         "p2p_call_status" => {
             Ok(p2p_runtime::p2p_call_status(params))
         }
+        "p2p_dismiss_incoming_call_alert" => {
+            Ok(p2p_runtime::p2p_dismiss_incoming_call_alert())
+        }
+        "p2p_force_end_active_call" => {
+            let reason = params
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("rpc");
+            Ok(p2p_runtime::p2p_force_end_active_call(reason))
+        }
+        "p2p_take_incoming_call_wake" => Ok(p2p_runtime::p2p_take_incoming_call_wake()),
+        "ui_session_prepare_reconnect" => {
+            let ms = params
+                .get("suppress_ms")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(5_000);
+            suppress_ui_exit_hangup_ms(ms);
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        "ui_process_exiting" => {
+            ui_process_exiting();
+            Ok(serde_json::json!({ "ok": true }))
+        }
         "p2p_transcript_load_merged" => {
             Ok(p2p_runtime::p2p_transcript_load_merged(params))
         }
@@ -213,8 +238,28 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
             let enabled = params
                 .get("enabled")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+                .unwrap_or(false);
             Ok(p2p_runtime::p2p_set_app_ack_read_enabled(enabled))
+        }
+        "p2p_set_app_ui_visible" => {
+            let visible = params
+                .get("visible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Ok(p2p_runtime::p2p_set_app_ui_visible(visible))
+        }
+        "p2p_sync_ui_session" => {
+            let ui_visible = params
+                .get("ui_visible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let room = params
+                .get("room_public_key_hex")
+                .or_else(|| params.get("public_key_hex"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            Ok(p2p_runtime::p2p_sync_ui_session(ui_visible, room))
         }
         "p2p_set_foreground_peer" => {
             let pk = params

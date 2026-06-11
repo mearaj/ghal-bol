@@ -1,13 +1,15 @@
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 
+import "package:ghal_bol_ui/ghal_bol_p2p.dart";
+
 abstract final class CallIncomingAlert {
   static const MethodChannel _channel = MethodChannel("ghal_bol/incoming_call");
   static bool _handlerInstalled = false;
 
   /// Wire platform → Dart callbacks (notification tap, GTK close X).
   static void installPlatformHandlers({
-    void Function()? onOpenedFromNotification,
+    void Function({String? publicKeyHex, String? displayName})? onOpenedFromNotification,
     void Function()? onWindowClosedByUser,
   }) {
     if (_handlerInstalled) return;
@@ -15,14 +17,24 @@ abstract final class CallIncomingAlert {
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
         case "openedFromNotification":
-          onOpenedFromNotification?.call();
+          final args = call.arguments;
+          if (args is Map) {
+            onOpenedFromNotification?.call(
+              publicKeyHex: args["publicKeyHex"]?.toString(),
+              displayName: args["displayName"]?.toString(),
+            );
+          } else {
+            onOpenedFromNotification?.call();
+          }
         case "windowClosedByUser":
           onWindowClosedByUser?.call();
       }
     });
   }
 
-  static void installOpenedHandler(void Function() onOpened) {
+  static void installOpenedHandler(
+    void Function({String? publicKeyHex, String? displayName}) onOpened,
+  ) {
     installPlatformHandlers(onOpenedFromNotification: onOpened);
   }
 
@@ -41,6 +53,11 @@ abstract final class CallIncomingAlert {
 
   static Future<void> dismiss() async {
     try {
+      if (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.linux ||
+              defaultTargetPlatform == TargetPlatform.android)) {
+        await GhalBolP2p.dismissIncomingCallAlert();
+      }
       await _channel.invokeMethod<void>("dismiss");
     } catch (_) {}
   }

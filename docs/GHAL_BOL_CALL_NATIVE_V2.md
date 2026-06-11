@@ -242,6 +242,18 @@ video may run on different stacks during transition (voice native, video WebRTC)
 | **P5 Flutter** | **Done (voice).** Invite/accept negotiate `voice_engine: native_v2`; when both sides support it, `CallController` uses native media (`GhalBolP2p.callMediaStart/Stop/SetMicMuted`) with **no WebRTC/SDP/ICE**. Old peers (no tag) fall back to WebRTC. Video still uses WebRTC; video toggle is disabled during a native-voice call. E2EE chip is truthful (native voice is always identity-E2E). |
 | **P6 Android** | **Done (build + plumbing).** `cpal` reuses its Oboe (AAudio/OpenSL) backend on `target_os = "android"`, gated by `set_android_audio_ready()` — the `:p2p` JNI `initAndroidAudio` hands cpal the JavaVM + Context via `ndk_context`. libopus is cross-built static per ABI by `scripts/build_android_opus.sh` (audiopus_sys can't cross-compile it) and linked via `LIBOPUS_*` from `pack_android_workspace_jni_libs.sh`; the `.so` statically embeds opus and needs only `libc++_shared.so`/`libOpenSLES.so` (already shipped by the app). The `:p2p` service gains a `microphone` FGS type (re-promoted at call start once `RECORD_AUDIO` is granted). `CallController` advertises `native_v2` on Android behind `kAndroidNativeVoice`. **Known gaps (device-test):** cpal uses Oboe's default (media) input/route, so there is **no hardware AEC and no earpiece/speaker route control** — clean on a headset, echo on speaker. Proper fix = drive Oboe directly with `VOICE_COMMUNICATION` preset + `MODE_IN_COMMUNICATION` (bypassing cpal) or a software APM. |
 
+### UI session and privacy (do not regress)
+
+See [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”. Summary:
+
+- **`p2p_force_end_active_call`** — stops `CallMediaStop` / `CallVideoStop`, sends **`hangup`**, clears `call_active` + `call_state`, dismisses OS incoming-call notification.
+- **Daemon / `:p2p` tracks UI RPC sockets** — when the last Flutter socket closes (`ui_session_ended`), force-end runs automatically (covers **Ctrl+C** on `flutter run`).
+- **`ui_session_prepare_reconnect`** — 5s suppress during login unlock socket drop so calls are not torn down mid-unlock.
+- **`p2p_take_incoming_call_wake`** — Linux daemon notification tap → Flutter presents call UI.
+- **Flutter** — GTK X / call-screen pop / `AppLifecycleState.detached` also call force-end (belt-and-suspenders).
+
+**Never ship:** UI gone but native media still up and peer still in a call.
+
 ### Desktop device-test steps (Linux↔Linux)
 
 1. Quit any running Flutter app (the sync script stops a stale daemon).

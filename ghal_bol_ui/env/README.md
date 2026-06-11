@@ -23,7 +23,9 @@ flutter pub get
 flutter run -d android
 ```
 
-`env/.env.development` is bundled into the APK because `pubspec.yaml` includes the whole `env/` folder. Rebuild after changing the file.
+`env/.env.development` and `env/.env.production` are **gitignored** (only `*.example` is tracked). `git checkout` will not touch your local URLs.
+
+`env/.env.development` is bundled into the APK because `pubspec.yaml` lists it as an asset. Rebuild after changing the file.
 
 Alternative without editing the file:
 
