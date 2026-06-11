@@ -101,12 +101,12 @@ Full detail: [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README
 
 | Variable | Default |
 |----------|---------|
-| `GHAL_BOL_SERVER_LISTEN` | `127.0.0.1:8765` (binary); `run_server.sh` uses `0.0.0.0:8765` |
+| `GHAL_BOL_SERVER_LISTEN` | `127.0.0.1:8765` (binary); `run_server.sh` uses `0.0.0.0:8765`. Dual-stack: the server also binds the counterpart-family wildcard (`[::]:<port>`, IPv6 `V6ONLY`) on the same port so coord HTTP is reachable over both IPv4 and IPv6; a missing stack logs a warning and continues single-stack |
 | `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol/ghalbol_server/coord.db` |
 | `GHAL_BOL_SERVER_PRESENCE_TTL_SECS` | `90` |
 | `GHAL_BOL_RELAY_ENABLE` | `1` (set `0` to disable the relay node) |
-| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (raw TCP — **open this port** directly; it is not proxied by the HTTP/TLS nginx front) |
-| `GHAL_BOL_RELAY_PUBLIC_HOST` | unset → advertises `/dns4/<host>/tcp/<port>` (e.g. `coord.ghalbol.com`) so clients can reserve |
+| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (raw TCP — **open this port** directly; it is not proxied by the HTTP/TLS nginx front). Dual-stack: the relay also listens on the counterpart-family wildcard (`[::]:<port>`) so it accepts both IPv4 and IPv6 clients |
+| `GHAL_BOL_RELAY_PUBLIC_HOST` | unset → advertises **both** `/dns6/<host>/tcp/<port>` and `/dns4/<host>/tcp/<port>` (IPv6 first; e.g. `coord.ghalbol.com`) so clients can reserve over either family. Native IPv6 needs an `AAAA` record; IPv4-only/NAT64 clients map the host themselves |
 | `GHAL_BOL_RELAY_PUBLIC_ADDRS` | unset → comma-separated dialable multiaddrs (overrides `_PUBLIC_HOST`) |
 
 ## `coord_client`
