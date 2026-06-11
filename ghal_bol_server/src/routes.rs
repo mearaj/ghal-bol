@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -150,10 +151,11 @@ async fn register(
     };
 
     validate_endpoints(&req.endpoints)?;
+    let endpoints = expand_libp2p_dns4_circuit_endpoints(req.endpoints);
 
     let store = Arc::clone(&state.app.presence);
     let peer = tokio::task::spawn_blocking(move || {
-        store.upsert(pk, req.endpoints, caps, req.ipv6, req.ipv4)
+        store.upsert(pk, endpoints, caps, req.ipv6, req.ipv4)
     })
     .await
     .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
@@ -215,6 +217,76 @@ async fn list_peers(State(state): State<Arc<RouteState>>) -> ApiResult<Json<Peer
         .await
         .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
     Ok(Json(PeerListResponse { peers }))
+}
+
+/// Duplicate `/dns4/…/p2p-circuit` libp2p endpoints with resolved `/ip4/…` aliases so
+/// TCP-only mobile clients can dial without libp2p transport DNS.
+fn expand_libp2p_dns4_circuit_endpoints(endpoints: Vec<PeerEndpoint>) -> Vec<PeerEndpoint> {
+    let mut out = endpoints;
+    let mut extra = Vec::new();
+    for ep in &out {
+        if ep.scheme != "libp2p" || !ep.host.contains("/p2p-circuit") {
+            continue;
+        }
+        if let Some(ip4) = resolve_libp2p_circuit_dns4_to_ip4(&ep.host) {
+            if !out.iter().any(|e| e.scheme == "libp2p" && e.host == ip4)
+                && !extra.iter().any(|e: &PeerEndpoint| e.host == ip4)
+            {
+                extra.push(PeerEndpoint {
+                    scheme: "libp2p".into(),
+                    host: ip4,
+                    port: 0,
+                });
+            }
+        }
+    }
+    out.extend(extra);
+    out
+}
+
+fn resolve_libp2p_circuit_dns4_to_ip4(host: &str) -> Option<String> {
+    if host.contains("/ip4/") {
+        return None;
+    }
+    let segs: Vec<&str> = host.split('/').filter(|s| !s.is_empty()).collect();
+    let mut dns_host: Option<&str> = None;
+    let mut port: Option<u16> = None;
+    let mut p2p_idx: Option<usize> = None;
+    let mut i = 0;
+    while i < segs.len() {
+        match segs[i] {
+            "dns4" | "dns" => {
+                if i + 1 < segs.len() {
+                    dns_host = Some(segs[i + 1]);
+                    i += 2;
+                    continue;
+                }
+            }
+            "tcp" => {
+                if i + 1 < segs.len() {
+                    port = segs[i + 1].parse().ok();
+                    i += 2;
+                    continue;
+                }
+            }
+            "p2p" => {
+                p2p_idx = Some(i);
+                break;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let (dns, p, p2p_start) = (dns_host?, port?, p2p_idx?);
+    let suffix = format!("/{}", segs[p2p_start..].join("/"));
+    let resolved = format!("{dns}:{p}")
+        .to_socket_addrs()
+        .ok()?
+        .find_map(|sa| match sa.ip() {
+            std::net::IpAddr::V4(ip) if !ip.is_private() && !ip.is_loopback() => Some(ip),
+            _ => None,
+        })?;
+    Some(format!("/ip4/{resolved}/tcp/{p}{suffix}"))
 }
 
 fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {
