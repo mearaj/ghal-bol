@@ -70,6 +70,11 @@ impl RelayConfig {
             if let Ok(host) = std::env::var("GHAL_BOL_RELAY_PUBLIC_HOST") {
                 let host = host.trim();
                 if !host.is_empty() {
+                    // Advertise both IP families, IPv6 first (preferred when reachable). A
+                    // dual-stack resolver returns the host's AAAA + A; a DNS64/IPv6-only carrier
+                    // synthesizes an IPv6 mapping for the A record. Clients keep whichever family
+                    // routes on their network (see `network_transport::resolve_relay_bootnodes`).
+                    public_addrs.push(format!("/dns6/{host}/tcp/{}", listen.port()));
                     public_addrs.push(format!("/dns4/{host}/tcp/{}", listen.port()));
                 }
             }
@@ -139,6 +144,37 @@ fn load_or_create_keypair(path: &Path) -> std::io::Result<identity::Keypair> {
     Ok(kp)
 }
 
+/// Build a `/ip4|/ip6/.../tcp/<port>` listen multiaddr from a socket address (family-aware).
+fn tcp_listen_multiaddr(sa: SocketAddr) -> Multiaddr {
+    let s = match sa.ip() {
+        std::net::IpAddr::V4(ip) => format!("/ip4/{ip}/tcp/{}", sa.port()),
+        std::net::IpAddr::V6(ip) => format!("/ip6/{ip}/tcp/{}", sa.port()),
+    };
+    s.parse().expect("valid tcp listen multiaddr")
+}
+
+/// Counterpart-family listen address preserving scope (wildcard↔wildcard, loopback↔loopback). A
+/// specific interface IP has no safe counterpart (`None`) — never widen it into a public wildcard.
+fn counterpart_listen_addr(primary: SocketAddr) -> Option<SocketAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let port = primary.port();
+    match primary.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port))
+        }
+        IpAddr::V4(ip) if ip.is_loopback() => {
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port))
+        }
+        IpAddr::V6(ip) if ip.is_loopback() => {
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+        }
+        _ => None,
+    }
+}
+
 fn build_swarm(
     keypair: identity::Keypair,
 ) -> Result<Swarm<RelayBehaviour>, Box<dyn std::error::Error + Send + Sync>> {
@@ -181,9 +217,21 @@ pub fn start(
     let peer_id = keypair.public().to_peer_id();
     let mut swarm = build_swarm(keypair)?;
 
-    let listen_ma: Multiaddr =
-        format!("/ip4/{}/tcp/{}", cfg.listen.ip(), cfg.listen.port()).parse()?;
-    swarm.listen_on(listen_ma)?;
+    // Listen on the configured address and additionally on the counterpart IP family (same port,
+    // same scope), so the relay accepts both IPv4 and IPv6 client connections (dual-stack; IPv6
+    // preferred when both work). The default `0.0.0.0:4002` covers IPv4; `[::]:<port>` covers IPv6.
+    let primary_listen = tcp_listen_multiaddr(cfg.listen);
+    swarm.listen_on(primary_listen.clone())?;
+    if let Some(counterpart) = counterpart_listen_addr(cfg.listen) {
+        let counterpart_listen = tcp_listen_multiaddr(counterpart);
+        if let Err(e) = swarm.listen_on(counterpart_listen.clone()) {
+            tracing::warn!(
+                listen = %counterpart_listen,
+                error = %e,
+                "relay counterpart-family listen failed — continuing single-stack"
+            );
+        }
+    }
 
     if cfg.public_addrs.is_empty() {
         tracing::warn!(
@@ -236,14 +284,66 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>) {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "relay listening");
             }
-            SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(event)) => {
-                tracing::debug!(?event, "relay event");
+            // Reservation / circuit decisions at INFO so the relay's view of each client is visible
+            // under the default `RUST_LOG=info` (a CGNAT phone stuck "waiting for
+            // ReservationReqAccepted" while a Wi‑Fi peer reserves fine is diagnosed from here — see
+            // docs/TRANSPORT.md § "CGNAT / mobile-data relay reservation").
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(event)) => match event {
+                relay::Event::ReservationReqAccepted {
+                    src_peer_id,
+                    renewed,
+                } => {
+                    tracing::info!(%src_peer_id, renewed, "relay reservation ACCEPTED");
+                }
+                relay::Event::ReservationReqDenied {
+                    src_peer_id,
+                    status,
+                } => {
+                    tracing::warn!(%src_peer_id, ?status, "relay reservation DENIED");
+                }
+                relay::Event::ReservationTimedOut { src_peer_id } => {
+                    tracing::info!(%src_peer_id, "relay reservation timed out");
+                }
+                relay::Event::ReservationClosed { src_peer_id } => {
+                    tracing::info!(%src_peer_id, "relay reservation closed");
+                }
+                relay::Event::CircuitReqAccepted {
+                    src_peer_id,
+                    dst_peer_id,
+                } => {
+                    tracing::info!(%src_peer_id, %dst_peer_id, "relay circuit ACCEPTED");
+                }
+                relay::Event::CircuitReqDenied {
+                    src_peer_id,
+                    dst_peer_id,
+                    status,
+                } => {
+                    tracing::warn!(%src_peer_id, %dst_peer_id, ?status, "relay circuit DENIED");
+                }
+                relay::Event::CircuitClosed {
+                    src_peer_id,
+                    dst_peer_id,
+                    error,
+                } => {
+                    tracing::info!(%src_peer_id, %dst_peer_id, ?error, "relay circuit closed");
+                }
+                other => {
+                    tracing::debug!(?other, "relay event");
+                }
+            },
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
+                tracing::info!(
+                    %peer_id,
+                    remote = %endpoint.get_remote_address(),
+                    "relay client connected"
+                );
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                tracing::debug!(%peer_id, "relay client connected");
-            }
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                tracing::debug!(%peer_id, "relay client disconnected");
+            SwarmEvent::ConnectionClosed {
+                peer_id, cause, ..
+            } => {
+                tracing::info!(%peer_id, ?cause, "relay client disconnected");
             }
             _ => {}
         }

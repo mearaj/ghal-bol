@@ -219,22 +219,24 @@ async fn list_peers(State(state): State<Arc<RouteState>>) -> ApiResult<Json<Peer
     Ok(Json(PeerListResponse { peers }))
 }
 
-/// Duplicate `/dns4/…/p2p-circuit` libp2p endpoints with resolved `/ip4/…` aliases so
-/// TCP-only mobile clients can dial without libp2p transport DNS.
+/// Duplicate `/dns4|/dns6|/dns/…/p2p-circuit` libp2p endpoints with resolved `/ip6/…` **and**
+/// `/ip4/…` aliases so TCP-only clients (Android has no libp2p DNS transport) can dial the relay
+/// circuit by concrete IP. Both families are emitted — IPv6 first (preferred when reachable) — so a
+/// dual-stack or IPv6-only dialer can use the IPv6 alias and an IPv4 dialer the IPv4 one.
 fn expand_libp2p_dns4_circuit_endpoints(endpoints: Vec<PeerEndpoint>) -> Vec<PeerEndpoint> {
     let mut out = endpoints;
-    let mut extra = Vec::new();
+    let mut extra: Vec<PeerEndpoint> = Vec::new();
     for ep in &out {
         if ep.scheme != "libp2p" || !ep.host.contains("/p2p-circuit") {
             continue;
         }
-        if let Some(ip4) = resolve_libp2p_circuit_dns4_to_ip4(&ep.host) {
-            if !out.iter().any(|e| e.scheme == "libp2p" && e.host == ip4)
-                && !extra.iter().any(|e: &PeerEndpoint| e.host == ip4)
+        for host in resolve_libp2p_circuit_dns_to_ip(&ep.host) {
+            if !out.iter().any(|e| e.scheme == "libp2p" && e.host == host)
+                && !extra.iter().any(|e| e.host == host)
             {
                 extra.push(PeerEndpoint {
                     scheme: "libp2p".into(),
-                    host: ip4,
+                    host,
                     port: 0,
                 });
             }
@@ -244,9 +246,11 @@ fn expand_libp2p_dns4_circuit_endpoints(endpoints: Vec<PeerEndpoint>) -> Vec<Pee
     out
 }
 
-fn resolve_libp2p_circuit_dns4_to_ip4(host: &str) -> Option<String> {
-    if host.contains("/ip4/") {
-        return None;
+/// Resolve the `/dns*` relay hop of a circuit multiaddr into concrete `/ip6/…` and `/ip4/…`
+/// circuit multiaddrs (IPv6 first). Empty when the host is already a literal IP or unresolvable.
+fn resolve_libp2p_circuit_dns_to_ip(host: &str) -> Vec<String> {
+    if host.contains("/ip4/") || host.contains("/ip6/") {
+        return Vec::new();
     }
     let segs: Vec<&str> = host.split('/').filter(|s| !s.is_empty()).collect();
     let mut dns_host: Option<&str> = None;
@@ -255,7 +259,7 @@ fn resolve_libp2p_circuit_dns4_to_ip4(host: &str) -> Option<String> {
     let mut i = 0;
     while i < segs.len() {
         match segs[i] {
-            "dns4" | "dns" => {
+            "dns4" | "dns6" | "dns" | "dnsaddr" => {
                 if i + 1 < segs.len() {
                     dns_host = Some(segs[i + 1]);
                     i += 2;
@@ -277,16 +281,35 @@ fn resolve_libp2p_circuit_dns4_to_ip4(host: &str) -> Option<String> {
         }
         i += 1;
     }
-    let (dns, p, p2p_start) = (dns_host?, port?, p2p_idx?);
+    let (Some(dns), Some(p), Some(p2p_start)) = (dns_host, port, p2p_idx) else {
+        return Vec::new();
+    };
     let suffix = format!("/{}", segs[p2p_start..].join("/"));
-    let resolved = format!("{dns}:{p}")
-        .to_socket_addrs()
-        .ok()?
-        .find_map(|sa| match sa.ip() {
-            std::net::IpAddr::V4(ip) if !ip.is_private() && !ip.is_loopback() => Some(ip),
-            _ => None,
-        })?;
-    Some(format!("/ip4/{resolved}/tcp/{p}{suffix}"))
+    let Ok(resolved) = format!("{dns}:{p}").to_socket_addrs() else {
+        return Vec::new();
+    };
+    let mut v6 = Vec::new();
+    let mut v4 = Vec::new();
+    for sa in resolved {
+        match sa.ip() {
+            std::net::IpAddr::V6(ip) => {
+                let a = format!("/ip6/{ip}/tcp/{p}{suffix}");
+                if !v6.contains(&a) {
+                    v6.push(a);
+                }
+            }
+            std::net::IpAddr::V4(ip) if !ip.is_private() && !ip.is_loopback() => {
+                let a = format!("/ip4/{ip}/tcp/{p}{suffix}");
+                if !v4.contains(&a) {
+                    v4.push(a);
+                }
+            }
+            std::net::IpAddr::V4(_) => {}
+        }
+    }
+    // IPv6 first (preferred), then IPv4.
+    v6.extend(v4);
+    v6
 }
 
 fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {

@@ -3,6 +3,7 @@
 //! Presence and endpoint discovery only — no chat transcripts or message payloads.
 
 use ghal_bol_server::{app, relay, AppState, RelayConfig, ServerConfig};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -43,25 +44,128 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let purge = spawn_purge_task(Arc::clone(&state), Arc::clone(&shutdown));
     let app = app(state);
 
+    // Dual-stack: also serve the counterpart IP family on the same port so both IPv4 and IPv6
+    // clients can reach coord (IPv6 is preferred when both work). Best-effort — a host without an
+    // IPv6 (or IPv4) stack simply keeps the primary listener.
+    let counterpart = bind_counterpart_listener(config.listen).await;
+
     tracing::info!(
         listen = %config.listen,
+        dual_stack = counterpart.is_some(),
         db = %config.database_path.display(),
         "ghal_bol_server listening (ctrl+c to stop)"
     );
 
-    let shutdown_notify = Arc::clone(&shutdown);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
+    // Trigger graceful shutdown for every server task on the first signal.
+    {
+        let shutdown_notify = Arc::clone(&shutdown);
+        tokio::spawn(async move {
             shutdown_signal().await;
             shutdown_notify.notify_waiters();
-            // Do not block Ctrl+C forever on slow/stuck HTTP clients.
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        })
-        .await?;
+        });
+    }
+
+    let mut servers: Vec<JoinHandle<()>> =
+        vec![spawn_http_server(listener, app.clone(), Arc::clone(&shutdown))];
+    if let Some(listener6) = counterpart {
+        servers.push(spawn_http_server(listener6, app, Arc::clone(&shutdown)));
+    }
+    for s in servers {
+        let _ = s.await;
+    }
 
     purge.abort();
     tracing::info!("ghal_bol_server stopped");
     Ok(())
+}
+
+/// Serve the router on a listener until the shared shutdown is notified.
+fn spawn_http_server(
+    listener: TcpListener,
+    app: axum::Router,
+    shutdown: Arc<Notify>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+            shutdown.notified().await;
+            // Do not block Ctrl+C forever on slow/stuck HTTP clients.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        });
+        if let Err(e) = serve.await {
+            tracing::warn!(error = %e, "http server task ended with error");
+        }
+    })
+}
+
+/// Map a listen address to its counterpart-family address **preserving scope** so the server is
+/// reachable over both IP families without changing exposure: a wildcard maps to the other-family
+/// wildcard, loopback to other-family loopback. A specific interface IP has no safe counterpart
+/// (returns `None`) — we must never widen a loopback/single-IP bind into a public wildcard.
+fn counterpart_addr(primary: SocketAddr) -> Option<SocketAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let port = primary.port();
+    match primary.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port))
+        }
+        IpAddr::V4(ip) if ip.is_loopback() => {
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port))
+        }
+        IpAddr::V6(ip) if ip.is_loopback() => {
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+        }
+        _ => None,
+    }
+}
+
+/// Bind a listener for the IP family not covered by `primary` (same port, same scope), so the
+/// server is reachable over both IPv4 and IPv6. The IPv6 socket is forced `V6ONLY` to avoid
+/// clashing with an IPv4 wildcard already bound. Returns `None` (with a log) when there is no safe
+/// counterpart (specific-IP bind) or the counterpart stack is unavailable — single-stack continues.
+async fn bind_counterpart_listener(primary: SocketAddr) -> Option<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let Some(addr) = counterpart_addr(primary) else {
+        tracing::debug!(
+            listen = %primary,
+            "coord HTTP bound to a specific IP — no dual-stack counterpart"
+        );
+        return None;
+    };
+    let domain = match addr.ip() {
+        IpAddr::V6(_) => Domain::IPV6,
+        IpAddr::V4(_) => Domain::IPV4,
+    };
+
+    let build = || -> std::io::Result<TcpListener> {
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        if domain == Domain::IPV6 {
+            socket.set_only_v6(true)?;
+        }
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+        socket.listen(1024)?;
+        TcpListener::from_std(std::net::TcpListener::from(socket))
+    };
+
+    match build() {
+        Ok(l) => {
+            tracing::info!(listen = %addr, "coord HTTP also listening (dual-stack)");
+            Some(l)
+        }
+        Err(e) => {
+            tracing::warn!(
+                listen = %addr,
+                error = %e,
+                "coord HTTP counterpart-family bind failed — continuing single-stack"
+            );
+            None
+        }
+    }
 }
 
 fn spawn_purge_task(state: Arc<AppState>, shutdown: Arc<Notify>) -> JoinHandle<()> {
