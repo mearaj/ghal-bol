@@ -1416,6 +1416,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       appNamespace: _appNs,
       localPeerAlias: _storedCustomAlias,
       aliasNonce: _aliasSaveNonce,
+      hubThreadKey: _selectedConversationKey,
       activeContact: contact,
       hubPollsEvents: true,
       onHubChatAttach: _attachHubChat,

@@ -427,6 +427,31 @@ Historically, some threads were stored under the **public key** before PeerId wa
 
 **Rule:** never show transcript lines in the UI without loading through merged keys for the active contact.
 
+### Hub chat — stable thread id (`hubThreadKey`) — regression guard
+
+On daemon platforms the hub mounts one [`ChatScreen`](../ghal_bol_ui/lib/chat_screen.dart) per selected contact (`ValueKey("hub-chat-<pk>")`). **Which transcript bucket to load is not the same as the roster row object.**
+
+| Role | Source | Stable across roster reload? |
+|------|--------|------------------------------|
+| **Thread id** (load/save key, send target, `didUpdateWidget` room switch) | `hubThreadKey` from hub `_selectedConversationKey` (66-hex `public_key_hex`) | **Yes** |
+| **Roster metadata** (alias, trust banner, preview, `is_known`) | `activeContact` (`SavedContact` from `ContactStore`) | **No** — row can be **null for a frame** after send, poll, or `ContactStore` reload |
+
+**Regression (2026-06):** tying thread identity to `activeContact?.conversationKey` caused cross-room history loss. After send or poll, roster reload often rebuilt the hub with `activeContact == null` while the user was still in the same room. `didUpdateWidget` treated that as `conversationKey` changing `A → ""`, cleared lines, reloaded with `conv=solo`, and opening another chat showed empty or wrong history. **Disk was fine** — Flutter dropped or painted the wrong thread.
+
+**Do not reintroduce:**
+
+- Room-switch detection from `activeContact?.conversationKey` alone when `hubPollsEvents` is true.
+- Transcript load/send keyed only on `activeContact` when the hub already knows `_selectedConversationKey`.
+- Extra reload/clear hacks instead of a stable hub thread key.
+
+**Required contract:**
+
+1. [`chat_hub_screen.dart`](../ghal_bol_ui/lib/chat_hub_screen.dart) passes `hubThreadKey: _selectedConversationKey` into `ChatScreen`.
+2. [`chat_screen.dart`](../ghal_bol_ui/lib/chat_screen.dart) uses `hubThreadKey` for `_conversationKey()`, `_conversationKeysForLoad()`, `_recipientPublicKeyHex()`, and `_threadKeyForWidget()` in `didUpdateWidget` (not `activeContact` alone).
+3. `initState` loads transcript when `hubThreadKey` is set even if `activeContact` is briefly null.
+
+**Symptom if broken:** `transcript reload skipped conv=solo` or `conv=solo rows=0` while a room is open; sending in chat A empties chat B on next open; log shows `Contacts list` then missing `transcript reload conv=<pk> rows=N` for the selected peer.
+
 ## P2P lifecycle
 
 1. **Unlock** — UI: FFI `createOrUnlockIdentity`; daemon: `unlock` with the same namespace and password (must match public key). Both call `set_p2p_handler_context(app_namespace)`.

@@ -49,8 +49,10 @@ class ChatScreen extends StatefulWidget {
     this.appNamespace,
     /// When true, Join / Share invitation live on [ChatHubScreen]; this surface is messages only.
     this.networkActionsInHub = false,
-    /// Active 1:1 contact (open chat room). When set, messages target this peer.
+    /// Active 1:1 contact (open chat room). Roster metadata only — not the thread id.
     this.activeContact,
+    /// Hub: authoritative DM thread (`public_key_hex`). Stable when roster row flickers.
+    this.hubThreadKey,
     /// Hub owns P2P poll + [P2pNetworkCoordinator]; this screen only renders one contact.
     this.hubPollsEvents = false,
     /// Called after a successful join so the shell can persist the contact.
@@ -75,6 +77,7 @@ class ChatScreen extends StatefulWidget {
   final bool networkActionsInHub;
 
   final SavedContact? activeContact;
+  final String? hubThreadKey;
   final bool hubPollsEvents;
   final void Function(SavedContact contact)? onContactJoined;
   final void Function(ChatScreenState state)? onHubChatAttach;
@@ -644,7 +647,21 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return peers;
   }
 
+  String? _hubThreadPublicKeyHex() {
+    final hub = widget.hubThreadKey?.trim().toLowerCase() ?? "";
+    if (isValidPublicKeyHex(hub)) return hub;
+    return null;
+  }
+
+  String _threadKeyForWidget(ChatScreen w) {
+    final hub = w.hubThreadKey?.trim().toLowerCase() ?? "";
+    if (isValidPublicKeyHex(hub)) return hub;
+    return w.activeContact?.conversationKey ?? "";
+  }
+
   String? _recipientPublicKeyHex() {
+    final hub = _hubThreadPublicKeyHex();
+    if (hub != null) return hub;
     final learned = _learnedRemotePublicKeyHex?.trim();
     if (isValidPublicKeyHex(learned)) return learned;
     final ac = widget.activeContact;
@@ -678,6 +695,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Canonical thread key for **writes** — always `public_key_hex`.
   String _conversationKey() {
+    final hub = _hubThreadPublicKeyHex();
+    if (hub != null) return hub;
     final ac = widget.activeContact;
     if (ac != null && ac.conversationKey.isNotEmpty) return ac.conversationKey;
     final peer = _recipientPublicKeyHex();
@@ -688,6 +707,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// All thread keys for **reads** (pk + legacy libp2p PeerId bucket on disk).
   Set<String> _conversationKeysForLoad() {
     final keys = <String>{};
+    final hub = _hubThreadPublicKeyHex();
+    if (hub != null) {
+      keys.addAll(SavedContact(publicKeyHex: hub).allConversationKeys);
+    }
     final ac = widget.activeContact;
     if (ac != null) keys.addAll(ac.allConversationKeys);
     final pk = _recipientPublicKeyHex();
@@ -1015,8 +1038,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _pullAliasFromStore();
       unawaited(_refreshRoomContact());
     }
-    final oldKey = oldWidget.activeContact?.conversationKey ?? "";
-    final newKey = widget.activeContact?.conversationKey ?? "";
+    final oldKey = _threadKeyForWidget(oldWidget);
+    final newKey = _threadKeyForWidget(widget);
     if (oldKey != newKey) {
       final ac = widget.activeContact;
       _roomContact = ac;
@@ -1325,7 +1348,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final inv = ac.toConnectInvite();
       if (inv != null) _remoteInvite = inv;
     }
-    if (widget.activeContact != null) {
+    final hub = _hubThreadPublicKeyHex();
+    if (hub != null) {
+      _stashRemotePublicKey(hub);
+      _paintCachedTranscriptIfAny();
+      unawaited(_reloadTranscriptForConversation());
+    } else if (widget.activeContact != null) {
       _paintCachedTranscriptIfAny();
       unawaited(_reloadTranscriptForConversation());
     }

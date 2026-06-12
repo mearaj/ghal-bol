@@ -4,6 +4,8 @@ Thin UI over **`ghal_bol`** (Rust): unlock, hub, chat, QR invites, calls, delive
 
 **Session signals:** use **`GhalBolUiSession`** (`lib/ghal_bol_ui_session.dart`) only — `setVisible` + `setRoom` → native `p2p_sync_ui_session`. Do not call deprecated `GhalBolP2p.setForegroundPeer` / `setAppAckReadEnabled` from product code.
 
+**Hub transcript thread id:** pass `hubThreadKey: _selectedConversationKey` into `ChatScreen` — not `activeContact` alone (roster row flickers null on reload and caused cross-room history loss; see [DESIGN.md § Hub chat — stable thread id](../docs/DESIGN.md#hub-chat--stable-thread-id-hubthreadkey--regression-guard)).
+
 | Target | Entry | P2P |
 |--------|--------|-----|
 | Android | `bootstrap_native.dart` | `:p2p` process + JNI |
