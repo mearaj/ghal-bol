@@ -436,6 +436,20 @@ pub fn set_coord_base_urls(urls: &[String], insecure_tls: bool) {
         .take(MAX_COORD_SERVERS)
         .collect();
     let g = coord_globals();
+    let unchanged = g
+        .base_urls
+        .lock()
+        .ok()
+        .is_some_and(|cur| *cur == urls)
+        && g.insecure_tls.load(Ordering::Relaxed) == insecure_tls;
+    if unchanged {
+        // `p2p_start already_running` and hub resume call this every session — do not wipe
+        // coord presence or force a WAN rediscovery gap when URLs are unchanged.
+        if !COORD_REGISTERED.load(Ordering::Relaxed) {
+            schedule_register_presence();
+        }
+        return;
+    }
     if let Ok(mut u) = g.base_urls.lock() {
         *u = urls.clone();
     }
@@ -664,18 +678,20 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
     }
     let has_relay = addrs
         .iter()
-        .any(crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr);
+        .any(crate::p2p::network_transport::is_coord_ipv4_relay_listen);
     let publishable: Vec<Multiaddr> = addrs
         .iter()
         .filter(|ma| {
+            // RFC1918 Wi‑Fi LAN TCP is registered alongside relay so coord lookup can reach
+            // same-subnet peers when mDNS receive is flaky (common on Android OEM Wi‑Fi).
             if is_coord_lan_tcp_fallback(ma) {
-                return false;
+                return has_relay;
             }
             if has_relay || coord_is_configured() {
-                return crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr(ma)
+                return crate::p2p::network_transport::is_coord_ipv4_relay_listen(ma)
                     || crate::p2p::network_transport::is_coord_register_tcp_multiaddr(ma);
             }
-            crate::p2p::network_transport::is_coord_relay_tcp_circuit_multiaddr(ma)
+            crate::p2p::network_transport::is_coord_ipv4_relay_listen(ma)
                 || crate::p2p::network_transport::is_coord_register_tcp_multiaddr(ma)
                 || is_coord_presence_tcp_fallback(ma)
         })
@@ -875,15 +891,75 @@ fn pick_coord_libp2p_endpoints(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
     vec![libp2p.remove(0)]
 }
 
-/// When a relay circuit is available, register only `libp2p` endpoints (not CGNAT/LAN TCP).
+fn pick_coord_lan_tcp_endpoint(eps: &[CoordEndpoint]) -> Option<CoordEndpoint> {
+    fn tcp_host_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+        let t = host.trim();
+        t.parse().ok().or_else(|| crate::p2p::network_transport::ipv4_from_ma_str(t))
+    }
+    eps.iter()
+        .filter(|e| e.scheme == "tcp")
+        .filter(|e| {
+            e.port > 0
+                && tcp_host_ipv4(&e.host)
+                    .is_some_and(|ip| {
+                        ip.is_private() && !crate::p2p::network_transport::is_cgnat_ipv4(ip)
+                    })
+        })
+        .min_by_key(|e| {
+            tcp_host_ipv4(&e.host)
+                .map(|ip| {
+                    if ip.octets()[0] == 192 {
+                        0u8
+                    } else {
+                        1u8
+                    }
+                })
+                .unwrap_or(2)
+        })
+        .cloned()
+}
+
+/// When a relay circuit is available, register `libp2p` plus optional RFC1918 LAN TCP (same Wi‑Fi).
 fn endpoints_for_coord_register(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
     if eps.iter().any(|e| e.scheme == "libp2p") {
-        pick_coord_libp2p_endpoints(eps)
-    } else if coord_is_configured() {
+        let mut out = pick_coord_libp2p_endpoints(eps.clone());
+        if let Some(lan) = pick_coord_lan_tcp_endpoint(&eps) {
+            if !out.iter().any(|e| e.scheme == "tcp" && e.host == lan.host && e.port == lan.port) {
+                out.push(lan);
+            }
+        }
+        return out;
+    }
+    if coord_is_configured() {
         // CGNAT/LAN TCP is not dialable over WAN; wait for relay reservation.
         Vec::new()
     } else {
         eps
+    }
+}
+
+#[cfg(test)]
+mod endpoints_for_coord_register_tests {
+    use super::*;
+
+    #[test]
+    fn relay_plus_lan_wifi_tcp_both_registered() {
+        let eps = vec![
+            CoordEndpoint {
+                scheme: "libp2p".into(),
+                host: "/dns4/coord.example/tcp/4002/p2p/Relay/p2p-circuit/p2p/16Peer".into(),
+                port: 0,
+            },
+            CoordEndpoint {
+                scheme: "tcp".into(),
+                host: "192.168.1.38".into(),
+                port: 43411,
+            },
+        ];
+        let out = endpoints_for_coord_register(eps);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|e| e.scheme == "libp2p"));
+        assert!(out.iter().any(|e| e.scheme == "tcp" && e.host == "192.168.1.38"));
     }
 }
 
@@ -967,8 +1043,16 @@ fn try_register_presence() -> Result<(), String> {
                 );
             }
             Err(e) => {
-                last_err = e;
-                crate::flow_log::warn("coord", format!("register on {base} failed: {last_err}"));
+                last_err = e.clone();
+                let has_relay = endpoints.iter().any(|ep| ep.scheme == "libp2p");
+                let (reason, action) =
+                    crate::p2p::connectivity_diag::explain_coord_register_failure(&e, has_relay);
+                crate::flow_log::warn(
+                    "coord",
+                    format!(
+                        "register on {base} — reason={reason} | next={action} | http={last_err}"
+                    ),
+                );
             }
         }
     }

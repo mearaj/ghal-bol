@@ -2,6 +2,18 @@
 
 **Read this file first** in a new session. Then **`docs/DESIGN.md`** before changing P2P, acks, invites, or persistence. Transport (libp2p): **`docs/TRANSPORT.md`**. **`docs/STORY.md`** is **human-authored** connectivity / discovery policy (agents: **read only** — it overrides conflicting guidance in other docs; **never edit, revert, or `git checkout` it**).
 
+### STORY.md — do not misread the first sections
+
+`STORY.md` opens with human backlog (`## Current issues to resolve`, `# Now`, `# Next`). **Those are not agent task lists or implementation specs.** Agents must **not** implement from them, throttle relay/WAN recovery because of “don’t flood”, or treat “Now your job is to fix…” as permission for log-driven patchwork.
+
+**Binding connectivity policy for agents starts at `# Story`** (the section that says *anything in the docs that violates this story should be overridden*). For **how** relay reservation, bootstrap dial, and coord register work mechanically, **`docs/TRANSPORT.md`** (§ Client, § CGNAT) and **`coord_runtime.rs`** are canonical — not the opening paragraphs of STORY.
+
+| Misread from STORY top | Wrong agent behaviour (breaks WAN) | Correct meaning |
+|------------------------|----------------------------------|-----------------|
+| “Don’t register again and again” | Skip relay reservation, coord lookup, or WAN recovery ticks | Throttle redundant **`POST /v1/register`** when endpoints unchanged (`should_throttle_register`); **force** register on endpoint change, failed register, handover, relay accepted |
+| “Full eye on the network” | Register/coord HTTP on every tick; or tear down steady links | Continuous profile watch; register when **publishable endpoint changes** — not spam |
+| “Steady, reliable, don’t flood” | One relay only, no parallel coord relays, no bootstrap dials | Throttle **storms** (repeated `listen_on`, redundant bootstrap `swarm.dial`) — **not** required reservation + happy-eyeballs dial (TRANSPORT.md § CGNAT) |
+
 ## Golden rules
 
 1. **`ghal_bol` (Rust) owns all product logic** — crypto, keystore, libp2p, outbox, **ack send/retry**, contacts, transcripts, invite codec, call signaling. Implement behaviour here and expose **`ghal_bol_ffi_*`** (or daemon JSON-RPC on Linux/Android `:p2p`).

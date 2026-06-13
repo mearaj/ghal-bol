@@ -2,7 +2,7 @@
 
 This document is the **single design reference** for how Ghal Bol is meant to work: layers, messaging state, chat-room semantics, and P2P lifecycle. Wire-level detail lives in [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md); invites in [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
 
-**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md). **[STORY.md](STORY.md) is human-authored** — agents read it for connectivity policy (overrides conflicting guidance here) but **must not edit or revert it**; change this file and code instead.
+**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md). **[STORY.md](STORY.md) § `# Story` onward** is human-authored connectivity policy (overrides conflicting guidance here) but **must not edit or revert it**; change this file and code instead. STORY’s opening sections (`Current issues`, `# Now`, `# Next`) are backlog notes — see AGENTS.md.
 
 ## Goals
 

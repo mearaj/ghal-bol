@@ -98,25 +98,24 @@ struct RelayBehaviour {
 
 /// Relay limits tuned for a real chat link, not the libp2p defaults.
 ///
-/// `relay::Config::default()` caps **every** circuit at **120 s** and **128 KiB** and allows only
-/// **16 concurrent circuits** relay-wide. For two peers behind NAT/CGNAT whose DCUtR hole-punch
-/// fails, the relay is the *only* data path, so those defaults tear the conversation down after ~2
-/// minutes (the client logs `Limit { duration: 120s, data_in_bytes: 131072 }` then `dm peer
-/// disconnected`). A chat link must persist, so we lift the per-circuit caps (0 bytes = unlimited)
-/// and raise the pool sizes. Rate limiters from `Config::default()` are kept to bound abuse.
+/// `relay::Config::default()` caps **every** circuit at **120 s** and **128 KiB**, allows only
+/// **16 concurrent circuits** relay-wide, and installs **rate limiters** (~1 circuit / reservation
+/// per peer every **2 minutes**). Clients legitimately retry DM reconnect every ~2 s (outbox /
+/// coord upkeep), so those default limiters surface as `relay circuit DENIED …
+/// ResourceLimitExceeded` and WAN chat never completes. Lift caps for a chat relay and **clear**
+/// the default rate limiters — abuse is bounded by `max_circuits*` pool sizes instead.
 fn relay_config() -> relay::Config {
     relay::Config {
-        // 0 disables the byte cap entirely (see libp2p CopyFuture: enforced only when > 0).
-        max_circuit_bytes: 0,
-        // Long enough that an active conversation is never torn down by the relay; the client
-        // re-reserves on its own cadence. Stays well under the u32::MAX-seconds protocol limit.
-        max_circuit_duration: Duration::from_secs(24 * 60 * 60),
-        // Headroom for many concurrent peers plus reconnect/DCUtR churn.
         max_reservations: 4096,
         max_reservations_per_peer: 16,
+        reservation_duration: Duration::from_secs(60 * 60),
+        reservation_rate_limiters: vec![],
         max_circuits: 4096,
         max_circuits_per_peer: 16,
-        ..relay::Config::default()
+        // 0 disables the byte cap entirely (see libp2p CopyFuture: enforced only when > 0).
+        max_circuit_bytes: 0,
+        max_circuit_duration: Duration::from_secs(24 * 60 * 60),
+        circuit_src_rate_limiters: vec![],
     }
 }
 

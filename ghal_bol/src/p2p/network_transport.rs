@@ -48,12 +48,23 @@ pub(crate) struct NetworkHandoverKey {
     pub public_v4: Option<std::net::Ipv4Addr>,
 }
 
+/// Relay circuit listen addr we register on coord and fingerprint (IPv4/dns4 only).
+/// libp2p may also open a `/dns6/.../p2p-circuit` listener; treating that as a WAN
+/// path change clears bootstrap HOP state and invalidates the live reservation.
+pub(crate) fn is_coord_ipv4_relay_listen(ma: &Multiaddr) -> bool {
+    if !is_coord_relay_tcp_circuit_multiaddr(ma) {
+        return false;
+    }
+    let s = ma.to_string();
+    s.contains("/ip4/") || s.contains("/dns4/")
+}
+
 /// Sorted WAN-relevant listen addrs (relay circuit + public TCP) for drift detection.
 pub(crate) fn wan_coord_listen_fingerprint(addrs: &[Multiaddr]) -> Vec<String> {
     let mut keys: Vec<String> = addrs
         .iter()
         .filter(|ma| {
-            is_coord_relay_tcp_circuit_multiaddr(ma) || is_coord_register_tcp_multiaddr(ma)
+            is_coord_ipv4_relay_listen(ma) || is_coord_register_tcp_multiaddr(ma)
         })
         .map(|ma| ma.to_string())
         .collect();
@@ -124,6 +135,11 @@ impl LocalNetworkProfile {
     /// Cellular/CGNAT without an active LAN — needs relay for coord when URL is set.
     pub(crate) fn on_mobile_data_path(&self) -> bool {
         !self.has_active_lan() && (self.has_cellular_iface || self.has_cgnat_ipv4)
+    }
+
+    /// CGNAT / no public IPv4 — WAN peers need a relay circuit even on Wi‑Fi LAN.
+    pub(crate) fn needs_relay_for_wan(&self) -> bool {
+        !self.has_public_ipv4 && (self.on_mobile_data_path() || self.has_cgnat_ipv4)
     }
 }
 
@@ -229,13 +245,7 @@ pub(crate) fn resolve_relay_bootnodes(peer_str: &str, addrs: &[String]) -> Vec<(
     };
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let ip4_only: Vec<&String> = addrs.iter().filter(|a| a.contains("/ip4/")).collect();
-    let bases: Vec<&String> = if ip4_only.is_empty() {
-        addrs.iter().collect()
-    } else {
-        ip4_only
-    };
-    for addr in bases {
+    for addr in addrs {
         for ma in relay_base_addr_to_dial_multiaddrs(addr, peer) {
             if seen.insert(ma.to_string()) {
                 out.push((peer, ma));
@@ -247,19 +257,21 @@ pub(crate) fn resolve_relay_bootnodes(peer_str: &str, addrs: &[String]) -> Vec<(
 
 fn relay_base_addr_to_dial_multiaddrs(addr: &str, peer: PeerId) -> Vec<Multiaddr> {
     let segs: Vec<&str> = addr.trim().split('/').filter(|s| !s.is_empty()).collect();
-    let mut host: Option<(String, bool)> = None;
+    let mut host: Option<(String, bool, bool)> = None;
     let mut port: Option<u16> = None;
     let mut i = 0;
     while i + 1 < segs.len() {
         match segs[i] {
-            "ip4" => host = Some((segs[i + 1].to_string(), false)),
-            "dns4" | "dns" | "dns6" => host = Some((segs[i + 1].to_string(), true)),
+            "ip4" => host = Some((segs[i + 1].to_string(), false, false)),
+            "ip6" => host = Some((segs[i + 1].to_string(), false, true)),
+            "dns4" | "dns" => host = Some((segs[i + 1].to_string(), true, false)),
+            "dns6" => host = Some((segs[i + 1].to_string(), true, true)),
             "tcp" => port = segs[i + 1].parse().ok(),
             _ => {}
         }
         i += 1;
     }
-    let (Some((h, is_dns)), Some(p)) = (host, port) else {
+    let (Some((h, is_dns, is_v6)), Some(p)) = (host, port) else {
         native_log::warn("relay", format!("ghalbol relay addr not TCP host/port: {addr}"));
         return Vec::new();
     };
@@ -270,11 +282,27 @@ fn relay_base_addr_to_dial_multiaddrs(addr: &str, peer: PeerId) -> Vec<Multiaddr
             return Vec::new();
         };
         for sa in resolved {
-            if let IpAddr::V4(ip) = sa.ip() {
-                if !is_public_bootstrap_ipv4(ip) {
-                    continue;
+            match sa.ip() {
+                IpAddr::V4(ip) if !is_v6 => {
+                    if !is_public_bootstrap_ipv4(ip) {
+                        continue;
+                    }
+                    if let Ok(ma) = format!("/ip4/{ip}/tcp/{p}/p2p/{peer}").parse::<Multiaddr>() {
+                        out.push(ma);
+                    }
                 }
-                if let Ok(ma) = format!("/ip4/{ip}/tcp/{p}/p2p/{peer}").parse::<Multiaddr>() {
+                IpAddr::V6(ip) if is_v6 && !ip.is_loopback() && !ip.is_unspecified() => {
+                    if let Ok(ma) = format!("/ip6/{ip}/tcp/{p}/p2p/{peer}").parse::<Multiaddr>() {
+                        out.push(ma);
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else if is_v6 {
+        if let Ok(ip) = h.parse::<std::net::Ipv6Addr>() {
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                if let Ok(ma) = format!("/ip6/{ip}/tcp/{p}/p2p/{peer}").parse::<Multiaddr>() {
                     out.push(ma);
                 }
             }
@@ -287,6 +315,42 @@ fn relay_base_addr_to_dial_multiaddrs(addr: &str, peer: PeerId) -> Vec<Multiaddr
         }
     }
     out
+}
+
+/// Append `/p2p-circuit` to the connected bootstrap TCP multiaddr (preserves live port).
+pub(crate) fn relay_circuit_listen_addr(base: &Multiaddr) -> Option<Multiaddr> {
+    if is_relay_circuit_multiaddr(base) {
+        return Some(base.clone());
+    }
+    let mut ma = base.clone();
+    if !ma.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+        ma.push(Protocol::P2pCircuit);
+    }
+    Some(ma)
+}
+
+/// Lower rank = preferred bootstrap TCP family for this profile.
+pub(crate) fn relay_bootstrap_family_rank(
+    ma: &Multiaddr,
+    mobile: bool,
+    ipv6_degraded: bool,
+) -> u8 {
+    let s = ma.to_string();
+    if s.contains("/ip4/") {
+        if mobile || ipv6_degraded {
+            0
+        } else {
+            1
+        }
+    } else if s.contains("/ip6/") {
+        if mobile || ipv6_degraded {
+            1
+        } else {
+            0
+        }
+    } else {
+        2
+    }
 }
 
 pub(crate) fn ipv4_from_ma_str(s: &str) -> Option<std::net::Ipv4Addr> {
@@ -519,15 +583,16 @@ pub(crate) fn sort_coord_dial_multiaddrs(mut addrs: Vec<Multiaddr>) -> Vec<Multi
     addrs
 }
 
-/// WAN coord dials: IPv4 TCP relay circuits only (DM transport is TCP; IPv6 relay often fails).
+/// WAN coord dials: IPv4/dns4 TCP relay circuits only (DM transport is TCP; IPv6 relay often fails).
 pub(crate) fn filter_coord_relay_dial_platform(mut addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     addrs.retain(|ma| !is_relay_circuit_multiaddr(ma) || is_coord_relay_tcp_circuit_multiaddr(ma));
-    #[cfg(target_os = "android")]
-    {
-        addrs.retain(|ma| {
-            !is_relay_circuit_multiaddr(ma) || ma.to_string().contains("/ip4/")
-        });
-    }
+    addrs.retain(|ma| {
+        if !is_relay_circuit_multiaddr(ma) {
+            return true;
+        }
+        let s = ma.to_string();
+        s.contains("/ip4/") || s.contains("/dns4/")
+    });
     addrs
 }
 
@@ -565,7 +630,17 @@ pub(crate) fn is_trusted_bootstrap_dial_addr(ma: &Multiaddr) -> bool {
     if is_relay_circuit_multiaddr(ma) {
         return true;
     }
-    ipv4_from_ma_str(&ma.to_string()).is_some_and(is_public_bootstrap_ipv4)
+    let s = ma.to_string();
+    if let Some(ip) = ipv4_from_ma_str(&s) {
+        return is_public_bootstrap_ipv4(ip);
+    }
+    if let Some(host) = s.split("/ip6/").nth(1) {
+        let ip_str = host.split('/').next().unwrap_or("");
+        if let Ok(ip) = ip_str.parse::<std::net::Ipv6Addr>() {
+            return !ip.is_loopback() && !ip.is_unspecified();
+        }
+    }
+    false
 }
 
 /// Expand `0.0.0.0` / `::` listeners into concrete LAN addresses for coord/mDNS peerstore.
@@ -664,6 +739,35 @@ mod tests {
     }
 
     #[test]
+    fn wan_listen_fingerprint_ignores_dns6_relay() {
+        let dns4: Multiaddr = "/dns4/coord.ghalbol.com/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+            .parse()
+            .unwrap();
+        let dns6: Multiaddr = "/dns6/coord.ghalbol.com/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+            .parse()
+            .unwrap();
+        let fp = wan_coord_listen_fingerprint(&[dns6, dns4.clone()]);
+        assert_eq!(fp, vec![dns4.to_string()]);
+    }
+
+    #[test]
+    fn wan_coord_dial_addrs_drop_ipv6_relay_on_all_platforms() {
+        let v6: Multiaddr = "/ip6/2600:1900:4000:8dad::/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF/p2p-circuit/p2p/16Uiu2HAm5HuMtmkgC6yPqq6g8NSrgqjbamQ6Vj6r3GjjrzKAs2Eu"
+            .parse()
+            .unwrap();
+        let v4: Multiaddr = "/ip4/34.30.211.249/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF/p2p-circuit/p2p/16Uiu2HAm5HuMtmkgC6yPqq6g8NSrgqjbamQ6Vj6r3GjjrzKAs2Eu"
+            .parse()
+            .unwrap();
+        let dns4: Multiaddr = "/dns4/coord.ghalbol.com/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF/p2p-circuit/p2p/16Uiu2HAm5HuMtmkgC6yPqq6g8NSrgqjbamQ6Vj6r3GjjrzKAs2Eu"
+            .parse()
+            .unwrap();
+        let out = wan_coord_dial_addrs(vec![v6.clone(), v4.clone(), dns4.clone()]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], v4);
+        assert_eq!(out[1], dns4);
+    }
+
+    #[test]
     fn coord_dial_ipv4_relay_before_ipv6() {
         let v6: Multiaddr = "/ip6/2001:41d0:203:2ca6::/tcp/4001/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb/p2p-circuit/p2p/16Uiu2HAm5KP74oCyKi9sfYYA9P2FtpdjZCE2WQwxH1w2FTV1Kp3P"
             .parse()
@@ -687,6 +791,34 @@ mod tests {
         assert_eq!(p.mode_label(), "lan");
         assert!(!p.avoid_blind_routed_dial());
         assert!(!p.on_mobile_data_path());
+    }
+
+    #[test]
+    fn profile_wifi_cgnat_needs_relay_for_wan() {
+        let p = LocalNetworkProfile {
+            has_wifi_iface: true,
+            has_rfc1918_ipv4: true,
+            has_cgnat_ipv4: true,
+            has_cellular_iface: true,
+            ..Default::default()
+        };
+        assert!(p.has_active_lan());
+        assert!(!p.on_mobile_data_path());
+        assert!(p.needs_relay_for_wan());
+    }
+
+    #[test]
+    fn bootstrap_family_rank_ipv6_degraded_prefers_v4_on_lan() {
+        let v4: Multiaddr =
+            "/ip4/34.30.211.249/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF"
+                .parse()
+                .unwrap();
+        let v6: Multiaddr =
+            "/ip6/2600:1900:4000:8dad::/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF"
+                .parse()
+                .unwrap();
+        assert!(relay_bootstrap_family_rank(&v4, false, false) > relay_bootstrap_family_rank(&v6, false, false));
+        assert!(relay_bootstrap_family_rank(&v4, false, true) < relay_bootstrap_family_rank(&v6, false, true));
     }
 
     #[test]

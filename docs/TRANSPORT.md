@@ -2,7 +2,7 @@
 
 **Status:** **libp2p is the production P2P transport.** A prior plan to replace libp2p with a custom native QUIC/TCP stack was **evaluated and discarded** (May 2026). This document is the canonical reference for how peers connect today.
 
-**For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Flutter. **Connectivity policy:** [STORY.md](STORY.md) overrides conflicting guidance here — **human-owned; agents read only, never edit or `git checkout` STORY.md**.
+**For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Flutter. **Connectivity policy:** [STORY.md](STORY.md) § **`# Story` onward** overrides conflicting guidance here — **human-owned; agents read only, never edit or `git checkout` STORY.md**. The opening sections (`Current issues`, `# Now`, `# Next`) are human backlog, **not** implementation spec; do not throttle relay/WAN recovery from them (see AGENTS.md § “STORY.md — do not misread the first sections”).
 
 ---
 
@@ -80,6 +80,56 @@ This section encodes the **override rules at the end of [AGENTS.md](../AGENTS.md
 8. **Internet/coord recovery is immediate** — when internet or coord comes back, the continuous watch detects it within seconds and resumes WAN registration/lookup across the coord list without a libp2p restart.
 
 The ultimate goal is **strong, reliable, smooth** peer interaction. coord + libp2p are sufficient for this across WAN and LAN; do not regress these guarantees for performance or simplicity.
+
+---
+
+## End-to-end WAN phases (both peers — read before changing transport)
+
+WAN chat is a **pipeline with hard gates**. Each device must complete phases A→D before the **other** device can dial it. Opening a chat room or sending a new message does **not** substitute for these gates; `:p2p` drives them from `p2p_start`, outbox restore, `dm_upkeep`, and `coord_tick`.
+
+```text
+Per device (Android :p2p / Linux daemon)
+──────────────────────────────────────
+A. Swarm up          p2p_start, dm_peers registered
+B. Relay bootstrap   TCP to GET /v1/relay peer (log: bootstrap connection)
+C. Own reservation   listen_on(…/p2p-circuit) after Identify on HOP
+                     (log: reservation accepted, relay listen addr)
+D. Coord register    POST /v1/register with /p2p-circuit endpoint
+                     (log: coord registered, server: peer registered)
+
+Cross-device (after BOTH at phase D)
+────────────────────────────────────
+E. Coord lookup      GET /v1/peers/{remote_pk} → /p2p-circuit multiaddr
+F. Circuit dial      swarm.dial(peer’s circuit addr via coord relay)
+G. Stream + outbox   ConnectionEstablished → /ghal-bol/msg/1.0.0 → resync outbox
+```
+
+**Android vs Linux transport:** Linux builds TCP+QUIC+Noise; Android `:p2p` is **TCP+Noise only** (no libp2p DNS transport — coord expands `/dns4/…/p2p-circuit` to `/ip4/…` aliases at register). Both use the same relay-client state machine in `chat_server.rs`.
+
+### Phase-gate symptoms (from App log)
+
+| Log pattern | Phase stuck | Meaning |
+|-------------|-------------|---------|
+| `waiting for relay/public listen endpoint before coord register` | B or C | No publishable WAN addr yet — reservation not accepted |
+| `reservation accepted` but no `coord registered` | D | Relay OK; coord HTTPS/register failed |
+| `register — reason=coord register HTTP transport failed` | D | **HTTPS** to coord broken (VPN/DNS/TLS) — not libp2p |
+| `lookup — category=peer_not_on_coord` (404) | Remote still A–D | **Expected** until remote finishes pipeline; outbox waits |
+| `issue=no_dial_addrs \| reason=no dial addrs — coord has no record` | E blocked by remote D | Same as 404 — do not treat as “dial broken” |
+| `coord_lookup_peer ok — dialing` but no `dm peer connected` | F | Circuit dial failing — check server `circuit ACCEPTED/DENIED` |
+| `issue=… ResourceLimitExceeded` | F | Relay server rate limiters — redeploy `ghal_bol_server` |
+| `dm peer connected` + `outbox resync` | G ✓ | Pending transcript outbox drains — no new user send required |
+
+### libp2p community lessons (relay v2 — applies directly)
+
+| Issue | Lesson for Ghal Bol |
+|-------|---------------------|
+| [rust-libp2p #2513](https://github.com/libp2p/rust-libp2p/discussions/2513) `NoReservation` / circuit DENIED | **Callee must** `listen_on(/p2p-circuit)` on the relay before caller’s circuit dial works. 404 on coord lookup means callee never reached phase D. |
+| [rust-libp2p #2944](https://github.com/libp2p/rust-libp2p/discussions/2944) | After `ReservationReqAccepted`, connection still needs correct dial multiaddr format: `…/p2p/<relay>/p2p-circuit/p2p/<dest>`. |
+| Reservation valid only while bootstrap TCP up | [circuit-v2 spec](https://github.com/libp2p/specs/blob/master/relay/circuit-v2.md): disconnect from relay invalidates reservation — server logs `reservation closed`. Client must re-reserve + re-register. |
+| `listen_on` while in-flight cancels prior reservation | Never re-issue faster than `RELAY_RESERVE_THROTTLE_MS`; one HOP anchor only. |
+| Relay server default rate limiters | ~1 circuit / 2 min / peer — incompatible with 2s reconnect upkeep; clear in `ghal_bol_server/src/relay.rs`. |
+
+Diagnostic log format (grep `category=` / `reason=` / `next=`): implemented in `ghal_bol/src/p2p/connectivity_diag.rs`.
 
 ---
 
@@ -242,7 +292,22 @@ Do not substitute Kademlia DHT or public libp2p bootstrap peers when a coord loo
 
 ---
 
-## Ghal Bol relay (co-located with coord)
+## libp2p relay-client WAN state machine (client)
+
+All WAN circuit reservation must go through **`ensure_wan_relay_circuit`** in `chat_server.rs` — not ad-hoc `listen_on` from scattered ticks. rust-libp2p relay-client behaviour that agents must respect:
+
+| Constraint | Why |
+|------------|-----|
+| HOP pins to **one** bootstrap TCP link | Dual-stack happy-eyeballs can open v4+v6; prune to one anchor before `listen_on`. **`listen_on` must use the live HOP TCP multiaddr** from `bootstrap_tcp_conns`, not the dial-cache addr (desktop IPv6-unreachable + IPv4 HOP was a common stall). |
+| New `listen_on(/p2p-circuit)` **cancels** in-flight reservation | Never re-issue while `relay_reserve_in_flight_ms` is set (30s timeout). |
+| **Identify** on bootstrap before reserve | Prefer `bootstrap_identified` after `Identify::Received`; if Identify was drained during `bootstrap_publishable_listen`, allow `listen_on` after `RELAY_TCP_HOP_FALLBACK_MS` (~800ms) on an established bootstrap TCP link. |
+| Startup listen wait | `bootstrap_publishable_listen` forwards **all** swarm events through `handle_swarm_event` — never drop Identify/Relay in a partial match. |
+| Probe `listen_on` **only** when bootstrap TCP is down | CGNAT path; never parallel with active bootstrap dials. |
+| Throttle redundant dials / listens | `issue_bootstrap_dials`, `RELAY_RESERVE_THROTTLE_MS` — storms break mobile CGNAT. |
+
+Phases: dial bootstrap (all families, one throttle window) → Identify → prune HOP → settle 450ms → **one** `listen_on` → `ReservationReqAccepted` → coord register.
+
+---
 
 When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WAN needs a **Ghal Bol relay** that reliably grants Circuit Relay v2 reservations. `ghal_bol_server` runs its **own** relay node next to each HTTP coordinator. The HTTP API stays a lightweight presence phone book; the relay only carries brief NAT‑traversal traffic until **DCUtR** upgrades the client pair to a direct connection. **Public IPFS bootstrap peers are not used** for peer discovery or relay reservation.
 
@@ -252,6 +317,7 @@ When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WA
 - **The relay's `libp2p` MUST enable the `secp256k1` feature** (`ghal_bol_server/Cargo.toml`). Ghal Bol **clients authenticate with their secp256k1 device identity** (golden rule 7 / [IDENTITY.md](IDENTITY.md)). The Noise handshake authenticates the remote's identity public key, so a relay built **without** `secp256k1` cannot decode/verify a secp256k1 client and **drops the connection mid‑handshake** — the client sees `Decode(Io(UnexpectedEof))`, the circuit listener closes (`addrs=[]`), `coord_registered=false`, and **no real device can ever reserve a circuit** (every device uses a secp256k1 key). A minimal probe using an ed25519 key will *appear* to work and hide this — always test the relay with a **secp256k1** key (`PROBE_SECP256K1=1` in `examples/relay_probe.rs`).
 - **Dual-stack (IPv4 + IPv6, IPv6 preferred).** The relay listens on the configured address **and** the counterpart-family wildcard on the same port (`GHAL_BOL_RELAY_LISTEN` default `0.0.0.0:4002` ⇒ also `[::]:4002`), so it accepts both IPv4 and IPv6 clients. A counterpart-listen failure (host without that stack) logs a warning and continues single-stack.
 - Env: `GHAL_BOL_RELAY_ENABLE` (default on), `GHAL_BOL_RELAY_LISTEN` (default `0.0.0.0:4002`), `GHAL_BOL_RELAY_PUBLIC_HOST` (→ advertises **both** `/dns6/<host>/tcp/<port>` and `/dns4/<host>/tcp/<port>`, IPv6 first) or `GHAL_BOL_RELAY_PUBLIC_ADDRS` (comma‑separated multiaddrs). **The relay TCP port must be open to the internet**; advertise the public host or clients cannot reserve. For native IPv6 reachability the host needs an `AAAA` record; on IPv4‑only/NAT64 carriers the `/dns*` host is mapped to a routable address client-side regardless.
+- **Relay rate limiters (production).** libp2p `relay::Config::default()` installs per-peer/per-IP rate limiters (~**one circuit per 2 minutes** per source peer). Ghal Bol’s `:p2p` node retries DM reconnect every ~2 s when the outbox has pending rows (background — **not** gated on opening a chat room). If the coord relay still uses those default limiters, the server logs `relay circuit DENIED … ResourceLimitExceeded` while clients log endless `coord_lookup_peer ok — dialing …/p2p-circuit` with no `dm peer connected`. `ghal_bol_server/src/relay.rs` clears `reservation_rate_limiters` and `circuit_src_rate_limiters` and raises pool caps instead. **Redeploy the server binary** after changing relay config; client-only rebuilds cannot fix this.
 - `GET /v1/relay` → `{ enabled, peer_id, addrs }` (addrs are dialable bases without `/p2p/<id>`; both `/dns6` and `/dns4` are returned, IPv6 first).
 - **Registration circuit expansion (`routes.rs`).** On `POST /v1/register`, `/dns*/…/p2p-circuit` endpoints are duplicated with resolved `/ip6/…` **and** `/ip4/…` aliases (IPv6 first) so TCP-only clients (Android has no libp2p DNS transport) can dial a peer's relay circuit by concrete IP over whichever family routes.
 

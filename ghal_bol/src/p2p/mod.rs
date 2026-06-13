@@ -4,6 +4,7 @@
 //! Transport: **QUIC/TCP**, **relay**, **mDNS**, plus coord lookup and invite bootstrap addrs.
 
 pub mod call_active;
+pub mod connectivity_diag;
 pub mod network_transport;
 pub mod chat_server;
 pub mod native_log;

@@ -143,6 +143,8 @@ peer registered public_key=… endpoints=1    ← must appear after apps unlock
 | `advertised=[]`, warn about `GHAL_BOL_RELAY_PUBLIC_HOST` | No public relay — WAN impossible |
 | Only `GET /v1/peers/…` 404, no `peer registered` | Relay TCP dead or clients never reserved+registered |
 | `GET /v1/relay` 200 from ngrok but `nc` refused on advertised port | Stale bore port or server stopped |
+| `relay circuit DENIED … ResourceLimitExceeded` (both peers `reservation ACCEPTED`) | Relay still on libp2p default **circuit rate limiters** (~1 circuit / 2 min per peer) — rebuild + redeploy `ghal_bol_server` (`relay.rs` clears them) |
+| `relay reservation closed` on one peer ~minutes after `ACCEPTED` | That peer lost bootstrap TCP to the relay — reservation is invalid until it reconnects; client re-reserves automatically |
 
 See [TRANSPORT.md](../../docs/TRANSPORT.md) § “WAN prerequisites” and [COORDINATION_SERVER.md](../../docs/COORDINATION_SERVER.md) § “Troubleshooting”.
 

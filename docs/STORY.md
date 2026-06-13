@@ -1,5 +1,3 @@
-# Warning: AI agent should avoid making changes to this file.
-
 ## Current issues to resolve
 The app should have full eye on the network everytime, so it knows
 what active network it's using, whether internet is active or not.
@@ -21,7 +19,8 @@ practise... we need the connection to be strong, reliable, steady
 and that doesn't mean flooding or polluting the network... 
 the app should see if the internet network is changed i.e. it's global
 public reachability address is changed, if it's not and it's already 
-registered on coord server then there should be no need to register.
+registered on coord server then there should be no need to register unless
+needed for relay.
 This should be reliable and accurate. There should never be the situation
 where app thinks it's already registered and it's valid address is
 reflecting on coord/relay server and it actually is not.
