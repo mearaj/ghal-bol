@@ -23,14 +23,25 @@ The system does not require phone numbers, email addresses, or centralized accou
 - Private: 64 hex chars (32-byte secret)
 - On disk: `keystore_v1.json` — Argon2id + ChaCha20-Poly1305 (`ghal_bol/src/keystore_v1.rs`)
 
-Storage root (Linux desktop):
+Storage root — one namespace directory per build; keystore, prefs, and `ghal_bol/` (contacts, transcript) all live under it:
 
-| Build | `app_namespace` | Path |
-|-------|-----------------|------|
-| `flutter run -d linux` (debug) | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` |
-| `flutter run --release -d linux` / shipped bundle | `com.ghalbol` | `~/.local/share/com.ghalbol/` |
+| Build | `app_namespace` | Linux | Android (under package `app_flutter`) |
+|-------|-----------------|-------|----------------------------------------|
+| `flutter run` (debug) | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` | `com.ghalbol.debug/` |
+| `flutter run --release` / shipped | `com.ghalbol` | `~/.local/share/com.ghalbol/` | `/` (package root) |
 
-Android uses the same `app_namespace` values; debug/release differ by package id (`com.ghalbol.debug` vs `com.ghalbol`). Keystore: `app_flutter/com.ghalbol.debug/` (debug) or `app_flutter/` (release). Contacts/transcript: `app_flutter/ghal_bol/` on both (package id isolates debug vs release).
+Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v1.json`, `ghal_bol/chat_transcript_v1.json`. Debug vs release on Android are separate package ids (`com.ghalbol.debug` vs `com.ghalbol`), so separate `app_flutter` trees.
+
+**Linux — do not confuse app data with the local coord server:**
+
+| Path | Owner | Contents |
+|------|-------|----------|
+| `~/.local/share/com.ghalbol.debug/` | Debug **app** (`flutter run`) | Keystore, contacts, transcript for debug builds |
+| `~/.local/share/com.ghalbol/` | Release **app** *or* local **coord server** | Release app data when running release builds; **also** `ghalbol_server/` (coord DB, relay key) when you run `./ghal_bol_server/deploy/run_server.sh` — the server always uses namespace `com.ghalbol` (`ghal_bol_server/src/config.rs`), independent of whether the desktop app is debug or release |
+
+The debug app does **not** write identity or chat stores to `com.ghalbol/` unless you run a release build. Seeing both directories on a dev machine is normal: server under `com.ghalbol/ghalbol_server/`, debug app under `com.ghalbol.debug/`. There is no automatic migration between debug and release namespaces — re-pair or import identity when switching builds.
+
+**Android path fix (2026-06):** `ui_data_dir()` uses `namespace_data_dir()` so keystore and `ghal_bol/` contacts/transcript share the same namespace root (debug: `app_flutter/com.ghalbol.debug/ghal_bol/`).
 
 ---
 

@@ -202,6 +202,29 @@ LAN is faster and stronger, so a contact discovered on the LAN must shift onto i
 
 Do **not** tear down the existing connection on LAN discovery (that would drop in-flight messages); the upgrade is additive and the stream follows the better path on reopen.
 
+#### LAN relay vs mDNS race (2026-06-13 regression — do not reintroduce)
+
+On Wi‑Fi/LAN, **mDNS direct TCP and coord relay circuit dials must not race** for the same peer before the first `ConnectionEstablished`. libp2p cancels one dial (“oneshot canceled”); the survivor is often the slower relay path while the LAN dial stalls ~15s (`lan_dial_in_flight`), then repeats forever — chat never connects on LAN even though mDNS shows the correct RFC1918 addr.
+
+**Broken behaviour (regression):** `should_defer_coord_relay_for_lan` required `connected == true` before deferring relay dials. On **first connect**, coord lookup returned relay addrs immediately after mDNS `Discovered`, so relay and mDNS LAN TCP dials ran in parallel.
+
+**Required behaviour (`chat_server.rs`):**
+
+| Mechanism | Rule |
+|-----------|------|
+| `should_defer_coord_relay_for_lan` | On active Wi‑Fi/LAN, defer coord **relay** dials when the peer has a live mDNS candidate, an in-flight LAN dial, a recent LAN sighting, or an existing **direct** connection — **including before first connect**. Do **not** gate deferral on `swarm.is_connected`. |
+| `dial_dm_peer_addr` | Block relay-circuit dials while `lan_dial_in_flight_blocks` on Wi‑Fi/LAN (same race as above). |
+| `coord_dial_from_lookup_addrs` | Strip coord-published RFC1918 addrs on LAN (stale ports); call `should_defer_coord_relay_for_lan` and drop relay addrs from the ranked list when deferring. |
+| `peer_mdns_lan_candidate_addrs` | Live mDNS candidate **list** per peer (libp2p emits addrs one-by-one) — **not** a long-lived dial cache. On dial failure, drop that candidate and try the next; refresh from mDNS events. |
+
+**Log signatures (broken LAN):**
+
+- `mdns dialing … /ip4/192.168.x.x/tcp/…` then within ~2s `coord_lookup_peer ok — dialing … via relay circuit` for the **same** peer on Wi‑Fi
+- No `dm connection established` / `peer_connected` for minutes; mDNS retries ~15s apart
+- Sends stuck: `outbound blocked: coord lookup (additive)`
+
+**Log signatures (fixed LAN):** `mdns dialing` without a competing relay dial to the same peer on Wi‑Fi; then `dm connection established … (direct)`.
+
 See [DESIGN.md](DESIGN.md) § “Dial strategy — WAN first”. Do not add Dart dial policy or RFC1918 /24 guessing from coord (regression: long connect stalls).
 
 ### Roaming
@@ -324,6 +347,24 @@ When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WA
 **Client (`ghal_bol`)**
 - At swarm startup, for **each** configured coord URL, `coord_runtime::fetch_all_ghalbol_relays` fetches `/v1/relay` and `network_transport::resolve_relay_bootnodes` resolves dialable bases into **both IP families** — `/ip4/<public>/tcp/<port>/p2p/<id>` **and `/ip6/<routable>/tcp/<port>/p2p/<id>`** (IPv6 sorted first; product policy is "IPv6 preferred when it works"). This is required for IPv6‑only / NAT64 mobile carriers: there the OS resolver (DNS64) synthesizes an IPv6 address for the relay's `/dns4` hostname and the literal IPv4 base has no route — keeping only IPv4 (the old behaviour) left such devices unable to reserve a circuit and therefore unreachable. `is_trusted_bootstrap_dial_addr` accepts a public IPv4 **or** a globally routable IPv6 (incl. NAT64 `64:ff9b::/96`). `issue_bootstrap_dials` dials **all** resolved families for a relay within one throttle window (happy‑eyeballs) so a preferred‑but‑unroutable family never starves the other. libp2p's relay client pins HOP to **one** bootstrap TCP link per relay, so `prune_duplicate_relay_bootstrap_connections` closes extras and keeps the best family (`relay_bootstrap_family_rank` — IPv6 on global‑v6 LAN, IPv4 on CGNAT/mobile when both connect). **Circuit reservation** is then a single `listen_on(…/p2p-circuit)` on that anchor only (`relay_circuit_listen_addr`). Do **not** issue multi‑family `listen_on` while two bootstrap TCP links are still up — HOP and circuit addr must match. The client **dials base TCP** (throttled), prunes to one link, then after identify requests the circuit. Probe-style `listen_on` runs only from `retry_stalled_relay_reservations` when bootstrap TCP is still **not** connected (not in parallel with active bootstrap dials). The resulting `/p2p-circuit` is registered in coord presence; recovery retries in § "Steady connection". **If the advertised relay TCP port is unreachable** (dev: dead bore/ngrok tunnel; prod: firewall), clients log `relay TCP unreachable`, never register on coord, and peer lookups return 404 until the tunnel is fixed.
 - **Cached to disk** (`<data_dir>/ghalbol_relay.json` per coord host): a successful fetch is persisted. **Invalidate on relay TCP failure** (`Connection refused`) — client clears cache and refetches `GET /v1/relay`. **Dev bore assigns a new remote port every `run_server.sh` start** — apps must refetch after server restart; stale cache + stale ngrok JSON = wrong port. The relay **PeerId** is stable only while `<data_dir>/relay_ed25519.key` on the server is preserved — do not delete that file.
+
+### Caching policy (P2P — avoid caches that can break connectivity)
+
+**Default: do not cache anything that influences dial targets, peer reachability, or transport choice.** If there is even a slight chance a cache serves a stale addr, port, or path and degrades P2P, prefer live discovery (mDNS events, coord HTTP lookup, current swarm connection state).
+
+| Allowed | Invalidation / notes |
+|---------|----------------------|
+| `ghalbol_relay.json` (coord relay base from `GET /v1/relay`) | Clear and refetch on relay TCP `Connection refused`; dev bore port changes each server restart |
+| Short in-memory throttles (`should_routed_dial`, `lan_dial_in_flight`, per-relay reserve throttle) | Time-bounded; not substitute for live reachability |
+
+| **Do not add** | Why |
+|----------------|-----|
+| Cached coord lookup multiaddrs for urgent reconnect | Stale relay/RFC1918 addrs race live mDNS and stall LAN (removed `coord_cached_dial_addrs`) |
+| Single “last good” mDNS LAN addr per peer | libp2p re-announces ports; use `peer_mdns_lan_candidate_addrs` list + drop failed candidate |
+| Cached “peer is on LAN” without mDNS/`Expired` refresh | Use `peers_on_local_lan` timestamp + mDNS `Expired` to drop immediately |
+| Dart-side dial/lookup caches | All WAN/LAN routing lives in Rust (`chat_server.rs`, `coord_runtime.rs`) |
+
+When adding new state, ask: “If this value is wrong for 30s, does chat break?” If yes, do not cache — compute from live signals or refetch.
 - **Network handovers** (wifi ⇄ mobile ⇄ different LAN): relay re-reservation rides `handle_network_path_change` → `retry_stalled_relay_reservations`, so the circuit is re-reserved and re-registered on the new path without a libp2p restart.
 
 ---
@@ -408,6 +449,8 @@ Do not rename without a version bump:
 13. **Removing CGNAT probe reservation** — `try_ghalbol_probe_style_circuit_listen` at startup / when `!any_bootstrap_connected` is required for phones; Wi‑Fi-only tests hide the regression.
 14. **One-sided relay OK** — Linux `reservation accepted` while Android stuck on `CGNAT listen addr only` means chat will not work; both peers must register on coord.
 15. **Blocking peer relay dials until own circuit listens** — `skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` stalls WAN 30–40s on CGNAT; peer outbound dials only need coord relay bootstrap TCP + peer registered. See § “Outbound peer relay dials vs own reservation”.
+16. **Racing coord relay dials against mDNS LAN on Wi‑Fi before first connect** — gating `should_defer_coord_relay_for_lan` on `connected == true` causes relay + LAN TCP to cancel each other; endless ~15s mDNS retries, no `peer_connected`. See § “LAN relay vs mDNS race”.
+17. **P2P dial/lookup caches** — coord lookup addr cache, frozen mDNS LAN addr, or Dart-side routing cache. Prefer live mDNS + coord HTTP; only `ghalbol_relay.json` with TCP-failure invalidation. See § “Caching policy (P2P)”.
 
 ---
 
@@ -427,6 +470,7 @@ Do not rename without a version bump:
 
 | Date | Change |
 |------|--------|
+| 2026-06-13 | **LAN relay vs mDNS race (regression fix):** on Wi‑Fi, defer coord relay dials while mDNS LAN path is viable or in flight — **before** first connect. Removed coord lookup addr cache; mDNS uses live candidate list per peer. § “LAN relay vs mDNS race”, § “Caching policy (P2P)”. |
 | 2026-06-11 | **Bootstrap TCP prune (libp2p relay HOP pin):** happy-eyeballs left **two** coord-relay TCP links (v6 then v4); libp2p's relay client sends all HOP (reserve + routed DM dial) on `directly_connected_peers[relay].first()` only. When v6 connected first on mobile-data but could not carry HOP, v4 bootstrap was ignored — server saw `client connected` ×2, no `reservation`/`circuit` events. `prune_duplicate_relay_bootstrap_connections` keeps one link (IPv4 on mobile-data path, IPv6 when LAN has global v6); reservation uses that anchor only. |
 | 2026-06-11 | **Relay reservation:** dual-family bootstrap **dials** kept; `prune_duplicate_relay_bootstrap_connections` keeps one TCP on best family (`relay_bootstrap_family_rank`); one `listen_on(…/p2p-circuit)` on that anchor. No startup probe while bootstrap dials run; `relay_reservation_active` gates on accepted reservation only. |
 | 2026-06-11 | **Relay reservation regression fix:** with `bootstrap_relay_addr` set, `relay_reservation_circuit_addrs` returned the base TCP addr without `/p2p-circuit`, so `listen_on` failed (`relay reserve listen …` empty error). Fixed via `relay_circuit_listen_addr`. |

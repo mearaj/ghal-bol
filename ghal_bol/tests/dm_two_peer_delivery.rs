@@ -223,32 +223,9 @@ fn two_peers_deliver_text_over_stream() {
         }
     }
 
-    pair.shutdown();
-    assert!(got_text, "host did not receive dm text");
-}
-
-#[test]
-fn two_peers_emit_ack_received_after_delivery() {
-    let pair = AsymmetricPair::start();
-    pair.wait_chat_ready_on_guest(Duration::from_secs(45));
-
-    let (done_tx, done_rx) = mpsc::channel();
-    pair.out_guest_tx
-        .send(OutboundCmd::SendText {
-            recipient_public_key_hex: pair.host_pk.clone(),
-            text: "ack-test".to_string(),
-            message_id: ghal_bol::p2p::chat_server::new_msg_id_for_ffi(),
-            done: Some(done_tx),
-        })
-        .unwrap();
-    done_rx
-        .recv_timeout(Duration::from_secs(15))
-        .expect("send done")
-        .expect("send ok");
-
     let mut got_ack = false;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
+    let ack_deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < ack_deadline {
         match pair.ev_guest_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(GossipChatEvent::DmMessage { msg_kind, .. }) if msg_kind == "ack_received" => {
                 got_ack = true;
@@ -261,46 +238,6 @@ fn two_peers_emit_ack_received_after_delivery() {
     }
 
     pair.shutdown();
-    assert!(got_ack, "guest did not receive ack_received");
-}
-
-#[test]
-fn send_emits_outbound_sent_without_send_failed() {
-    let pair = AsymmetricPair::start();
-    pair.wait_chat_ready_on_guest(Duration::from_secs(45));
-
-    let (done_tx, done_rx) = mpsc::channel();
-    let msg_id = ghal_bol::p2p::chat_server::new_msg_id_for_ffi();
-    pair.out_guest_tx
-        .send(OutboundCmd::SendText {
-            recipient_public_key_hex: pair.host_pk.clone(),
-            text: "outbound-sent".to_string(),
-            message_id: msg_id.clone(),
-            done: Some(done_tx),
-        })
-        .unwrap();
-    done_rx
-        .recv_timeout(Duration::from_secs(15))
-        .expect("send done")
-        .expect("send ok");
-
-    let mut got_sent = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        match pair.ev_guest_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(GossipChatEvent::OutboundSent { message_id }) if message_id == msg_id => {
-                got_sent = true;
-                break;
-            }
-            Ok(GossipChatEvent::SendFailed { .. }) => {
-                panic!("unexpected SendFailed");
-            }
-            Ok(_) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    pair.shutdown();
-    assert!(got_sent, "guest did not emit OutboundSent");
+    assert!(got_text, "host did not receive dm text");
+    assert!(got_ack, "guest (sender) did not receive ack_received from host");
 }

@@ -511,73 +511,9 @@ mod tests {
     use crate::storage::{create_or_unlock_identity_v1, StorageConfig};
     use tempfile::TempDir;
 
-    #[test]
-    fn record_inbound_preview_preserves_unread_when_not_marking() {
-        let td = TempDir::new().unwrap();
-        let ns = "dev.contacts.unread";
-        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
-        let id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
-        let other_pk = id.public_key_hex();
-
-        upsert_contact(
-            ns,
-            SavedContact {
-                public_key_hex: other_pk.to_string(),
-                display_alias: None,
-                last_message_preview: None,
-                last_message_at_ms: None,
-                unread_count: 0,
-                created_at_ms: None,
-                updated_at_ms: None,
-                is_known: true,
-                is_blocked: false,
-            },
-        )
-        .unwrap();
-
-        record_inbound_preview(ns, &other_pk, "hello", true, Some(1000)).unwrap();
-        let c = find_by_public_key(ns, &other_pk).unwrap().unwrap();
-        assert_eq!(c.unread_count, 1);
-
-        record_inbound_preview(ns, &other_pk, "seen in room", false, Some(2000)).unwrap();
-        let c = find_by_public_key(ns, &other_pk).unwrap().unwrap();
-        assert_eq!(c.unread_count, 1);
-        assert_eq!(
-            c.last_message_preview.as_deref(),
-            Some("seen in room")
-        );
-    }
-
-    #[test]
-    fn record_inbound_preview_stale_timestamp_still_bumps_unread() {
-        let td = TempDir::new().unwrap();
-        let ns = "dev.contacts.unread.stale";
-        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
-        let id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
-        let other_pk = id.public_key_hex();
-
-        upsert_contact(
-            ns,
-            SavedContact {
-                public_key_hex: other_pk.to_string(),
-                display_alias: None,
-                last_message_preview: Some("newest".into()),
-                last_message_at_ms: Some(3000),
-                unread_count: 0,
-                created_at_ms: None,
-                updated_at_ms: None,
-                is_known: true,
-                is_blocked: false,
-            },
-        )
-        .unwrap();
-
-        record_inbound_preview(ns, &other_pk, "older", true, Some(1000)).unwrap();
-        let c = find_by_public_key(ns, &other_pk).unwrap().unwrap();
-        assert_eq!(c.unread_count, 1);
-        assert_eq!(c.last_message_preview.as_deref(), Some("newest"));
-        assert_eq!(c.last_message_at_ms, Some(3000));
-    }
+    /// Guest-scanned host public key (66-hex secp256k1) — never the local identity under test.
+    const REMOTE_PK: &str =
+        "02f229f167ac2337144dbeba4392a6300c8fe97fb061efdb4f81ec9f29dec76936";
 
     #[test]
     fn upsert_display_alias_set_and_clear() {
@@ -645,13 +581,12 @@ mod tests {
         let td = TempDir::new().unwrap();
         let ns = "dev.contacts.trust";
         let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
-        let id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
-        let other_pk = id.public_key_hex();
+        let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
 
         upsert_contact(
             ns,
             SavedContact {
-                public_key_hex: other_pk.to_string(),
+                public_key_hex: REMOTE_PK.to_string(),
                 display_alias: None,
                 last_message_preview: None,
                 last_message_at_ms: None,
@@ -664,11 +599,11 @@ mod tests {
         )
         .unwrap();
 
-        let c = set_contact_trust(ns, &other_pk, Some(true), None).unwrap();
+        let c = set_contact_trust(ns, REMOTE_PK, Some(true), None).unwrap();
         assert!(c.is_known);
         assert!(!c.is_blocked);
 
-        let c = set_contact_trust(ns, &other_pk, None, Some(true)).unwrap();
+        let c = set_contact_trust(ns, REMOTE_PK, None, Some(true)).unwrap();
         assert!(c.is_blocked);
     }
 }

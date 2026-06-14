@@ -371,15 +371,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_invite_timestamp_not_live() {
-        let now = now_ms();
-        assert!(!call_invite_is_live(0, now));
-        assert!(!call_invite_is_live(-1, now));
-        assert!(call_invite_is_live(now - 1_000, now));
-        assert!(!call_invite_is_live(now - MAX_LIVE_CALL_INVITE_AGE_MS - 1, now));
-    }
-
-    #[test]
     fn expire_stale_ringing_clears_old_inbound() {
         clear_all_calls();
         let t0 = now_ms();

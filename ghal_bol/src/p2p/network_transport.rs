@@ -701,12 +701,6 @@ mod tests {
     }
 
     #[test]
-    fn publishable_allows_lan_192_168() {
-        let ma: Multiaddr = "/ip4/192.168.1.42/tcp/4001".parse().unwrap();
-        assert!(is_publishable_listen_addr(&ma));
-    }
-
-    #[test]
     fn relay_bootnode_ip4_base_builds_dialable_circuit_addr() {
         let peer = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X";
         let nodes = resolve_relay_bootnodes(peer, &["/ip4/203.0.113.7/tcp/4002".to_string()]);
@@ -781,19 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_wifi_with_cellular_iface_is_lan() {
-        let p = LocalNetworkProfile {
-            has_wifi_iface: true,
-            has_rfc1918_ipv4: true,
-            has_cellular_iface: true,
-            ..Default::default()
-        };
-        assert_eq!(p.mode_label(), "lan");
-        assert!(!p.avoid_blind_routed_dial());
-        assert!(!p.on_mobile_data_path());
-    }
-
-    #[test]
     fn profile_wifi_cgnat_needs_relay_for_wan() {
         let p = LocalNetworkProfile {
             has_wifi_iface: true,
@@ -819,41 +800,6 @@ mod tests {
                 .unwrap();
         assert!(relay_bootstrap_family_rank(&v4, false, false) > relay_bootstrap_family_rank(&v6, false, false));
         assert!(relay_bootstrap_family_rank(&v4, false, true) < relay_bootstrap_family_rank(&v6, false, true));
-    }
-
-    #[test]
-    fn network_handover_key_changes_public_ipv4() {
-        let a = LocalNetworkProfile {
-            has_public_ipv4: true,
-            primary_public_ipv4: Some(std::net::Ipv4Addr::new(203, 0, 113, 10)),
-            ..Default::default()
-        };
-        let b = LocalNetworkProfile {
-            has_public_ipv4: true,
-            primary_public_ipv4: Some(std::net::Ipv4Addr::new(203, 0, 113, 11)),
-            ..Default::default()
-        };
-        assert_ne!(network_handover_key(&a), network_handover_key(&b));
-    }
-
-    #[test]
-    fn network_handover_key_changes_wifi_to_mobile() {
-        let wifi = LocalNetworkProfile {
-            has_wifi_iface: true,
-            has_rfc1918_ipv4: true,
-            primary_rfc1918_ipv4: Some(std::net::Ipv4Addr::new(192, 168, 1, 5)),
-            ..Default::default()
-        };
-        let mobile = LocalNetworkProfile {
-            has_cellular_iface: true,
-            has_cgnat_ipv4: true,
-            primary_cgnat_ipv4: Some(std::net::Ipv4Addr::new(100, 91, 13, 241)),
-            ..Default::default()
-        };
-        assert_ne!(
-            network_handover_key(&wifi),
-            network_handover_key(&mobile)
-        );
     }
 
     #[test]

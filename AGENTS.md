@@ -24,6 +24,7 @@
 6. **Do not `p2p_stop` / restart libp2p on every contact change** — use `register_dm_peer` / `sync_contacts` hot-register only.
 7. **Do not run `scripts/sync_ghal_bol_native_for_flutter.sh` while the Linux app is running** — it stops `ghal_bol_daemon` and causes `Broken pipe` on the UI socket. **Android:** rebuild with `pack_android_workspace_jni_libs.sh` — **default must ship all four standard ABIs** (`armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64`) for Play, emulators, and 32-bit ARM devices; `PACK_ANDROID_ARM64_ONLY=1` is a dev fast-path only (host `cargo-ndk`; no adb).
 8. **E2E for all peer-key traffic** — Any product communication between two contacts must use **end-to-end** crypto tied to the device **secp256k1 private key** and the peer’s **66-hex public key** (same identity as chat). Includes: DM text (`secp256k1_seal`), call signaling (`ghal_bol_call_v1`), call **audio and video** media (FrameCryptor + `derive_call_media_keys_from_identity`). Do **not** ship peer-facing plaintext payloads or disable media/signaling E2E for “performance” without an explicit product decision. Connect/setup may fall back to transport-only (e.g. DTLS-SRTP) only when identity E2EE setup fails — never by default.
+9. **Avoid P2P-breaking caches** — Do not cache dial targets, coord lookup addrs, or mDNS LAN addrs if staleness could break or degrade connectivity. Prefer live mDNS events + coord HTTP lookup. The only permitted on-disk transport cache is `ghalbol_relay.json` (invalidate on relay TCP failure). See [TRANSPORT.md](docs/TRANSPORT.md) § “Caching policy (P2P)”.
 
 ## Repository layout
 
@@ -156,6 +157,8 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **Slow WAN fallback after LAN loss** — mDNS `Expired` must re-kick coord/relay lookup immediately; do not wait on LAN TTL.
 - **Orphan active call when UI is gone** — `:p2p` / daemon outliving Flutter is **not** permission to keep media up. Last UI socket EOF must run **`p2p_force_end_active_call`**; GTK X / call-screen pop / `detached` must also hang up. See `docs/DESIGN.md` § “Call UI lifecycle and privacy”.
 - **Fixing call restore / notification without force-end** — changes to `call_active`, `CallController.syncActiveCallFromNative`, or incoming-call notify must not skip UI-session teardown (regression checklist in DESIGN.md).
+- **Racing coord relay dials against mDNS LAN on Wi‑Fi before first connect** — `should_defer_coord_relay_for_lan` must defer relay while mDNS candidate / LAN dial in flight / recent LAN sighting exists — **not** only when `swarm.is_connected`. Symptom: `mdns dialing` + `coord_lookup_peer ok — dialing … via relay circuit` every ~15s, never `peer_connected`. See [TRANSPORT.md](docs/TRANSPORT.md) § “LAN relay vs mDNS race”.
+- **P2P dial/lookup caches** — coord lookup addr cache, frozen mDNS LAN addr, Dart routing cache. If staleness could break P2P, do not cache. See TRANSPORT.md § “Caching policy (P2P)”.
 
 ## Debugging checklist (one message, two devices)
 
@@ -185,6 +188,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | Ticks appear without peer ack | Fake state — Flutter must not promote; check poll + transcript patch only |
 | Wire OK, empty roster | `handler context not set` on daemon poll; unlock + `p2p_start` with `app_namespace` |
 | Host no contact after scan | `peer_identified` or inbound text `stores_updated` → roster bump + `merge_discovered_peer_id` |
+| LAN chat broken on Wi‑Fi (mDNS shows peer, no connect) | `mdns dialing` then relay dial to same peer within ~2s? Never `dm connection established`? **Regression:** relay racing mDNS before first connect — fix `should_defer_coord_relay_for_lan` (defer without `connected` gate). TRANSPORT.md § “LAN relay vs mDNS race”. Also check stale contact pk (desktop dials old key while mDNS discovers new peer id). |
 | WAN chat dead minutes, coord health OK | `forcing bootstrap redial` loop? `wan_recovery=true` + `relay_listen=false` + `bootstrap_ok=true`? Fix `run_wan_recovery_pass` — never disconnect coord relay for relay; rebuild native. TRANSPORT.md § WAN recovery. **Note:** `bootstrap_*` logs = coord relay, not IPFS peers. |
 | Coord lookup 404 for peer | Peer not on coord yet — both need `reservation accepted` + `coord registered`; **not** proof coord HTTP is down. If **all** lookups 404 and server shows no `peer registered`, relay TCP is dead (dev: bore stopped / wrong port). **Asymmetric:** Wi‑Fi side registered, phone 404 → phone never got relay circuit — TRANSPORT.md § “CGNAT / mobile-data relay reservation” |
 | Phone: many `coord relay dial`/s, no `bootstrap connection`, `CGNAT listen addr only` | Bootstrap **dial storm** or missing CGNAT probe reservation — rebuild native; see TRANSPORT.md § “CGNAT / mobile-data relay reservation” |

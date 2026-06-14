@@ -210,29 +210,47 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
 
   /// Last [_isHubChatRoomOpen] we pushed to native — detect resize list-only without a tap.
   bool? _layoutSyncedRoomOpen;
+  String? _lastSyncedForegroundPk;
+  bool _layoutSyncPostFrameScheduled = false;
 
   void _syncNativeForegroundPeer() {
     unawaited(_syncNativeForegroundPeerAsync());
   }
 
+  /// Stable pk for native foreground — not [_selectedContact] (roster reload null frame).
+  String? _nativeForegroundPublicKey() {
+    final key = _selectedConversationKey?.trim().toLowerCase() ?? "";
+    if (isValidPublicKeyHex(key)) return key;
+    final c = _selectedContact;
+    if (c == null) return null;
+    final pk = c.publicKeyHex.trim().toLowerCase();
+    return isValidPublicKeyHex(pk) ? pk : null;
+  }
+
   /// True when the user is **seeing** the conversation UI (not a selected row in the list).
   ///
-  /// Desktop split: shrinking below [kGhalBolChatShellSplitWidth] shows the list-only narrow
-  /// shell; `_splitChatEngaged` may still be true but the room is **not** open — recv only.
+  /// Desktop split: the right pane always shows [_chatBody] for the selected row — native read
+  /// gate must follow [_selectedConversationKey], not [_splitChatEngaged] (history/back can
+  /// clear engaged while the thread stays on screen; that was recv-only + spurious leave drain).
+  /// Narrow shell: list-only until [_narrowShowRoom] (back from chat).
   bool _isHubChatRoomOpen(BuildContext context) {
-    if (_navTab != 0 || _selectedContact == null) return false;
+    if (_navTab != 0) return false;
+    // DESIGN.md hubThreadKey — gate on stable key, not roster row lookup.
+    final key = _selectedConversationKey;
+    if (key == null || key.isEmpty || !isValidPublicKeyHex(key)) return false;
     if (ghalBolUseChatShellSplit(context)) {
-      return _splitChatEngaged;
+      return true;
     }
     return _narrowShowRoom;
   }
 
   /// Window crossed split breakpoint or room visibility changed — native must match UI.
+  /// Post-frame only: MediaQuery can flicker one frame on resize and must not close read gate.
   void _syncNativeForegroundIfLayoutChanged(BuildContext context) {
-    final roomOpen = _isHubChatRoomOpen(context);
-    if (_layoutSyncedRoomOpen == roomOpen) return;
-    _layoutSyncedRoomOpen = roomOpen;
+    if (_layoutSyncPostFrameScheduled) return;
+    _layoutSyncPostFrameScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _layoutSyncPostFrameScheduled = false;
       if (!mounted) return;
       final nowSplit = ghalBolUseChatShellSplit(context);
       // Wide → narrow: list-only; engaged flag is stale until user taps the chat pane again.
@@ -241,9 +259,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
         _hubHistory.replaceTop(_hubHistorySnapshot());
       }
       final roomNow = _isHubChatRoomOpen(context);
-      if (_layoutSyncedRoomOpen != roomNow) {
-        _layoutSyncedRoomOpen = roomNow;
-      }
+      if (_layoutSyncedRoomOpen == roomNow) return;
       _syncNativeForegroundPeer();
     });
   }
@@ -252,10 +268,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     final epoch = ++_foregroundSyncEpoch;
     final roomOpen = _nativeForegroundRoomOpen(context);
     if (!roomOpen) {
+      if (_layoutSyncedRoomOpen == false && _lastSyncedForegroundPk == null) {
+        return;
+      }
       AppLog.instance.flow(
         "Hub",
         "room closed → sync ui session (no room, leave drain)",
       );
+      _lastSyncedForegroundPk = null;
       GhalBolUiSession.setRoom(null);
       await GhalBolUiSession.awaitApplied();
       if (mounted && epoch == _foregroundSyncEpoch) {
@@ -263,17 +283,24 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       }
       return;
     }
-    final c = _selectedContact!;
-    final pk = c.publicKeyHex.trim().toLowerCase();
+    final pk = _nativeForegroundPublicKey();
+    if (pk == null) return;
+    if (_layoutSyncedRoomOpen == true && _lastSyncedForegroundPk == pk) {
+      return;
+    }
     AppLog.instance.flow(
       "Hub",
       "room open → sync ui session pk=${pk.length > 16 ? "${pk.substring(0, 8)}…" : pk}",
     );
-    unawaited(ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c));
+    final c = _selectedContact;
+    if (c != null) {
+      unawaited(ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c));
+    }
     GhalBolUiSession.setRoom(pk);
     await GhalBolUiSession.awaitApplied();
     if (mounted && epoch == _foregroundSyncEpoch) {
       _layoutSyncedRoomOpen = true;
+      _lastSyncedForegroundPk = pk;
     }
   }
 

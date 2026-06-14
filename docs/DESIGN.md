@@ -33,7 +33,7 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
          shared on-disk stores (contacts_v1.json, chat_transcript_v1.json)
 ```
 
-**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `libghal_bol.so` for identity and store I/O over FFI. Both processes must use the **same** data directory and `app_namespace`. Debug (`com.ghalbol.debug`) uses its own root (`~/.local/share/com.ghalbol.debug/` on Linux); release uses `~/.local/share/com.ghalbol/`.
+**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `libghal_bol.so` for identity and store I/O over FFI. Both processes must use the **same** data directory and `app_namespace`. One **namespace root** per build holds keystore, prefs, and `ghal_bol/` (contacts, transcript): Linux `~/.local/share/com.ghalbol.debug/` (debug) or `~/.local/share/com.ghalbol/` (release); Android `{app_flutter}/com.ghalbol.debug/` (debug) or `{app_flutter}/` (release). See [IDENTITY.md](IDENTITY.md).
 
 | Concern | Owner |
 |---------|--------|
@@ -506,12 +506,14 @@ Rules:
 1. **Always try WAN/coord** for configured contacts while the network is up. Do not prefer RFC1918 addrs from coord presence for a peer who is not on your LAN.
 2. **LAN path is opt-in by discovery** — mDNS sighting (or an explicit same-LAN signal), not “both devices use 192.168.1.x”.
 3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): skip blind `DialOpts::peer_id` dials; dial explicit coord relay multiaddrs only (throttled). If bootstrap TCP is still pending, use probe-style `listen_on(…/p2p-circuit)` — see [TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”.
-4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally.
+4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally. While a peer has a live mDNS LAN candidate or an in-flight LAN dial, **defer coord relay dials** for that peer even before the first connect — relay + mDNS TCP racing cancels dials and breaks LAN chat ([TRANSPORT.md](TRANSPORT.md) § “LAN relay vs mDNS race”).
 5. **Outbound dial to peer’s relay circuit** (coord lookup result): proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Own circuit is for **registering** your WAN addr so peers can find you; it is not a prerequisite for dialing an already-registered peer. Per-peer throttle: `should_routed_dial` in `dial_dm_peer_addr` ([TRANSPORT.md](TRANSPORT.md) § “Outbound peer relay dials vs own reservation”).
 
 Coord register/lookup on a **5s** tick; send-text triggers an immediate coord lookup when not connected. Throttles: coord `peer_not_on_server` backoff, 1–2s between dials per peer.
 
-**Anti-patterns (caused multi-minute stalls):** Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer; **uncoordinated coord-relay dial spam on CGNAT** (many `coord relay dial` per second — prevents bootstrap TCP from completing); **removing probe-style relay reservation on mobile-data** while Wi‑Fi tests still pass ([TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”); **blocking peer relay dials until own circuit listens** (`skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` — ~40s dead WAN on phones; use `should_routed_dial` only).
+**Caching (P2P):** avoid caches that can serve stale dial targets — especially anything that could race or override live mDNS or coord lookup. Only permitted on-disk cache: `ghalbol_relay.json` with invalidation on relay TCP failure. mDNS LAN uses a live candidate list, not a frozen “last addr”. See [TRANSPORT.md](TRANSPORT.md) § “Caching policy (P2P)”.
+
+**Anti-patterns (caused multi-minute stalls):** Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer; **uncoordinated coord-relay dial spam on CGNAT** (many `coord relay dial` per second — prevents bootstrap TCP from completing); **removing probe-style relay reservation on mobile-data** while Wi‑Fi tests still pass ([TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”); **blocking peer relay dials until own circuit listens** (`skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` — ~40s dead WAN on phones; use `should_routed_dial` only); **racing coord relay against mDNS LAN on Wi‑Fi before first connect** (gate `should_defer_coord_relay_for_lan` on `connected == true` — endless ~15s mDNS retries, no LAN chat); **coord lookup or mDNS dial caches** that stale-addrs can break P2P.
 
 **Network watch:** Android connectivity + profile poll → WAN relay recovery when coord URL is set. UI lock does not stop `:p2p` / daemon / poll.
 

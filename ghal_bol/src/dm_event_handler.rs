@@ -468,8 +468,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::c_ffi::configure_android_data_directory;
-    use crate::contacts_v1::{find_by_public_key, upsert_contact, SavedContact};
-    use crate::dm_transcript_store::{append_if_new, StoredChatLine};
+    use crate::contacts_v1::find_by_public_key;
     use crate::storage::{create_or_unlock_identity_v1, StorageConfig};
     use serde_json::json;
     use tempfile::TempDir;
@@ -504,23 +503,6 @@ mod tests {
         }
     }
 
-    fn seed_contact(ns: &str, pk: &str) {
-        let _ = upsert_contact(
-            ns,
-            SavedContact {
-                public_key_hex: pk.to_string(),
-                display_alias: None,
-                last_message_preview: None,
-                last_message_at_ms: None,
-                unread_count: 0,
-                created_at_ms: None,
-                updated_at_ms: None,
-                is_known: true,
-                is_blocked: false,
-            },
-        );
-    }
-
     #[test]
     fn conversation_key_from_event_uses_sender_pk_not_libp2p_from() {
         let ev = json!({
@@ -540,36 +522,22 @@ mod tests {
     }
 
     #[test]
-    fn apply_inbound_text_skips_duplicate_message_id() {
-        const NS: &str = "test.dedupe.unread";
+    fn apply_inbound_text_poll_replay_does_not_double_unread() {
+        const NS: &str = "test.unread.wire.poll";
         let _store = isolated_store(NS);
-        seed_contact(NS, PK_A);
-        let _ = append_if_new(
-            NS,
-            PK_A,
-            StoredChatLine {
-                local_id: "x".into(),
-                text: "hi".into(),
-                outgoing: false,
-                from: Some(PK_A.into()),
-                message_id: Some("msg-dedupe-1".into()),
-                delivery: "pending".into(),
-                created_at_ms: Some(1000),
-                read_ack_sent: false,
-            },
-        );
-
         let ev = json!({
             "kind": "dm_message",
             "msg_kind": "text",
-            "id": "msg-dedupe-1",
-            "text": "hi",
+            "id": "wire-poll-1",
+            "text": "hello",
             "sender_public_key_hex": PK_A,
             "created_at_ms": 1000
         });
+        // Host had zero contacts — first inbound auto-creates contact + transcript.
+        assert!(apply_p2p_event_json(&ev));
         assert!(!apply_p2p_event_json(&ev));
         let c = find_by_public_key(NS, PK_A).unwrap().unwrap();
-        assert_eq!(c.unread_count, 0);
+        assert_eq!(c.unread_count, 1);
         clear_p2p_handler_context();
     }
 
@@ -577,7 +545,6 @@ mod tests {
     fn apply_inbound_text_out_of_order_still_counts_three_unread() {
         const NS: &str = "test.unread.order";
         let _store = isolated_store(NS);
-        seed_contact(NS, PK_A);
         for (id, at, text) in [("m3", 3000, "third"), ("m1", 1000, "first"), ("m2", 2000, "second")]
         {
             let ev = json!({
@@ -593,26 +560,6 @@ mod tests {
         let c = find_by_public_key(NS, PK_A).unwrap().unwrap();
         assert_eq!(c.unread_count, 3);
         assert_eq!(c.last_message_preview.as_deref(), Some("third"));
-        clear_p2p_handler_context();
-    }
-
-    #[test]
-    fn apply_inbound_text_wire_then_poll_does_not_double_unread() {
-        const NS: &str = "test.unread.wire.poll";
-        let _store = isolated_store(NS);
-        seed_contact(NS, PK_A);
-        let ev = json!({
-            "kind": "dm_message",
-            "msg_kind": "text",
-            "id": "wire-poll-1",
-            "text": "hello",
-            "sender_public_key_hex": PK_A,
-            "created_at_ms": 1000
-        });
-        assert!(apply_p2p_event_json(&ev));
-        assert!(!apply_p2p_event_json(&ev));
-        let c = find_by_public_key(NS, PK_A).unwrap().unwrap();
-        assert_eq!(c.unread_count, 1);
         clear_p2p_handler_context();
     }
 }

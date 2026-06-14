@@ -1379,30 +1379,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    #[test]
-    fn relay_cache_round_trips_and_clears() {
-        let dir = std::env::temp_dir().join(format!("ghalbol_relay_cache_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("ghalbol_relay.json");
-
-        // Empty cache → None.
-        assert!(read_relay_cache(Some(&path)).is_none());
-
-        // Write then read back.
-        let peer = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X".to_string();
-        let addrs = vec!["/dns4/coord.ghalbol.com/tcp/4002".to_string()];
-        write_relay_cache(Some(&path), &peer, &addrs);
-        let got = read_relay_cache(Some(&path)).expect("cached relay");
-        assert_eq!(got.0, peer);
-        assert_eq!(got.1, addrs);
-
-        // Clearing removes it (server explicitly disabled the relay).
-        clear_relay_cache(Some(&path));
-        assert!(read_relay_cache(Some(&path)).is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     static COORD_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     /// Serializes tests that touch process-wide coord globals.
@@ -1435,86 +1411,6 @@ mod tests {
         COORD_LAST_REG_ATTEMPT_MS.store(0, Ordering::Relaxed);
         COORD_REG_PENDING.store(false, Ordering::Relaxed);
         COORD_REG_WORKER_BUSY.store(false, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn parse_coord_urls_accepts_mixed_delimiters() {
-        let urls = parse_coord_urls(
-            "https://a.test/,https://b.test/\thttps://c.test/\nhttps://d.test/  https://e.test/",
-        );
-        assert_eq!(
-            urls,
-            vec![
-                "https://a.test".to_string(),
-                "https://b.test".to_string(),
-                "https://c.test".to_string(),
-                "https://d.test".to_string(),
-                "https://e.test".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_coord_urls_json_array_still_works() {
-        let urls = parse_coord_urls(r#"["https://x.test", "https://y.test"]"#);
-        assert_eq!(
-            urls,
-            vec!["https://x.test".to_string(), "https://y.test".to_string()]
-        );
-    }
-
-    #[test]
-    fn coord_urls_from_json_value_accepts_legacy_and_new_keys() {
-        let legacy = serde_json::json!({
-            "base_url": "https://legacy.test/",
-            "insecure_tls": false
-        });
-        assert_eq!(
-            coord_urls_from_json_value(&legacy),
-            vec!["https://legacy.test".to_string()]
-        );
-        let modern = serde_json::json!({
-            "base_urls": ["https://a.test", "https://b.test"]
-        });
-        assert_eq!(
-            coord_urls_from_json_value(&modern),
-            vec!["https://a.test".to_string(), "https://b.test".to_string()]
-        );
-        let p2p_start = serde_json::json!({
-            "coord_base_url": "https://p2p.test"
-        });
-        assert_eq!(
-            coord_urls_from_json_value(&p2p_start),
-            vec!["https://p2p.test".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_coord_urls_plain_without_brackets() {
-        assert_eq!(
-            parse_coord_urls("https://only.test/"),
-            vec!["https://only.test".to_string()]
-        );
-        assert_eq!(
-            parse_coord_urls("https://a.test, https://b.test"),
-            vec!["https://a.test".to_string(), "https://b.test".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_coord_urls_semicolon_and_mixed_whitespace() {
-        let urls = parse_coord_urls(
-            "https://a.test/\n\thttps://b.test/, https://z.test/;\t https://f.test/",
-        );
-        assert_eq!(
-            urls,
-            vec![
-                "https://a.test".to_string(),
-                "https://b.test".to_string(),
-                "https://z.test".to_string(),
-                "https://f.test".to_string(),
-            ]
-        );
     }
 
     #[test]

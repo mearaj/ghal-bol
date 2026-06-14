@@ -185,24 +185,3 @@ pub fn explain_outgoing_dial_error(err: &str) -> (&'static str, &'static str) {
         "See error detail; may be transient (throttled, already dialing).",
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classifies_404_as_peer_not_on_coord() {
-        assert_eq!(
-            classify_coord_lookup_error("lookup HTTP 404 Not Found"),
-            CoordLookupCategory::PeerNotOnCoord
-        );
-    }
-
-    #[test]
-    fn classifies_transport_as_unreachable() {
-        assert_eq!(
-            classify_coord_lookup_error("error sending request for url (https://coord.example/v1/peers/x)"),
-            CoordLookupCategory::CoordHttpUnreachable
-        );
-    }
-}

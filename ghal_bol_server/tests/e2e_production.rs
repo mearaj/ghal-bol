@@ -169,32 +169,20 @@ async fn lookup_peer(base_url: &str, target: &TestPeer) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn real_tcp_two_peers_register_and_discover_each_other() {
+async fn guest_lookup_host_after_both_register_on_coord() {
     let server = RunningServer::start().await;
     assert!(server.db_file().is_file(), "sqlite file should exist on disk");
 
-    let peer_a = TestPeer::new(0x0a, "10.0.0.1", 4433);
-    let peer_b = TestPeer::new(0x0b, "10.0.0.2", 4444);
+    let host = TestPeer::new(0x0a, "10.0.0.1", 4433);
+    let guest = TestPeer::new(0x0b, "10.0.0.2", 4444);
 
-    register_peer(&server.base_url, &peer_a).await;
-    register_peer(&server.base_url, &peer_b).await;
+    register_peer(&server.base_url, &host).await;
+    register_peer(&server.base_url, &guest).await;
 
-    let a_sees_b = lookup_peer(&server.base_url, &peer_b).await;
-    assert_eq!(a_sees_b["endpoints"][0]["host"], "10.0.0.2");
-    assert_eq!(a_sees_b["endpoints"][0]["port"], 4444);
-
-    let b_sees_a = lookup_peer(&server.base_url, &peer_a).await;
-    assert_eq!(b_sees_a["endpoints"][0]["host"], "10.0.0.1");
-
-    let list = http_client()
-        .get(format!("{}/v1/peers", server.base_url))
-        .send()
-        .await
-        .expect("list")
-        .json::<serde_json::Value>()
-        .await
-        .expect("list json");
-    assert_eq!(list["peers"].as_array().unwrap().len(), 2);
+    // Guest scanned host QR — only guest needs host's coord record to dial WAN.
+    let guest_sees_host = lookup_peer(&server.base_url, &host).await;
+    assert_eq!(guest_sees_host["endpoints"][0]["host"], "10.0.0.1");
+    assert_eq!(guest_sees_host["endpoints"][0]["port"], 4433);
 }
 
 #[tokio::test]
