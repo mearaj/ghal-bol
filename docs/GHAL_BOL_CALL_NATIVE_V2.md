@@ -251,8 +251,9 @@ See [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”. Summary:
 - **`ui_session_prepare_reconnect`** — 5s suppress during login unlock socket drop so calls are not torn down mid-unlock.
 - **`p2p_take_incoming_call_wake`** — Linux daemon notification tap → Flutter presents call UI.
 - **Flutter** — GTK X / call-screen pop / `AppLifecycleState.detached` also call force-end (belt-and-suspenders).
+- **Video call end (2026-06-15)** — `CallController._endLocal` stops native voice/video, releases **`CallVideoTexturePool`** textures on hangup (not on widget dispose), dismisses call UI without blocking on hangup RPC. Prevents orphan media and Linux Flutter crashes during/after video teardown. Detail: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) § “Flutter video textures and call end”, [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”.
 
-**Never ship:** UI gone but native media still up and peer still in a call.
+**Never ship:** UI gone but native media still up and peer still in a call. **Never ship:** releasing GPU call textures from `NativeCallVideoView.dispose` during an active call.
 
 ### Desktop device-test steps (Linux↔Linux)
 

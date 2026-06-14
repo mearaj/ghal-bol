@@ -312,6 +312,15 @@ be native voice). A call may run **native voice + WebRTC video** during transiti
 | **V2 Linux wiring** | **Done.** Native video replaces WebRTC when both peers advertise `native_v1` (Linux↔Linux, Linux↔Android, Android↔Android). |
 | **V3 Android / V4 iOS / V5 datagrams** | Not started. |
 
+### Flutter video textures and call end (Linux + Android)
+
+| Rule | Detail |
+|------|--------|
+| **Register** | `NativeCallVideoView` → `GhalBolP2p.callVideoTexture` → `CallVideoTextureBridge.register` (shm RGBA). Pooled per `(call_id, track)` in `CallVideoTexturePool`. |
+| **Release on hangup only** | `CallVideoTexturePool.releaseCall(call_id)` from `CallController._endLocal` / `_stopNativeCallIfStillActive` **after** `callVideoStop`. **`releaseWidget` is a no-op** — do not release on widget dispose/rebuild (PiP swap, route pop); that caused Linux Flutter **SIGSEGV** mid-call. |
+| **End order** | Stop UI phase → `callMediaStop` / `callVideoStop` → `CallDesktopNativeCamera.stop` → `releaseCall` → optional async `hangup` — UI must not block on RPC. |
+| **Privacy** | Same as voice: UI gone → `p2p_force_end_active_call` (daemon / `:p2p`). See [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”. |
+
 **Current shipping reality:** native **voice** (`native_v2`) + **native video** (`native_v1`)
 when negotiated; otherwise WebRTC video. Voice status:
 [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
