@@ -61,7 +61,8 @@ pub fn explain_coord_lookup_failure(
                 "WAN blocked until remote completes: bootstrap TCP → reservation accepted → \
                  coord registered. libp2p relay v2 requires destination reservation before \
                  circuit dial (rust-libp2p #2513 NoReservation). Check remote App log for \
-                 reservation/register — not opening chat room or sending new messages."
+                 reservation/register. Hub room open is NOT required — :p2p keeps outbox retry \
+                 and coord lookup on dm_upkeep/coord_tick (DESIGN.md)."
             } else {
                 "Finish own WAN path first: relay circuit listening + coord register, then \
                  lookup retries automatically."

@@ -454,13 +454,34 @@ On daemon platforms the hub mounts one [`ChatScreen`](../ghal_bol_ui/lib/chat_sc
 
 ## P2P lifecycle
 
+### Stream-first symmetric connect (canonical connect model)
+
+**Ideas reference only:** older [protonet](https://github.com/mearaj/protonet) (`protonet-as-reference`, 4+ years) had one `chatStreams` entry per contact and 1 Hz upkeep — useful as a **historical sketch**, not a target to mirror. Ghal Bol’s connect layer is **stream-first and stricter**: one live DM mux per contact, upkeep noop while the writer is up, coord + relay + mDNS for discovery (not Kademlia), and no `disconnect_peer` while a route may still work.
+
+The connect layer that made the original serverless libp2p build reliable: **both peers connected within a few seconds** with no coord server — only DHT bootstrap and the rules below. Ghal Bol **must keep this shape** in `:p2p` / daemon. WAN adds coord + relay for **discovery and dial addrs only**; it must not replace this model with competing dial policies.
+
+| Rule | Meaning |
+|------|---------|
+| **Both listen** | Each node accepts inbound libp2p connections and inbound DM streams (`/ghal-bol/msg/1.0.0`). |
+| **One stream per contact** | At most one live DM stream per contact, keyed by `public_key_hex` / derived PeerId (`dm_peer_stream_up`). While the stream writer is live, `dm_upkeep` **does nothing** for that contact — no coord lookup, no `disconnect_peer`, no identify dials. If both sides open outbound before either accept wins the writer slot, extra inbound streams are **read-only** (process DM frames; do not drain) until the mux closes. |
+| **Symmetric roles** | No permanent listener/caller. Either peer may accept inbound or open outbound; same stream handler on both paths. |
+| **Send = connect** | Outbound text uses: no stream → ensure libp2p connection → open one stream → write. UI never dials or owns connect policy. |
+| **Single upkeep owner** | `dm_upkeep` (~1s) walks contacts: **if stream up → skip**; else missing stream → one connect attempt; pending outbox drains when `chat_ready`. Discovery (coord lookup, mDNS) runs **only when stream is down**. |
+
+**PeerId** is derived from secp256k1 `public_key_hex` (already). **Discovery** is coord HTTP + relay (WAN) and mDNS (LAN) — a separate layer below stream-first.
+
+**Target latency:** when a route exists, `peer_connected` → `chat_ready` within **seconds**, as in the original build — not minutes of overlapping `swarm.dial` / coord lookup paths cancelling each other.
+
+**Violations (regressions):** racing LAN mDNS TCP and coord relay circuit dials before first connect; multiple code paths each dialling the same peer in the same second; extra “priority” flags that bypass in-flight defer and reintroduce races; Flutter dial policy. See [TRANSPORT.md](TRANSPORT.md) § “Stream-first symmetric connect”, § “LAN relay vs mDNS race”.
+
 1. **Unlock** — UI: FFI `createOrUnlockIdentity`; daemon: `unlock` with the same namespace and password (must match public key). Both call `set_p2p_handler_context(app_namespace)`.
 2. **`p2p_start`** — `dm_peers: [{ "public_key_hex": "…" }]`, `bootstrap_peers: []`, `app_namespace`. If the node is **already running**, native still refreshes handler context and re-registers all `dm_peers` from config (daemon may survive UI restarts).
 3. **Contact added** (scan) → `sync_contacts` **hot-registers** keys on the **running** node — **no full `p2p_stop` / restart** for roster changes.
-4. **Dial** → coord lookup + relay (WAN) or mDNS (LAN per-peer) toward configured PeerId (guest dials from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
-5. **Connect** → open `/ghal-bol/msg/1.0.0` (no separate key-exchange prelude).
-6. **`chat_ready`** → outbound stream writer up; safe to send frames.
-7. **Poll** → `p2p_poll` → JSON events; `dm_event_handler` updates on-disk stores; Flutter reloads roster/transcript via FFI.
+4. **Route** → coord lookup + relay (WAN) or mDNS (LAN) supplies dial addrs only ([stream-first](#stream-first-symmetric-connect-canonical-connect-model) — one dial path per peer, no races).
+5. **Connect** → libp2p `ConnectionEstablished` toward derived PeerId (guest from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
+6. **Stream** → open `/ghal-bol/msg/1.0.0` if none live (inbound accept or outbound open — same handler).
+7. **`chat_ready`** → outbound stream writer up; safe to send frames; outbox drains without opening a hub room.
+8. **Poll** → `p2p_poll` → JSON events; `dm_event_handler` updates on-disk stores; Flutter reloads roster/transcript via FFI.
 
 **Host after scan (asymmetric):** scanner’s roster updates immediately from QR. Host may show **zero** contacts until `peer_identified` or first inbound `dm_message` (text) creates/updates the row — poll must bump **roster** on those `stores_updated` events, not only preview.
 
@@ -506,14 +527,14 @@ Rules:
 1. **Always try WAN/coord** for configured contacts while the network is up. Do not prefer RFC1918 addrs from coord presence for a peer who is not on your LAN.
 2. **LAN path is opt-in by discovery** — mDNS sighting (or an explicit same-LAN signal), not “both devices use 192.168.1.x”.
 3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): skip blind `DialOpts::peer_id` dials; dial explicit coord relay multiaddrs only (throttled). If bootstrap TCP is still pending, use probe-style `listen_on(…/p2p-circuit)` — see [TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”.
-4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally. While a peer has a live mDNS LAN candidate or an in-flight LAN dial, **defer coord relay dials** for that peer even before the first connect — relay + mDNS TCP racing cancels dials and breaks LAN chat ([TRANSPORT.md](TRANSPORT.md) § “LAN relay vs mDNS race”).
+4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally. **Defer coord relay dials** only while a **direct LAN dial is in flight** or a **direct** (non-relay) link is already open — not merely because mDNS lists candidates. After the LAN in-flight window expires (4–6s per candidate), coord lookup + relay dial run **sequentially** ([stream-first](#stream-first-symmetric-connect-canonical-connect-model)). Pending outbox schedules coord lookup on upkeep; it must **not** start a parallel relay dial while LAN is in flight ([TRANSPORT.md](TRANSPORT.md) § “LAN relay vs mDNS race”). Do **not** replace an in-flight relay-circuit dial for **45s** (`circuit_dial_in_flight_blocks` — libp2p oneshot cancel).
 5. **Outbound dial to peer’s relay circuit** (coord lookup result): proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Own circuit is for **registering** your WAN addr so peers can find you; it is not a prerequisite for dialing an already-registered peer. Per-peer throttle: `should_routed_dial` in `dial_dm_peer_addr` ([TRANSPORT.md](TRANSPORT.md) § “Outbound peer relay dials vs own reservation”).
 
 Coord register/lookup on a **5s** tick; send-text triggers an immediate coord lookup when not connected. Throttles: coord `peer_not_on_server` backoff, 1–2s between dials per peer.
 
-**Caching (P2P):** avoid caches that can serve stale dial targets — especially anything that could race or override live mDNS or coord lookup. Only permitted on-disk cache: `ghalbol_relay.json` with invalidation on relay TCP failure. mDNS LAN uses a live candidate list, not a frozen “last addr”. See [TRANSPORT.md](TRANSPORT.md) § “Caching policy (P2P)”.
+**Caching (P2P):** avoid caches that can serve stale dial targets — especially anything that could race or override live mDNS or coord lookup. Only permitted on-disk cache: `ghalbol_relay.json` with invalidation on relay TCP failure. mDNS LAN uses a **live candidate set** (`peer_mdns_lan_candidate_addrs`): add on `Discovered`, remove on `Expired`/dial-fail — **not** a timer-driven dial cache and **not** port-ranked. **`dm_upkeep` must not re-dial LAN from that set**; LAN connect is mDNS event-driven only. See [TRANSPORT.md](TRANSPORT.md) § “Caching policy (P2P)”, § “Ephemeral LAN TCP ports”.
 
-**Anti-patterns (caused multi-minute stalls):** Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer; **uncoordinated coord-relay dial spam on CGNAT** (many `coord relay dial` per second — prevents bootstrap TCP from completing); **removing probe-style relay reservation on mobile-data** while Wi‑Fi tests still pass ([TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”); **blocking peer relay dials until own circuit listens** (`skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` — ~40s dead WAN on phones; use `should_routed_dial` only); **racing coord relay against mDNS LAN on Wi‑Fi before first connect** (gate `should_defer_coord_relay_for_lan` on `connected == true` — endless ~15s mDNS retries, no LAN chat); **coord lookup or mDNS dial caches** that stale-addrs can break P2P.
+**Anti-patterns (caused multi-minute stalls):** violating [stream-first symmetric connect](#stream-first-symmetric-connect-canonical-connect-model) (competing dial policies per peer); Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer; **racing relay against in-flight LAN** (`mdns dialing` then `coord dialing` within ~2s); **uncoordinated coord-relay dial spam on CGNAT** (many `coord relay dial` per second — prevents bootstrap TCP from completing); **removing probe-style relay reservation on mobile-data** while Wi‑Fi tests still pass ([TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”); **blocking peer relay dials until own circuit listens** (`skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` — ~40s dead WAN on phones; use `should_routed_dial` only); **racing coord relay against mDNS LAN on Wi‑Fi before first connect** (gate `should_defer_coord_relay_for_lan` on `connected == true` — endless ~15s mDNS retries, no LAN chat); **deferring relay merely because mDNS lists LAN candidates** (WAN fallback never runs when peers are on different networks); **coord lookup or mDNS dial caches** that stale-addrs can break P2P; **`dm_upkeep` re-dialing stale LAN TCP ports** from `peer_mdns_lan_candidate_addrs` after peer listen rebinding (symptom: same `mdns dialing …/tcp/PORT` every ~20s while `listen_addrs` shows a different port — see TRANSPORT.md § “Ephemeral LAN TCP ports”); **port-ranking heuristics** (highest port, preferred addr, TTL) instead of mDNS event lifecycle.
 
 **Network watch:** Android connectivity + profile poll → WAN relay recovery when coord URL is set. UI lock does not stop `:p2p` / daemon / poll.
 

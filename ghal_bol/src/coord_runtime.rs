@@ -1070,6 +1070,8 @@ fn try_register_presence() -> Result<(), String> {
     COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
     COORD_LAST_OK_MS.store(unix_ms_now(), Ordering::Relaxed);
     start_heartbeat_loop(pk);
+    // We are visible on coord — known peers should lookup/dial us; we lookup them on next upkeep.
+    crate::p2p::notify_dm_presence_wake();
     Ok(())
 }
 
