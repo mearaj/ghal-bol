@@ -279,11 +279,51 @@ mark_read_ack_confirmed(X)
 
 | Rule | Where |
 |------|--------|
-| Hub sets foreground + `app_ack_read_enabled` | `chat_hub_screen.dart` when room open |
+| Hub sets foreground + `app_ack_read_enabled` | `chat_hub_screen.dart` when room open — see **Linux desktop layout sync** below |
 | Chat must not set foreground when `hubPollsEvents` | `chat_screen.dart` |
 | Acks arrive via `ingestP2pEvent` | Do not also full-merge transcript on every `previewChangeCount` for the open room |
 | Delivery ticks | Debounced `mergeTranscriptFromNative(deliveryOnly: true)` on ack polls — not one FFI reload per retry |
 | Never send acks from Dart | Poll refreshes UI only |
+
+### Linux desktop — layout sync and read gate
+
+Native **`ack_read`** is gated on **`may_send_in_room_read_ack`**, which requires the hub to have pushed **`GhalBolUiSession.setRoom(pk)`** with read gate on. On Linux desktop the chat pane can be **visible** while native still thinks the room is closed if Flutter never ran that sync.
+
+**Shipping behaviour (`chat_hub_screen.dart`, `p2p_event_bridge.dart`, `ghal_bol_ui_session.dart`) — keep this:**
+
+| Mechanism | Rule |
+|-----------|------|
+| `_isHubChatRoomOpen` | **Split shell:** room is open when Chats tab + **`_selectedConversationKey`** (66-hex pk) — **not** `_splitChatEngaged`. **Narrow shell:** `_narrowShowRoom`. |
+| `_syncNativeForegroundIfLayoutChanged` | Called from `build()`; runs **post-frame** only. Sync when `_layoutSyncedRoomOpen != _isHubChatRoomOpen` — **not** on every frame when an RPC failed. |
+| `_layoutSyncedRoomOpen` / `_lastSyncedForegroundPk` | Updated after `_syncNativeForegroundPeerAsync` completes its `awaitApplied()` pump — including optimistic pre-set on select/history (`_layoutSyncedRoomOpen = _isHubChatRoomOpen` before sync) in the shipping tree. |
+| `node_ready` in hub | Poll refresh only (`setState`) — **no** extra session reapply from hub (bridge already runs `_reapplyDeferredSessionRpc` on `node_ready`). |
+| GTK minimize | `paused`/`hidden` do **not** clear room (minimize ≠ leave). |
+
+**Delivery/read ticks (sender view):** blue tick only after peer **`ack_read`** patches transcript on poll (`mergeTranscriptFromNative(deliveryOnly: true)`). Never promote ticks in Dart.
+
+**Open bug (ticks not fully fixed):** on Linux desktop, inbound mail sometimes gets **`ack_received`** but no **`ack_read sent`** while the chat pane is visibly open — native read gate is stale vs what the user sees. A tiny window **resize** can unblock it (post-frame `_syncNativeForegroundIfLayoutChanged`). **Do not** “fix” with fake ticks in Dart. A proper fix must not break P2P (see forbidden patch below).
+
+#### FORBIDDEN — reverted 2026-06-15 “`lastApplySucceeded`” hub session patch
+
+**Never reintroduce** (human or AI). Attempted in `chat_hub_screen.dart`, `p2p_event_bridge.dart`, `ghal_bol_ui_session.dart`; **reverted** after production break. This is **not** the current implementation.
+
+| Forbidden change | Why |
+|------------------|-----|
+| `GhalBolUiSession.lastApplySucceeded` / `uiSessionLastApplyOk` / `_uiSessionLastApplyOk` | Tracks RPC ok — then used to drive retry loops |
+| `_invalidateNativeForegroundSync()` on resume, `node_ready`, call end, `_attachHubChat` | Forces `_layoutSyncedRoomOpen = null` → burst of close/open sync |
+| `_syncNativeForegroundIfLayoutChanged` retry when `!lastApplySucceeded` (from `build()` every frame) | **Session RPC storm** on daemon state socket while P2P recovering |
+| Hub `node_ready`: invalidate + `reapplyUiSession()` + `_syncNativeForegroundPeer()` **on top of** bridge reapply | Duplicate `p2p_sync_ui_session`; fights libp2p upkeep |
+| `_attachHubChat` → extra `_syncNativeForegroundPeer()` | Double `room open` sync on every `ChatScreen` mount |
+| Only mark `_layoutSyncedRoomOpen` after native `ok: true`; remove optimistic pre-set before sync | Intended to fix read gate; paired with per-frame retry it **stopped working chat** |
+
+**Observed harm (adb logcat, Android + Linux, 2026-06-15):**
+
+- **`room closed → sync ui session (no room, leave drain)`** storms at hub bootstrap (×3–4 before user opens a chat) → native **`SetForegroundPeer(None)`** + leave drain while `:p2p` still starting.
+- Bursts of **`room open → sync ui session`** → foreground churn during relay negotiation.
+- **`stream_ready_count=0`**, **`dm connection closed`**, sends stuck at **`outbound waiting: not connected`** — P2P messaging **broken** (not a tick cosmetic issue).
+- UI **`conv=solo` / `pk=(none)` / `transcript reload … rows=0`** while sibling files under `{namespace}/ghal_bol/` still on disk (`contacts_v1.json`, `chat_transcript_v1.json`) — looks like **total data loss**; users create a **new identity** or hit **`identity_split` / `resetFirstTimeIdentity`** paths → **keystore effectively gone** without a single `delete` API call.
+
+**Canonical rule:** P2P session sync must stay **low volume**. Read-gate staleness on Linux desktop is a **known open bug**; the reverted patch traded it for **WAN/LAN chat death**. Fix read gate with a **narrow** retry (e.g. once on resume/`node_ready`), never per-frame `build()` loops or duplicate hub+bridge reapply.
 
 ### Regression symptoms (treat as bugs)
 
@@ -294,6 +334,10 @@ mark_read_ack_confirmed(X)
 | `patch outbound delivery=read` in a tight loop on unlock | Draining stale poll queue; fix emit + apply gates |
 | `Large outgoing transaction` / app dies copying logs | Log + poll storm; fix native volume first |
 | Blue tick never appears | Confirm `ack_received` not sent or not applied; foreground/room gates wrong — not “send more ack_read” |
+| Linux desktop: chat open, `ack_received` only, no `ack_read sent` | **Open bug:** hub→native read gate stale — tiny resize may unblock post-frame layout sync. **Do not** reintroduce the forbidden `lastApplySucceeded` patch (§ “FORBIDDEN — reverted 2026-06-15”). Never fake ticks in Dart. |
+| Android/iOS: chat dead, `stream_ready_count=0`, many `room closed` + `leave drain` at hub open | **Regression:** forbidden session-sync patch or hub foreground storm — check log for burst `sync_ui_session` / `set_foreground_peer (none)` before first `chat_ready`. |
+| App “empty” after session churn, `conv=solo rows=0`, files still on disk under `ghal_bol/` | UI/session desync — not directory wipe. Do not create new identity; fix foreground sync. See forbidden patch table above. |
+| Single tick while peer “read” it | Recipient never sent `ack_read` (room/gate closed on **their** device) — check their logs for `ack_read sent`, not sender UI |
 
 **Do not fix floods by:** larger poll batches, Dart-side ack filtering alone, or “dedupe” without fixing confirm + retry cadence in Rust.
 
@@ -314,6 +358,7 @@ mark_read_ack_confirmed(X)
 - **`stores_updated` on no-op** transcript patches (forces hub/chat FFI reload storms).
 - **Hub `previewChangeCount` → full `mergeTranscriptFromNative`** while the open chat already handles the same events in `ingestP2pEvent`.
 - Treating duplicate read acks as expected — fix the confirm loop and retry cadence instead.
+- **Forbidden 2026-06-15 hub session patch** — `lastApplySucceeded`, `_invalidateNativeForegroundSync`, per-frame `!lastApplySucceeded` retry in `_syncNativeForegroundIfLayoutChanged`, hub `node_ready` + `_attachHubChat` session reapply. **Broke P2P messaging** and indirectly caused identity/data loss UX. § “Linux desktop — layout sync” → “FORBIDDEN — reverted 2026-06-15”.
 
 ## UI session contract (integrator app ↔ native P2P)
 
@@ -388,8 +433,8 @@ Linux desktop: `paused`/`hidden` do **not** clear the room (minimize ≠ leave);
 
 | Layout | Room “open” when |
 |--------|------------------|
-| **Narrow** (phone) | Chats tab + `_narrowShowRoom` + selected contact |
-| **Split** (desktop) | Chats tab + selected contact + **`_splitChatEngaged`** (user opened chat column; list click can disengage) |
+| **Narrow** (phone) | Chats tab + `_narrowShowRoom` + selected contact (`_selectedConversationKey`) |
+| **Split** (desktop) | Chats tab + **`_selectedConversationKey`** (66-hex pk) — right pane shows [`ChatScreen`](../ghal_bol_ui/lib/chat_screen.dart) for that key. **Do not** gate on `_splitChatEngaged`; back/history can clear engaged while the thread stays visible (that caused recv-only + spurious leave drain). |
 
 `ChatScreen` **must not** call `p2pSetForegroundPeer` when `hubPollsEvents` is true (IndexedStack keeps chat mounted off-room).
 
@@ -567,13 +612,16 @@ When two contacts are both online the link must stay **steady** and recover inst
 | User action | Expected behaviour |
 |-------------|-------------------|
 | **Linux GTK close (X)** during call | Flutter `onWindowClosedByUser` → `_endLocal` + `_stopNativeCallIfStillActive`; hide window (app may stay in tray) |
-| **Leave call screen** (back / pop) while connected | `onCallScreenDismissedWhileLive` → hang up + stop media |
+| **Leave call screen** (back / pop) while connected | `onCallScreenDismissedWhileLive` → hang up + stop media + **`CallVideoTexturePool.releaseCall`** |
+| **Hangup / remote hangup / call end** | `_endLocal`: UI phase → `ended` immediately; **`callMediaStop` / `callVideoStop`** + **`CallVideoTexturePool.releaseCall`** (async ok); **`CallDesktopNativeCamera.stop`**; then `hangup` signal. **Do not** block UI teardown on RPC. |
 | **Ctrl+C / UI process kill** | UI sockets EOF → daemon `:p2p` **`ui_session_ended`** → `p2p_force_end_active_call` |
 | **`AppLifecycleState.detached`** (best-effort) | Flutter `notifyUiProcessExiting` → same force-end |
 | **Login unlock socket reconnect** | `ui_session_prepare_reconnect` suppresses hangup for ~5s (transient EOF only) |
 | **Logout / identity delete** | `p2p_stop` clears call state |
 
-Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p2p_force_end_active_call` (media stop + hangup + `call_active` / `call_state` clear + dismiss OS notification).
+**Linux native video teardown (2026-06-15 — do not regress):** GPU textures are released on **call end** via `CallVideoTexturePool.releaseCall(call_id)` after `callVideoStop`, **not** on `NativeCallVideoView.dispose` / PiP widget rebuild (`releaseWidget` is intentionally a no-op — releasing on dispose caused Flutter **SIGSEGV** on Linux during in-call texture updates). Ending a video call must stop capture, stop native video session, release textures, then dismiss call UI — never leave textures registered while tearing down the call screen.
+
+Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p2p_force_end_active_call` (media stop + hangup + `call_active` / `call_state` clear + dismiss OS notification), `call_controller.dart` `_endLocal` / `_stopNativeCallIfStillActive`.
 
 ### Incoming call while UI hidden (Linux)
 
@@ -583,11 +631,13 @@ Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p
 
 ### Regression checklist (manual — two devices)
 
-1. Connected **video** call → Linux **X** → peer must see hangup within seconds; no camera/mic on either side.
-2. Same with **`flutter run` Ctrl+C** during call (UI only) — daemon must hang up; Android peer must not stay in-call.
-3. Pop call screen during connected call → hangup on both sides.
-4. Incoming call with app hidden → notification tap → call UI visible and answerable.
-5. Login unlock (UI lock, not logout) during call → call **continues** (suppress window applies).
+1. Connected **video** call → Linux **X** → peer must see hangup within seconds; no camera/mic on either side; **no Flutter SIGSEGV** (textures released on end, not on widget dispose).
+2. Connected **video** call → **Hang up** button → same; call UI closes cleanly on both sides.
+3. Same with **`flutter run` Ctrl+C** during call (UI only) — daemon must hang up; Android peer must not stay in-call.
+4. Pop call screen during connected call → hangup on both sides.
+5. Incoming call with app hidden → notification tap → call UI visible and answerable.
+6. Login unlock (UI lock, not logout) during call → call **continues** (suppress window applies).
+7. Linux desktop chat open → inbound text → **`ack_read sent`** in logs without requiring window resize (**open bug** if resize needed — do **not** fix with forbidden `lastApplySucceeded` patch; § “FORBIDDEN — reverted 2026-06-15”).
 
 Wire detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § “UI session and privacy”.
 
