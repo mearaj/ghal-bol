@@ -293,7 +293,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       if (mk == "text") {
         final mid = ev["id"]?.toString().trim() ?? "";
-        if (mid.isNotEmpty && _uiSeenMessageIds.contains(mid)) {
+        if (mid.isNotEmpty &&
+            _uiSeenMessageIds.contains(mid) &&
+            _hasMessageId(mid)) {
           if (ev["stores_updated"] == true) {
             unawaited(mergeTranscriptFromNative(deliveryOnly: true));
           }
@@ -312,7 +314,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (ev["kind"]?.toString() == "dm_message" &&
         ev["msg_kind"]?.toString() == "text") {
       final mid = ev["id"]?.toString().trim() ?? "";
-      if (mid.isNotEmpty && _uiSeenMessageIds.contains(mid)) return;
+      if (mid.isNotEmpty &&
+          _uiSeenMessageIds.contains(mid) &&
+          _hasMessageId(mid)) {
+        return;
+      }
     }
     _handleEvent(ev);
     if (widget.hubPollsEvents &&
@@ -603,6 +609,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
     _drainP2pAfterFrame();
     if (widget.hubPollsEvents) {
+      final key = _conversationKey();
+      if (key == "solo") return;
       ChatTranscriptStore.invalidateThreadCache(
         appNamespace: _resolvedAppNamespace,
         conversationKeys: _conversationKeysForLoad(),
@@ -656,6 +664,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String _threadKeyForWidget(ChatScreen w) {
     final hub = w.hubThreadKey?.trim().toLowerCase() ?? "";
     if (isValidPublicKeyHex(hub)) return hub;
+    final rc = _roomContact;
+    if (rc != null && rc.conversationKey.isNotEmpty) return rc.conversationKey;
     return w.activeContact?.conversationKey ?? "";
   }
 
@@ -664,6 +674,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (hub != null) return hub;
     final learned = _learnedRemotePublicKeyHex?.trim();
     if (isValidPublicKeyHex(learned)) return learned;
+    final rc = _roomContact;
+    if (rc != null) {
+      final pk = resolvePublicKeyHex(storedHex: rc.publicKeyHex);
+      if (isValidPublicKeyHex(pk)) return pk;
+    }
     final ac = widget.activeContact;
     if (ac != null) {
       final pk = resolvePublicKeyHex(storedHex: ac.publicKeyHex);
@@ -697,6 +712,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String _conversationKey() {
     final hub = _hubThreadPublicKeyHex();
     if (hub != null) return hub;
+    final rc = _roomContact;
+    if (rc != null && rc.conversationKey.isNotEmpty) return rc.conversationKey;
     final ac = widget.activeContact;
     if (ac != null && ac.conversationKey.isNotEmpty) return ac.conversationKey;
     final peer = _recipientPublicKeyHex();
@@ -711,6 +728,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (hub != null) {
       keys.addAll(SavedContact(publicKeyHex: hub).allConversationKeys);
     }
+    final rc = _roomContact;
+    if (rc != null) keys.addAll(rc.allConversationKeys);
     final ac = widget.activeContact;
     if (ac != null) keys.addAll(ac.allConversationKeys);
     final pk = _recipientPublicKeyHex();
@@ -876,6 +895,25 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  List<_ChatLine> _outboundLinesPendingOnDisk(List<StoredChatLine> loaded) {
+    final loadedMids = <String>{
+      for (final r in loaded)
+        if (r.messageId?.trim().isNotEmpty ?? false) r.messageId!.trim(),
+    };
+    final loadedOutboundBubbles = <String>{
+      for (final r in loaded.where((r) => r.outgoing))
+        "${r.text.trim()}|${r.createdAtMs ?? 0}",
+    };
+    return _lines.where((l) {
+      if (!l._persisted || !l.outgoing) return false;
+      final mid = l.messageId?.trim() ?? "";
+      if (mid.isNotEmpty && loadedMids.contains(mid)) return false;
+      final bubble = _outboundBubbleKey(l);
+      if (bubble != null && loadedOutboundBubbles.contains(bubble)) return false;
+      return true;
+    }).toList();
+  }
+
   /// Paint cached transcript synchronously (hub warms cache on contact select).
   bool _paintCachedTranscriptIfAny() {
     final canon = _conversationKey();
@@ -893,9 +931,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final loaded = cached.map(_lineFromStored).toList();
     _seedAckStateFromTranscript(cached);
     setState(() {
-      final optimistic = _lines
-          .where((l) => l._persisted && l.outgoing && (l.messageId?.trim().isEmpty ?? true))
-          .toList();
+      final optimistic = _outboundLinesPendingOnDisk(cached);
       _lines.removeWhere((l) => l._persisted);
       _lines.addAll(loaded);
       for (final o in optimistic) {
@@ -1248,6 +1284,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _reloadTranscriptForConversation({bool force = false}) async {
     final key = _conversationKey();
+    if (widget.hubPollsEvents &&
+        key == "solo" &&
+        _transcriptLoadedKey != null &&
+        _transcriptLoadedKey != "solo") {
+      return;
+    }
     if (!force && _transcriptLoadedKey == key) return;
     if (_loadingTranscript) return;
     final hasVisibleLines = _lines.any((l) => !l.system);
@@ -1267,9 +1309,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (!mounted || gen != _reloadGeneration) return;
       final loaded = rows.map(_lineFromStored).toList();
       setState(() {
-        final optimistic = _lines
-            .where((l) => l._persisted && l.outgoing && (l.messageId?.trim().isEmpty ?? true))
-            .toList();
+        final optimistic = _outboundLinesPendingOnDisk(rows);
         // On room switch always replace. Never wipe visible rows when native returns empty
         // during same-room refresh (transient read / daemon cold start) — that looked like
         // sudden message deletion.
@@ -1778,7 +1818,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     });
     _scheduleSaveTranscript();
     if (widget.hubPollsEvents) {
+      ChatTranscriptStore.invalidateThreadCache(
+        appNamespace: _resolvedAppNamespace,
+        conversationKeys: _conversationKeysForLoad(),
+      );
       P2pEventBridge.instance.drainNow();
+      unawaited(mergeTranscriptFromNative());
     }
     return true;
   }

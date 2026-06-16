@@ -124,6 +124,15 @@ class P2pEventBridge {
     _scheduleUiSessionApply();
   }
 
+  /// Re-send the current desired UI session to native (`p2p_sync_ui_session`).
+  ///
+  /// Use when the hub still shows the room open but `:p2p` read gate may be stale
+  /// (Linux desktop) — not a per-frame retry; call from debounced poll hooks only.
+  void nudgeUiSessionSnapshot() {
+    if (!GhalBolP2p.isAvailable) return;
+    _scheduleUiSessionApply();
+  }
+
   /// Wait until [setForegroundConversation] / [setUiVisible] has applied in native.
   Future<void> awaitForegroundApplied() => awaitUiSessionApplied();
 

@@ -31,11 +31,13 @@ class GhalBolP2pService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var daemonThread: Thread? = null
     private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
+    private var wifiConnectivityCallback: ConnectivityManager.NetworkCallback? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var lastDefaultNetwork: Network? = null
     private var lastTransportsKey: String = ""
     private val networkNotifyRunnable = Runnable {
         try {
+            acquireMulticastLock()
             P2pDaemonNative.notifyNetworkChange()
         } catch (e: Throwable) {
             android.util.Log.w("GhalBol", "notifyNetworkChange: ${e.message}")
@@ -169,6 +171,8 @@ class GhalBolP2pService : Service() {
             } else {
                 cm.registerNetworkCallback(NetworkRequest.Builder().build(), callback, mainHandler)
             }
+            registerWifiNetworkCallback(cm)
+            notifyP2pNetworkChange()
         } catch (e: Throwable) {
             android.util.Log.w("GhalBol", "connectivity callback: ${e.message}")
             connectivityCallback = null
@@ -186,6 +190,35 @@ class GhalBolP2pService : Service() {
             }
         }
         connectivityCallback = null
+        wifiConnectivityCallback?.let {
+            try {
+                cm.unregisterNetworkCallback(it)
+            } catch (_: Throwable) {
+            }
+        }
+        wifiConnectivityCallback = null
+    }
+
+    /** Wi‑Fi link up/down even when cellular remains the default network. */
+    private fun registerWifiNetworkCallback(cm: ConnectivityManager) {
+        if (wifiConnectivityCallback != null) return
+        val request =
+            NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+        val callback =
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) = notifyP2pNetworkChange()
+
+                override fun onLost(network: Network) = notifyP2pNetworkChange()
+            }
+        wifiConnectivityCallback = callback
+        try {
+            cm.registerNetworkCallback(request, callback, mainHandler)
+        } catch (e: Throwable) {
+            android.util.Log.w("GhalBol", "wifi network callback: ${e.message}")
+            wifiConnectivityCallback = null
+        }
     }
 
     private fun notifyP2pNetworkChange() {

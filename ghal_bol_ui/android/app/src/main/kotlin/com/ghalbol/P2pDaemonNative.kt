@@ -49,7 +49,7 @@ object P2pDaemonNative {
     @JvmStatic
     external fun runDaemon(socketAbsolutePath: String): Boolean
 
-    /** Hint libp2p that Wi‑Fi/mobile/default route changed (call from `:p2p` process). */
+    /** Hint libp2p that the OS network changed — Rust probes ConnectivityManager (`:p2p` only). */
     @JvmStatic
     external fun notifyNetworkChange()
 

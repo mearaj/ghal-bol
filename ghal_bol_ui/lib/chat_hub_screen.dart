@@ -119,15 +119,19 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       _navTab = entry.navTab;
       _narrowShowRoom = entry.narrowShowRoom;
       _splitChatEngaged = entry.splitChatEngaged;
-      _selectedConversationKey = entry.conversationKey;
-      final key = entry.conversationKey;
-      if (key == null || key.isEmpty) {
+      final incomingKey = entry.conversationKey?.trim();
+      if (incomingKey != null && incomingKey.isNotEmpty) {
+        _selectedConversationKey = incomingKey;
+        if (_openRoomContact?.conversationKey != incomingKey) {
+          _openRoomContact = _selectedContact;
+        }
+      } else if (!entry.narrowShowRoom && !entry.splitChatEngaged && _navTab == 0) {
+        // Roster-only back — keep stable thread key for mounted [ChatScreen] (DESIGN.md hubThreadKey).
+      } else {
+        _selectedConversationKey = null;
         _openRoomContact = null;
-      } else if (_openRoomContact?.conversationKey != key) {
-        _openRoomContact = _selectedContact;
       }
     });
-    _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
     _syncNativeForegroundPeer();
   }
 
@@ -150,7 +154,6 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       setState(() => _navTab = 0);
     }
     _hubHistory.replaceTop(_hubHistorySnapshot());
-    _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
     _syncNativeForegroundPeer();
   }
 
@@ -212,6 +215,12 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   bool? _layoutSyncedRoomOpen;
   String? _lastSyncedForegroundPk;
   bool _layoutSyncPostFrameScheduled = false;
+  Timer? _layoutCloseDebounce;
+  Timer? _roomOpenConfirmTimer;
+  Timer? _readGateNudgeDebounce;
+  Timer? _readGateKeepaliveTimer;
+  int _lastReadGateNudgeMs = 0;
+  static const _readGateNudgeMinGapMs = 1500;
 
   void _syncNativeForegroundPeer() {
     unawaited(_syncNativeForegroundPeerAsync());
@@ -260,12 +269,85 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       }
       final roomNow = _isHubChatRoomOpen(context);
       if (_layoutSyncedRoomOpen == roomNow) return;
+      if (!roomNow) {
+        // Debounce room-close on resize flicker — must not run leave drain spuriously.
+        _layoutCloseDebounce?.cancel();
+        _layoutCloseDebounce = Timer(const Duration(milliseconds: 120), () {
+          if (!mounted) return;
+          if (_isHubChatRoomOpen(context)) return;
+          if (_layoutSyncedRoomOpen == false) return;
+          _syncNativeForegroundPeer();
+        });
+        return;
+      }
+      _layoutCloseDebounce?.cancel();
       _syncNativeForegroundPeer();
+    });
+  }
+
+  bool _openRoomMatchesPeerKey(String pk) {
+    if (pk.isEmpty) return false;
+    final sel = _selectedConversationKey?.trim().toLowerCase() ?? "";
+    if (sel.isNotEmpty && publicKeysEqual(sel, pk)) return true;
+    final fg = _nativeForegroundPublicKey();
+    return fg != null && publicKeysEqual(fg, pk);
+  }
+
+  /// Linux desktop: `:p2p` read gate can drift while chat pane stays visible.
+  /// Re-run `p2p_sync_ui_session` (debounced) — same effect as resize, without layout churn.
+  void _scheduleReadGateNudge({String? reason}) {
+    if (kIsWeb || !Platform.isLinux) return;
+    if (!_nativeForegroundRoomOpen(context)) return;
+    _readGateNudgeDebounce?.cancel();
+    _readGateNudgeDebounce = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted || !_nativeForegroundRoomOpen(context)) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - _lastReadGateNudgeMs < _readGateNudgeMinGapMs) return;
+      _lastReadGateNudgeMs = now;
+      AppLog.instance.flow(
+        "Hub",
+        "read gate nudge${reason != null ? " ($reason)" : ""}",
+      );
+      GhalBolUiSession.setVisible(true);
+      GhalBolUiSession.nudge();
+    });
+  }
+
+  void _syncReadGateKeepalive(bool roomOpen) {
+    if (kIsWeb || !Platform.isLinux || !roomOpen) {
+      _readGateKeepaliveTimer?.cancel();
+      _readGateKeepaliveTimer = null;
+      return;
+    }
+    if (_readGateKeepaliveTimer != null) return;
+    _readGateKeepaliveTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      _scheduleReadGateNudge(reason: "keepalive");
+    });
+  }
+
+  /// One deferred re-push of the open room — covers native miss before P2P/daemon ready.
+  /// Single shot per room-open epoch; not a per-frame retry (DESIGN.md forbidden patch).
+  void _scheduleRoomOpenConfirmSync(int epoch) {
+    _roomOpenConfirmTimer?.cancel();
+    _roomOpenConfirmTimer = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted || epoch != _foregroundSyncEpoch) return;
+      if (!_nativeForegroundRoomOpen(context)) return;
+      final pk = _nativeForegroundPublicKey();
+      if (pk == null) return;
+      GhalBolUiSession.setVisible(true);
+      GhalBolUiSession.setRoom(pk);
+      unawaited(GhalBolUiSession.awaitApplied().then((_) {
+        if (mounted && epoch == _foregroundSyncEpoch) {
+          _layoutSyncedRoomOpen = true;
+          _lastSyncedForegroundPk = pk;
+        }
+      }));
     });
   }
 
   Future<void> _syncNativeForegroundPeerAsync() async {
     final epoch = ++_foregroundSyncEpoch;
+    _roomOpenConfirmTimer?.cancel();
     final roomOpen = _nativeForegroundRoomOpen(context);
     if (!roomOpen) {
       if (_layoutSyncedRoomOpen == false && _lastSyncedForegroundPk == null) {
@@ -280,14 +362,12 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       await GhalBolUiSession.awaitApplied();
       if (mounted && epoch == _foregroundSyncEpoch) {
         _layoutSyncedRoomOpen = false;
+        _syncReadGateKeepalive(false);
       }
       return;
     }
     final pk = _nativeForegroundPublicKey();
     if (pk == null) return;
-    if (_layoutSyncedRoomOpen == true && _lastSyncedForegroundPk == pk) {
-      return;
-    }
     AppLog.instance.flow(
       "Hub",
       "room open → sync ui session pk=${pk.length > 16 ? "${pk.substring(0, 8)}…" : pk}",
@@ -296,11 +376,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     if (c != null) {
       unawaited(ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c));
     }
+    GhalBolUiSession.setVisible(true);
     GhalBolUiSession.setRoom(pk);
     await GhalBolUiSession.awaitApplied();
     if (mounted && epoch == _foregroundSyncEpoch) {
       _layoutSyncedRoomOpen = true;
       _lastSyncedForegroundPk = pk;
+      _scheduleRoomOpenConfirmSync(epoch);
+      _syncReadGateKeepalive(true);
     }
   }
 
@@ -323,6 +406,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     super.initState();
     _onCallEndedReloadChat = () {
       _attachedHubChat?.onHubReattached(reloadTranscript: true);
+      _syncNativeForegroundPeer();
     };
     CallController.addCallEndedListener(_onCallEndedReloadChat);
     _hubHistory.reset(_hubHistorySnapshot());
@@ -350,7 +434,15 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
         _attachedHubChat?.onHubReattached(reloadTranscript: true);
         P2pEventBridge.instance.drainNow();
       case AppLifecycleState.inactive:
-        // Android: shade, task switcher, brief focus loss — stop **new** read receipts.
+        // Android: shade, task switcher — stop new read receipts. Linux: window drag /
+        // brief focus loss during resize must not clear read gate (room stays on screen).
+        if (!kIsWeb && Platform.isLinux) {
+          AppLog.instance.flow(
+            "Hub",
+            "lifecycle inactive on Linux — read gate unchanged (room on screen)",
+          );
+          break;
+        }
         AppLog.instance.flow("Hub", "lifecycle inactive → ui not visible (room unchanged)");
         GhalBolUiSession.setVisible(false);
       case AppLifecycleState.paused:
@@ -395,6 +487,10 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     WidgetsBinding.instance.removeObserver(this);
     _rosterSyncDebounce?.cancel();
     _contactsPreviewDebounce?.cancel();
+    _layoutCloseDebounce?.cancel();
+    _roomOpenConfirmTimer?.cancel();
+    _readGateNudgeDebounce?.cancel();
+    _readGateKeepaliveTimer?.cancel();
     ContactStore.rosterChangeCount.removeListener(_onRosterChanged);
     ContactStore.changeCount.removeListener(_onContactsUiChanged);
     ContactStore.previewChangeCount.removeListener(_onPreviewPollChanged);
@@ -416,6 +512,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   void _onPreviewPollChanged() {
+    _scheduleReadGateNudge(reason: "preview");
     _contactsPreviewDebounce?.cancel();
     _contactsPreviewDebounce = Timer(const Duration(milliseconds: 400), () {
       unawaited(_reloadContactsListOnly());
@@ -591,9 +688,12 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       }
     });
     _recordHubNavigation();
-    _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
     _syncNativeForegroundPeer();
     P2pEventBridge.instance.drainNow();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _attachedHubChat?.onHubReattached();
+    });
     unawaited(ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c));
     unawaited(
       ChatTranscriptStore.warmThreadCache(
@@ -630,6 +730,21 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       if (sel.isNotEmpty && publicKeysEqual(sel, pk)) {
         AppLog.instance.flow("Hub", "selected peer disconnected pk=${pk.substring(0, 8)}…");
         _attachedHubChat?.onHubPeerLinkLost();
+      }
+    }
+    if (kind == "dm_message") {
+      final msgKind = ev["msg_kind"]?.toString() ?? "";
+      if (msgKind == "text") {
+        final pk = contactKeyFromEvent(ev);
+        if (_openRoomMatchesPeerKey(pk)) {
+          _scheduleReadGateNudge(reason: "inbound_text");
+        }
+      }
+    }
+    if (kind == "chat_ready" || kind == "peer_connected") {
+      final pk = streamContactKeyFromEvent(ev);
+      if (_openRoomMatchesPeerKey(pk)) {
+        _scheduleReadGateNudge(reason: kind ?? "stream");
       }
     }
     if (kind == "node_ready") {
@@ -769,7 +884,6 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
         }
       });
       _recordHubNavigation();
-      _layoutSyncedRoomOpen = _isHubChatRoomOpen(context);
       _syncNativeForegroundPeer();
       if (saved.hasFullKeys) {
         unawaited(P2pNetworkCoordinator.registerContacts([saved]));

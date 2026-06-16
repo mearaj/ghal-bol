@@ -22,6 +22,8 @@ pub(crate) struct LocalNetworkProfile {
     pub primary_cgnat_ipv4: Option<std::net::Ipv4Addr>,
     /// RFC1918 address on Wi‑Fi/LAN when present.
     pub primary_rfc1918_ipv4: Option<std::net::Ipv4Addr>,
+    /// RFC1918 on a Wi‑Fi-named interface — LAN even when rmnet/CGNAT stays visible.
+    pub has_rfc1918_on_wifi: bool,
     /// Direct public IPv4 on an interface (VPS / rare home WAN).
     pub primary_public_ipv4: Option<std::net::Ipv4Addr>,
 }
@@ -30,6 +32,7 @@ pub(crate) struct LocalNetworkProfile {
 pub(crate) fn network_handover_key(p: &LocalNetworkProfile) -> NetworkHandoverKey {
     NetworkHandoverKey {
         active_lan: p.has_active_lan(),
+        rfc1918_on_wifi: p.has_rfc1918_on_wifi,
         mobile_path: p.on_mobile_data_path(),
         mode: p.mode_label(),
         cgnat: p.primary_cgnat_ipv4,
@@ -41,6 +44,7 @@ pub(crate) fn network_handover_key(p: &LocalNetworkProfile) -> NetworkHandoverKe
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NetworkHandoverKey {
     pub active_lan: bool,
+    pub rfc1918_on_wifi: bool,
     pub mobile_path: bool,
     pub mode: &'static str,
     pub cgnat: Option<std::net::Ipv4Addr>,
@@ -76,13 +80,16 @@ pub(crate) fn wan_coord_listen_fingerprint(addrs: &[Multiaddr]) -> Vec<String> {
 impl LocalNetworkProfile {
     /// Wi‑Fi, tether, or wired LAN — prefer mDNS/direct TCP; do not treat as cellular-only.
     pub(crate) fn has_active_lan(&self) -> bool {
+        if self.has_rfc1918_on_wifi {
+            return true;
+        }
         if self.has_rfc1918_ipv4
             && (self.has_wifi_iface || self.has_tether_iface || self.has_usb_iface)
         {
             return true;
         }
-        // Desktop wired Ethernet (and similar): RFC1918 without a cellular-only path.
-        if self.has_rfc1918_ipv4 && !self.on_mobile_data_path() {
+        // Desktop wired Ethernet (and similar): RFC1918 without cellular/CGNAT-only path.
+        if self.has_rfc1918_ipv4 && !self.has_cellular_iface && !self.has_cgnat_ipv4 {
             return true;
         }
         false
@@ -143,6 +150,21 @@ impl LocalNetworkProfile {
     }
 }
 
+/// Android Wi‑Fi return can lag `if_addrs` while libp2p is already listening on RFC1918 TCP.
+/// Treat any live RFC1918 DM listen as active LAN for handover (not a dial cache).
+pub(crate) fn effective_network_profile(
+    detected: LocalNetworkProfile,
+    has_rfc1918_dm_listen: bool,
+) -> LocalNetworkProfile {
+    if detected.has_active_lan() || !has_rfc1918_dm_listen {
+        return detected;
+    }
+    let mut p = detected;
+    p.has_rfc1918_ipv4 = true;
+    p.has_rfc1918_on_wifi = true;
+    p
+}
+
 fn iface_name_is_wifi(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("wlan") || n.contains("wifi") || n.starts_with("wl")
@@ -176,7 +198,8 @@ pub(crate) fn detect_local_network_profile() -> LocalNetworkProfile {
     };
     for iface in ifs {
         let name = iface.name.as_str();
-        if iface_name_is_wifi(name) {
+        let is_wifi = iface_name_is_wifi(name);
+        if is_wifi {
             p.has_wifi_iface = true;
         }
         if iface_name_is_cellular(name) {
@@ -201,6 +224,9 @@ pub(crate) fn detect_local_network_profile() -> LocalNetworkProfile {
                 } else if ip.is_private() {
                     p.has_rfc1918_ipv4 = true;
                     p.primary_rfc1918_ipv4 = Some(ip);
+                    if is_wifi {
+                        p.has_rfc1918_on_wifi = true;
+                    }
                 } else if is_public_bootstrap_ipv4(ip) {
                     p.has_public_ipv4 = true;
                     p.primary_public_ipv4 = Some(ip);
@@ -800,6 +826,47 @@ mod tests {
                 .unwrap();
         assert!(relay_bootstrap_family_rank(&v4, false, false) > relay_bootstrap_family_rank(&v6, false, false));
         assert!(relay_bootstrap_family_rank(&v4, false, true) < relay_bootstrap_family_rank(&v6, false, true));
+    }
+
+    #[test]
+    fn effective_profile_infers_lan_when_wifi_listen_up_before_if_addrs() {
+        let detected = LocalNetworkProfile {
+            has_wifi_iface: true,
+            has_cellular_iface: true,
+            has_cgnat_ipv4: true,
+            ..Default::default()
+        };
+        assert!(!detected.has_active_lan());
+        let effective = effective_network_profile(detected, true);
+        assert!(effective.has_active_lan());
+        assert!(effective.has_rfc1918_on_wifi);
+        assert_eq!(effective.mode_label(), "lan");
+    }
+
+    #[test]
+    fn effective_profile_unchanged_without_lan_listen() {
+        let detected = LocalNetworkProfile {
+            has_wifi_iface: true,
+            has_cellular_iface: true,
+            has_cgnat_ipv4: true,
+            ..Default::default()
+        };
+        let effective = effective_network_profile(detected, false);
+        assert!(!effective.has_active_lan());
+        assert_eq!(effective.mode_label(), "mobile-data");
+    }
+
+    #[test]
+    fn effective_profile_infers_lan_from_listen_without_wifi_iface_in_if_addrs() {
+        let detected = LocalNetworkProfile {
+            has_cellular_iface: true,
+            has_cgnat_ipv4: true,
+            ..Default::default()
+        };
+        assert!(!detected.has_wifi_iface);
+        let effective = effective_network_profile(detected, true);
+        assert!(effective.has_active_lan());
+        assert_eq!(effective.mode_label(), "lan");
     }
 
     #[test]

@@ -538,13 +538,19 @@ fn listen_addrs_to_coord_endpoints(addrs: &[Multiaddr]) -> Vec<CoordEndpoint> {
         eps.extend(multiaddr_to_coord_endpoints(ma));
     }
     // With coord, only relay (or public TCP) is WAN-dialable — never CGNAT-only presence.
-    if eps.is_empty() && !has_relay && !coord_is_configured() {
+    if eps.is_empty() && !has_relay {
         for ma in addrs {
-            if !is_coord_presence_tcp_fallback(ma) {
+            if coord_is_configured() {
+                // Relay handover on Wi‑Fi: RFC1918 LAN TCP keeps same-subnet coord lookup alive.
+                if !is_coord_lan_tcp_fallback(ma) {
+                    continue;
+                }
+            } else if !is_coord_presence_tcp_fallback(ma) {
                 continue;
-            }
-            // RFC1918 is LAN-only — mDNS, not coord (misleading for WAN peers).
-            if let Some(ip) = crate::p2p::network_transport::ipv4_from_ma_str(&ma.to_string()) {
+            } else if let Some(ip) =
+                crate::p2p::network_transport::ipv4_from_ma_str(&ma.to_string())
+            {
+                // RFC1918 is LAN-only — mDNS, not coord (misleading for WAN peers).
                 if ip.is_private() && !crate::p2p::network_transport::is_cgnat_ipv4(ip) {
                     continue;
                 }
@@ -684,8 +690,9 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
         .filter(|ma| {
             // RFC1918 Wi‑Fi LAN TCP is registered alongside relay so coord lookup can reach
             // same-subnet peers when mDNS receive is flaky (common on Android OEM Wi‑Fi).
+            // Also alone during relay handover so Wi‑Fi flap does not clear all endpoints.
             if is_coord_lan_tcp_fallback(ma) {
-                return has_relay;
+                return true;
             }
             if has_relay || coord_is_configured() {
                 return crate::p2p::network_transport::is_coord_ipv4_relay_listen(ma)
@@ -931,7 +938,10 @@ fn endpoints_for_coord_register(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
         return out;
     }
     if coord_is_configured() {
-        // CGNAT/LAN TCP is not dialable over WAN; wait for relay reservation.
+        // Relay handover on Wi‑Fi: LAN TCP alone keeps same-subnet coord lookup working.
+        if let Some(lan) = pick_coord_lan_tcp_endpoint(&eps) {
+            return vec![lan];
+        }
         Vec::new()
     } else {
         eps
@@ -960,6 +970,19 @@ mod endpoints_for_coord_register_tests {
         assert_eq!(out.len(), 2);
         assert!(out.iter().any(|e| e.scheme == "libp2p"));
         assert!(out.iter().any(|e| e.scheme == "tcp" && e.host == "192.168.1.38"));
+    }
+
+    #[test]
+    fn lan_wifi_tcp_only_during_relay_handover() {
+        let eps = vec![CoordEndpoint {
+            scheme: "tcp".into(),
+            host: "192.168.1.38".into(),
+            port: 43411,
+        }];
+        let out = endpoints_for_coord_register(eps);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].host, "192.168.1.38");
+        assert_eq!(out[0].port, 43411);
     }
 }
 
@@ -1557,5 +1580,21 @@ mod tests {
         // STORY.md: seamless handover — heartbeats + presence stay until new circuit registers.
         assert!(COORD_REGISTERED.load(Ordering::Relaxed));
         assert!(!g.heartbeat_stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn rebuild_registers_lan_wifi_tcp_during_relay_handover() {
+        let _guard = coord_test_setup();
+        let g = coord_globals();
+        if let Ok(mut u) = g.base_urls.lock() {
+            *u = vec!["https://example.test".into()];
+        }
+        let lan: Multiaddr = "/ip4/192.168.1.38/tcp/43411".parse().unwrap();
+        rebuild_coord_endpoints_from_listen(&[lan]);
+        let endpoints = g.endpoints.lock().unwrap().clone();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].scheme, "tcp");
+        assert_eq!(endpoints[0].host, "192.168.1.38");
+        assert_eq!(endpoints[0].port, 43411);
     }
 }

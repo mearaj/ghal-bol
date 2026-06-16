@@ -144,7 +144,6 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
             Ok(serde_json::json!({ "ok": true }))
         }
         "p2p_is_running" => Ok(p2p_runtime::p2p_is_running()),
-        "p2p_notify_network_change" => Ok(p2p_runtime::p2p_notify_network_change()),
         "p2p_poll" => Ok(match p2p_runtime::p2p_poll_event() {
             Some(ev) => serde_json::json!({ "ok": true, "event": ev }),
             None => serde_json::json!({ "ok": true, "event": null }),

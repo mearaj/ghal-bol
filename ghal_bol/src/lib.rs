@@ -66,6 +66,8 @@ mod incoming_call_android;
 mod android_daemon;
 #[cfg(target_os = "android")]
 mod android_jni_cache;
+#[cfg(target_os = "android")]
+mod android_network;
 #[cfg(not(target_arch = "wasm32"))]
 mod transcript_ffi;
 mod storage;

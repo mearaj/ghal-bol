@@ -287,21 +287,45 @@ mark_read_ack_confirmed(X)
 
 ### Linux desktop — layout sync and read gate
 
-Native **`ack_read`** is gated on **`may_send_in_room_read_ack`**, which requires the hub to have pushed **`GhalBolUiSession.setRoom(pk)`** with read gate on. On Linux desktop the chat pane can be **visible** while native still thinks the room is closed if Flutter never ran that sync.
+Native **`ack_read`** is gated on **`may_send_in_room_read_ack`** in **`ghal_bol`** (`chat_server.rs`): `app_ui_visible` + `app_ack_read_enabled` + foreground peer on the **`:p2p`/daemon** thread. Flutter pushes that snapshot via **`p2p_sync_ui_session`** only (`GhalBolUiSession`).
+
+**Verified 2026-06-15:** Linux desktop ↔ Android LAN chat **>10 minutes** continuous (`conn=true`, `stream=true`), delivery/read ticks without window resize. Root cause of the prior “resize fixes ticks” bug was documented in App log (see below).
 
 **Shipping behaviour (`chat_hub_screen.dart`, `p2p_event_bridge.dart`, `ghal_bol_ui_session.dart`) — keep this:**
 
 | Mechanism | Rule |
 |-----------|------|
 | `_isHubChatRoomOpen` | **Split shell:** room is open when Chats tab + **`_selectedConversationKey`** (66-hex pk) — **not** `_splitChatEngaged`. **Narrow shell:** `_narrowShowRoom`. |
-| `_syncNativeForegroundIfLayoutChanged` | Called from `build()`; runs **post-frame** only. Sync when `_layoutSyncedRoomOpen != _isHubChatRoomOpen` — **not** on every frame when an RPC failed. |
-| `_layoutSyncedRoomOpen` / `_lastSyncedForegroundPk` | Updated after `_syncNativeForegroundPeerAsync` completes its `awaitApplied()` pump — including optimistic pre-set on select/history (`_layoutSyncedRoomOpen = _isHubChatRoomOpen` before sync) in the shipping tree. |
+| `_syncNativeForegroundIfLayoutChanged` | Called from `build()`; runs **post-frame** only. Sync when `_layoutSyncedRoomOpen != _isHubChatRoomOpen` — **not** on every frame when an RPC failed. Layout **close** debounced ~120 ms so resize flicker does not leave-drain. |
+| Room open sync | **`setVisible(true)` then `setRoom(pk)`** — required so `p2p_sync_ui_session` returns `read_receipts: true`. **`setRoom` alone is not enough** if `_uiVisibleDesired` is still false. |
+| `_layoutSyncedRoomOpen` / `_lastSyncedForegroundPk` | Updated after `_syncNativeForegroundPeerAsync` completes `awaitApplied()`. |
+| Linux read-gate nudge | Debounced **`GhalBolUiSession.nudge()`** (+ `setVisible(true)`) on inbound text / stream ready / preview bump / 8 s keepalive while room open — **belt-and-suspenders only**; primary fix is Linux `inactive` rule below. |
 | `node_ready` in hub | Poll refresh only (`setState`) — **no** extra session reapply from hub (bridge already runs `_reapplyDeferredSessionRpc` on `node_ready`). |
 | GTK minimize | `paused`/`hidden` do **not** clear room (minimize ≠ leave). |
+| **Linux `inactive`** | **Do not** `setVisible(false)`. GTK window drag / brief focus loss must **not** set `:p2p` `read=false` while chat pane is visible. Log: `lifecycle inactive on Linux — read gate unchanged`. **Android `inactive` still gates read off.** |
 
 **Delivery/read ticks (sender view):** blue tick only after peer **`ack_read`** patches transcript on poll (`mergeTranscriptFromNative(deliveryOnly: true)`). Never promote ticks in Dart.
 
-**Open bug (ticks not fully fixed):** on Linux desktop, inbound mail sometimes gets **`ack_received`** but no **`ack_read sent`** while the chat pane is visibly open — native read gate is stale vs what the user sees. A tiny window **resize** can unblock it (post-frame `_syncNativeForegroundIfLayoutChanged`). **Do not** “fix” with fake ticks in Dart. A proper fix must not break P2P (see forbidden patch below).
+#### Fixed 2026-06-15 — Linux desktop read ticks (do not regress)
+
+**Symptom:** inbound **`ack_received`** but no **`ack_read sent`** while chat pane visibly open; tiny window resize “fixed” it temporarily.
+
+**Log proof (Linux App log):**
+```text
+ui_session_applied visible=true room=<pk> read=true
+lifecycle inactive → ui not visible (room unchanged)   ← old bug
+ui_session_applied visible=false room=<pk> read=false  ← gate off, room still open
+```
+No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
+
+**Fix (Dart hub only — no native change):** skip `GhalBolUiSession.setVisible(false)` on **`AppLifecycleState.inactive`** when `Platform.isLinux`; always **`setVisible(true)`** before **`setRoom(pk)`** on room open and on read-gate nudge.
+
+**Verified:** Android ↔ Linux desktop LAN, **>10 min** soak — messages, **`ack_read sent`**, blue ticks, **`conn=true,stream=true`** without resize.
+
+**Regression — never reintroduce:**
+- `setVisible(false)` on Linux **`inactive`** (restores the resize workaround bug).
+- Fixing ticks with the forbidden **`lastApplySucceeded`** patch (broke P2P for hours — § below).
+- Fake ticks in Flutter without native transcript patch.
 
 #### FORBIDDEN — reverted 2026-06-15 “`lastApplySucceeded`” hub session patch
 
@@ -323,7 +347,7 @@ Native **`ack_read`** is gated on **`may_send_in_room_read_ack`**, which require
 - **`stream_ready_count=0`**, **`dm connection closed`**, sends stuck at **`outbound waiting: not connected`** — P2P messaging **broken** (not a tick cosmetic issue).
 - UI **`conv=solo` / `pk=(none)` / `transcript reload … rows=0`** while sibling files under `{namespace}/ghal_bol/` still on disk (`contacts_v1.json`, `chat_transcript_v1.json`) — looks like **total data loss**; users create a **new identity** or hit **`identity_split` / `resetFirstTimeIdentity`** paths → **keystore effectively gone** without a single `delete` API call.
 
-**Canonical rule:** P2P session sync must stay **low volume**. Read-gate staleness on Linux desktop is a **known open bug**; the reverted patch traded it for **WAN/LAN chat death**. Fix read gate with a **narrow** retry (e.g. once on resume/`node_ready`), never per-frame `build()` loops or duplicate hub+bridge reapply.
+**Canonical rule:** P2P session sync must stay **low volume**. Linux read ticks were fixed **2026-06-15** with the **`inactive`/Linux** rule above — **not** the reverted patch. If read gate drifts again, use debounced **`GhalBolUiSession.nudge()`** + verify `setVisible(true)` on room open; **never** per-frame `build()` loops, **`lastApplySucceeded`**, or duplicate hub+bridge reapply.
 
 ### Regression symptoms (treat as bugs)
 
@@ -334,7 +358,7 @@ Native **`ack_read`** is gated on **`may_send_in_room_read_ack`**, which require
 | `patch outbound delivery=read` in a tight loop on unlock | Draining stale poll queue; fix emit + apply gates |
 | `Large outgoing transaction` / app dies copying logs | Log + poll storm; fix native volume first |
 | Blue tick never appears | Confirm `ack_received` not sent or not applied; foreground/room gates wrong — not “send more ack_read” |
-| Linux desktop: chat open, `ack_received` only, no `ack_read sent` | **Open bug:** hub→native read gate stale — tiny resize may unblock post-frame layout sync. **Do not** reintroduce the forbidden `lastApplySucceeded` patch (§ “FORBIDDEN — reverted 2026-06-15”). Never fake ticks in Dart. |
+| Linux desktop: chat open, `ack_received` only, no `ack_read sent` | **Regression:** Linux **`inactive`** called `setVisible(false)` while room open (`read=false` in `ui_session_applied`). Fix: § “Fixed 2026-06-15 — Linux desktop read ticks”. **Do not** use forbidden `lastApplySucceeded` patch. |
 | Android/iOS: chat dead, `stream_ready_count=0`, many `room closed` + `leave drain` at hub open | **Regression:** forbidden session-sync patch or hub foreground storm — check log for burst `sync_ui_session` / `set_foreground_peer (none)` before first `chat_ready`. |
 | App “empty” after session churn, `conv=solo rows=0`, files still on disk under `ghal_bol/` | UI/session desync — not directory wipe. Do not create new identity; fix foreground sync. See forbidden patch table above. |
 | Single tick while peer “read” it | Recipient never sent `ack_read` (room/gate closed on **their** device) — check their logs for `ack_read sent`, not sender UI |
@@ -358,7 +382,8 @@ Native **`ack_read`** is gated on **`may_send_in_room_read_ack`**, which require
 - **`stores_updated` on no-op** transcript patches (forces hub/chat FFI reload storms).
 - **Hub `previewChangeCount` → full `mergeTranscriptFromNative`** while the open chat already handles the same events in `ingestP2pEvent`.
 - Treating duplicate read acks as expected — fix the confirm loop and retry cadence instead.
-- **Forbidden 2026-06-15 hub session patch** — `lastApplySucceeded`, `_invalidateNativeForegroundSync`, per-frame `!lastApplySucceeded` retry in `_syncNativeForegroundIfLayoutChanged`, hub `node_ready` + `_attachHubChat` session reapply. **Broke P2P messaging** and indirectly caused identity/data loss UX. § “Linux desktop — layout sync” → “FORBIDDEN — reverted 2026-06-15”.
+- **Linux desktop `inactive` → `setVisible(false)`** while chat room open — sets `:p2p` `read=false` without leave drain; ticks stall until resize/`resumed`. **Keep** `lifecycle inactive on Linux — read gate unchanged`. Android shade/task switcher still uses `inactive` gate-off.
+- **Forbidden 2026-06-15 hub session patch** — `lastApplySucceeded`, `_invalidateNativeForegroundSync`, per-frame `!lastApplySucceeded` retry in `_syncNativeForegroundIfLayoutChanged`, hub `node_ready` + `_attachHubChat` session reapply. **Broke P2P messaging** and indirectly caused identity/data loss UX. § “FORBIDDEN — reverted 2026-06-15”. **Do not** substitute for the Linux `inactive` fix.
 
 ## UI session contract (integrator app ↔ native P2P)
 
@@ -403,7 +428,7 @@ Native applies in one place (`p2p_sync_ui_session` in `p2p_runtime.rs`):
 
 | API | When | Native (`p2p_sync_ui_session`) |
 |-----|------|----------------------------------|
-| `GhalBolUiSession.setVisible(true/false)` | `resumed` / `inactive` / `paused` | `app_ui_visible` + read gate |
+| `GhalBolUiSession.setVisible(true/false)` | `resumed` / `inactive` / `paused` | `app_ui_visible` + read gate (see lifecycle tables) |
 | `GhalBolUiSession.setRoom(pk/null)` | Hub room open/close | foreground peer + leave drain on `null` |
 | `GhalBolUiSession.awaitApplied()` | After close/open ordering | wait for state RPC |
 
@@ -417,13 +442,22 @@ Native applies in one place (`p2p_sync_ui_session` in `p2p_runtime.rs`):
 | `inactive` | `setUiVisible(false)` — **no new read**; room desired state unchanged (shade / task switcher) |
 | `paused` / `hidden` / `detached` | `setUiVisible(false)` + `setForegroundConversation(null)` — full close + leave drain |
 
-Linux desktop: `paused`/`hidden` do **not** clear the room (minimize ≠ leave); GTK **close (X)** uses `notifyNativeUiExited`.
+### Lifecycle (Linux desktop)
+
+| State | Hub / bridge behaviour |
+|-------|-------------------------|
+| `resumed` | `setUiVisible(true)` + `_syncNativeForegroundPeer()` if room open |
+| **`inactive`** | **No session RPC** — read gate unchanged (window drag / focus flicker). **Never** `setVisible(false)` here. |
+| `paused` / `hidden` | **No room close** (minimize ≠ leave) — read acks unchanged |
+| GTK **close (X)** | `linuxWindowClosedByUser` → room close + leave drain via `notifyNativeUiExited` |
+
+Android `paused`/`hidden`/`detached` clears room. Linux **`inactive` is not Android `inactive`** — do not unify without platform check.
 
 ### Anti-patterns (caused wrong read ticks)
 
 - Split RPCs without `p2p_sync_ui_session` — flags drift after recover / node_ready.
 - `app_ack_read_enabled` default **true** — read ticks before hub opens a room.
-- Gating read on foreground only, ignoring `app_ui_visible` — Android `inactive` sends blue ticks.
+- Gating read on foreground only, ignoring `app_ui_visible` — Android **`inactive`** must gate read off; Linux **`inactive`** must **not** (see lifecycle tables).
 - `set_app_ack_read_enabled(false)` clearing foreground before `SetForegroundPeer(null)` — breaks leave drain.
 - P2P recover blindly re-enabling read when `_foregroundDesired` is set but app is backgrounded.
 
@@ -438,7 +472,7 @@ Linux desktop: `paused`/`hidden` do **not** clear the room (minimize ≠ leave);
 
 `ChatScreen` **must not** call `p2pSetForegroundPeer` when `hubPollsEvents` is true (IndexedStack keeps chat mounted off-room).
 
-On **pause / background**, hub clears room via `setForegroundConversation(null)` inside `syncUiSession`. On **inactive**, only `setUiVisible(false)` — room stays desired until pause or explicit leave.
+On **pause / background** (mobile), hub clears room via `setForegroundConversation(null)`. On **Android `inactive`**, only `setUiVisible(false)` — room stays desired until pause or explicit leave. **Linux `inactive`:** no visibility change.
 
 Native applies foreground **synchronously** via `sync_foreground_peer_now` when FFI/RPC sets peer — inbound handler uses **`may_send_in_room_read_ack`**. **`last_room_peer`** is updated whenever foreground is set to a peer (for leave drain).
 
@@ -574,6 +608,7 @@ Rules:
 3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): skip blind `DialOpts::peer_id` dials; dial explicit coord relay multiaddrs only (throttled). If bootstrap TCP is still pending, use probe-style `listen_on(…/p2p-circuit)` — see [TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”.
 4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally. **Defer coord relay dials** only while a **direct LAN dial is in flight** or a **direct** (non-relay) link is already open — not merely because mDNS lists candidates. After the LAN in-flight window expires (4–6s per candidate), coord lookup + relay dial run **sequentially** ([stream-first](#stream-first-symmetric-connect-canonical-connect-model)). Pending outbox schedules coord lookup on upkeep; it must **not** start a parallel relay dial while LAN is in flight ([TRANSPORT.md](TRANSPORT.md) § “LAN relay vs mDNS race”). Do **not** replace an in-flight relay-circuit dial for **45s** (`circuit_dial_in_flight_blocks` — libp2p oneshot cancel).
 5. **Outbound dial to peer’s relay circuit** (coord lookup result): proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Own circuit is for **registering** your WAN addr so peers can find you; it is not a prerequisite for dialing an already-registered peer. Per-peer throttle: `should_routed_dial` in `dial_dm_peer_addr` ([TRANSPORT.md](TRANSPORT.md) § “Outbound peer relay dials vs own reservation”).
+6. **Wi‑Fi toggle on LAN** — brief **45s handover grace** (`in_wifi_switch_handover_grace`): `dm_upkeep` pauses coord lookup so mDNS can rediscover fresh ephemeral ports; **WAN/coord resumes after grace**. LAN dials remain **mDNS `Discovered` only** — never upkeep re-dial from cache ([TRANSPORT.md](TRANSPORT.md) § Roaming).
 
 Coord register/lookup on a **5s** tick; send-text triggers an immediate coord lookup when not connected. Throttles: coord `peer_not_on_server` backoff, 1–2s between dials per peer.
 
@@ -637,7 +672,7 @@ Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p
 4. Pop call screen during connected call → hangup on both sides.
 5. Incoming call with app hidden → notification tap → call UI visible and answerable.
 6. Login unlock (UI lock, not logout) during call → call **continues** (suppress window applies).
-7. Linux desktop chat open → inbound text → **`ack_read sent`** in logs without requiring window resize (**open bug** if resize needed — do **not** fix with forbidden `lastApplySucceeded` patch; § “FORBIDDEN — reverted 2026-06-15”).
+7. Linux desktop chat open → drag window / brief focus loss → send inbound text → **`ack_read sent`** without resize (`inactive` must **not** log `read=false` with room still set). Soak **>10 min** LAN Android↔Linux: **`conn=true,stream=true`**, ticks stable. **Do not** fix regressions with forbidden `lastApplySucceeded` patch (§ “FORBIDDEN — reverted 2026-06-15”).
 
 Wire detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § “UI session and privacy”.
 

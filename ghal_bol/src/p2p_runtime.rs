@@ -645,15 +645,6 @@ pub fn p2p_is_running() -> Value {
     json_ok(serde_json::json!({ "ok": true, "running": p2p_holder_alive() }))
 }
 
-/// Hint the swarm loop that the OS default network changed (Android callback or desktop).
-pub fn p2p_notify_network_change() -> Value {
-    if !p2p_holder_alive() {
-        return json_ok(serde_json::json!({ "ok": false, "running": false }));
-    }
-    crate::p2p::notify_network_change();
-    json_ok(serde_json::json!({ "ok": true }))
-}
-
 pub fn p2p_stop() {
     native_log::info("p2p", "p2p_stop requested");
     crate::coord_runtime::stop_coord_presence();

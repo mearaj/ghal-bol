@@ -36,7 +36,6 @@ class GhalBolBackground {
     CallController.instance.onAppForeground();
     if (await GhalBolP2p.isRunning()) {
       unawaited(ghalBolListenerForegroundEnsureStarted());
-      unawaited(GhalBolP2p.notifyNetworkChange());
       P2pEventBridge.instance.drainNow();
     } else {
       unawaited(P2pEventBridge.instance.recoverP2pIfNeeded());

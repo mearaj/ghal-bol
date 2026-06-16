@@ -9,7 +9,6 @@ use jni::EnvUnowned;
 
 use crate::c_ffi::configure_android_data_directory;
 use crate::daemon::run_daemon;
-use crate::p2p::notify_network_change;
 
 /// Must run once per `:p2p` process before any `reqwest`/coord HTTPS (see rustls-platform-verifier Android docs).
 #[unsafe(no_mangle)]
@@ -110,11 +109,11 @@ pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_runDaemon<'local>
         .resolve_with::<LogContextErrorAndDefault, _>(|| "ghal_bol runDaemon".to_string())
 }
 
-/// Called from `ConnectivityManager` when the default network changes (`:p2p` process).
+/// Called from `:p2p` when Android reports a connectivity change (thin platform hook only).
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_notifyNetworkChange<'local>(
     _unowned_env: EnvUnowned<'local>,
     _class: JClass<'local>,
 ) {
-    notify_network_change();
+    crate::android_network::on_connectivity_changed();
 }

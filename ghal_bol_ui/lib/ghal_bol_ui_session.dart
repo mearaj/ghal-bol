@@ -28,4 +28,7 @@ abstract final class GhalBolUiSession {
   /// Wait until the latest session snapshot reached native (`p2p_sync_ui_session`).
   static Future<void> awaitApplied() =>
       P2pEventBridge.instance.awaitUiSessionApplied();
+
+  /// Re-apply current visible + room to `:p2p` / daemon (opens read gate + catch-up).
+  static void nudge() => P2pEventBridge.instance.nudgeUiSessionSnapshot();
 }
