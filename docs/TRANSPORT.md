@@ -314,6 +314,63 @@ Compare `mdns discovered` / `listen_addrs` in the ~30s `Native/flow` snapshot: t
 
 See [DESIGN.md](DESIGN.md) § “Dial strategy — WAN first”. Do not add Dart dial policy, RFC1918 /24 guessing from coord, or port-ranking heuristics (regression: multi-minute LAN stalls).
 
+### LAN stability — cold start and Wi‑Fi toggle (verified 2026-06-16)
+
+**Status:** Short-duration manual testing on Linux desktop + Android shows **cold-start LAN chat** and **Wi‑Fi off/on on the same subnet** both recover without breaking the link. This is the most stable LAN handover configuration tested to date. Long soak / multi-hour idle is not yet covered here.
+
+**Network state (no extra library required):** `if_addrs` alone lags after Wi‑Fi toggle. Authoritative hints:
+
+| Platform | Source | Module |
+|----------|--------|--------|
+| Android | `ConnectivityManager` (`TRANSPORT_WIFI`) | `android_network.rs` |
+| Linux | `/sys/class/net/wl*/operstate` down→up | `linux_network.rs` |
+| Both | 1s profile poll + libp2p connection/stream state | `network_tick`, `chat_server.rs` |
+
+Do **not** add a cross-platform “network library” unless a new platform lacks these hooks. libp2p does not report OS link-up; recovery is triggered by OS hints + P2P disconnect events.
+
+**What broke Wi‑Fi switch (not “wrong port in config”):**
+
+| Bug | Symptom | Fix |
+|-----|---------|-----|
+| **Soft mDNS-only upkeep** | Repeating `LAN upkeep — nudge mDNS`, never `mdns discovered` | Upkeep calls full `kick_lan_dm_rediscovery_after_handover` (fresh listen + force mDNS + purge), same as cold start |
+| **Recovery throttle double-consume** | Upkeep called `should_run_lan_recovery` then only soft-restarted mDNS; full kick was throttled out | Let `kick_lan` own the throttle; do not pre-consume it before a soft restart |
+| **Linux missing link-up event** | Same-subnet toggle: profile stayed `lan`, no handover key change, no kick | `linux_network::poll_wifi_link_up_transition` → `notify_network_change` → forced kick |
+| **Poll path skipped DM-down-on-LAN** | Streams down on LAN but 1s poll never kicked | `dm_down_on_lan = on_lan && needs_lan` (not only on connectivity notify) |
+| **Port ranking / upkeep LAN re-dial** (earlier) | Same stale `mdns dialing …/tcp/PORT` every ~20s | Removed; LAN connect is mDNS event-driven only (§ “Ephemeral LAN TCP ports”) |
+| **Full kick on every dial fail** (earlier) | `closed stale LAN ephemeral TCP listener` every ~200ms | Failover removes addr + `notify_dm_presence_wake`; full kick only on handover / upkeep / connectivity |
+
+**Required recovery sequence after Wi‑Fi toggle** (`kick_lan_dm_rediscovery_after_handover`):
+
+1. Purge `peer_mdns_lan_candidate_addrs` for DM peers; clear `lan_dial_in_flight` / `lan_candidates_exhausted`
+2. `ensure_lan_tcp_listen(handover=true)` — close stale ephemeral listeners, bind fresh `/ip4/0.0.0.0/tcp/0`
+3. `restart_mdns_behaviour(force=true)`
+4. `notify_stream_reopen`, `clear_coord_lookup_backoff_all`, `schedule_register_presence_force`
+
+**Triggers:** Android/Linux connectivity notify; `lan_handover_upkeep` when link down + no candidate (5s throttle); `handle_lan_interface_drift` (`lan`→`lan` key change); mobile-data→LAN `handle_lan_path_restored`.
+
+**Success logs (within ~5–15s after Wi‑Fi back):**
+
+```text
+LAN DM rediscovery — Wi‑Fi back (connectivity notify)
+  or LAN DM rediscovery — link down, no mDNS candidate yet
+LAN handover — fresh ephemeral TCP listen for mDNS
+mdns restarted after LAN handover
+mdns discovered …/tcp/XXXXX
+mdns dialing …/tcp/XXXXX          ← same port as discovered
+dm connection established … (direct)
+chat_ready
+```
+
+**Regression signatures — do not ship:**
+
+```text
+LAN upkeep — nudge mDNS (link down, no candidate yet)   ← soft-only path (removed)
+closed stale LAN ephemeral TCP listener (handover) every ~200ms
+coord dialing … relay circuit while on LAN with no mdns dialing first
+```
+
+**Future agents — do not reintroduce:** soft mDNS restart without fresh listen; pre-throttle before `kick_lan`; port ranking; upkeep LAN re-dial from candidate cache; full `kick_lan` on every LAN dial `OutgoingConnectionError`; Flutter `p2p_notify_network_change`.
+
 ### Event-driven async — avoid assumed timers (canonical)
 
 **Product rule (general — not limited to dial or handover):**
@@ -352,7 +409,7 @@ The **A / B subscriber model** is an **analogy** for this split — one example 
 
 | Event (B finished or failed) | A reacts immediately |
 |------------------------------|-------------------|
-| `ConnectivityManager` / profile change | `kick_lan_dm_rediscovery_after_handover` **once** (listen + mDNS restart + purge stale addrs) |
+| Android `ConnectivityManager` / Linux `wl*` operstate up / profile change | `kick_lan_dm_rediscovery_after_handover` **once** (fresh listen + force mDNS + purge stale addrs) |
 | mDNS `Discovered` (direct LAN TCP) | `dial_mdns_lan_addr` / `dial_lan_upgrade` on **that** addr |
 | mDNS `Expired` / LAN dial `OutgoingConnectionError` | Drop addr, failover candidate or `notify_coord_lookup` |
 | `ConnectionEstablished` (DM) | `note_connection_path`, clear in-flight dials, open chat stream |
@@ -363,9 +420,9 @@ The **A / B subscriber model** is an **analogy** for this split — one example 
 
 ### Roaming
 
-- **This device** — Android `ConnectivityManager` callbacks in `:p2p` (thin hook → Rust `android_network`), 1s interface profile poll (`network_tick`), WAN relay recovery when coord URL is set. **Flutter must not** call network-change RPCs; UI only polls for display.
-- **Wi‑Fi return (soft handover)** — when `has_active_lan` flips false→true (e.g. mobile-data → Wi‑Fi while rmnet/CGNAT iface still visible), `handle_lan_path_restored` runs: ephemeral LAN TCP listen, mDNS behaviour restart (throttled), clear `lan_candidates_exhausted`, `mark_dm_reconnect_urgent_unless_live_direct_stream`, coord register refresh — **no** `coord_invalidate` / forced WAN recovery. On-LAN DHCP drift (`lan`→`lan` key change) uses `handle_lan_interface_drift` (listen sync only). Leaving LAN **immediately** purges mDNS state then full WAN handover.
-- **Wi‑Fi toggle (same subnet, both still on LAN)** — Android `ConnectivityManager` → Rust `notify_network_change` → **`kick_lan_dm_rediscovery_after_handover` once** (event): fresh `listen_on(/ip4/0.0.0.0/tcp/0)`, force mDNS restart, purge mDNS candidates, **`clear_coord_lookup_backoff_all`**, **`notify_stream_reopen`**, **`schedule_register_presence_force`**. Defer coord relay only while **LAN dial in flight** or **waiting for first mDNS TCP after purge** (state flags, § “Event-driven async”). mDNS **`handle_mdns_discovered_list`** dials LAN TCP on every event when disconnected. **LAN upgrade:** `new_lan_tcp` dials LAN immediately even when relay stream is live. **LAN connect is mDNS event-driven only** — no upkeep LAN re-dial from cache; no tick-polled recovery without a new event.
+- **This device** — Android `ConnectivityManager` callbacks in `:p2p` (thin hook → Rust `android_network.rs`), Linux `wl*` operstate poll (`linux_network.rs` on `network_tick`), 1s interface profile poll, WAN relay recovery when coord URL is set. **Flutter must not** call network-change RPCs; UI only polls for display.
+- **Wi‑Fi return (soft handover)** — when `has_active_lan` flips false→true (e.g. mobile-data → Wi‑Fi while rmnet/CGNAT iface still visible), `handle_lan_path_restored` runs: ephemeral LAN TCP listen, mDNS behaviour restart (throttled), clear `lan_candidates_exhausted`, `mark_dm_reconnect_urgent_unless_live_direct_stream`, coord register refresh — **no** `coord_invalidate` / forced WAN recovery. On-LAN DHCP drift (`lan`→`lan` handover key change) uses `handle_lan_interface_drift` → full `kick_lan_dm_rediscovery_after_handover`. Leaving LAN **immediately** purges mDNS state then full WAN handover.
+- **Wi‑Fi toggle (same subnet, both still on LAN)** — see § **“LAN stability — cold start and Wi‑Fi toggle”** (canonical). Summary: OS link-up hint → `notify_network_change` → **`kick_lan_dm_rediscovery_after_handover` once**; upkeep repeats full kick (throttled) when link down + no mDNS candidate — **not** soft mDNS-only restart. mDNS **`handle_mdns_discovered_list`** dials LAN TCP on every `Discovered` event when disconnected. **LAN connect is mDNS event-driven only** — no upkeep LAN re-dial from cache.
 - **Coord tick** — periodic lookup (~5s) plus immediate lookup when send is queued and peer is not connected.
 
 ### Steady connection when both peers are online (do not regress)
@@ -595,6 +652,7 @@ Do not rename without a version bump:
 16. **Racing coord relay dials against mDNS LAN on Wi‑Fi before first connect** — gating `should_defer_coord_relay_for_lan` on `connected == true` causes relay + LAN TCP to cancel each other; endless ~15s mDNS retries, no `peer_connected`. See § “LAN relay vs mDNS race”.
 17. **P2P dial/lookup caches** — coord lookup addr cache, frozen mDNS LAN addr, upkeep re-dials from `peer_mdns_lan_candidate_addrs`, or Dart-side routing cache. Prefer live mDNS events + coord HTTP; only `ghalbol_relay.json` with TCP-failure invalidation. See § “Caching policy (P2P)”, § “Ephemeral LAN TCP ports”.
 18. **Port guessing / ranking heuristics** — highest-port-wins, “preferred” mDNS addr, TTL-based pick, or `nc` probes instead of reading mDNS lifecycle + `Native/flow` listen_addrs. See § “Ephemeral LAN TCP ports”.
+19. **Soft mDNS-only Wi‑Fi switch recovery** — `restart_mdns_behaviour` without `ensure_lan_tcp_listen(handover=true)` and candidate purge; or pre-consuming `should_run_lan_recovery` then skipping full `kick_lan`. Symptom: endless `LAN upkeep — nudge mDNS`, no `mdns discovered`. See § “LAN stability — cold start and Wi‑Fi toggle”.
 
 ---
 
@@ -612,29 +670,17 @@ Do not rename without a version bump:
 
 ## Changelog
 
+Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start and Wi‑Fi toggle”** and § **Roaming**. Rows below are history; intermediate fixes may be superseded.
+
 | Date | Change |
 |------|--------|
-| 2026-06-16 | **Event-driven async (general rule):** renamed § “Event-driven async — avoid assumed timers”; A/B subscriber model is an **analogy for all async work with unknown duration** (connect, handover, lookup, reserve, stream, register — not dial-only). Scope table + connectivity as one application. AGENTS golden rule 10 + DESIGN.md aligned. |
-| 2026-06-16 | **Event-driven connectivity (product owner rule):** expanded § — B owns uncertain-duration dial/listen and notifies A on success/disconnect/fail; A never sleeps on guessed intervals. AGENTS golden rule 10 + DESIGN.md dial strategy aligned. |
-| 2026-06-16 | **Doc alignment — Wi‑Fi switch:** coord lookup skipped only during 45s `in_wifi_switch_handover_grace` (not all of `profile=lan`); removed upkeep LAN re-dial from `connect_dm_peer_now` (mDNS events only); § Roaming updated. |
-| 2026-06-16 | **Wi‑Fi switch v3 (log 02:46):** relay `/p2p-circuit` on RFC1918 in mDNS no longer marks `peer_on_local_lan`; handover expands `0.0.0.0` listen into RFC1918; purge `peers_on_local_lan` with mDNS candidates; force mDNS restart; Android Wi‑Fi hint before `if_addrs` catches up. § Roaming. |
-| 2026-06-16 | **Architecture:** Android Wi‑Fi/ConnectivityManager probe moved to Rust (`android_network.rs`); `:p2p` Kotlin only registers callbacks; removed Flutter `p2p_notify_network_change` on resume. § Roaming. |
-| 2026-06-16 | **Wi‑Fi switch phone mDNS (log 01:52):** `kick_lan_dm_rediscovery` no longer requires `profile=lan` — runs when Android Wi‑Fi transport is linked (profile lags after toggle); connectivity notify kicks LAN before coord rebuild. § Roaming. |
-| 2026-06-16 | **Wi‑Fi switch relay handover (log-driven):** relay circuit loss during `profile=lan` no longer clears all coord endpoints — RFC1918 LAN TCP registers alone until relay returns; `try_recover_lan` kicks mDNS when relay drops with DM down (not only on connectivity notify); LAN dial window expiry defers coord for `peer_on_local_lan`. § Roaming. |
-| 2026-06-16 | **LAN connect + switch (log-driven):** mDNS dial picks highest-port RFC1918 candidate (not first/stale); refused/empty candidates defer coord on LAN instead of immediate exhaustion; stream open timeout on fresh link reopens stream instead of tearing down TCP (01:20:38 connect → 01:20:48 reset regression). § Roaming, § Ephemeral LAN TCP ports. |
-| 2026-06-16 | **LAN Wi‑Fi switch recovery:** `p2p_notify_network_change` with `profile=lan` unchanged now kicks mDNS rediscovery when any DM stream is down (`Wi‑Fi flap — DM disconnected on LAN`); LAN dial window expiry drops stale candidate instead of retrying the same port forever; mDNS dial uses `PeerCondition::Disconnected`. § Roaming. |
-| 2026-06-16 | **LAN defer regression fix:** `defer_coord_for_lan_rediscovery` was blocking coord relay for every `peer_on_local_lan` peer (not just post-handover grace), leaving LAN dial timeouts stuck forever. Grace-only defer + urgent upkeep LAN retry + coord fallback after dial window expiry. § Roaming. |
-| 2026-06-16 | **LAN Wi‑Fi toggle reconnect (log-driven v2):** handover purges stale mDNS TCP candidates before restart; 45s grace defers coord relay + `lan_candidates_exhausted` for `peer_on_local_lan` until fresh `Discovered`; coord lookup only after exhaustion outside grace. § Roaming. |
-| 2026-06-16 | **LAN reconnect after Wi‑Fi/relay flap (log-driven):** `lan_candidates_exhausted` no longer permanent after one refused dial; removed highest-port trim; mDNS dials the event addr; `LAN interface drift` + relay circuit loss on `profile=lan` kick mDNS rediscovery instead of coord-only stall. § Roaming. |
-| 2026-06-16 | **LAN zombie link + upkeep LAN re-dial (log-driven fix):** `open_stream` timeout queues `disconnect_peer` (asymmetric link: one side `peer_connected`, other never). `connect_dm_peer_now` is coord/WAN-only — no timer re-dials from `peer_mdns_lan_candidate_addrs` (stopped 45s `mdns dialing` loops to stale ports). LAN dial window expiry triggers coord fallback. § Ephemeral LAN TCP ports. |
-| 2026-06-15 | **Wi‑Fi toggle LAN recovery v2 rollback:** reverted per-tick forced LAN profile + debounced mDNS purge cancel (broke initial LAN and post-toggle recovery). Wi‑Fi hint requires site-local IPv4 on Wi‑Fi transport; recovery on connectivity notify only; immediate mDNS purge on `lan → mobile-data`. § Roaming. |
-| 2026-06-15 | **Wi‑Fi toggle LAN recovery v2 (Android):** detect Wi‑Fi on **any** linked network (not only default cellular); dedicated `TRANSPORT_WIFI` callback; treat `0.0.0.0` DM listen + Android Wi‑Fi hint as LAN for handover; force soft LAN restore when linked. § Roaming. **Superseded by rollback row above.** |
-| 2026-06-15 | **Wi‑Fi toggle LAN recovery (Android):** `ConnectivityManager` passes `TRANSPORT_WIFI` to Rust; `try_recover_lan_after_wifi_available` reopens LAN listen + mDNS when profile stuck on `mobile-data` before `if_addrs` catches up. Debounced mDNS purge on `lan → mobile-data` (2.5s). § Roaming. |
-| 2026-06-15 | **Wi‑Fi toggle recovery (regression fix):** relay `ListenerClosed` with clean reason now re-reserves when bootstrap TCP is down or during `wan_recovery` without a live IPv4 circuit (Wi‑Fi flap left phone stuck on `waiting for relay/public listen endpoint`). `effective_network_profile` infers LAN from live RFC1918 listen + wlan iface when `if_addrs` lags; bootstrap `ConnectionEstablished` during WAN recovery kicks `ensure_wan_relay_circuit`. § Roaming. |
-| 2026-06-15 | **Wi‑Fi return handover (STORY network watch):** `has_rfc1918_on_wifi` + `lan_restored` detect phone stuck on `profile=mobile-data` with Wi‑Fi RFC1918 present; soft handover on LAN restore (mDNS restart, LAN listen, no coord invalidation); `LAN_DIAL_IN_FLIGHT_MS` = 45s; identify strips RFC1918 on Wi‑Fi (live mDNS only); `dial_mdns_lan_addr` skips while `circuit_dial_in_flight`. § Roaming. |
-| 2026-06-15 | **FORBIDDEN hub session patch (reverted):** `lastApplySucceeded` / per-frame `sync_ui_session` retry / `_invalidateNativeForegroundSync` on node_ready+attach+resume — **broke P2P** (leave-drain storms, `stream_ready_count=0`), UI looked empty while `ghal_bol/*.json` remained; indirect identity loss. **Never reintroduce.** Shipping hub keeps low-volume session sync. Linux read ticks **still open**. DESIGN.md § “FORBIDDEN — reverted 2026-06-15”; AGENTS.md anti-pattern. |
-| 2026-06-15 | **Linux desktop UX (calls + read gate):** DESIGN.md — split-shell room open on `_selectedConversationKey` (not `_splitChatEngaged`); post-frame layout sync (**without** forbidden retry loop); video call end texture teardown (`releaseCall` on hangup). Read receipt blue tick on desktop: **known open bug** (resize workaround). |
-| 2026-06-15 | **Ephemeral LAN ports / stale mDNS cache (regression fix):** documented why ephemeral TCP ports are normal and how treating `peer_mdns_lan_candidate_addrs` as an upkeep dial cache caused repeated stale-port dials after rebuild. LAN connect is mDNS event-driven; `connect_dm_peer_now` is coord/WAN only; removed port-ranking heuristics. § “Ephemeral LAN TCP ports”, § “Caching policy”, steady-connection item 2. Linux desktop idle timeout 120s. |
+| 2026-06-16 | **LAN stability (verified short test):** cold-start LAN and Wi‑Fi off/on on same subnet recover on Linux + Android. Fixes: `linux_network.rs` (sysfs operstate → `notify_network_change`); `platform_wifi_linked`; full `kick_lan` on connectivity notify and in `lan_handover_upkeep` (not soft mDNS-only); `dm_down_on_lan` on 1s poll when streams down. § “LAN stability — cold start and Wi‑Fi toggle”. Removed port ranking / upkeep LAN re-dial (earlier). |
+| 2026-06-16 | **Event-driven async (general rule):** § “Event-driven async — avoid assumed timers”; A/B subscriber model for connect, handover, lookup, reserve, stream, register. AGENTS + DESIGN.md aligned. |
+| 2026-06-16 | **Architecture:** Android Wi‑Fi probe in Rust (`android_network.rs`); `:p2p` Kotlin registers callbacks only; removed Flutter `p2p_notify_network_change`. |
+| 2026-06-16 | **LAN connect model (supersedes port-ranking experiments):** mDNS event-driven dial only; `connect_dm_peer_now` coord/WAN-only; removed `rank_mdns_lan_tcp_candidates` / highest-port heuristics; 45s handover grace defers coord while waiting for fresh `Discovered`. § “Ephemeral LAN TCP ports”, § “LAN relay vs mDNS race”. |
+| 2026-06-15 | **Ephemeral LAN ports / stale mDNS cache:** documented ephemeral TCP + candidate-set lifecycle; stopped upkeep re-dials to stale ports. § “Ephemeral LAN TCP ports”. |
+| 2026-06-15 | **Wi‑Fi return handover:** `has_rfc1918_on_wifi` + `lan_restored`; soft handover on mobile-data→LAN; immediate mDNS purge on `lan → mobile-data`. |
+| 2026-06-15 | **FORBIDDEN hub session patch (reverted):** `lastApplySucceeded` / per-frame session retry — broke P2P. Never reintroduce. DESIGN.md § “FORBIDDEN — reverted 2026-06-15”. |
 | 2026-06-14 | **Stream-first symmetric connect:** canonical connect model from the original serverless build (seconds to connect, one stream per contact, single upkeep owner). Coord/relay/mDNS are discovery inputs only — must not race parallel dials. § “Stream-first symmetric connect”; DESIGN.md § same. Removed incorrect “coord relay first on outbox” dial guidance. |
 | 2026-06-13 | **LAN relay vs mDNS race (regression fix):** on Wi‑Fi, defer coord relay dials while a **direct LAN dial is in flight** — **before** first connect. Removed coord lookup addr cache; mDNS uses live candidate list per peer. § “LAN relay vs mDNS race”, § “Caching policy (P2P)”. |
 | 2026-06-11 | **Bootstrap TCP prune (libp2p relay HOP pin):** happy-eyeballs left **two** coord-relay TCP links (v6 then v4); libp2p's relay client sends all HOP (reserve + routed DM dial) on `directly_connected_peers[relay].first()` only. When v6 connected first on mobile-data but could not carry HOP, v4 bootstrap was ignored — server saw `client connected` ×2, no `reservation`/`circuit` events. `prune_duplicate_relay_bootstrap_connections` keeps one link (IPv4 on mobile-data path, IPv6 when LAN has global v6); reservation uses that anchor only. |

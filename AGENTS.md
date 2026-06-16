@@ -74,6 +74,7 @@ Android :p2p process     Linux ghal_bol_daemon
 | Display ticks (no policy) | **Flutter** | `chat_screen.dart`, `dm_delivery_sync.dart` (comments only) |
 | Start P2P / dm_peers list | **Flutter** | `p2p_network_coordinator.dart` |
 | Poll loop (UI refresh only) | **Flutter** | `p2p_event_bridge.dart` |
+| OS network hints (Wi‑Fi link) | **Rust** | `android_network.rs`, `linux_network.rs`, `chat_server.rs` `network_tick` |
 
 ## Message state (do not break this)
 
@@ -165,7 +166,9 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **Competing dial policies instead of stream-first symmetric connect** — multiple paths (`kick_dm_peer_discovery`, `register_dm_peer`, `coord_tick`, mDNS handler) each calling `swarm.dial` for the same peer in the same second. One stream per contact, one upkeep owner (~1s). See [DESIGN.md](docs/DESIGN.md) § “Stream-first symmetric connect”.
 - **P2P dial/lookup caches** — coord lookup addr cache, frozen mDNS LAN addr, **`dm_upkeep` LAN re-dials from candidate set**, or Dart routing cache. If staleness could break P2P, do not cache. See TRANSPORT.md § “Caching policy (P2P)”, § “Ephemeral LAN TCP ports”.
 - **Timer-based async policy** — grace windows, tick-polled recovery, or tuning `N`-second constants instead of worker→subscriber events. Applies to connect/handover and any P2P path with unknown duration. See TRANSPORT.md § “Event-driven async”.
-- **Flutter network-change RPCs** — no `p2p_notify_network_change` / resume connectivity hints from Dart; Android `:p2p` registers `ConnectivityManager` callbacks and Rust (`android_network.rs` + `network_tick`) owns Wi‑Fi handover recovery.
+- **Flutter network-change RPCs** — no `p2p_notify_network_change` / resume connectivity hints from Dart; Android `:p2p` registers `ConnectivityManager` callbacks; Linux uses `linux_network.rs` operstate on `network_tick`; Rust owns Wi‑Fi handover recovery.
+- **Soft mDNS-only Wi‑Fi switch recovery** — `lan_handover_upkeep` must call full `kick_lan_dm_rediscovery_after_handover` (fresh listen + force mDNS), not `restart_mdns_behaviour` alone; symptom: repeating `LAN upkeep — nudge mDNS` with zero `mdns discovered`. See TRANSPORT.md § “LAN stability — cold start and Wi‑Fi toggle”.
+- **Recovery throttle double-consume** — do not call `should_run_lan_recovery` then only soft-restart mDNS; `kick_lan` owns the 5s throttle.
 - **Forbidden 2026-06-15 hub UI session patch** — `lastApplySucceeded` / `uiSessionLastApplyOk`, `_invalidateNativeForegroundSync`, per-frame session retry from `build()`, hub `node_ready`/`_attachHubChat`/`resume`/`call end` session reapply storms. **Reverted:** stopped P2P chat (`stream_ready_count=0`, leave-drain bursts), UI looked wiped (`conv=solo`), users lost identity indirectly. **Do not** use this to fix Linux read ticks — use Linux **`inactive`** rule + low-volume `GhalBolUiSession.nudge()` instead (DESIGN.md § “Fixed 2026-06-15”). § “FORBIDDEN — reverted 2026-06-15”.
 - **Linux desktop `inactive` → setVisible(false)** — regression; restores “resize fixes ticks” bug (`ui_session_applied read=false` with room open).
 - **Port guessing / ranking for LAN** — highest-port-wins, preferred mDNS addr, probing with `nc` instead of mDNS `Discovered`/`Expired` + `Native/flow` listen_addrs. Ephemeral ports change every restart; see TRANSPORT.md § “Ephemeral LAN TCP ports”.
@@ -199,6 +202,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | Wire OK, empty roster | `handler context not set` on daemon poll; unlock + `p2p_start` with `app_namespace` |
 | Host no contact after scan | `peer_identified` or inbound text `stores_updated` → roster bump + `merge_discovered_peer_id` |
 | LAN chat broken on Wi‑Fi (mDNS shows peer, no connect) | `mdns dialing` then relay dial to same peer within ~2s? Never `dm connection established`? **Regression:** relay racing mDNS before first connect — fix `should_defer_coord_relay_for_lan` (defer without `connected` gate). TRANSPORT.md § “LAN relay vs mDNS race”. Also check stale contact pk (desktop dials old key while mDNS discovers new peer id). |
+| Wi‑Fi toggle: LAN dead after switch | Repeating `LAN upkeep — nudge mDNS` with no `mdns discovered`? **Regression:** soft mDNS-only upkeep or missing Linux operstate notify — full `kick_lan` + `linux_network.rs`. TRANSPORT.md § “LAN stability — cold start and Wi‑Fi toggle”. Expect `LAN DM rediscovery — Wi‑Fi back` then `fresh ephemeral TCP listen`. |
 | Same `mdns dialing …/tcp/PORT` every ~20s for minutes; `listen_addrs` / fresh `mdns discovered` shows **different** port | **Stale mDNS candidate cache + upkeep LAN re-dial** — not a port to hardcode. Fix: event-driven LAN only, coord-only upkeep; remove port-ranking heuristics. TRANSPORT.md § “Ephemeral LAN TCP ports”. Full app restart after native rebuild. |
 | Chat worked 5–10 min then died on LAN | Linux idle timeout was 300s; listen port may have changed — check `dm peer disconnected` + stale dial loop above. Desktop idle now 120s. |
 | WAN chat dead minutes, coord health OK | `forcing bootstrap redial` loop? `wan_recovery=true` + `relay_listen=false` + `bootstrap_ok=true`? Fix `run_wan_recovery_pass` — never disconnect coord relay for relay; rebuild native. TRANSPORT.md § WAN recovery. **Note:** `bootstrap_*` logs = coord relay, not IPFS peers. |
@@ -232,7 +236,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `docs/GHAL_BOL_VIDEO_NATIVE_V1.md` | Native Rust **video** wire/engine spec (no WebRTC) |
 | `docs/STORY.md` | **Human-only** connectivity / discovery story (agents: read, never write) |
 | `docs/COORDINATION_SERVER.md` | Run/test coord server, local dev stack, **HTTP log troubleshooting** |
-| `docs/TRANSPORT.md` | libp2p transport stack, discovery, invariants, **§ WAN prerequisites** |
+| `docs/TRANSPORT.md` | libp2p transport stack, discovery, invariants, **§ LAN stability (Wi‑Fi toggle)**, **§ WAN prerequisites** |
 | `ghal_bol_server/deploy/README.md` | Dev `run_server.sh`, bore/ngrok, **§ Regression prevention** |
 | `docs/WEB_SITE.md` | Static **ghalbol.com** web build, Firebase, Linux download, `/connect/…` handoff |
 | `README.md` | Product vision + repo map |

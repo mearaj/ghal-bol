@@ -287,6 +287,7 @@ fn app_ack_read_enabled() -> bool {
 }
 
 use futures::StreamExt;
+use libp2p::core::transport::ListenerId;
 use libp2p::core::ConnectedPoint;
 use libp2p::identity::PeerId;
 use libp2p::multiaddr::Protocol;
@@ -747,10 +748,12 @@ struct SessionState {
     /// Lets a peer freshly seen on the LAN decide whether it still needs a direct
     /// LAN link (it is connected only over a relay circuit) — see `handle_mdns_discovered_list`.
     peers_direct_conns: RwLock<HashMap<PeerId, u32>>,
+    /// Live relay-circuit `ConnectionId`s per DM peer — closed when direct LAN is up.
+    dm_relay_conn_ids: RwLock<HashMap<PeerId, HashSet<ConnectionId>>>,
+    /// Ephemeral `/ip4/0.0.0.0/tcp/0` listener ids — removed on LAN handover so mDNS advertises one port.
+    lan_ephemeral_tcp_listener_ids: RwLock<Vec<ListenerId>>,
     /// Live mDNS LAN TCP candidates per peer (libp2p emits addrs one-by-one — not a dial cache).
     peer_mdns_lan_candidate_addrs: RwLock<HashMap<PeerId, Vec<Multiaddr>>>,
-    /// Most recently merged publishable LAN TCP candidate — preferred for next dial (not a long-lived cache).
-    peer_mdns_lan_preferred: RwLock<HashMap<PeerId, Multiaddr>>,
     /// All ranked LAN TCP candidates failed — WAN/coord only until fresh mDNS merge.
     lan_candidates_exhausted: RwLock<HashSet<PeerId>>,
     /// DM contacts whose connection just dropped — reconnect is urgent until this deadline (ms).
@@ -929,8 +932,9 @@ impl SessionState {
             dial_skip_log_ms: RwLock::new(HashMap::new()),
             peers_on_local_lan: RwLock::new(HashMap::new()),
             peers_direct_conns: RwLock::new(HashMap::new()),
+            dm_relay_conn_ids: RwLock::new(HashMap::new()),
+            lan_ephemeral_tcp_listener_ids: RwLock::new(Vec::new()),
             peer_mdns_lan_candidate_addrs: RwLock::new(HashMap::new()),
-            peer_mdns_lan_preferred: RwLock::new(HashMap::new()),
             lan_candidates_exhausted: RwLock::new(HashSet::new()),
             dm_reconnect_urgent: RwLock::new(HashMap::new()),
             dm_wire_activity_ms: RwLock::new(HashMap::new()),
@@ -1121,19 +1125,8 @@ impl SessionState {
             if let Ok(mut lan) = self.peer_mdns_lan_candidate_addrs.write() {
                 lan.remove(&peer);
             }
-            if let Ok(mut pref) = self.peer_mdns_lan_preferred.write() {
-                pref.remove(&peer);
-            }
         }
         removed
-    }
-
-    fn peer_mdns_lan_candidate_contains(&self, peer: PeerId, addr: &Multiaddr) -> bool {
-        self.peer_mdns_lan_candidate_addrs
-            .read()
-            .ok()
-            .map(|m| m.get(&peer).is_some_and(|v| v.iter().any(|a| a == addr)))
-            .unwrap_or(false)
     }
 
     fn should_run_lan_recovery(&self, now_ms: i64) -> bool {
@@ -1152,9 +1145,6 @@ impl SessionState {
         if let Ok(mut m) = self.peer_mdns_lan_candidate_addrs.write() {
             m.clear();
         }
-        if let Ok(mut pref) = self.peer_mdns_lan_preferred.write() {
-            pref.clear();
-        }
         if let Ok(mut e) = self.lan_candidates_exhausted.write() {
             e.clear();
         }
@@ -1163,45 +1153,19 @@ impl SessionState {
         }
     }
 
-    fn set_mdns_lan_preferred(&self, peer: PeerId, addr: Multiaddr) {
-        if let Ok(mut m) = self.peer_mdns_lan_preferred.write() {
-            m.insert(peer, addr);
-        }
-    }
-
-    fn clear_mdns_lan_preferred_if(&self, peer: PeerId, addr: &Multiaddr) {
-        if let Ok(mut m) = self.peer_mdns_lan_preferred.write() {
-            if m.get(&peer).is_some_and(|a| a == addr) {
-                m.remove(&peer);
-            }
-        }
-    }
-
     fn merge_mdns_lan_candidate(&self, peer: PeerId, addr: &Multiaddr) -> bool {
         if !is_direct_lan_tcp_mdns_candidate(addr) {
             return false;
         }
         let mut added = false;
-        let mut max_port_before: Option<u16> = None;
         if let Ok(mut m) = self.peer_mdns_lan_candidate_addrs.write() {
             let v = m.entry(peer).or_default();
-            max_port_before = v
-                .iter()
-                .filter(|ma| is_direct_lan_tcp_mdns_candidate(ma))
-                .filter_map(|ma| lan_tcp_port(ma))
-                .max();
             if !v.iter().any(|a| a == addr) {
                 v.push(addr.clone());
                 added = true;
             }
         }
         if added {
-            let new_port = lan_tcp_port(addr);
-            let prefer = max_port_before.is_none()
-                || new_port.is_some_and(|p| max_port_before.is_some_and(|m| p >= m));
-            if prefer {
-                self.set_mdns_lan_preferred(peer, addr.clone());
-            }
             if let Ok(mut e) = self.lan_candidates_exhausted.write() {
                 e.remove(&peer);
             }
@@ -1213,7 +1177,6 @@ impl SessionState {
         let Some(failed_ma) = failed else {
             return;
         };
-        self.clear_mdns_lan_preferred_if(peer, failed_ma);
         if let Ok(mut m) = self.peer_mdns_lan_candidate_addrs.write() {
             if let Some(v) = m.get_mut(&peer) {
                 v.retain(|a| a != failed_ma);
@@ -1240,9 +1203,9 @@ impl SessionState {
         true
     }
 
-    /// Defer coord relay while a direct LAN TCP dial is in flight, the direct link is up, or
-    /// non-exhausted mDNS LAN candidates remain (try LAN before racing relay circuits).
-    /// After all LAN candidates fail, `lan_candidates_exhausted` clears and coord relay proceeds.
+    /// Defer coord relay while a direct LAN TCP dial is in flight, direct link is up, or
+    /// handover is waiting for first mDNS after candidate purge.
+    /// Do not defer merely because stale addrs remain in the candidate set (TRANSPORT.md).
     fn should_defer_coord_relay_for_lan(
         &self,
         swarm: &mut Swarm<ChatBehaviour>,
@@ -1262,7 +1225,11 @@ impl SessionState {
         if self.defer_coord_for_lan_rediscovery(peer, now_ms) {
             return true;
         }
-        !self.lan_candidates_exhausted(peer) && self.peer_mdns_lan_addr(peer).is_some()
+        // No mDNS candidate yet while link is down — give LAN discovery a chance before relay.
+        self.is_dm_contact(peer)
+            && !self.lan_candidates_exhausted(peer)
+            && self.peer_mdns_lan_addr(peer).is_none()
+            && (!swarm.is_connected(&peer) || !self.dm_peer_stream_up(peer))
     }
 
     fn chat_ready_seen(&self, peer: PeerId) -> bool {
@@ -1301,16 +1268,16 @@ impl SessionState {
         self.forget_peer_on_local_lan(peer)
     }
 
+    /// Next LAN TCP addr for failover only — first publishable candidate in mDNS discovery order.
     fn peer_mdns_lan_addr(&self, peer: PeerId) -> Option<Multiaddr> {
-        let addrs = self.peer_mdns_lan_candidate_addrs.read().ok().and_then(|m| {
+        let v = self.peer_mdns_lan_candidate_addrs.read().ok().and_then(|m| {
             m.get(&peer).cloned()
         })?;
-        let preferred = self
-            .peer_mdns_lan_preferred
-            .read()
-            .ok()
-            .and_then(|m| m.get(&peer).cloned());
-        pick_best_mdns_lan_tcp_addr(&addrs, preferred.as_ref())
+        v.iter()
+            .filter(|ma| is_direct_lan_tcp_mdns_candidate(ma))
+            .find(|ma| super::network_transport::is_publishable_listen_addr(ma))
+            .or_else(|| v.iter().find(|ma| is_direct_lan_tcp_mdns_candidate(ma)))
+            .cloned()
     }
 
     fn lan_candidates_exhausted(&self, peer: PeerId) -> bool {
@@ -1370,11 +1337,6 @@ impl SessionState {
         if let Ok(mut m) = self.peer_mdns_lan_candidate_addrs.write() {
             for peer in &peers {
                 m.remove(peer);
-            }
-        }
-        if let Ok(mut pref) = self.peer_mdns_lan_preferred.write() {
-            for peer in &peers {
-                pref.remove(peer);
             }
         }
         if let Ok(mut lan) = self.peers_on_local_lan.write() {
@@ -1448,6 +1410,43 @@ impl SessionState {
                 }
             }
         }
+    }
+
+    fn note_dm_relay_connection(&self, peer: PeerId, conn_id: ConnectionId) {
+        if let Ok(mut m) = self.dm_relay_conn_ids.write() {
+            m.entry(peer).or_default().insert(conn_id);
+        }
+    }
+
+    fn forget_dm_relay_connection(&self, peer: PeerId, conn_id: ConnectionId) {
+        if let Ok(mut m) = self.dm_relay_conn_ids.write() {
+            if let Some(set) = m.get_mut(&peer) {
+                set.remove(&conn_id);
+                if set.is_empty() {
+                    m.remove(&peer);
+                }
+            }
+        }
+    }
+
+    fn drain_dm_relay_connection_ids(&self, peer: PeerId) -> Vec<ConnectionId> {
+        let Ok(mut m) = self.dm_relay_conn_ids.write() else {
+            return Vec::new();
+        };
+        m.remove(&peer).map(|s| s.into_iter().collect()).unwrap_or_default()
+    }
+
+    fn note_lan_ephemeral_tcp_listener(&self, id: ListenerId) {
+        if let Ok(mut v) = self.lan_ephemeral_tcp_listener_ids.write() {
+            v.push(id);
+        }
+    }
+
+    fn drain_lan_ephemeral_tcp_listener_ids(&self) -> Vec<ListenerId> {
+        let Ok(mut v) = self.lan_ephemeral_tcp_listener_ids.write() else {
+            return Vec::new();
+        };
+        std::mem::take(&mut *v)
     }
 
     /// True when at least one direct (non-relay) connection to `peer` is open.
@@ -1544,6 +1543,14 @@ impl SessionState {
         const FRESH_LINK_MS: i64 = 30_000;
         let now_ms = chrono_now_ms();
         let err_lc = err.to_lowercase();
+        if (err_lc.contains("oneshot canceled") || err_lc.contains("receiver is gone"))
+            && self.dm_has_stream_writer(peer)
+        {
+            if let Ok(mut g) = self.stream_open_inflight.write() {
+                g.remove(&peer);
+            }
+            return;
+        }
         let had_ready = self.chat_ready_seen(peer);
         let fresh_link = self
             .dm_wire_activity_ms
@@ -2319,12 +2326,7 @@ impl SessionState {
                         "LAN dial failed for {peer} — waiting for fresh mDNS (coord deferred)"
                     ),
                 );
-                kick_lan_after_lan_dial_path_failed(
-                    swarm,
-                    self,
-                    peer,
-                    "LAN dial failed — no mDNS candidates",
-                );
+                notify_dm_presence_wake();
                 return false;
             }
             self.mark_lan_candidates_exhausted(peer);
@@ -3410,8 +3412,11 @@ fn build_swarm(config: &GossipChatConfig) -> Result<Swarm<ChatBehaviour>, ChatSe
     Ok(swarm)
 }
 
-fn listen_swarm_transports(swarm: &mut Swarm<ChatBehaviour>) -> Result<(), ChatServerError> {
-    listen_ephemeral(swarm, "/ip4/0.0.0.0/tcp/0")?;
+fn listen_swarm_transports(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+) -> Result<(), ChatServerError> {
+    listen_lan_ephemeral_tcp(swarm, session, false)?;
     #[cfg(all(not(target_os = "android"), not(feature = "test-minimal-swarm")))]
     if !minimal_swarm_mode() {
         listen_ephemeral(swarm, "/ip4/0.0.0.0/udp/0/quic-v1")?;
@@ -4354,6 +4359,18 @@ fn wifi_lan_handover_active(session: &SessionState) -> bool {
     detected.has_wifi_iface || detected.has_rfc1918_on_wifi
 }
 
+/// Android ConnectivityManager or Linux sysfs operstate — authoritative when if_addrs lags.
+fn platform_wifi_linked(session: &SessionState) -> bool {
+    if ANDROID_WIFI_TRANSPORT.load(Ordering::Relaxed) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    if crate::linux_network::wifi_oper_up() {
+        return true;
+    }
+    wifi_lan_handover_active(session)
+}
+
 /// Relay dropped or interface drift while still on LAN — reopen listen, restart mDNS, allow LAN dials again.
 fn kick_lan_dm_rediscovery_after_handover(
     swarm: &mut Swarm<ChatBehaviour>,
@@ -4361,19 +4378,20 @@ fn kick_lan_dm_rediscovery_after_handover(
     reason: &str,
     force: bool,
 ) {
+    let now_ms = chrono_now_ms();
     if !force {
-        let on_wifi = wifi_lan_handover_active(session)
-            || ANDROID_WIFI_TRANSPORT.load(Ordering::Relaxed);
-        if !on_wifi {
+        if !platform_wifi_linked(session) {
             return;
         }
-    } else if !ANDROID_WIFI_TRANSPORT.load(Ordering::Relaxed)
-        && !wifi_lan_handover_active(session)
-    {
+        // Throttle full handover — dial fail must not close/rebind listen every tick.
+        if !session.should_run_lan_recovery(now_ms) {
+            notify_dm_presence_wake();
+            return;
+        }
+    } else if !platform_wifi_linked(session) {
         return;
     }
     native_log::info("net", format!("LAN DM rediscovery — {reason}"));
-    let now_ms = chrono_now_ms();
     session.note_lan_handover(now_ms);
     session.purge_mdns_lan_candidates_for_dm_peers();
     for peer in session.dm_peer_ids() {
@@ -4415,7 +4433,7 @@ fn kick_lan_after_lan_dial_path_failed(
     if swarm.is_connected(&peer) {
         return;
     }
-    if !wifi_lan_handover_active(session) && !ANDROID_WIFI_TRANSPORT.load(Ordering::Relaxed) {
+    if !platform_wifi_linked(session) {
         return;
     }
     kick_lan_dm_rediscovery_after_handover(swarm, session, reason, false);
@@ -4789,6 +4807,38 @@ fn listen_ephemeral(swarm: &mut Swarm<ChatBehaviour>, ma: &str) -> Result<(), Ch
     }
 }
 
+fn close_stale_lan_ephemeral_tcp_listeners(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+) {
+    for id in session.drain_lan_ephemeral_tcp_listener_ids() {
+        if swarm.remove_listener(id) {
+            native_log::info("listen", "closed stale LAN ephemeral TCP listener (handover)");
+        }
+    }
+}
+
+fn listen_lan_ephemeral_tcp(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+    handover: bool,
+) -> Result<(), ChatServerError> {
+    if handover {
+        close_stale_lan_ephemeral_tcp_listeners(swarm, session);
+    }
+    let parsed = parse_ma("/ip4/0.0.0.0/tcp/0")?;
+    match swarm.listen_on(parsed) {
+        Ok(id) => {
+            session.note_lan_ephemeral_tcp_listener(id);
+            Ok(())
+        }
+        Err(e) => {
+            native_log::warn("listen", format!("LAN ephemeral TCP listen skipped: {e}"));
+            Ok(())
+        }
+    }
+}
+
 fn swarm_has_lan_dm_listen(swarm: &Swarm<ChatBehaviour>) -> bool {
     swarm.listeners().any(|ma| {
         super::network_transport::is_dm_listen_tcp_multiaddr(ma)
@@ -4812,6 +4862,10 @@ fn detected_network_with_platform_hints() -> super::network_transport::LocalNetw
         // if_addrs can lag after Wi‑Fi toggle; ConnectivityManager is authoritative.
         p.has_rfc1918_on_wifi = true;
     }
+    #[cfg(target_os = "linux")]
+    if crate::linux_network::wifi_oper_up() {
+        p.has_wifi_iface = true;
+    }
     p
 }
 
@@ -4832,8 +4886,8 @@ fn try_recover_lan_after_wifi_available(
     coord_relays: &[(PeerId, Multiaddr)],
     connectivity_notify: bool,
 ) -> bool {
-    // Android Wi‑Fi toggle: kick LAN immediately — profile and if_addrs lag behind ConnectivityManager.
-    if connectivity_notify && ANDROID_WIFI_TRANSPORT.load(Ordering::Relaxed) {
+    // OS connectivity notify: full cold-start LAN sequence — if_addrs/profile lag after toggle.
+    if connectivity_notify && platform_wifi_linked(session) {
         kick_lan_dm_rediscovery_after_handover(
             swarm,
             session,
@@ -4845,7 +4899,7 @@ fn try_recover_lan_after_wifi_available(
     let wifi_linked = wifi_lan_handover_active(session);
     let on_lan = session.network_profile_snapshot().has_active_lan();
     let needs_lan = session.any_dm_peer_needs_lan_rediscovery();
-    let dm_down_on_lan = connectivity_notify && needs_lan;
+    let dm_down_on_lan = on_lan && needs_lan;
     let relay_lost_on_lan = on_lan && !relay_circuit_listening(swarm) && needs_lan;
     // Android connectivity notify: Wi‑Fi is back but profile may still read mobile-data for ticks.
     let wifi_notify_handover = connectivity_notify && wifi_linked;
@@ -4921,7 +4975,7 @@ fn ensure_lan_tcp_listen(
         return;
     }
     if handover || !swarm_has_ephemeral_dm_tcp_listen(swarm) {
-        if listen_ephemeral(swarm, "/ip4/0.0.0.0/tcp/0").is_ok() {
+        if listen_lan_ephemeral_tcp(swarm, session, handover).is_ok() {
             native_log::info("net", "LAN handover — fresh ephemeral TCP listen for mDNS");
         }
     }
@@ -4932,18 +4986,11 @@ fn ensure_lan_tcp_listen(
     }
 }
 
-/// While LAN handover is active, nudge mDNS and reopen dead streams — no new listen-port storm.
+/// On LAN: full handover when link down + no mDNS candidate; stream reopen only when candidate exists.
 fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &SessionState) {
     let now_ms = chrono_now_ms();
-    if !session.within_lan_handover_grace(now_ms) && !wifi_lan_handover_active(session) {
+    if !wifi_lan_handover_active(session) {
         return;
-    }
-    let stream_down = session.dm_peer_ids().iter().any(|p| {
-        session.should_dial_libp2p_peer(*p) && !session.dm_peer_stream_up(*p)
-    });
-    if stream_down && session.should_run_lan_recovery(now_ms) {
-        native_log::info("net", "LAN handover upkeep — reopen DM streams (STORY)");
-        notify_stream_reopen();
     }
     let needs_mdns_nudge = session.dm_peer_ids().iter().any(|p| {
         if !session.should_dial_libp2p_peer(*p) {
@@ -4952,11 +4999,24 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
         let link_down = !swarm.is_connected(p) || !session.dm_peer_stream_up(*p);
         link_down && session.peer_mdns_lan_addr(*p).is_none()
     });
-    if !needs_mdns_nudge || !session.should_run_lan_recovery(now_ms) {
+    if needs_mdns_nudge {
+        // Full handover (fresh listen + force mDNS), not soft restart — matches cold start.
+        kick_lan_dm_rediscovery_after_handover(
+            swarm,
+            session,
+            "link down, no mDNS candidate yet",
+            false,
+        );
         return;
     }
-    native_log::info("net", "LAN handover upkeep — nudge mDNS (link down, no candidate yet)");
-    restart_mdns_behaviour(swarm, session, false);
+    let in_grace = session.within_lan_handover_grace(now_ms);
+    let stream_down = session.dm_peer_ids().iter().any(|p| {
+        session.should_dial_libp2p_peer(*p) && !session.dm_peer_stream_up(*p)
+    });
+    if in_grace && stream_down && session.should_run_lan_recovery(now_ms) {
+        native_log::info("net", "LAN handover upkeep — reopen DM streams (STORY)");
+        notify_stream_reopen();
+    }
 }
 
 fn new_msg_id() -> String {
@@ -5440,85 +5500,6 @@ fn is_direct_lan_tcp_mdns_candidate(ma: &Multiaddr) -> bool {
         && super::network_transport::ipv4_from_ma_str(&ma.to_string())
             .is_some_and(|ip| ip.is_private())
         && super::network_transport::is_dm_dial_multiaddr(ma)
-}
-
-fn lan_tcp_port(ma: &Multiaddr) -> Option<u16> {
-    ma.iter().find_map(|p| match p {
-        Protocol::Tcp(port) => Some(port),
-        _ => None,
-    })
-}
-
-/// Keep one RFC1918 LAN TCP candidate per host — highest port (live listen), drop stale lower ports.
-fn trim_mdns_lan_candidates_highest_port_per_host(peer: PeerId, session: &SessionState) {
-    let Ok(mut m) = session.peer_mdns_lan_candidate_addrs.write() else {
-        return;
-    };
-    let Some(v) = m.get_mut(&peer) else {
-        return;
-    };
-    let mut best: HashMap<String, Multiaddr> = HashMap::new();
-    for ma in v.iter() {
-        if !is_direct_lan_tcp_mdns_candidate(ma) {
-            continue;
-        }
-        let Some(ip) = super::network_transport::ipv4_from_ma_str(&ma.to_string()) else {
-            continue;
-        };
-        let port = lan_tcp_port(ma).unwrap_or(0);
-        let replace = best
-            .get(&ip.to_string())
-            .and_then(|prev| lan_tcp_port(prev))
-            .is_none_or(|prev_port| port >= prev_port);
-        if replace {
-            best.insert(ip.to_string(), ma.clone());
-        }
-    }
-    if best.is_empty() {
-        return;
-    }
-    let mut trimmed: Vec<Multiaddr> = best.into_values().collect();
-    trimmed.sort_by_key(|ma| std::cmp::Reverse(lan_tcp_port(ma).unwrap_or(0)));
-    *v = trimmed;
-    if let Some(best_ma) = v.first() {
-        session.set_mdns_lan_preferred(peer, best_ma.clone());
-    }
-}
-
-/// Rank LAN TCP mDNS candidates for dial order (best first).
-///
-/// Failover order uses highest TCP port among publishable RFC1918 candidates. The **first** dial
-/// uses `pick_best_mdns_lan_tcp_addr` with a per-peer preferred addr set when a new candidate
-/// merges with port >= prior max (live session) — not when a lower port re-announces (stale).
-fn rank_mdns_lan_tcp_candidates(addrs: &[Multiaddr]) -> Vec<Multiaddr> {
-    let publishable: Vec<Multiaddr> = addrs
-        .iter()
-        .filter(|ma| is_direct_lan_tcp_mdns_candidate(ma))
-        .filter(|ma| super::network_transport::is_publishable_listen_addr(ma))
-        .cloned()
-        .collect();
-    let use_publishable = !publishable.is_empty();
-    let mut ranked: Vec<Multiaddr> = addrs
-        .iter()
-        .filter(|ma| is_direct_lan_tcp_mdns_candidate(ma))
-        .filter(|ma| !use_publishable || super::network_transport::is_publishable_listen_addr(ma))
-        .cloned()
-        .collect();
-    ranked.sort_by_key(|ma| std::cmp::Reverse(lan_tcp_port(ma).unwrap_or(0)));
-    ranked
-}
-
-fn pick_best_mdns_lan_tcp_addr(
-    addrs: &[Multiaddr],
-    preferred: Option<&Multiaddr>,
-) -> Option<Multiaddr> {
-    let ranked = rank_mdns_lan_tcp_candidates(addrs);
-    if let Some(p) = preferred {
-        if ranked.iter().any(|a| a == p) {
-            return Some(p.clone());
-        }
-    }
-    ranked.into_iter().next()
 }
 
 fn failed_dial_multiaddr_from_error(err_s: &str) -> Option<Multiaddr> {
@@ -7668,7 +7649,7 @@ fn libp2p_peer_dial_pending(swarm: &mut Swarm<ChatBehaviour>, peer: PeerId) -> b
 /// Drop stale `lan_dial_in_flight` when libp2p is no longer dialing; hold the slot for
 /// `LAN_DIAL_PENDING_GRACE_MS` after `swarm.dial(Ok)` so a second mDNS burst cannot parallel-dial.
 fn lan_dial_expired_coord_fallback(
-    swarm: &mut Swarm<ChatBehaviour>,
+    _swarm: &mut Swarm<ChatBehaviour>,
     session: &SessionState,
     peer: PeerId,
 ) {
@@ -7681,12 +7662,7 @@ fn lan_dial_expired_coord_fallback(
             ),
         );
         if session.peer_mdns_lan_addr(peer).is_none() {
-            kick_lan_after_lan_dial_path_failed(
-                swarm,
-                session,
-                peer,
-                "LAN dial window expired — refresh mDNS",
-            );
+            notify_dm_presence_wake();
         } else {
             notify_dm_presence_wake();
         }
@@ -7697,6 +7673,25 @@ fn lan_dial_expired_coord_fallback(
         format!("LAN dial window expired for {peer} — coord/WAN fallback"),
     );
     notify_coord_lookup();
+}
+
+fn close_dm_relay_connections_for_peer(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+    peer: PeerId,
+) {
+    for conn_id in session.drain_dm_relay_connection_ids(peer) {
+        if swarm.close_connection(conn_id) {
+            native_log::info(
+                "swarm",
+                format!("closed relay circuit to {peer} (direct LAN active)"),
+            );
+        }
+    }
+}
+
+fn dm_connection_is_relay(endpoint: &ConnectedPoint) -> bool {
+    super::network_transport::is_relay_circuit_multiaddr(endpoint.get_remote_address())
 }
 
 fn reconcile_lan_dial_in_flight(
@@ -8137,6 +8132,7 @@ fn handle_mdns_discovered_list(
             }
         }
         let mut new_lan_tcp = false;
+        let mut dial_from_event: Option<Multiaddr> = None;
         let lan_tcp_discovered: Vec<Multiaddr> = addrs
             .iter()
             .filter(|a| is_direct_lan_tcp_mdns_candidate(a))
@@ -8146,16 +8142,13 @@ fn handle_mdns_discovered_list(
             if session.merge_mdns_lan_candidate(peer, addr) {
                 if is_direct_lan_tcp_mdns_candidate(addr) {
                     new_lan_tcp = true;
+                    // First new LAN TCP in this mDNS batch — stale ports often follow live ones.
+                    if dial_from_event.is_none() {
+                        dial_from_event = Some(addr.clone());
+                    }
                 }
             }
         }
-        let preferred = session
-            .peer_mdns_lan_preferred
-            .read()
-            .ok()
-            .and_then(|m| m.get(&peer).cloned());
-        let dial_from_event =
-            pick_best_mdns_lan_tcp_addr(&lan_tcp_discovered, preferred.as_ref());
         if !lan_tcp_discovered.is_empty() {
             session.note_peer_on_local_lan(peer);
         }
@@ -8170,8 +8163,8 @@ fn handle_mdns_discovered_list(
                 && !skip_lan_upgrade
                 && !session.peer_has_direct_connection(peer)
             {
-                if let Some(best) = dial_from_event.or_else(|| session.peer_mdns_lan_addr(peer)) {
-                    dial_lan_upgrade(swarm, session, peer, best);
+                if let Some(addr) = dial_from_event.or_else(|| session.peer_mdns_lan_addr(peer)) {
+                    dial_lan_upgrade(swarm, session, peer, addr);
                 }
             }
         } else if session.is_dm_contact(peer) && !lan_tcp_discovered.is_empty() {
@@ -8659,8 +8652,10 @@ fn handle_swarm_event(
                 session.refresh_bootstrap_connected_flag(swarm);
             } else if session.is_dm_contact(peer_id) {
                 session.clear_circuit_dial_in_flight(peer_id);
-                let is_relay =
-                    super::network_transport::is_relay_circuit_multiaddr(endpoint.get_remote_address());
+                let is_relay = dm_connection_is_relay(&endpoint);
+                if is_relay {
+                    session.forget_dm_relay_connection(peer_id, connection_id);
+                }
                 session.drop_connection_path(peer_id, is_relay);
                 if swarm.is_connected(&peer_id) {
                     native_log::debug(
@@ -8697,10 +8692,20 @@ fn handle_swarm_event(
                 session.clear_circuit_dial_in_flight(peer_id);
                 session.clear_lan_dial_in_flight(peer_id);
                 session.clear_relay_circuit_dial_backoff(peer_id);
-                let is_relay =
-                    super::network_transport::is_relay_circuit_multiaddr(endpoint.get_remote_address());
-                session.note_connection_path(peer_id, is_relay);
-                if !is_relay {
+                let is_relay = dm_connection_is_relay(&endpoint);
+                if is_relay {
+                    if session.peer_has_direct_connection(peer_id) {
+                        native_log::info(
+                            "swarm",
+                            format!("drop redundant relay link to {peer_id} (direct LAN up)"),
+                        );
+                        let _ = swarm.close_connection(connection_id);
+                        return;
+                    }
+                    session.note_dm_relay_connection(peer_id, connection_id);
+                } else {
+                    session.note_connection_path(peer_id, false);
+                    close_dm_relay_connections_for_peer(swarm, session, peer_id);
                     if let Some(ip) = super::network_transport::ipv4_from_ma_str(
                         &endpoint.get_remote_address().to_string(),
                     ) {
@@ -9399,7 +9404,7 @@ pub async fn run_gossip_chat_node_with_std_io(
             net.has_global_ipv6
         ),
     );
-    listen_swarm_transports(&mut swarm)?;
+    listen_swarm_transports(&mut swarm, session.as_ref())?;
     // Start relay TCP + CGNAT probe before the brief listen wait so cellular bootstrap is not idle.
     if coord_only && !coord_relays.is_empty() {
         dial_coord_relays(&mut swarm, &session, &coord_relays);
@@ -9627,6 +9632,10 @@ pub async fn run_gossip_chat_node_with_std_io(
             _ = network_tick.tick() => {
                 let recovering_before = session.wan_recovery_active.load(Ordering::Relaxed);
                 let mut handover = false;
+                #[cfg(target_os = "linux")]
+                if crate::linux_network::poll_wifi_link_up_transition() {
+                    notify_network_change();
+                }
                 let forced = take_network_change_notify();
                 if forced {
                     let detected = detected_network_with_platform_hints();
@@ -9843,7 +9852,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                 }
             }
             ev = swarm.select_next_some() => {
-                if let SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &ev {
+                if let SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } = &ev {
                     if let Some(pk) = session.register_inbound_dialer_if_needed(*peer_id, endpoint)
                     {
                         let _ = events_tx.send(GossipChatEvent::PeerIdentified {
@@ -9855,6 +9864,22 @@ pub async fn run_gossip_chat_node_with_std_io(
                         // Coord relay bootstrap only — not a chat contact.
                     } else if session.is_dm_contact(*peer_id) {
                         let pid = *peer_id;
+                        let is_relay = dm_connection_is_relay(endpoint);
+                        if is_relay && session.peer_has_direct_connection(pid) {
+                            native_log::info(
+                                "swarm",
+                                format!("ignore relay link to {pid} — direct LAN already up"),
+                            );
+                            let _ = swarm.close_connection(*connection_id);
+                        } else {
+                        if !is_relay {
+                            session.note_connection_path(pid, false);
+                            close_dm_relay_connections_for_peer(
+                                &mut swarm,
+                                session.as_ref(),
+                                pid,
+                            );
+                        }
                         native_log::info("swarm", format!("dm peer connected {pid}"));
                         session.note_connected(pid);
                         if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&pid) {
@@ -9876,6 +9901,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                             )
                             .await;
                         });
+                        }
                     }
                 }
                 if let SwarmEvent::ConnectionClosed { peer_id, .. } = &ev {
@@ -9937,115 +9963,73 @@ pub async fn run_gossip_chat_node_with_std_io(
 #[cfg(test)]
 mod mdns_connect_tests {
     use super::*;
+    use crate::p2p::network_transport;
     use libp2p::Multiaddr;
 
-    #[test]
-    fn rank_mdns_prefers_highest_port_for_failover_when_no_preferred() {
-        let live: Multiaddr =
-            "/ip4/192.168.1.38/tcp/45735/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        let stale: Multiaddr =
-            "/ip4/192.168.1.38/tcp/43923/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert_eq!(
-            pick_best_mdns_lan_tcp_addr(&[live.clone(), stale.clone()], None),
-            Some(live)
-        );
+    fn test_session() -> SessionState {
+        let (_ks, identity) = crate::keystore_v1::create_keystore_v1("test-mdns-port", None).unwrap();
+        SessionState::new(
+            identity,
+            &[],
+            HashSet::new(),
+            None,
+            None,
+            network_transport::detect_local_network_profile(),
+            None,
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn pick_mdns_uses_preferred_when_stale_has_higher_port() {
-        let stale: Multiaddr =
-            "/ip4/192.168.1.38/tcp/43439/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        let live: Multiaddr =
-            "/ip4/192.168.1.38/tcp/36131/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert_eq!(
-            pick_best_mdns_lan_tcp_addr(&[stale.clone(), live.clone()], Some(&live)),
-            Some(live.clone())
-        );
-        assert_eq!(
-            pick_best_mdns_lan_tcp_addr(&[stale.clone(), live.clone()], None),
-            Some(stale)
-        );
+    fn merge_keeps_all_lan_tcp_until_expired_or_dial_fail() {
+        let session = test_session();
+        let peer = PeerId::random();
+        let first: Multiaddr = "/ip4/192.168.1.38/tcp/43377/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+            .parse()
+            .unwrap();
+        let second: Multiaddr = "/ip4/192.168.1.38/tcp/33527/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+            .parse()
+            .unwrap();
+        assert!(session.merge_mdns_lan_candidate(peer, &first));
+        assert!(session.merge_mdns_lan_candidate(peer, &second));
+        let addrs = session
+            .peer_mdns_lan_candidate_addrs
+            .read()
+            .unwrap()
+            .get(&peer)
+            .cloned()
+            .unwrap();
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(session.peer_mdns_lan_addr(peer), Some(first.clone()));
+        session.remove_mdns_lan_candidate(peer, Some(&first));
+        assert_eq!(session.peer_mdns_lan_addr(peer), Some(second));
     }
 
     #[test]
-    fn rank_mdns_prefers_highest_port_when_stale_before_live() {
-        let stale: Multiaddr =
-            "/ip4/192.168.1.38/tcp/40339/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        let live: Multiaddr =
-            "/ip4/192.168.1.38/tcp/45273/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert_eq!(
-            pick_best_mdns_lan_tcp_addr(&[stale.clone(), live.clone()], None),
-            Some(live)
-        );
+    fn peer_mdns_lan_addr_failover_uses_discovery_order_not_port() {
+        let session = test_session();
+        let peer = PeerId::random();
+        let first: Multiaddr = "/ip4/192.168.1.38/tcp/45735/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+            .parse()
+            .unwrap();
+        let second: Multiaddr = "/ip4/192.168.1.37/tcp/36131/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+            .parse()
+            .unwrap();
+        assert!(session.merge_mdns_lan_candidate(peer, &first));
+        assert!(session.merge_mdns_lan_candidate(peer, &second));
+        assert_eq!(session.peer_mdns_lan_addr(peer), Some(first));
     }
 
     #[test]
-    fn rank_mdns_prefers_highest_port_when_stale_low_port_first() {
-        let stale: Multiaddr =
-            "/ip4/192.168.1.38/tcp/34319/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+    fn merge_skips_non_lan_tcp_addrs() {
+        let session = test_session();
+        let peer = PeerId::random();
+        let relay: Multiaddr =
+            "/dns4/coord.ghalbol.com/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
                 .parse()
                 .unwrap();
-        let live: Multiaddr =
-            "/ip4/192.168.1.38/tcp/43721/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert_eq!(
-            pick_best_mdns_lan_tcp_addr(&[stale.clone(), live.clone()], None),
-            Some(live)
-        );
-    }
-
-    #[test]
-    fn rank_mdns_prefers_highest_port_when_stale_reannounce() {
-        let stale: Multiaddr =
-            "/ip4/192.168.1.38/tcp/42267/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        let live: Multiaddr =
-            "/ip4/192.168.1.38/tcp/43923/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert_eq!(
-            pick_best_mdns_lan_tcp_addr(&[stale.clone(), live.clone()], None),
-            Some(live)
-        );
-    }
-
-    #[test]
-    fn rank_mdns_drops_docker_bridge_listen_addrs() {
-        let docker: Multiaddr = "/ip4/172.17.0.1/tcp/43065".parse().unwrap();
-        let lan: Multiaddr = "/ip4/192.168.1.38/tcp/43065".parse().unwrap();
-        let ranked = rank_mdns_lan_tcp_candidates(&[docker, lan.clone()]);
-        assert_eq!(ranked, vec![lan]);
-    }
-
-    #[test]
-    fn rank_mdns_ipv6_only_stale_port_loses_to_live_ipv4_port() {
-        // libp2p may advertise ip4:41281 (IPv6-only listener) alongside ip4:44179 (0.0.0.0).
-        let stale: Multiaddr =
-            "/ip4/192.168.1.37/tcp/41281/p2p/16Uiu2HAmAPQiHoxGjcHXz3sugEHLDvkz6hMyMhPFZtxzySExwpc2"
-                .parse()
-                .unwrap();
-        let live: Multiaddr =
-            "/ip4/192.168.1.37/tcp/44179/p2p/16Uiu2HAmAPQiHoxGjcHXz3sugEHLDvkz6hMyMhPFZtxzySExwpc2"
-                .parse()
-                .unwrap();
-        assert_eq!(
-            pick_best_mdns_lan_tcp_addr(&[stale, live.clone()], None),
-            Some(live)
-        );
+        assert!(!session.merge_mdns_lan_candidate(peer, &relay));
     }
 
     #[test]

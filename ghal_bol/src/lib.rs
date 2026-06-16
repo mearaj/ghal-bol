@@ -68,6 +68,8 @@ mod android_daemon;
 mod android_jni_cache;
 #[cfg(target_os = "android")]
 mod android_network;
+#[cfg(target_os = "linux")]
+mod linux_network;
 #[cfg(not(target_arch = "wasm32"))]
 mod transcript_ffi;
 mod storage;
