@@ -2319,7 +2319,12 @@ impl SessionState {
                         "LAN dial failed for {peer} — waiting for fresh mDNS (coord deferred)"
                     ),
                 );
-                notify_dm_presence_wake();
+                kick_lan_after_lan_dial_path_failed(
+                    swarm,
+                    self,
+                    peer,
+                    "LAN dial failed — no mDNS candidates",
+                );
                 return false;
             }
             self.mark_lan_candidates_exhausted(peer);
@@ -4383,6 +4388,37 @@ fn kick_lan_dm_rediscovery_after_handover(
     session.clear_coord_lookup_backoff_all();
     notify_stream_reopen();
     crate::coord_runtime::schedule_register_presence_force();
+}
+
+/// After full DM disconnect — reopen streams and rediscover without nuking a link that may reconnect.
+fn recover_dm_peer_after_disconnect(session: &SessionState, peer: PeerId) {
+    notify_stream_reopen();
+    let now_ms = chrono_now_ms();
+    if session.defer_coord_for_lan_rediscovery(peer, now_ms) {
+        native_log::info(
+            "net",
+            format!("DM peer {peer} disconnected on LAN — stream reopen; mDNS will redial"),
+        );
+        notify_dm_presence_wake();
+    } else {
+        notify_coord_lookup();
+    }
+}
+
+/// Full handover kick only when the LAN dial path failed (event), not on transient libp2p churn.
+fn kick_lan_after_lan_dial_path_failed(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+    peer: PeerId,
+    reason: &str,
+) {
+    if swarm.is_connected(&peer) {
+        return;
+    }
+    if !wifi_lan_handover_active(session) && !ANDROID_WIFI_TRANSPORT.load(Ordering::Relaxed) {
+        return;
+    }
+    kick_lan_dm_rediscovery_after_handover(swarm, session, reason, false);
 }
 
 /// Coord presence + DM rediscovery without tearing down bootstrap HOP / reservation state.
@@ -7631,7 +7667,11 @@ fn libp2p_peer_dial_pending(swarm: &mut Swarm<ChatBehaviour>, peer: PeerId) -> b
 
 /// Drop stale `lan_dial_in_flight` when libp2p is no longer dialing; hold the slot for
 /// `LAN_DIAL_PENDING_GRACE_MS` after `swarm.dial(Ok)` so a second mDNS burst cannot parallel-dial.
-fn lan_dial_expired_coord_fallback(session: &SessionState, peer: PeerId) {
+fn lan_dial_expired_coord_fallback(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+    peer: PeerId,
+) {
     let now_ms = chrono_now_ms();
     if session.defer_coord_for_lan_rediscovery(peer, now_ms) {
         native_log::info(
@@ -7640,7 +7680,16 @@ fn lan_dial_expired_coord_fallback(session: &SessionState, peer: PeerId) {
                 "LAN dial window expired for {peer} — waiting for fresh mDNS (coord deferred)"
             ),
         );
-        notify_dm_presence_wake();
+        if session.peer_mdns_lan_addr(peer).is_none() {
+            kick_lan_after_lan_dial_path_failed(
+                swarm,
+                session,
+                peer,
+                "LAN dial window expired — refresh mDNS",
+            );
+        } else {
+            notify_dm_presence_wake();
+        }
         return;
     }
     native_log::info(
@@ -7687,13 +7736,13 @@ fn reconcile_lan_dial_in_flight(
                         dial_mdns_lan_addr(swarm, session, peer, next);
                     } else {
                         session.remove_mdns_lan_candidate(peer, Some(&addr));
-                        lan_dial_expired_coord_fallback(session, peer);
+                        lan_dial_expired_coord_fallback(swarm, session, peer);
                     }
                 } else {
-                    lan_dial_expired_coord_fallback(session, peer);
+                    lan_dial_expired_coord_fallback(swarm, session, peer);
                 }
             } else {
-                lan_dial_expired_coord_fallback(session, peer);
+                lan_dial_expired_coord_fallback(swarm, session, peer);
             }
         }
         return;
@@ -8784,6 +8833,12 @@ fn handle_swarm_event(
                     {
                         session.clear_lan_dial_in_flight(peer);
                         if !swarm.is_connected(&peer) && session.lan_candidates_exhausted(peer) {
+                            kick_lan_after_lan_dial_path_failed(
+                                swarm,
+                                session,
+                                peer,
+                                "LAN candidates exhausted",
+                            );
                             notify_coord_lookup();
                         }
                     }
@@ -9841,18 +9896,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                                 if let Some(pk) = secp256k1_public_key_hex_from_peer_id(peer_id) {
                                     session.refresh_dm_reconnect_urgent(&pk);
                                 }
-                                if wifi_lan_handover_active(session.as_ref())
-                                    || ANDROID_WIFI_TRANSPORT.load(Ordering::Relaxed)
-                                {
-                                    kick_lan_dm_rediscovery_after_handover(
-                                        &mut swarm,
-                                        session.as_ref(),
-                                        "DM peer disconnected on LAN",
-                                        false,
-                                    );
-                                } else {
-                                    notify_coord_lookup();
-                                }
+                                recover_dm_peer_after_disconnect(session.as_ref(), *peer_id);
                                 session.note_disconnected(peer_id);
                                 if let Ok(mut g) = writers.lock() {
                                     g.remove(peer_id);

@@ -356,7 +356,7 @@ The **A / B subscriber model** is an **analogy** for this split — one example 
 | mDNS `Discovered` (direct LAN TCP) | `dial_mdns_lan_addr` / `dial_lan_upgrade` on **that** addr |
 | mDNS `Expired` / LAN dial `OutgoingConnectionError` | Drop addr, failover candidate or `notify_coord_lookup` |
 | `ConnectionEstablished` (DM) | `note_connection_path`, clear in-flight dials, open chat stream |
-| `ConnectionClosed` / full DM disconnect | `notify_stream_reopen`, `kick_lan` on LAN, or `notify_coord_lookup` on WAN |
+| `ConnectionClosed` / full DM disconnect | `recover_dm_peer_after_disconnect` (stream reopen + mDNS or coord) — **not** full `kick_lan` (avoids killing a link that just connected) |
 | LAN dial no longer in flight + candidates exhausted | `notify_coord_lookup` (WAN backup) |
 
 **`dm_upkeep` (~1s)** drains outbox, read-ack retries, and work **already queued by events** — it is **not** the connect owner and must **not** poll “is handover still active?” to re-kick mDNS, reopen streams, or pause all coord on a clock.
