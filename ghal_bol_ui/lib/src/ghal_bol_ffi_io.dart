@@ -1753,14 +1753,25 @@ abstract final class GhalBolFfi {
     String appNamespace,
     Map<String, dynamic> query,
   ) {
+    final view = transcriptLoadThreadView(appNamespace, query);
+    return view.lines;
+  }
+
+  static ({int revision, List<Map<String, dynamic>> lines}) transcriptLoadThreadView(
+    String appNamespace,
+    Map<String, dynamic> query,
+  ) {
     final r = _callJson2Ptr(_transcriptLoadMerged, appNamespace, jsonEncode(query));
-    if (r["ok"] != true) return [];
+    if (r["ok"] != true) return (revision: 0, lines: <Map<String, dynamic>>[]);
+    final revRaw = r["revision"];
+    final revision = revRaw is num ? revRaw.toInt() : 0;
     final raw = r["lines"];
-    if (raw is! List) return [];
-    return raw
+    if (raw is! List) return (revision: revision, lines: <Map<String, dynamic>>[]);
+    final lines = raw
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
+    return (revision: revision, lines: lines);
   }
 
   static bool transcriptSave(

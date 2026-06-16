@@ -109,6 +109,48 @@ fn conversation_key_from_event(ev: &Value) -> String {
     public_key_hex_from_event(ev)
 }
 
+/// Canonical transcript view key for poll/UI sync (66-hex pk when known).
+pub fn transcript_poll_view_key(app_namespace: &str, ev: &Value) -> Option<String> {
+    let kind = ev.get("kind")?.as_str()?;
+    let raw = match kind {
+        "dm_message" => {
+            let pk = public_key_hex_from_event(ev);
+            if is_valid_public_key_hex(&pk) {
+                pk
+            } else {
+                let from = ev.get("from").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if from.is_empty() {
+                    return None;
+                }
+                find_by_peer_id(app_namespace, from)
+                    .ok()
+                    .flatten()
+                    .map(|c| {
+                        if c.has_public_key() {
+                            c.public_key_hex.trim().to_ascii_lowercase()
+                        } else {
+                            c.conversation_key()
+                        }
+                    })?
+            }
+        }
+        "peer_identified" => {
+            let pk = public_key_hex_from_event(ev);
+            if !is_valid_public_key_hex(&pk) {
+                return None;
+            }
+            pk
+        }
+        _ => return None,
+    };
+    let view = crate::dm_transcript_store::transcript_view_key(app_namespace, &raw);
+    if view.is_empty() {
+        None
+    } else {
+        Some(view)
+    }
+}
+
 fn dm_ack_sender_matches(sender_pk: &str, contact: &SavedContact) -> bool {
     is_valid_public_key_hex(sender_pk) && contact.has_public_key() && contact.public_key_hex == sender_pk
 }

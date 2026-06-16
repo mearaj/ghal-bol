@@ -6,8 +6,8 @@ use std::os::raw::c_char;
 use serde_json::Value;
 
 use crate::dm_transcript_store::{
-    append_if_new, load_merged, patch_inbound_read_ack_sent_for_thread,
-    patch_outgoing_delivery, resolve_transcript_path, save_thread, StoredChatLine,
+    append_if_new, patch_inbound_read_ack_sent_for_thread, patch_outgoing_delivery,
+    resolve_transcript_path, save_thread, thread_view, StoredChatLine,
 };
 
 fn json_ok(v: Value) -> *mut c_char {
@@ -85,10 +85,11 @@ pub unsafe extern "C" fn ghal_bol_ffi_transcript_load_merged(
         let from_peer = q
             .get("match_inbound_from_peer_id")
             .and_then(|v| v.as_str());
-        match load_merged(&ns, &keys, from_peer) {
-            Ok(lines) => json_ok(serde_json::json!({
+        match crate::dm_transcript_store::thread_view(&ns, &keys, from_peer) {
+            Ok(view) => json_ok(serde_json::json!({
                 "ok": true,
-                "lines": lines.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
+                "revision": view.revision,
+                "lines": view.lines.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
             })),
             Err(e) => json_err(format!("{e}")),
         }

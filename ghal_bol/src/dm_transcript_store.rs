@@ -18,9 +18,104 @@ use crate::public_key_util::{
 use crate::storage::KeystoreStorageError;
 
 static IO_CHAIN: OnceLock<Mutex<()>> = OnceLock::new();
+static REVISIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 fn io_chain() -> &'static Mutex<()> {
     IO_CHAIN.get_or_init(|| Mutex::new(()))
+}
+
+fn revision_map() -> &'static Mutex<HashMap<String, u64>> {
+    REVISIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn revision_storage_key(app_namespace: &str, view_key: &str) -> String {
+    format!(
+        "{}|{}",
+        app_namespace.trim(),
+        view_key.trim().to_ascii_lowercase()
+    )
+}
+
+/// Canonical UI view key for a thread — prefer 66-hex public key when the contact is known.
+pub fn transcript_view_key(app_namespace: &str, conversation_key: &str) -> String {
+    let k = conversation_key.trim();
+    if k.is_empty() {
+        return String::new();
+    }
+    if is_valid_public_key_hex(k) {
+        return k.to_ascii_lowercase();
+    }
+    if let Ok(Some(c)) = find_by_peer_id(app_namespace, k) {
+        if c.has_public_key() {
+            return c.public_key_hex.trim().to_ascii_lowercase();
+        }
+        return c.conversation_key();
+    }
+    if let Ok(Some(c)) = find_by_public_key(app_namespace, k) {
+        if c.has_public_key() {
+            return c.public_key_hex.trim().to_ascii_lowercase();
+        }
+        return c.conversation_key();
+    }
+    k.to_string()
+}
+
+fn bump_transcript_revision(app_namespace: &str, conversation_key: &str) {
+    let view = transcript_view_key(app_namespace, conversation_key);
+    if view.is_empty() {
+        return;
+    }
+    let key = revision_storage_key(app_namespace, &view);
+    if let Ok(mut m) = revision_map().lock() {
+        let e = m.entry(key).or_insert(0);
+        *e = e.saturating_add(1);
+    }
+}
+
+/// Monotonic revision for one canonical view key (in-memory; bumped on every disk mutation).
+pub fn thread_revision_for_view(app_namespace: &str, view_key: &str) -> u64 {
+    let key = revision_storage_key(app_namespace, view_key);
+    revision_map()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).copied())
+        .unwrap_or(0)
+}
+
+pub fn thread_revision_for_keys(app_namespace: &str, conversation_keys: &[String]) -> u64 {
+    let expanded = expand_conversation_keys(app_namespace, conversation_keys);
+    let mut views: HashSet<String> = HashSet::new();
+    for k in expanded {
+        let v = transcript_view_key(app_namespace, &k);
+        if !v.is_empty() {
+            views.insert(v);
+        }
+    }
+    views
+        .iter()
+        .map(|v| thread_revision_for_view(app_namespace, v))
+        .max()
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Debug)]
+pub struct TranscriptThreadView {
+    pub revision: u64,
+    pub lines: Vec<StoredChatLine>,
+}
+
+pub fn thread_view(
+    app_namespace: &str,
+    conversation_keys: &[String],
+    match_inbound_from_peer_id: Option<&str>,
+) -> Result<TranscriptThreadView, TranscriptStoreError> {
+    let lines = load_merged(
+        app_namespace,
+        conversation_keys,
+        match_inbound_from_peer_id,
+    )?;
+    let revision = thread_revision_for_keys(app_namespace, conversation_keys);
+    Ok(TranscriptThreadView { revision, lines })
 }
 
 /// One in-process mutex + cross-process flock for the duration of a read/modify/write.
@@ -444,7 +539,9 @@ pub fn save_thread(
     if let Some(obj) = ns_entry.as_object_mut() {
         obj.insert(conversation_key.to_string(), Value::Array(arr));
     }
-    write_root_unlocked(&path, &all)
+    write_root_unlocked(&path, &all)?;
+    bump_transcript_revision(app_namespace, conversation_key);
+    Ok(())
 }
 
 pub fn append_if_new(
@@ -471,6 +568,7 @@ pub fn append_if_new(
             root.insert(app_namespace.to_string(), Value::Object(threads));
         }
         write_root_unlocked(&path, &all)?;
+        bump_transcript_revision(app_namespace, conversation_key);
         return Ok(());
     };
     let mut existing: Vec<StoredChatLine> = ns_obj
@@ -510,7 +608,9 @@ pub fn append_if_new(
             "append line conv={conversation_key} mid={mid} outgoing={outgoing} len={text_len}",
         ),
     );
-    write_root_unlocked(&path, &all)
+    write_root_unlocked(&path, &all)?;
+    bump_transcript_revision(app_namespace, conversation_key);
+    Ok(())
 }
 
 pub fn patch_outgoing_delivery(
@@ -561,6 +661,7 @@ pub fn patch_outgoing_delivery(
             format!("patched outgoing delivery={delivery} mid={mid} conv={conversation_key}"),
         );
         write_root_unlocked(&path, &all)?;
+        bump_transcript_revision(app_namespace, conversation_key);
     } else {
         flow_log::debug(
             "Transcript",
@@ -612,6 +713,7 @@ pub fn patch_inbound_read_ack_sent_for_thread(
     }
     if changed {
         write_root_unlocked(&path, &all)?;
+        bump_transcript_revision(app_namespace, conversation_key);
     }
     Ok(changed)
 }
@@ -620,19 +722,21 @@ fn patch_inbound_read_ack_sent_all_threads(
     all: &mut Value,
     app_namespace: &str,
     message_id: &str,
-) -> bool {
+) -> (bool, Vec<String>) {
     let mid = message_id.trim();
     if mid.is_empty() {
-        return false;
+        return (false, Vec::new());
     }
     let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
-        return false;
+        return (false, Vec::new());
     };
     let mut changed = false;
-    for thread in ns_obj.values_mut() {
+    let mut touched = Vec::new();
+    for (conv_key, thread) in ns_obj.iter_mut() {
         let Some(lines) = thread.as_array_mut() else {
             continue;
         };
+        let mut thread_changed = false;
         for item in lines.iter_mut() {
             let Some(parsed) = StoredChatLine::from_json(item) else {
                 continue;
@@ -647,9 +751,13 @@ fn patch_inbound_read_ack_sent_all_threads(
             next.read_ack_sent = true;
             *item = next.to_json();
             changed = true;
+            thread_changed = true;
+        }
+        if thread_changed {
+            touched.push(conv_key.clone());
         }
     }
-    changed
+    (changed, touched)
 }
 
 /// Search every thread under [app_namespace] (read-ack confirm from `chat_server`).
@@ -664,9 +772,13 @@ pub fn patch_inbound_read_ack_sent_at_path(
             return Ok(false);
         }
         let mut all = read_root_unlocked(path)?;
-        let changed = patch_inbound_read_ack_sent_all_threads(&mut all, app_namespace, mid);
+        let (changed, touched) =
+            patch_inbound_read_ack_sent_all_threads(&mut all, app_namespace, mid);
         if changed {
             write_root_unlocked(path, &all)?;
+            for conv_key in touched {
+                bump_transcript_revision(app_namespace, &conv_key);
+            }
         }
         Ok(changed)
     })

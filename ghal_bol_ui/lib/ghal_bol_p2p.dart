@@ -347,7 +347,7 @@ abstract final class GhalBolP2p {
   }
 
   /// Read-only transcript merge via background `:p2p` (same process that writes on poll).
-  static Future<List<Map<String, dynamic>>> transcriptLoadMerged({
+  static Future<({int revision, List<Map<String, dynamic>> lines})> transcriptLoadThreadView({
     required String appNamespace,
     required List<String> conversationKeys,
     String? matchInboundFromPeerId,
@@ -363,15 +363,32 @@ abstract final class GhalBolP2p {
         "p2p_transcript_load_merged",
         params: params,
       );
-      if (r["ok"] != true) return [];
+      if (r["ok"] != true) return (revision: 0, lines: <Map<String, dynamic>>[]);
+      final revRaw = r["revision"];
+      final revision = revRaw is num ? revRaw.toInt() : 0;
       final lines = r["lines"];
-      if (lines is! List) return [];
-      return lines
+      if (lines is! List) return (revision: revision, lines: <Map<String, dynamic>>[]);
+      final parsed = lines
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
+      return (revision: revision, lines: parsed);
     }
-    return GhalBolFfi.transcriptLoadMerged(appNamespace, params);
+    return GhalBolFfi.transcriptLoadThreadView(appNamespace, params);
+  }
+
+  /// Read-only transcript merge via background `:p2p` (same process that writes on poll).
+  static Future<List<Map<String, dynamic>>> transcriptLoadMerged({
+    required String appNamespace,
+    required List<String> conversationKeys,
+    String? matchInboundFromPeerId,
+  }) async {
+    final view = await transcriptLoadThreadView(
+      appNamespace: appNamespace,
+      conversationKeys: conversationKeys,
+      matchInboundFromPeerId: matchInboundFromPeerId,
+    );
+    return view.lines;
   }
 
   /// Native **video** control plane (H.264 over `/ghal-bol/call-video/1.0.0`).

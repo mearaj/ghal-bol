@@ -840,10 +840,11 @@ pub fn p2p_transcript_load_merged(config: &Value) -> Value {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    match crate::dm_transcript_store::load_merged(ns, &keys, from_peer) {
-        Ok(lines) => json_ok(serde_json::json!({
+    match crate::dm_transcript_store::thread_view(ns, &keys, from_peer) {
+        Ok(view) => json_ok(serde_json::json!({
             "ok": true,
-            "lines": lines.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
+            "revision": view.revision,
+            "lines": view.lines.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
         })),
         Err(e) => json_err(format!("{e}")),
     }
@@ -1456,6 +1457,26 @@ pub fn p2p_set_foreground_peer(public_key_hex: Option<&str>) -> Value {
     json_ok(serde_json::json!({ "ok": true }))
 }
 
+fn enrich_transcript_poll_fields(j: &mut Value) {
+    let Some(ns) = crate::dm_event_handler::active_app_namespace() else {
+        return;
+    };
+    let Some(view_key) = crate::dm_event_handler::transcript_poll_view_key(&ns, j) else {
+        return;
+    };
+    let rev = crate::dm_transcript_store::thread_revision_for_view(&ns, &view_key);
+    if let Some(obj) = j.as_object_mut() {
+        obj.insert(
+            "conversation_key".to_string(),
+            Value::String(view_key),
+        );
+        obj.insert(
+            "transcript_revision".to_string(),
+            Value::Number(rev.into()),
+        );
+    }
+}
+
 pub fn p2p_poll_event() -> Option<Value> {
     maybe_maintain_poll_queue(call_state::now_ms());
     let now = call_state::now_ms();
@@ -1474,6 +1495,7 @@ pub fn p2p_poll_event() -> Option<Value> {
             if let Some(obj) = j.as_object_mut() {
                 obj.insert("stores_updated".to_string(), Value::Bool(true));
             }
+            enrich_transcript_poll_fields(&mut j);
             if let Some(kind) = j.get("kind").and_then(|v| v.as_str()) {
                 native_log::info("DM/store", format!("stores_updated after {kind}"));
             }
@@ -1498,6 +1520,7 @@ pub fn p2p_poll_event() -> Option<Value> {
                 if let Some(obj) = j.as_object_mut() {
                     obj.insert("stores_updated".to_string(), Value::Bool(true));
                 }
+                enrich_transcript_poll_fields(&mut j);
                 return Some(j);
             }
         }

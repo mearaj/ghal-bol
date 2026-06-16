@@ -805,9 +805,17 @@ Transcript survives restart; native re-seeds outbox and read-ack queues from dis
 
 | Do | Do not |
 |----|--------|
-| `mergeTranscriptFromNative` / `transcriptLoadMerged` to **display** native state | `ChatTranscriptStore.save` / `appendIfNew` / delivery patches (no-ops on daemon — keep call sites hub-gated) |
-| `ingestP2pEvent` for the open room | Full transcript reload on every `previewChangeCount` (hub reloads roster only) |
+| `syncTranscriptView` / `transcriptLoadThreadView` to **display** native state (full snapshot, revision-guarded) | `ChatTranscriptStore.save` / `appendIfNew` / delivery patches (no-ops on daemon — keep call sites hub-gated) |
+| `ingestP2pEvent` for the open room — schedule sync when poll carries `stores_updated` + matching `conversation_key` | Incremental Dart merge (`deliveryOnly`, `_mergeStoredRowsIntoLines`) or full reload on every `previewChangeCount` |
 | Keep visible lines when reload returns **0 rows** during same-room refresh | `force: true` empty reload that clears persisted bubbles |
+
+### Transcript UI view contract (revision sync)
+
+**Native owns the painted view.** `:p2p` bumps a monotonic **`transcript_revision`** per canonical thread view key (66-hex public key when known) on every disk mutation (`append_if_new`, delivery/read-ack patches, `save_thread`). Poll events that change stores include **`conversation_key`** and **`transcript_revision`** when handler context is set.
+
+**Flutter hub chat** loads via **`p2p_transcript_load_merged`** → `{ revision, lines }` and **replaces** persisted bubbles from that snapshot when `revision > _paintedTranscriptRevision` (or `force`). No incremental inbound merge, no `deliveryOnly` paint path — delivery/read ticks come from the same native rows acks already updated on disk.
+
+**Triggers:** poll `stores_updated` for the open thread; room open/resume; `hubThreadKey` change; after outbound send (force sync). Single-flight + ~100 ms debounce on burst ack polls.
 
 **Symptom if broken:** chat lines disappear while the hub preview still shows text; or outbound/inbound rows vanish after read-ack confirm while another append was in flight. Fix native locking and UI wipe guards — not “merge harder in Dart”.
 

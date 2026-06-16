@@ -275,6 +275,12 @@ abstract final class GhalBolFfi {
   static List<Map<String, dynamic>> transcriptLoadMerged(String _, Map<String, dynamic> _) =>
       [];
 
+  static ({int revision, List<Map<String, dynamic>> lines}) transcriptLoadThreadView(
+    String _,
+    Map<String, dynamic> _,
+  ) =>
+      (revision: 0, lines: <Map<String, dynamic>>[]);
+
   static bool transcriptSave(String _, String _, List<Map<String, dynamic>> _) => false;
 
   static bool transcriptAppendIfNew(String _, String _, Map<String, dynamic> _) => false;

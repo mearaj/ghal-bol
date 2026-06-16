@@ -64,6 +64,14 @@ class StoredChatLine {
   }
 }
 
+/// Native transcript snapshot for UI paint (revision + merged lines).
+class TranscriptThreadView {
+  const TranscriptThreadView({required this.revision, required this.lines});
+
+  final int revision;
+  final List<StoredChatLine> lines;
+}
+
 /// Local transcript — persisted in **`ghal_bol`**.
 ///
 /// **Daemon platforms (Android/Linux):** `:p2p` / `ghal_bol_daemon` owns all
@@ -139,6 +147,27 @@ class ChatTranscriptStore {
     return GhalBolFfi.transcriptResolvePath(appNamespace) ?? "";
   }
 
+  static Future<TranscriptThreadView> loadThreadView({
+    required String appNamespace,
+    required Set<String> conversationKeys,
+    String? matchInboundFromPeerId,
+    String? cacheUnderConversationKey,
+  }) async {
+    final r = await GhalBolP2p.transcriptLoadThreadView(
+      appNamespace: appNamespace,
+      conversationKeys: conversationKeys.toList(),
+      matchInboundFromPeerId: matchInboundFromPeerId,
+    );
+    final lines = r.lines.map(StoredChatLine.fromJson).whereType<StoredChatLine>().toList();
+    final cached = List<StoredChatLine>.from(lines);
+    _threadMemoryCache[_threadCacheKey(appNamespace, conversationKeys)] = cached;
+    final canon = cacheUnderConversationKey?.trim() ?? "";
+    if (canon.isNotEmpty) {
+      _threadMemoryCache[_threadCacheKey(appNamespace, {canon})] = cached;
+    }
+    return TranscriptThreadView(revision: r.revision, lines: lines);
+  }
+
   static Future<List<StoredChatLine>> loadMerged({
     required String appNamespace,
     required Set<String> conversationKeys,
@@ -146,19 +175,13 @@ class ChatTranscriptStore {
     /// When set, also cache under this single key (for hub warm + peek by canonical conv).
     String? cacheUnderConversationKey,
   }) async {
-    final raw = await GhalBolP2p.transcriptLoadMerged(
+    final view = await loadThreadView(
       appNamespace: appNamespace,
-      conversationKeys: conversationKeys.toList(),
+      conversationKeys: conversationKeys,
       matchInboundFromPeerId: matchInboundFromPeerId,
+      cacheUnderConversationKey: cacheUnderConversationKey,
     );
-    final lines = raw.map(StoredChatLine.fromJson).whereType<StoredChatLine>().toList();
-    final cached = List<StoredChatLine>.from(lines);
-    _threadMemoryCache[_threadCacheKey(appNamespace, conversationKeys)] = cached;
-    final canon = cacheUnderConversationKey?.trim() ?? "";
-    if (canon.isNotEmpty) {
-      _threadMemoryCache[_threadCacheKey(appNamespace, {canon})] = cached;
-    }
-    return lines;
+    return view.lines;
   }
 
   static Future<List<StoredChatLine>> load({

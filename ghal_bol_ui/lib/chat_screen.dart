@@ -153,7 +153,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Live UI guard — never paint the same wire [message_id] twice this session.
   final Set<String> _uiSeenMessageIds = {};
   int _reloadGeneration = 0;
+  int _paintedTranscriptRevision = 0;
   Future<void> _transcriptFlushChain = Future<void>.value();
+  Future<void> _transcriptSyncChain = Future<void>.value();
 
   String? _chatError;
 
@@ -188,7 +190,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Timer? _saveTranscriptDebounce;
   Timer? _fullTranscriptSaveTimer;
-  Timer? _deliveryMergeDebounce;
+  Timer? _transcriptSyncDebounce;
   final Map<String, _MsgDelivery> _pendingDeliveryPatches = {};
   final Set<String> _transcriptFlushedLocalIds = {};
   static final _localIdRandom = Random();
@@ -272,6 +274,16 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return true;
   }
 
+  bool _pollEventMatchesOpenThread(Map<String, dynamic> ev) {
+    if (!widget.hubPollsEvents) return true;
+    final evKey = ev["conversation_key"]?.toString().trim().toLowerCase() ?? "";
+    if (evKey.isEmpty) return true;
+    final pk = _recipientPublicKeyHex()?.trim().toLowerCase() ?? "";
+    if (isValidPublicKeyHex(pk) && evKey == pk) return true;
+    final conv = _conversationKey().trim().toLowerCase();
+    return conv.isNotEmpty && evKey == conv;
+  }
+
   /// History sync added a hub-side filter here that dropped `peer_identified` / `chat_ready`
   /// and many `dm_message` events — live chat must see every event from the hub poll.
   void ingestP2pEvent(Map<String, dynamic> ev) {
@@ -284,29 +296,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     if (widget.hubPollsEvents && ev["kind"]?.toString() == "dm_message") {
       final mk = ev["msg_kind"]?.toString() ?? "";
-      if (isRecipientOutboundAckKind(mk)) {
-        // DESIGN.md: merge delivery only after native patched transcript (stores_updated).
-        if (ev["stores_updated"] == true) {
-          _scheduleDeliveryMergeFromNative();
-        }
-        return;
-      }
-      if (mk == "text") {
-        final mid = ev["id"]?.toString().trim() ?? "";
-        if (mid.isNotEmpty &&
-            _uiSeenMessageIds.contains(mid) &&
-            _hasMessageId(mid)) {
-          if (ev["stores_updated"] == true) {
-            unawaited(mergeTranscriptFromNative(deliveryOnly: true));
-          }
-          return;
-        }
-        unawaited(mergeTranscriptFromNative());
-        return;
-      }
-      if (mk == kSenderConfirmedReadReceipt) {
-        if (ev["stores_updated"] == true) {
-          unawaited(mergeTranscriptFromNative());
+      if (mk == "text" ||
+          isRecipientOutboundAckKind(mk) ||
+          mk == kSenderConfirmedReadReceipt) {
+        if (ev["stores_updated"] == true && _pollEventMatchesOpenThread(ev)) {
+          _scheduleTranscriptSync();
         }
         return;
       }
@@ -321,13 +315,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
     _handleEvent(ev);
-    if (widget.hubPollsEvents &&
-        ev["stores_updated"] == true &&
-        ev["kind"] == "dm_message") {
-      final mk = ev["msg_kind"]?.toString() ?? "";
-      if (isRecipientOutboundAckKind(mk)) {
-        _scheduleDeliveryMergeFromNative();
-      }
+    if (ev["stores_updated"] == true &&
+        ev["kind"]?.toString() == "dm_message" &&
+        isRecipientOutboundAckKind(ev["msg_kind"]?.toString() ?? "")) {
+      _scheduleTranscriptSync();
     }
   }
 
@@ -363,7 +354,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     await _syncOpenChatToNativeAsync();
     if (!mounted || _loadingTranscript) return;
-    await mergeTranscriptFromNative(deliveryOnly: !needsFullLoad);
+    await syncTranscriptView(force: needsFullLoad);
   }
 
   static final Map<String, String> _registeredDmFingerprints = {};
@@ -615,7 +606,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         appNamespace: _resolvedAppNamespace,
         conversationKeys: _conversationKeysForLoad(),
       );
-      unawaited(mergeTranscriptFromNative(deliveryOnly: true));
+      unawaited(syncTranscriptView());
     }
   }
 
@@ -778,46 +769,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Coalesce burst ack polls into one FFI transcript read (delivery ticks only).
-  void _scheduleDeliveryMergeFromNative() {
-    _deliveryMergeDebounce?.cancel();
-    _deliveryMergeDebounce = Timer(const Duration(milliseconds: 120), () {
-      if (!mounted) return;
-      unawaited(mergeTranscriptFromNative(deliveryOnly: true));
-    });
-  }
-
-  /// Incremental merge from native transcript (DESIGN: poll displays what native stored).
-  Future<void> mergeTranscriptFromNative({bool deliveryOnly = false}) async {
-    if (!mounted) return;
-    ChatTranscriptStore.invalidateThreadCache(
-      appNamespace: _resolvedAppNamespace,
-      conversationKeys: _conversationKeysForLoad(),
-    );
-    try {
-      final rows = await _loadTranscriptRows();
-      if (!mounted) return;
-      setState(() {
-        if (deliveryOnly) {
-          _applyDeliveryFromStoredRows(rows);
-        } else {
-          _mergeStoredRowsIntoLines(rows);
-        }
-      });
-      if (!deliveryOnly) {
-        _seedAckStateFromTranscript(rows);
-        _dedupeLinesByMessageId();
-        _sortLinesByTime();
-        _scheduleListScroll(force: false);
-      } else {
-        unawaited(_flushDeliveryPatches());
-      }
-    } catch (e) {
-      AppLog.instance.w("Chat", "mergeTranscriptFromNative failed: $e");
-    }
-  }
-
-  void _applyDeliveryFromStoredRows(List<StoredChatLine> rows) {
+  void _applyDeliveryPatchesFromStoredRows(List<StoredChatLine> rows) {
     for (final r in rows) {
       if (!r.outgoing) continue;
       final mid = r.messageId?.trim() ?? "";
@@ -831,45 +783,88 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _mergeStoredRowsIntoLines(List<StoredChatLine> rows) {
-    final byMid = <String, _ChatLine>{};
-    for (final l in _lines) {
-      final mid = l.messageId?.trim() ?? "";
-      if (mid.isNotEmpty) byMid[mid] = l;
+  /// Coalesce burst poll events into one native transcript snapshot read.
+  void _scheduleTranscriptSync({bool force = false}) {
+    if (force) {
+      _transcriptSyncDebounce?.cancel();
+      unawaited(syncTranscriptView(force: true));
+      return;
     }
-    for (final r in rows) {
-      final mid = r.messageId?.trim() ?? "";
-      if (mid.isNotEmpty && byMid.containsKey(mid)) {
-        final l = byMid[mid]!;
-        if (r.outgoing) {
-          _applyMonotonicDelivery(l, _deliveryFromStored(r));
-        } else if (r.readAckSent) {
-          l.readAckSent = true;
+    _transcriptSyncDebounce?.cancel();
+    _transcriptSyncDebounce = Timer(const Duration(milliseconds: 100), () {
+      if (!mounted) return;
+      unawaited(syncTranscriptView());
+    });
+  }
+
+  /// Replace painted lines from native transcript (revision-guarded full snapshot).
+  Future<void> syncTranscriptView({bool force = false}) async {
+    if (!mounted) return;
+    final key = _conversationKey();
+    if (widget.hubPollsEvents && key == "solo") return;
+
+    _transcriptSyncChain = _transcriptSyncChain.then((_) async {
+      if (!mounted) return;
+      ChatTranscriptStore.invalidateThreadCache(
+        appNamespace: _resolvedAppNamespace,
+        conversationKeys: _conversationKeysForLoad(),
+      );
+      try {
+        final view = await ChatTranscriptStore.loadThreadView(
+          appNamespace: _resolvedAppNamespace,
+          conversationKeys: _conversationKeysForLoad(),
+          cacheUnderConversationKey: key,
+        );
+        if (!mounted) return;
+        if (!force &&
+            view.revision > 0 &&
+            view.revision <= _paintedTranscriptRevision &&
+            _lines.any((l) => !l.system)) {
+          return;
         }
-        continue;
+        _applyTranscriptView(view, force: force);
+      } catch (e) {
+        AppLog.instance.w("Chat", "syncTranscriptView failed: $e");
       }
-      if (r.text.trim().isEmpty) continue;
-      if (!_tryAddTextLine(
-        from: r.from ?? "",
-        text: r.text,
-        outgoing: r.outgoing,
-        messageId: mid.isEmpty ? null : mid,
-        createdAtMs: r.createdAtMs ?? 0,
-      )) {
-        continue;
+    });
+    await _transcriptSyncChain;
+  }
+
+  void _applyTranscriptView(TranscriptThreadView view, {bool force = false}) {
+    final rows = view.lines;
+    final key = _conversationKey();
+    final hasVisibleLines = _lines.any((l) => !l.system);
+    final loaded = rows.map(_lineFromStored).toList();
+    setState(() {
+      final optimistic = _outboundLinesPendingOnDisk(rows);
+      final sameRoom = _transcriptLoadedKey == key || _transcriptLoadedKey == null;
+      if (loaded.isNotEmpty || !hasVisibleLines || !sameRoom || force) {
+        _lines.removeWhere((l) => l._persisted);
+        _lines.addAll(loaded);
       }
-      if (mid.isNotEmpty) {
-        for (final l in _lines) {
-          if (l.messageId?.trim() != mid) continue;
-          if (r.outgoing) {
-            _applyMonotonicDelivery(l, _deliveryFromStored(r));
-          } else if (r.readAckSent) {
-            l.readAckSent = true;
-          }
-          break;
-        }
+      for (final o in optimistic) {
+        if (!_lines.any((l) => l.localId == o.localId)) _lines.add(o);
       }
-    }
+      _dedupeLinesByMessageId();
+      _sortLinesByTime();
+      if (loaded.isNotEmpty) {
+        _transcriptLoadedKey = key;
+        _paintedTranscriptRevision = view.revision;
+        _emptyTranscriptRetryCount = 0;
+        _emptyTranscriptRetry?.cancel();
+      }
+      _transcriptFlushedLocalIds
+        ..clear()
+        ..addAll(_lines.where((l) => l._persisted).map((l) => l.localId));
+      for (final l in _lines) {
+        final mid = l.messageId?.trim() ?? "";
+        if (mid.isNotEmpty) _uiSeenMessageIds.add(mid);
+      }
+    });
+    _seedAckStateFromTranscript(rows);
+    unawaited(_flushDeliveryPatches());
+    _flushBufferedHubDmEvents();
+    _scheduleListScroll(force: false);
   }
 
   _ChatLine _lineFromStored(StoredChatLine s) {
@@ -1004,7 +999,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       conversationKeys: _conversationKeysForLoad(),
     );
     final rows = await _loadTranscriptRows();
-    _applyDeliveryFromStoredRows(rows);
+    _applyDeliveryPatchesFromStoredRows(rows);
     final persisted = List<_ChatLine>.from(_lines)
         .where((l) => l._persisted)
         .map((l) => l.toStored())
@@ -1292,7 +1287,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     if (!force && _transcriptLoadedKey == key) return;
     if (_loadingTranscript) return;
-    final hasVisibleLines = _lines.any((l) => !l.system);
     _loadingTranscript = true;
     final gen = ++_reloadGeneration;
     if (force || _transcriptLoadedKey != key) {
@@ -1300,54 +1294,26 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         setState(() {
           _lines.removeWhere((l) => l._persisted);
           _uiSeenMessageIds.clear();
+          _paintedTranscriptRevision = 0;
         });
       }
       _paintCachedTranscriptIfAny();
     }
     try {
-      final rows = await _loadTranscriptRows();
+      final view = await ChatTranscriptStore.loadThreadView(
+        appNamespace: _resolvedAppNamespace,
+        conversationKeys: _conversationKeysForLoad(),
+        cacheUnderConversationKey: key,
+      );
       if (!mounted || gen != _reloadGeneration) return;
-      final loaded = rows.map(_lineFromStored).toList();
-      setState(() {
-        final optimistic = _outboundLinesPendingOnDisk(rows);
-        // On room switch always replace. Never wipe visible rows when native returns empty
-        // during same-room refresh (transient read / daemon cold start) — that looked like
-        // sudden message deletion.
-        final sameRoom = _transcriptLoadedKey == key || _transcriptLoadedKey == null;
-        if (loaded.isNotEmpty || !hasVisibleLines || !sameRoom) {
-          _lines.removeWhere((l) => l._persisted);
-          _lines.addAll(loaded);
-        }
-        for (final o in optimistic) {
-          if (!_lines.any((l) => l.localId == o.localId)) _lines.add(o);
-        }
-        _dedupeLinesByMessageId();
-        _sortLinesByTime();
-        // Do not mark loaded when FFI returned 0 rows — cold start can race unlock/daemon
-        // and would otherwise skip all later reloads while the room looks empty.
-        if (loaded.isNotEmpty) {
-          _transcriptLoadedKey = key;
-          _emptyTranscriptRetryCount = 0;
-          _emptyTranscriptRetry?.cancel();
-        }
-        _transcriptFlushedLocalIds
-          ..clear()
-          ..addAll(_lines.where((l) => l._persisted).map((l) => l.localId));
-        for (final l in _lines) {
-          final mid = l.messageId?.trim() ?? "";
-          if (mid.isNotEmpty) _uiSeenMessageIds.add(mid);
-        }
-      });
-      _seedAckStateFromTranscript(rows);
-      _flushBufferedHubDmEvents();
-      _scheduleListScroll(force: false);
+      _applyTranscriptView(view, force: force || _transcriptLoadedKey != key);
       _syncOpenChatToNative();
       AppLog.instance.flow(
         "Chat",
-        "transcript reload conv=$key rows=${loaded.length} "
-        "marked_loaded=${_transcriptLoadedKey == key} force=$force",
+        "transcript reload conv=$key rows=${view.lines.length} "
+        "rev=${view.revision} marked_loaded=${_transcriptLoadedKey == key} force=$force",
       );
-      if (loaded.isEmpty && widget.hubPollsEvents && key != "solo") {
+      if (view.lines.isEmpty && widget.hubPollsEvents && key != "solo") {
         _scheduleEmptyTranscriptRetry();
       }
     } finally {
@@ -1610,7 +1576,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           refId.isNotEmpty) {
         if (!_inboundAckFromActivePeer(ev)) return;
         if (ev["stores_updated"] != true) return;
-        _scheduleDeliveryMergeFromNative();
+        _scheduleTranscriptSync();
         return;
       }
       if (msgKind == kSenderConfirmedReadReceipt &&
@@ -1823,7 +1789,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         conversationKeys: _conversationKeysForLoad(),
       );
       P2pEventBridge.instance.drainNow();
-      unawaited(mergeTranscriptFromNative());
+      unawaited(syncTranscriptView(force: true));
     }
     return true;
   }
@@ -2036,7 +2002,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     _saveTranscriptDebounce?.cancel();
     _fullTranscriptSaveTimer?.cancel();
-    _deliveryMergeDebounce?.cancel();
+    _transcriptSyncDebounce?.cancel();
     _emptyTranscriptRetry?.cancel();
     unawaited(_flushDeliveryPatches());
     // Hub/daemon mode: :p2p owns transcript writes on poll — never full-save stale UI
