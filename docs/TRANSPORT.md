@@ -314,11 +314,58 @@ Compare `mdns discovered` / `listen_addrs` in the ~30s `Native/flow` snapshot: t
 
 See [DESIGN.md](DESIGN.md) § “Dial strategy — WAN first”. Do not add Dart dial policy, RFC1918 /24 guessing from coord, or port-ranking heuristics (regression: multi-minute LAN stalls).
 
+### Event-driven async — avoid assumed timers (canonical)
+
+**Product rule (general — not limited to dial or handover):**
+
+Whenever **policy** needs an outcome whose **duration is unknown** (connect, listen, reserve, lookup, stream open, register, path shift, …), **do not** drive that policy on guessed intervals (`sleep(N)`, grace windows, “retry every tick until maybe ready”). Instead:
+
+1. **Worker (B)** — owns the long-running or async operation until the stack reports a **fact** (success, failure, disconnect, new addr, HTTP response, …).
+2. **Policy (A)** — **subscribes** to those facts and reacts **immediately** (open stream, drain outbox, failover, invalidate state, shift LAN↔WAN).
+3. **Timers** — only where the **stack or flood prevention** requires them (TCP/circuit in-flight observation, storm throttles, keepalive below idle timeout, register dedupe when endpoints unchanged). Never as a substitute for “we don't know when B will finish.”
+
+The **A / B subscriber model** is an **analogy** for this split — one example is “A needs a peer connected; B keeps dialing until libp2p notifies.” The **same pattern** applies anywhere Rust/product waits on work it cannot time-bound.
+
+**Where this applies in Ghal Bol (non-exhaustive):**
+
+| Area | A (policy — react on signal) | B (worker — unknown duration) | B → A signals (examples) |
+|------|------------------------------|-------------------------------|---------------------------|
+| **LAN / WAN connect** | Stream-first connect, route pick, coord defer | `swarm.dial`, mDNS browse, relay reserve | `ConnectionEstablished`, `OutgoingConnectionError`, mDNS `Discovered`/`Expired` |
+| **Network handover** | `kick_lan` once, purge stale addrs, reopen streams | mDNS restart, ephemeral listen | Connectivity notify, profile change, relay `ListenerClosed` |
+| **Coord / WAN backup** | Lookup when LAN path failed or outbox waiting | HTTP lookup, relay circuit dial | Lookup ok/404/error, bootstrap connected, reservation accepted |
+| **DM stream** | Open mux, drain outbox, read-ack gate | `open_stream`, mux read/write | Stream ready, `receiver is gone`, connection closed |
+| **Presence / register** | Publish when endpoints **change** | `POST /v1/register`, relay listen set | Endpoint diff, reservation accepted, handover kick |
+| **Flutter UI** | Render transcript/ticks from native stores | — | Poll is **display only** — never connect/ack policy |
+
+**Anti-pattern (any area):** A polls or sleeps because B might be done “by now”; tick loops that re-kick the same recovery (mDNS, stream reopen, coord) without a new event; tuning `N` seconds instead of wiring the subscriber.
+
+**Allowed timers (guardrails only — all areas):**
+
+- In-flight observation while B runs (`LAN_DIAL_IN_FLIGHT_MS`, `CIRCUIT_DIAL_IN_FLIGHT_MS`) — track B, do not replace its events
+- Storm throttles (`should_issue_bootstrap_dial`, `should_routed_dial`, `should_throttle_register`)
+- Keepalive ping < idle connection timeout
+- Backoff after **confirmed** failure (404, refused) — not preemptive “wait before trying”
+
+**Forbidden (regressions — often handover, same rule everywhere):** grace windows blocking all coord; tick-polled recovery without a new event; shortening timer constants as a “speed fix”; timer-driven re-dial from stale caches.
+
+#### Connectivity — one application of the rule (`chat_server.rs`)
+
+| Event (B finished or failed) | A reacts immediately |
+|------------------------------|-------------------|
+| `ConnectivityManager` / profile change | `kick_lan_dm_rediscovery_after_handover` **once** (listen + mDNS restart + purge stale addrs) |
+| mDNS `Discovered` (direct LAN TCP) | `dial_mdns_lan_addr` / `dial_lan_upgrade` on **that** addr |
+| mDNS `Expired` / LAN dial `OutgoingConnectionError` | Drop addr, failover candidate or `notify_coord_lookup` |
+| `ConnectionEstablished` (DM) | `note_connection_path`, clear in-flight dials, open chat stream |
+| `ConnectionClosed` / full DM disconnect | `notify_stream_reopen`, `kick_lan` on LAN, or `notify_coord_lookup` on WAN |
+| LAN dial no longer in flight + candidates exhausted | `notify_coord_lookup` (WAN backup) |
+
+**`dm_upkeep` (~1s)** drains outbox, read-ack retries, and work **already queued by events** — it is **not** the connect owner and must **not** poll “is handover still active?” to re-kick mDNS, reopen streams, or pause all coord on a clock.
+
 ### Roaming
 
 - **This device** — Android `ConnectivityManager` callbacks in `:p2p` (thin hook → Rust `android_network`), 1s interface profile poll (`network_tick`), WAN relay recovery when coord URL is set. **Flutter must not** call network-change RPCs; UI only polls for display.
 - **Wi‑Fi return (soft handover)** — when `has_active_lan` flips false→true (e.g. mobile-data → Wi‑Fi while rmnet/CGNAT iface still visible), `handle_lan_path_restored` runs: ephemeral LAN TCP listen, mDNS behaviour restart (throttled), clear `lan_candidates_exhausted`, `mark_dm_reconnect_urgent_unless_live_direct_stream`, coord register refresh — **no** `coord_invalidate` / forced WAN recovery. On-LAN DHCP drift (`lan`→`lan` key change) uses `handle_lan_interface_drift` (listen sync only). Leaving LAN **immediately** purges mDNS state then full WAN handover.
-- **Wi‑Fi toggle (same subnet, both still on LAN)** — Android `ConnectivityManager` → Rust `notify_network_change` → `kick_lan_dm_rediscovery_after_handover`: fresh `listen_on(/ip4/0.0.0.0/tcp/0)`, force mDNS restart, purge mDNS candidates, **`clear_coord_lookup_backoff_all`**, **`notify_stream_reopen`**, **`schedule_register_presence_force`**. **`LAN_HANDOVER_GRACE_MS` (45s):** **`coord_blocked_for_lan_handover`** — no coord lookup/dial while LAN candidates not exhausted (STORY: LAN first); WAN only after LAN dial window fails. mDNS **`handle_mdns_discovered_list`** dials LAN TCP on every event when disconnected. **`lan_handover_upkeep_if_needed`:** mDNS nudge + stream reopen when link down — not repeated full listen kicks. **LAN upgrade:** `new_lan_tcp` dials LAN immediately even when relay stream is live. **LAN connect is mDNS event-driven only** — no upkeep LAN re-dial from cache.
+- **Wi‑Fi toggle (same subnet, both still on LAN)** — Android `ConnectivityManager` → Rust `notify_network_change` → **`kick_lan_dm_rediscovery_after_handover` once** (event): fresh `listen_on(/ip4/0.0.0.0/tcp/0)`, force mDNS restart, purge mDNS candidates, **`clear_coord_lookup_backoff_all`**, **`notify_stream_reopen`**, **`schedule_register_presence_force`**. Defer coord relay only while **LAN dial in flight** or **waiting for first mDNS TCP after purge** (state flags, § “Event-driven async”). mDNS **`handle_mdns_discovered_list`** dials LAN TCP on every event when disconnected. **LAN upgrade:** `new_lan_tcp` dials LAN immediately even when relay stream is live. **LAN connect is mDNS event-driven only** — no upkeep LAN re-dial from cache; no tick-polled recovery without a new event.
 - **Coord tick** — periodic lookup (~5s) plus immediate lookup when send is queued and peer is not connected.
 
 ### Steady connection when both peers are online (do not regress)
@@ -567,6 +614,8 @@ Do not rename without a version bump:
 
 | Date | Change |
 |------|--------|
+| 2026-06-16 | **Event-driven async (general rule):** renamed § “Event-driven async — avoid assumed timers”; A/B subscriber model is an **analogy for all async work with unknown duration** (connect, handover, lookup, reserve, stream, register — not dial-only). Scope table + connectivity as one application. AGENTS golden rule 10 + DESIGN.md aligned. |
+| 2026-06-16 | **Event-driven connectivity (product owner rule):** expanded § — B owns uncertain-duration dial/listen and notifies A on success/disconnect/fail; A never sleeps on guessed intervals. AGENTS golden rule 10 + DESIGN.md dial strategy aligned. |
 | 2026-06-16 | **Doc alignment — Wi‑Fi switch:** coord lookup skipped only during 45s `in_wifi_switch_handover_grace` (not all of `profile=lan`); removed upkeep LAN re-dial from `connect_dm_peer_now` (mDNS events only); § Roaming updated. |
 | 2026-06-16 | **Wi‑Fi switch v3 (log 02:46):** relay `/p2p-circuit` on RFC1918 in mDNS no longer marks `peer_on_local_lan`; handover expands `0.0.0.0` listen into RFC1918; purge `peers_on_local_lan` with mDNS candidates; force mDNS restart; Android Wi‑Fi hint before `if_addrs` catches up. § Roaming. |
 | 2026-06-16 | **Architecture:** Android Wi‑Fi/ConnectivityManager probe moved to Rust (`android_network.rs`); `:p2p` Kotlin only registers callbacks; removed Flutter `p2p_notify_network_change` on resume. § Roaming. |
