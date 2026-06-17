@@ -5,8 +5,8 @@
 
 use tokio::sync::mpsc;
 
-use super::session::VideoControls;
 use super::RawVideoFrame;
+use super::session::VideoControls;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -97,10 +97,13 @@ mod nokhwa_capture {
         nokhwa::utils::FrameFormat::RAWRGB,
     ];
 
-    fn try_open_at(index: nokhwa::utils::CameraIndex, label: &str) -> Result<nokhwa::Camera, String> {
+    fn try_open_at(
+        index: nokhwa::utils::CameraIndex,
+        label: &str,
+    ) -> Result<nokhwa::Camera, String> {
+        use nokhwa::Camera;
         use nokhwa::pixel_format::RgbFormat;
         use nokhwa::utils::{CameraFormat, RequestedFormat, RequestedFormatType, Resolution};
-        use nokhwa::Camera;
 
         let attempts: &[(&str, RequestedFormat)] = &[
             (
@@ -219,12 +222,18 @@ mod nokhwa_capture {
                     return;
                 }
                 let _ = ready_tx.send(Ok(()));
-                crate::p2p::native_log::info("call_video", "nokhwa camera capture started".to_string());
+                crate::p2p::native_log::info(
+                    "call_video",
+                    "nokhwa camera capture started".to_string(),
+                );
                 while !controls.stop.load(Ordering::Relaxed) {
                     let frame = match camera.frame() {
                         Ok(f) => f,
                         Err(e) => {
-                            crate::p2p::native_log::warn("call_video", format!("camera frame: {e}"));
+                            crate::p2p::native_log::warn(
+                                "call_video",
+                                format!("camera frame: {e}"),
+                            );
                             break;
                         }
                     };
@@ -249,10 +258,17 @@ mod nokhwa_capture {
                         w as usize,
                         h as usize,
                     );
-                    let _ = tx.try_send(RawVideoFrame { width: w, height: h, data: i420 });
+                    let _ = tx.try_send(RawVideoFrame {
+                        width: w,
+                        height: h,
+                        data: i420,
+                    });
                 }
                 let _ = camera.stop_stream();
-                crate::p2p::native_log::info("call_video", "nokhwa camera capture ended".to_string());
+                crate::p2p::native_log::info(
+                    "call_video",
+                    "nokhwa camera capture ended".to_string(),
+                );
             })
             .ok()?;
         match ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {

@@ -149,7 +149,12 @@ async fn register_peer(base_url: &str, peer: &TestPeer) -> serde_json::Value {
         .send()
         .await
         .expect("register request");
-    assert_eq!(reg.status(), StatusCode::OK, "register failed: {}", reg.text().await.unwrap_or_default());
+    assert_eq!(
+        reg.status(),
+        StatusCode::OK,
+        "register failed: {}",
+        reg.text().await.unwrap_or_default()
+    );
     let reg_json: serde_json::Value = reg.json().await.expect("register json");
     reg_json["peer"].clone()
 }
@@ -157,10 +162,7 @@ async fn register_peer(base_url: &str, peer: &TestPeer) -> serde_json::Value {
 async fn lookup_peer(base_url: &str, target: &TestPeer) -> serde_json::Value {
     let client = http_client();
     let resp = client
-        .get(format!(
-            "{}/v1/peers/{}",
-            base_url, target.public_key_hex
-        ))
+        .get(format!("{}/v1/peers/{}", base_url, target.public_key_hex))
         .send()
         .await
         .expect("lookup request");
@@ -171,7 +173,10 @@ async fn lookup_peer(base_url: &str, target: &TestPeer) -> serde_json::Value {
 #[tokio::test]
 async fn guest_lookup_host_after_both_register_on_coord() {
     let server = RunningServer::start().await;
-    assert!(server.db_file().is_file(), "sqlite file should exist on disk");
+    assert!(
+        server.db_file().is_file(),
+        "sqlite file should exist on disk"
+    );
 
     let host = TestPeer::new(0x0a, "10.0.0.1", 4433);
     let guest = TestPeer::new(0x0b, "10.0.0.2", 4444);
@@ -189,7 +194,7 @@ async fn guest_lookup_host_after_both_register_on_coord() {
 async fn real_tcp_server_restart_keeps_peers_in_sqlite() {
     let _data_dir = tempfile::tempdir().expect("tempdir");
     let data_dir = &_data_dir;
-        let db_dir = data_dir.path().join("ghalbol_server");
+    let db_dir = data_dir.path().join("ghalbol_server");
     std::fs::create_dir_all(&db_dir).expect("db dir");
     let port = reserve_tcp_port();
     let listen = format!("127.0.0.1:{port}");
@@ -200,10 +205,10 @@ async fn real_tcp_server_restart_keeps_peers_in_sqlite() {
 
     // --- Process 1 ---
     let mut child1 = Command::new(bin)
-            .env("GHAL_BOL_SERVER_LISTEN", &listen)
-            .env("GHAL_BOL_SERVER_DB", &db_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        .env("GHAL_BOL_SERVER_LISTEN", &listen)
+        .env("GHAL_BOL_SERVER_DB", &db_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn1");
     wait_until_healthy(&base_url).await;
@@ -215,10 +220,10 @@ async fn real_tcp_server_restart_keeps_peers_in_sqlite() {
 
     // --- Process 2 (same DB path) ---
     let mut child2 = Command::new(bin)
-            .env("GHAL_BOL_SERVER_LISTEN", &listen)
-            .env("GHAL_BOL_SERVER_DB", &db_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        .env("GHAL_BOL_SERVER_LISTEN", &listen)
+        .env("GHAL_BOL_SERVER_DB", &db_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn2");
     wait_until_healthy(&base_url).await;

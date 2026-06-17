@@ -4,17 +4,15 @@ use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
+use crate::app_paths::{chat_transcript_v1_path, contacts_v1_path, storage_config_for_namespace};
 use crate::c_ffi::ffi_unlocked_identity_clone;
 use crate::contacts_v1::{
-    clear_unread, find_by_peer_id, find_by_public_key, is_valid_public_key_hex,
-    merge_discovered_peer_id, record_inbound_preview, upsert_contact, SavedContact,
+    SavedContact, clear_unread, find_by_peer_id, find_by_public_key, is_valid_public_key_hex,
+    merge_discovered_peer_id, record_inbound_preview, upsert_contact,
 };
 use crate::dm_transcript_store::{
-    append_if_new, load_merged, patch_inbound_read_ack_sent_for_thread, patch_outgoing_delivery,
-    StoredChatLine,
-};
-use crate::app_paths::{
-    chat_transcript_v1_path, contacts_v1_path, storage_config_for_namespace,
+    StoredChatLine, append_if_new, load_merged, patch_inbound_read_ack_sent_for_thread,
+    patch_outgoing_delivery,
 };
 use crate::flow_log::{self, short_hex};
 use crate::public_key_util::same_contact_pk;
@@ -37,7 +35,10 @@ pub fn set_p2p_handler_context(app_namespace: &str) {
             foreground_public_key_hex: None,
         });
         let ns = app_namespace.trim();
-        flow_log::info("DM/store", format!("handler context set app_namespace={ns}"));
+        flow_log::info(
+            "DM/store",
+            format!("handler context set app_namespace={ns}"),
+        );
         let cfg = storage_config_for_namespace(ns);
         if let Ok(base) = base_data_dir(&cfg) {
             flow_log::info("Storage", format!("base_data_dir={}", base.display()));
@@ -144,15 +145,13 @@ pub fn transcript_poll_view_key(app_namespace: &str, ev: &Value) -> Option<Strin
         _ => return None,
     };
     let view = crate::dm_transcript_store::transcript_view_key(app_namespace, &raw);
-    if view.is_empty() {
-        None
-    } else {
-        Some(view)
-    }
+    if view.is_empty() { None } else { Some(view) }
 }
 
 fn dm_ack_sender_matches(sender_pk: &str, contact: &SavedContact) -> bool {
-    is_valid_public_key_hex(sender_pk) && contact.has_public_key() && contact.public_key_hex == sender_pk
+    is_valid_public_key_hex(sender_pk)
+        && contact.has_public_key()
+        && contact.public_key_hex == sender_pk
 }
 
 fn outbound_delivery_for_ack(msg_kind: &str) -> &'static str {
@@ -191,7 +190,10 @@ pub fn apply_p2p_event_json(ev: &Value) -> bool {
     };
     let Some(st) = g.as_mut() else {
         if kind == "dm_message" || kind == "peer_identified" {
-            flow_log::warn("DM/store", "event ignored: handler context not set (p2p_start?)");
+            flow_log::warn(
+                "DM/store",
+                "event ignored: handler context not set (p2p_start?)",
+            );
         }
         return false;
     };
@@ -212,7 +214,10 @@ pub fn apply_p2p_event_json(ev: &Value) -> bool {
             }
             flow_log::warn(
                 "DM/store",
-                format!("peer_identified skipped: pk_valid={}", is_valid_public_key_hex(&pk)),
+                format!(
+                    "peer_identified skipped: pk_valid={}",
+                    is_valid_public_key_hex(&pk)
+                ),
             );
         }
         "dm_message" => {
@@ -223,7 +228,10 @@ pub fn apply_p2p_event_json(ev: &Value) -> bool {
             if msg_kind == "ack_received" || msg_kind == "ack_read" {
                 return apply_inbound_ack(&ns, ev, msg_kind);
             }
-            flow_log::warn("DM/store", format!("dm_message ignored: unknown msg_kind={msg_kind}"));
+            flow_log::warn(
+                "DM/store",
+                format!("dm_message ignored: unknown msg_kind={msg_kind}"),
+            );
         }
         _ => {}
     }
@@ -259,13 +267,19 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
         return false;
     }
     if is_valid_public_key_hex(&my_pk) && sender_pk == my_pk {
-        flow_log::info("DM/store", format!("inbound text ignored: own message id={msg_id}"));
+        flow_log::info(
+            "DM/store",
+            format!("inbound text ignored: own message id={msg_id}"),
+        );
         return false;
     }
     if contact_is_blocked(ns, &sender_pk, &from_key) {
         flow_log::info(
             "DM/store",
-            format!("inbound text ignored: blocked sender pk={}", short_hex(&sender_pk)),
+            format!(
+                "inbound text ignored: blocked sender pk={}",
+                short_hex(&sender_pk)
+            ),
         );
         return false;
     }
@@ -298,9 +312,8 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
     // Wire persists on receive; poll replays the same event — bump unread/append only once per id.
     let poll_replay = if !msg_id.is_empty() {
         let rows = load_merged(ns, std::slice::from_ref(&conv_key), None).unwrap_or_default();
-        rows.iter().any(|r| {
-            !r.outgoing && r.message_id.as_deref().map(str::trim) == Some(msg_id)
-        })
+        rows.iter()
+            .any(|r| !r.outgoing && r.message_id.as_deref().map(str::trim) == Some(msg_id))
     } else {
         false
     };
@@ -389,7 +402,11 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
 }
 
 fn apply_inbound_ack(ns: &str, ev: &Value, msg_kind: &str) -> bool {
-    let ref_id = ev.get("ref_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let ref_id = ev
+        .get("ref_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     let from_key = conversation_key_from_event(ev);
     let sender_pk = public_key_hex_from_event(ev);
     if ref_id.is_empty() || from_key.is_empty() {
@@ -429,8 +446,12 @@ fn apply_inbound_ack(ns: &str, ev: &Value, msg_kind: &str) -> bool {
 
     let conv = contact.conversation_key();
     let rows = load_merged(ns, &[conv.clone()], None).unwrap_or_default();
-    let has_outgoing = rows.iter().any(|r| r.outgoing && r.message_id.as_deref() == Some(ref_id));
-    let has_inbound = rows.iter().any(|r| !r.outgoing && r.message_id.as_deref() == Some(ref_id));
+    let has_outgoing = rows
+        .iter()
+        .any(|r| r.outgoing && r.message_id.as_deref() == Some(ref_id));
+    let has_inbound = rows
+        .iter()
+        .any(|r| !r.outgoing && r.message_id.as_deref() == Some(ref_id));
 
     if msg_kind == "ack_read" && has_outgoing {
         let delivery = outbound_delivery_for_ack(msg_kind);
@@ -444,7 +465,10 @@ fn apply_inbound_ack(ns: &str, ev: &Value, msg_kind: &str) -> bool {
             }
             Ok(false) => return false,
             Err(e) => {
-                flow_log::warn("DM/store", format!("patch outbound read failed ref={ref_id}: {e}"));
+                flow_log::warn(
+                    "DM/store",
+                    format!("patch outbound read failed ref={ref_id}: {e}"),
+                );
                 return false;
             }
         }
@@ -511,7 +535,7 @@ mod tests {
     use super::*;
     use crate::c_ffi::configure_android_data_directory;
     use crate::contacts_v1::find_by_public_key;
-    use crate::storage::{create_or_unlock_identity_v1, StorageConfig};
+    use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -587,8 +611,11 @@ mod tests {
     fn apply_inbound_text_out_of_order_still_counts_three_unread() {
         const NS: &str = "test.unread.order";
         let _store = isolated_store(NS);
-        for (id, at, text) in [("m3", 3000, "third"), ("m1", 1000, "first"), ("m2", 2000, "second")]
-        {
+        for (id, at, text) in [
+            ("m3", 3000, "third"),
+            ("m1", 1000, "first"),
+            ("m2", 2000, "second"),
+        ] {
             let ev = json!({
                 "kind": "dm_message",
                 "msg_kind": "text",

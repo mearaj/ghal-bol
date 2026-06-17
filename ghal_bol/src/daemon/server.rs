@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::coord_runtime;
 use crate::daemon::paths::default_socket_path;
-use crate::daemon::ui_session::{suppress_ui_exit_hangup_ms, ui_process_exiting, UiSessionGuard};
+use crate::daemon::ui_session::{UiSessionGuard, suppress_ui_exit_hangup_ms, ui_process_exiting};
 use crate::p2p_runtime;
 use crate::session_runtime;
 
@@ -60,8 +60,7 @@ fn handle_client(stream: UnixStream, shutting_down: Arc<AtomicBool>) -> Result<(
         if line.is_empty() {
             continue;
         }
-        let req: Value =
-            serde_json::from_str(line).map_err(|e| format!("json request: {e}"))?;
+        let req: Value = serde_json::from_str(line).map_err(|e| format!("json request: {e}"))?;
         let id = req.get("id").cloned();
         let method = req
             .get("method")
@@ -100,7 +99,9 @@ impl std::io::Read for UnixStreamReader {
 fn write_response(stream: &Arc<Mutex<UnixStream>>, resp: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(resp).map_err(|e| format!("encode: {e}"))?;
     line.push('\n');
-    let mut guard = stream.lock().map_err(|_| "stream mutex poisoned".to_string())?;
+    let mut guard = stream
+        .lock()
+        .map_err(|_| "stream mutex poisoned".to_string())?;
     guard
         .write_all(line.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
@@ -153,18 +154,10 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
             let text = param_str(params, "text")?;
             Ok(p2p_runtime::p2p_send_text_dm(&recipient, &text))
         }
-        "p2p_call_signal" => {
-            Ok(p2p_runtime::p2p_call_signal(params))
-        }
-        "p2p_call_media" => {
-            Ok(p2p_runtime::p2p_call_media(params))
-        }
-        "p2p_call_status" => {
-            Ok(p2p_runtime::p2p_call_status(params))
-        }
-        "p2p_dismiss_incoming_call_alert" => {
-            Ok(p2p_runtime::p2p_dismiss_incoming_call_alert())
-        }
+        "p2p_call_signal" => Ok(p2p_runtime::p2p_call_signal(params)),
+        "p2p_call_media" => Ok(p2p_runtime::p2p_call_media(params)),
+        "p2p_call_status" => Ok(p2p_runtime::p2p_call_status(params)),
+        "p2p_dismiss_incoming_call_alert" => Ok(p2p_runtime::p2p_dismiss_incoming_call_alert()),
         "p2p_force_end_active_call" => {
             let reason = params
                 .get("reason")
@@ -185,18 +178,10 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
             ui_process_exiting();
             Ok(serde_json::json!({ "ok": true }))
         }
-        "p2p_transcript_load_merged" => {
-            Ok(p2p_runtime::p2p_transcript_load_merged(params))
-        }
-        "p2p_call_video" => {
-            Ok(p2p_runtime::p2p_call_video(params))
-        }
-        "p2p_call_video_frame" => {
-            Ok(p2p_runtime::p2p_call_video_frame(params))
-        }
-        "p2p_call_video_texture" => {
-            Ok(p2p_runtime::p2p_call_video_texture(params))
-        }
+        "p2p_transcript_load_merged" => Ok(p2p_runtime::p2p_transcript_load_merged(params)),
+        "p2p_call_video" => Ok(p2p_runtime::p2p_call_video(params)),
+        "p2p_call_video_frame" => Ok(p2p_runtime::p2p_call_video_frame(params)),
+        "p2p_call_video_texture" => Ok(p2p_runtime::p2p_call_video_texture(params)),
         "p2p_call_video_push_camera_frame" => {
             Ok(p2p_runtime::p2p_call_video_push_camera_frame(params))
         }
@@ -204,7 +189,11 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
             let message_id = param_str(params, "message_id")?;
             let recipient = param_str(params, "recipient_public_key_hex")?;
             let text = param_str(params, "text")?;
-            Ok(p2p_runtime::p2p_requeue_outbound_dm(&message_id, &recipient, &text))
+            Ok(p2p_runtime::p2p_requeue_outbound_dm(
+                &message_id,
+                &recipient,
+                &text,
+            ))
         }
         "p2p_send_ack_dm" => {
             let recipient = param_str(params, "recipient_public_key_hex")?;

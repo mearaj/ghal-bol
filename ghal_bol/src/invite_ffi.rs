@@ -91,8 +91,8 @@ pub unsafe extern "C" fn ghal_bol_ffi_peer_id_from_public_key_hex(
         let pk = s.trim().to_ascii_lowercase();
         match secp256k1_public_key_from_hex(&pk) {
             Ok(_) => {
-                let peer_id = legacy_libp2p_peer_id_str_from_public_key_hex(&pk)
-                    .unwrap_or_default();
+                let peer_id =
+                    legacy_libp2p_peer_id_str_from_public_key_hex(&pk).unwrap_or_default();
                 json_ok(serde_json::json!({
                     "ok": true,
                     "public_key_hex": pk,
@@ -150,7 +150,10 @@ pub unsafe extern "C" fn ghal_bol_ffi_build_connect_invite_uri(
             Ok(v) => v,
             Err(e) => return json_err(format!("params json: {e}")),
         };
-        let topic = v.get("topic").and_then(|x| x.as_str()).unwrap_or("ghal-bol-chat");
+        let topic = v
+            .get("topic")
+            .and_then(|x| x.as_str())
+            .unwrap_or("ghal-bol-chat");
         let pk = v
             .get("public_key_hex")
             .and_then(|x| x.as_str())
@@ -191,7 +194,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_parse_connect_invite_uri(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_open_sealed_cipher_hex(cipher_hex_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_open_sealed_cipher_hex(
+    cipher_hex_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let hex_s = match unsafe { utf8(cipher_hex_utf8, "cipher_hex") } {
             Ok(s) => s,

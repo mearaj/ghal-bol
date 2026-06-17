@@ -26,7 +26,9 @@ const DEFAULT_TOPIC: &str = "ghal-bol-chat";
 fn hex66_from_field(label: &str, hex_s: &str) -> Result<(), String> {
     let s = hex_s.trim();
     if s.len() != 66 {
-        return Err(format!("{label}: expected 66 hex chars (compressed secp256k1)"));
+        return Err(format!(
+            "{label}: expected 66 hex chars (compressed secp256k1)"
+        ));
     }
     hex::decode(s).map_err(|e| format!("{label}: hex: {e}"))?;
     Ok(())
@@ -81,7 +83,9 @@ fn verify_v2(v: &Value) -> Result<(), String> {
         return Err("encryption_public_key_hex is not used (single secp256k1 key)".to_string());
     }
     if field_nonempty_string(v, "coord_base_url") {
-        return Err("coord_base_url must not appear on invite wire (use app env / preferences)".to_string());
+        return Err(
+            "coord_base_url must not appear on invite wire (use app env / preferences)".to_string(),
+        );
     }
     Ok(())
 }
@@ -196,10 +200,9 @@ fn percent_decode_query_component(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(byte);
                 i += 3;
                 continue;
@@ -291,7 +294,12 @@ mod tests {
     fn v2_rejects_multiaddrs_on_wire() {
         let (_ks, id) = create_keystore_v1("pw", None).unwrap();
         let pk = id.public_key_hex();
-        let pid = id.to_libp2p_keypair().unwrap().public().to_peer_id().to_string();
+        let pid = id
+            .to_libp2p_keypair()
+            .unwrap()
+            .public()
+            .to_peer_id()
+            .to_string();
         let v = serde_json::json!({
             "ghalbol.share": SHARE,
             "format_version": CONNECT_INVITE_FORMAT_VERSION,
@@ -326,5 +334,4 @@ mod tests {
         let parsed = parse_connect_invite_uri(&uri).unwrap();
         verify_ghal_bol_connect_invite_value(&parsed).unwrap();
     }
-
 }

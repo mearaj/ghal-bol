@@ -65,14 +65,20 @@ fn load_preferences_v1(cfg: &StorageConfig) -> Result<PreferencesV1, KeystoreSto
     Ok(p)
 }
 
-fn save_preferences_v1(cfg: &StorageConfig, prefs: &PreferencesV1) -> Result<(), KeystoreStorageError> {
+fn save_preferences_v1(
+    cfg: &StorageConfig,
+    prefs: &PreferencesV1,
+) -> Result<(), KeystoreStorageError> {
     let path = preferences_v1_path(cfg)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp_path = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(prefs).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("preferences encode: {e}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("preferences encode: {e}"),
+        )
     })?;
     fs::write(&tmp_path, json.as_bytes())?;
     fs::rename(&tmp_path, &path)?;
@@ -83,7 +89,10 @@ fn session_public_key_hex_lower(ident: &DecryptedIdentity) -> String {
     ident.public_key_hex().to_lowercase()
 }
 
-fn verify_public_key_matches_session(ident: &DecryptedIdentity, public_key_hex: &str) -> Result<(), String> {
+fn verify_public_key_matches_session(
+    ident: &DecryptedIdentity,
+    public_key_hex: &str,
+) -> Result<(), String> {
     let want = public_key_hex.trim().to_lowercase();
     let cur = session_public_key_hex_lower(ident);
     if want != cur {
@@ -109,11 +118,7 @@ pub fn sanitize_peer_display_alias(raw: &str) -> Option<String> {
         }
     }
     let t = t.trim().to_string();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t)
-    }
+    if t.is_empty() { None } else { Some(t) }
 }
 
 /// Read stored display alias for the **current unlocked** identity (must match [public_key_hex]).
@@ -153,7 +158,9 @@ pub fn peer_display_alias_set(
     }
 }
 
-pub fn coord_settings_get(cfg: &StorageConfig) -> Result<(Option<String>, bool), KeystoreStorageError> {
+pub fn coord_settings_get(
+    cfg: &StorageConfig,
+) -> Result<(Option<String>, bool), KeystoreStorageError> {
     let prefs = load_preferences_v1(cfg)?;
     Ok((prefs.coord_base_url.clone(), prefs.coord_insecure_tls))
 }

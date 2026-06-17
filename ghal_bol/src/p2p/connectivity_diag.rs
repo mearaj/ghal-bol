@@ -87,7 +87,10 @@ pub fn explain_coord_lookup_failure(
     }
 }
 
-pub fn explain_coord_register_failure(err: &str, has_relay_endpoint: bool) -> (&'static str, &'static str) {
+pub fn explain_coord_register_failure(
+    err: &str,
+    has_relay_endpoint: bool,
+) -> (&'static str, &'static str) {
     if err.contains("no listen endpoints") {
         return (
             "coord register skipped — no publishable WAN endpoint yet",

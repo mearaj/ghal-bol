@@ -1,7 +1,7 @@
 //! Process-wide coordination server URL, registration, and heartbeat loop.
 
 use crate::coord::{CoordEndpoint, CoordHttpClient, endpoints_to_dial_multiaddr_strings};
-use crate::dm_transport::{coord_endpoints_to_dial_addrs, DmDialAddr};
+use crate::dm_transport::{DmDialAddr, coord_endpoints_to_dial_addrs};
 use libp2p::Multiaddr;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -26,7 +26,6 @@ struct CoordGlobals {
     heartbeat_join: Mutex<Option<JoinHandle<()>>>,
 }
 
-
 static COORD: OnceLock<CoordGlobals> = OnceLock::new();
 /// Serializes challenge + register HTTP (parallel calls cause nonce mismatch on the server).
 static COORD_REG_HTTP: OnceLock<Mutex<()>> = OnceLock::new();
@@ -37,6 +36,7 @@ static COORD_LAST_OK_MS: AtomicU64 = AtomicU64::new(0);
 static COORD_LAST_REG_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
 /// Avoid flapping `coord_registered` on one transient mobile-data failure.
 static COORD_CONSEC_FAILS: AtomicU64 = AtomicU64::new(0);
+static RELAY_PRESENCE_CHECK_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Backoff repeated coord peer lookups from the daemon/UI RPC path.
 /// Key: peer public_key_hex.
@@ -184,11 +184,19 @@ fn client_for(base: &str) -> Result<CoordHttpClient, String> {
 }
 
 pub(crate) fn has_coord_endpoints() -> bool {
+    has_public_coord_register_endpoints()
+}
+
+pub(crate) fn has_public_coord_register_endpoints() -> bool {
     coord_globals()
         .endpoints
         .lock()
         .ok()
-        .is_some_and(|v| !endpoints_for_coord_register(v.clone()).is_empty())
+        .is_some_and(|v| endpoints_are_registerable(&v))
+}
+
+fn endpoints_are_registerable(eps: &[CoordEndpoint]) -> bool {
+    !endpoints_for_coord_register(eps.to_vec()).is_empty()
 }
 
 fn suspend_coord_presence_waiting_endpoints() {
@@ -221,6 +229,109 @@ pub fn wan_discovery_via_coord_only() -> bool {
 /// Immediate coord re-register (e.g. right after relay reservation accepted).
 pub fn schedule_register_presence_force() {
     spawn_register_presence_inner(true);
+}
+
+/// After relay reservation: POST public/LAN TCP only (never libp2p circuit), then poll coord
+/// for server-registered relay presence when client register payload would be empty.
+pub fn schedule_coord_presence_after_relay() {
+    if !coord_is_configured() {
+        return;
+    }
+    if has_public_coord_register_endpoints() {
+        spawn_register_presence_inner(true);
+    }
+    schedule_check_relay_presence_once();
+}
+
+fn schedule_check_relay_presence_once() {
+    #[cfg(test)]
+    {
+        return;
+    }
+    #[cfg(not(test))]
+    schedule_check_relay_presence_once_impl();
+}
+
+#[cfg(not(test))]
+fn schedule_check_relay_presence_once_impl() {
+    if RELAY_PRESENCE_CHECK_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("ghalbol-coord-relay-poll".into())
+        .spawn(|| {
+            for attempt in 0..10 {
+                if attempt > 0 {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
+                    break;
+                };
+                if promote_relay_presence_if_visible(&ident.public_key_hex()) {
+                    break;
+                }
+            }
+            RELAY_PRESENCE_CHECK_PENDING.store(false, Ordering::Release);
+        })
+        .ok();
+}
+
+fn peer_record_has_relay_circuit(record: &crate::coord::CoordPeerRecord) -> bool {
+    record.endpoints.iter().any(|e| {
+        e.scheme == "libp2p" && e.host.contains("/p2p-circuit")
+    })
+}
+
+fn promote_relay_presence_if_visible(pk: &str) -> bool {
+    if COORD_REGISTERED.load(Ordering::Relaxed) {
+        return true;
+    }
+    let urls = coord_base_urls();
+    if urls.is_empty() {
+        return false;
+    }
+    let mut any_visible = false;
+    let mut registered = HashSet::new();
+    for base in &urls {
+        let Ok(client) = client_for(base) else {
+            continue;
+        };
+        match client.lookup(pk) {
+            Ok(rec) if peer_record_has_relay_circuit(&rec) => {
+                any_visible = true;
+                registered.insert(base.clone());
+            }
+            Ok(_) => {}
+            Err(e) => {
+                crate::flow_log::debug(
+                    "coord",
+                    format!(
+                        "relay presence poll on {base} for {}: {e}",
+                        &pk[..8.min(pk.len())]
+                    ),
+                );
+            }
+        }
+    }
+    if !any_visible {
+        return false;
+    }
+    if let Ok(mut r) = coord_globals().registered_on.lock() {
+        *r = registered;
+    }
+    COORD_REGISTERED.store(true, Ordering::Relaxed);
+    COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
+    COORD_LAST_OK_MS.store(unix_ms_now(), Ordering::Relaxed);
+    crate::flow_log::info(
+        "coord",
+        format!(
+            "relay presence visible on coord for {} — circuit registered by relay server",
+            &pk[..8.min(pk.len())]
+        ),
+    );
+    start_heartbeat_loop(pk.to_string());
+    crate::p2p::notify_dm_presence_wake();
+    true
 }
 
 /// Clear stale endpoint snapshot after a network handover. Keeps coord presence + heartbeats
@@ -330,9 +441,7 @@ pub fn fetch_all_ghalbol_relays(
                 )
             }
         });
-        if let Some((peer, addrs)) =
-            fetch_ghalbol_relay_for_base(base, per_host_cache.as_deref())
-        {
+        if let Some((peer, addrs)) = fetch_ghalbol_relay_for_base(base, per_host_cache.as_deref()) {
             if seen_peer.insert(peer.clone()) {
                 out.push((peer, addrs));
             }
@@ -354,7 +463,10 @@ fn relay_after_http_miss(cache_path: Option<&std::path::Path>) -> Option<(String
     read_relay_cache(cache_path, &base)
 }
 
-fn read_relay_cache(path: Option<&std::path::Path>, coord_base: &str) -> Option<(String, Vec<String>)> {
+fn read_relay_cache(
+    path: Option<&std::path::Path>,
+    coord_base: &str,
+) -> Option<(String, Vec<String>)> {
     let path = path?;
     let bytes = std::fs::read(path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -396,7 +508,10 @@ fn read_relay_cache(path: Option<&std::path::Path>, coord_base: &str) -> Option<
     }
     crate::flow_log::info(
         "relay",
-        format!("using cached ghalbol relay {peer} ({} addr(s))", addrs.len()),
+        format!(
+            "using cached ghalbol relay {peer} ({} addr(s))",
+            addrs.len()
+        ),
     );
     Some((peer, addrs))
 }
@@ -493,11 +608,7 @@ pub fn set_coord_base_urls(urls: &[String], insecure_tls: bool) {
         .take(MAX_COORD_SERVERS)
         .collect();
     let g = coord_globals();
-    let unchanged = g
-        .base_urls
-        .lock()
-        .ok()
-        .is_some_and(|cur| *cur == urls)
+    let unchanged = g.base_urls.lock().ok().is_some_and(|cur| *cur == urls)
         && g.insecure_tls.load(Ordering::Relaxed) == insecure_tls;
     if unchanged {
         // `p2p_start already_running` and hub resume call this every session — do not wipe
@@ -623,8 +734,7 @@ fn listen_addrs_to_coord_endpoints(addrs: &[Multiaddr]) -> Vec<CoordEndpoint> {
     }
     if has_relay {
         eps.retain(|e| {
-            e.scheme == "libp2p"
-                || (e.scheme == "tcp" && is_coord_publishable_host(&e.host))
+            e.scheme == "libp2p" || (e.scheme == "tcp" && is_coord_publishable_host(&e.host))
         });
     }
     eps.sort_by_key(|e| {
@@ -659,6 +769,13 @@ fn spawn_register_presence() {
 
 /// `force` bypasses throttle (endpoint set changed while already registered).
 fn spawn_register_presence_inner(force: bool) {
+    #[cfg(test)]
+    if coord_base_urls()
+        .iter()
+        .any(|b| b.contains("example.test"))
+    {
+        return;
+    }
     if !force && should_throttle_register() {
         if !COORD_REGISTERED.load(Ordering::Relaxed) {
             COORD_REG_PENDING.store(true, Ordering::Release);
@@ -810,13 +927,21 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
     new_keys.sort();
     if old_keys == new_keys {
         if !COORD_REGISTERED.load(Ordering::Relaxed) {
-            spawn_register_presence();
+            if endpoints_are_registerable(&v) {
+                spawn_register_presence();
+            } else {
+                schedule_check_relay_presence_once();
+            }
         }
         return;
     }
     *v = eps;
     // Keep heartbeats running until the new register succeeds (avoids GET 404 gaps).
-    spawn_register_presence_inner(true);
+    if endpoints_are_registerable(&v) {
+        spawn_register_presence_inner(true);
+    } else {
+        schedule_check_relay_presence_once();
+    }
 }
 
 fn presence_is_stale() -> bool {
@@ -833,11 +958,17 @@ pub fn coord_register_tick(listen_snapshot: &[Multiaddr]) {
         return;
     }
     if presence_is_stale() {
-        crate::flow_log::warn("coord", "presence stale (no recent heartbeat) — re-registering");
+        crate::flow_log::warn(
+            "coord",
+            "presence stale (no recent heartbeat) — re-registering",
+        );
         COORD_REGISTERED.store(false, Ordering::Relaxed);
     }
     rebuild_coord_endpoints_from_listen(listen_snapshot);
     if !has_coord_endpoints() {
+        if !COORD_REGISTERED.load(Ordering::Relaxed) {
+            schedule_check_relay_presence_once();
+        }
         return;
     }
     if !COORD_REGISTERED.load(Ordering::Relaxed) {
@@ -931,13 +1062,13 @@ fn pick_coord_libp2p_endpoints(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
         .lock()
         .ok()
         .and_then(|g| g.clone());
-    let mut libp2p: Vec<CoordEndpoint> = eps
-        .into_iter()
-        .filter(|e| e.scheme == "libp2p")
-        .collect();
+    let mut libp2p: Vec<CoordEndpoint> = eps.into_iter().filter(|e| e.scheme == "libp2p").collect();
     libp2p.sort_by_key(|e| {
         let h = e.host.as_str();
-        let rank = if h.contains("/ip4/") && h.contains("/tcp/") && h.contains("/p2p-circuit") && !h.contains("/quic")
+        let rank = if h.contains("/ip4/")
+            && h.contains("/tcp/")
+            && h.contains("/p2p-circuit")
+            && !h.contains("/quic")
         {
             0u8
         } else {
@@ -958,51 +1089,51 @@ fn pick_coord_libp2p_endpoints(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
 fn pick_coord_lan_tcp_endpoint(eps: &[CoordEndpoint]) -> Option<CoordEndpoint> {
     fn tcp_host_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
         let t = host.trim();
-        t.parse().ok().or_else(|| crate::p2p::network_transport::ipv4_from_ma_str(t))
+        t.parse()
+            .ok()
+            .or_else(|| crate::p2p::network_transport::ipv4_from_ma_str(t))
     }
     eps.iter()
         .filter(|e| e.scheme == "tcp")
         .filter(|e| {
             e.port > 0
-                && tcp_host_ipv4(&e.host)
-                    .is_some_and(|ip| {
-                        ip.is_private() && !crate::p2p::network_transport::is_cgnat_ipv4(ip)
-                    })
+                && tcp_host_ipv4(&e.host).is_some_and(|ip| {
+                    ip.is_private() && !crate::p2p::network_transport::is_cgnat_ipv4(ip)
+                })
         })
         .min_by_key(|e| {
             tcp_host_ipv4(&e.host)
-                .map(|ip| {
-                    if ip.octets()[0] == 192 {
-                        0u8
-                    } else {
-                        1u8
-                    }
-                })
+                .map(|ip| if ip.octets()[0] == 192 { 0u8 } else { 1u8 })
                 .unwrap_or(2)
         })
         .cloned()
 }
 
-/// When a relay circuit is available, register `libp2p` plus optional RFC1918 LAN TCP (same Wi‑Fi).
+/// Client POST /v1/register may include public TCP and optional RFC1918 LAN TCP only.
+/// Relay `/p2p-circuit` endpoints are registered by the coordination relay on reservation.
 fn endpoints_for_coord_register(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
-    if eps.iter().any(|e| e.scheme == "libp2p") {
-        let mut out = pick_coord_libp2p_endpoints(eps.clone());
-        if let Some(lan) = pick_coord_lan_tcp_endpoint(&eps) {
-            if !out.iter().any(|e| e.scheme == "tcp" && e.host == lan.host && e.port == lan.port) {
-                out.push(lan);
-            }
-        }
-        return out;
+    let tcp: Vec<CoordEndpoint> = eps
+        .into_iter()
+        .filter(|e| e.scheme == "tcp")
+        .collect();
+    if !coord_is_configured() {
+        return tcp;
     }
-    if coord_is_configured() {
-        // Relay handover on Wi‑Fi: LAN TCP alone keeps same-subnet coord lookup working.
-        if let Some(lan) = pick_coord_lan_tcp_endpoint(&eps) {
-            return vec![lan];
+    let mut out = Vec::new();
+    for e in &tcp {
+        if is_coord_publishable_host(&e.host) {
+            out.push(e.clone());
         }
-        Vec::new()
-    } else {
-        eps
     }
+    if let Some(lan) = pick_coord_lan_tcp_endpoint(&tcp) {
+        if !out
+            .iter()
+            .any(|e| e.scheme == "tcp" && e.host == lan.host && e.port == lan.port)
+        {
+            out.push(lan);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1010,7 +1141,7 @@ mod endpoints_for_coord_register_tests {
     use super::*;
 
     #[test]
-    fn relay_plus_lan_wifi_tcp_both_registered() {
+    fn relay_plus_lan_wifi_tcp_registers_lan_only_not_libp2p() {
         let eps = vec![
             CoordEndpoint {
                 scheme: "libp2p".into(),
@@ -1024,9 +1155,12 @@ mod endpoints_for_coord_register_tests {
             },
         ];
         let out = endpoints_for_coord_register(eps);
-        assert_eq!(out.len(), 2);
-        assert!(out.iter().any(|e| e.scheme == "libp2p"));
-        assert!(out.iter().any(|e| e.scheme == "tcp" && e.host == "192.168.1.38"));
+        assert_eq!(out.len(), 1);
+        assert!(!out.iter().any(|e| e.scheme == "libp2p"));
+        assert!(
+            out.iter()
+                .any(|e| e.scheme == "tcp" && e.host == "192.168.1.38")
+        );
     }
 
     #[test]
@@ -1157,13 +1291,14 @@ fn try_register_presence() -> Result<(), String> {
 
 fn start_heartbeat_loop(public_key_hex: String) {
     let g = coord_globals();
+    // Never join the previous heartbeat on the libp2p/swarm thread — that blocked mDNS and LAN
+    // dials for tens of seconds while ngrok HTTP finished.
+    g.heartbeat_stop.store(true, Ordering::Relaxed);
+    if let Ok(mut j) = g.heartbeat_join.lock() {
+        let _ = j.take();
+    }
     g.heartbeat_stop.store(false, Ordering::Relaxed);
     COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
-    if let Ok(mut j) = g.heartbeat_join.lock() {
-        if let Some(h) = j.take() {
-            let _ = h.join();
-        }
-    }
     let stop = &g.heartbeat_stop;
     let handle = std::thread::Builder::new()
         .name("ghalbol-coord-heartbeat".into())
@@ -1185,7 +1320,11 @@ fn start_heartbeat_loop(public_key_hex: String) {
                     continue;
                 }
                 if !COORD_REGISTERED.load(Ordering::Relaxed) {
-                    spawn_register_presence_inner(true);
+                    if has_public_coord_register_endpoints() {
+                        spawn_register_presence_inner(true);
+                    } else {
+                        let _ = promote_relay_presence_if_visible(&public_key_hex);
+                    }
                     continue;
                 }
                 let mut any_ok = false;
@@ -1413,7 +1552,9 @@ pub fn lookup_dial_addrs_for_public_key(public_key_hex: &str) -> Result<Vec<DmDi
 
 /// Coord lookup → ranked/filtered libp2p multiaddrs (relay + public TCP before RFC1918).
 /// Tries configured servers in order; stops on first success (STORY.md).
-pub fn lookup_dial_multiaddrs_for_public_key(public_key_hex: &str) -> Result<Vec<Multiaddr>, String> {
+pub fn lookup_dial_multiaddrs_for_public_key(
+    public_key_hex: &str,
+) -> Result<Vec<Multiaddr>, String> {
     let urls = coord_base_urls();
     if urls.is_empty() {
         return Err("coord base url not set".into());
@@ -1493,13 +1634,22 @@ mod tests {
         COORD_LAST_REG_ATTEMPT_MS.store(0, Ordering::Relaxed);
         COORD_REG_PENDING.store(false, Ordering::Relaxed);
         COORD_REG_WORKER_BUSY.store(false, Ordering::Relaxed);
+        COORD_REG_PENDING.store(false, Ordering::Relaxed);
+        RELAY_PRESENCE_CHECK_PENDING.store(false, Ordering::Relaxed);
+        g.heartbeat_stop.store(true, Ordering::Relaxed);
+        if let Ok(mut j) = g.heartbeat_join.lock() {
+            let _ = j.take();
+        }
     }
 
     #[test]
     fn wan_filter_skips_lan_when_public_present() {
         let lan: Multiaddr = "/ip4/192.168.1.2/tcp/4001".parse().unwrap();
         let wan: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().unwrap();
-        let out = crate::p2p::network_transport::filter_wan_preferred_dm_dial_addrs(vec![lan.clone(), wan.clone()]);
+        let out = crate::p2p::network_transport::filter_wan_preferred_dm_dial_addrs(vec![
+            lan.clone(),
+            wan.clone(),
+        ]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], wan);
     }
@@ -1564,8 +1714,9 @@ mod tests {
     }
 
     #[test]
-    fn register_payload_keeps_one_ipv4_libp2p() {
+    fn register_payload_never_includes_libp2p_circuit() {
         let _guard = coord_test_setup();
+        set_coord_base_urls(&["https://example.test".to_string()], false);
         let eps = endpoints_for_coord_register(vec![
             CoordEndpoint {
                 scheme: "tcp".into(),
@@ -1583,8 +1734,7 @@ mod tests {
                 port: 0,
             },
         ]);
-        assert_eq!(eps.len(), 1);
-        assert!(eps[0].host.contains("/ip4/54.38.47.166"));
+        assert!(eps.is_empty());
     }
 
     #[test]
@@ -1621,8 +1771,7 @@ mod tests {
         if let Ok(mut e) = g.endpoints.lock() {
             e.push(CoordEndpoint {
                 scheme: "libp2p".into(),
-                host: "/ip4/51.81.93.51/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/16Uiu2HAmTest"
-                    .into(),
+                host: "/ip4/51.81.93.51/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/16Uiu2HAmTest".into(),
                 port: 0,
             });
         }

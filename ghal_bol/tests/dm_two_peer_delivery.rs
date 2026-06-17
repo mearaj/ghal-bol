@@ -6,18 +6,18 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ghal_bol::create_keystore_v1;
 use ghal_bol::p2p::{
-    run_gossip_chat_node_with_std_io, DmPeer, GossipChatEvent, GossipChatConfig, OutboundCmd,
+    DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, run_gossip_chat_node_with_std_io,
 };
+use libp2p::Multiaddr;
 use libp2p::identity::PeerId;
 use libp2p::multiaddr::Protocol;
-use libp2p::Multiaddr;
 
 fn public_key_hex(id: &ghal_bol::DecryptedIdentity) -> String {
     id.public_key_hex()
@@ -34,7 +34,10 @@ fn pick_loopback_or_lan(addrs: &[Multiaddr]) -> Multiaddr {
     if let Some(a) = addrs.iter().find(|a| a.to_string().contains("/ip4/127.")) {
         return a.clone();
     }
-    if let Some(a) = addrs.iter().find(|a| a.to_string().contains("/ip4/192.168.")) {
+    if let Some(a) = addrs
+        .iter()
+        .find(|a| a.to_string().contains("/ip4/192.168."))
+    {
         return a.clone();
     }
     addrs.first().cloned().expect("no listen addr from host")
@@ -105,7 +108,11 @@ impl AsymmetricPair {
         let id_a_t = id_a;
         let host_server = common::spawn_p2p_thread("two-peer-host", move || {
             common::block_on_local(run_gossip_chat_node_with_std_io(
-                cfg_a, id_a_t, out_host_rx, ev_host_tx, stop_host_t,
+                cfg_a,
+                id_a_t,
+                out_host_rx,
+                ev_host_tx,
+                stop_host_t,
             ))
             .expect("host gossip node");
         });
@@ -124,7 +131,11 @@ impl AsymmetricPair {
         let stop_guest_t = Arc::clone(&stop_guest);
         let guest_server = common::spawn_p2p_thread("two-peer-guest", move || {
             common::block_on_local(run_gossip_chat_node_with_std_io(
-                cfg_b, id_b, out_guest_rx, ev_guest_tx, stop_guest_t,
+                cfg_b,
+                id_b,
+                out_guest_rx,
+                ev_guest_tx,
+                stop_guest_t,
             ))
             .expect("guest gossip node");
         });
@@ -208,11 +219,7 @@ fn two_peers_deliver_text_over_stream() {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match pair.ev_host_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(GossipChatEvent::DmMessage {
-                msg_kind,
-                text,
-                ..
-            }) if msg_kind == "text" => {
+            Ok(GossipChatEvent::DmMessage { msg_kind, text, .. }) if msg_kind == "text" => {
                 assert_eq!(text.as_deref(), Some("integration-hello"));
                 got_text = true;
                 break;
@@ -239,5 +246,8 @@ fn two_peers_deliver_text_over_stream() {
 
     pair.shutdown();
     assert!(got_text, "host did not receive dm text");
-    assert!(got_ack, "guest (sender) did not receive ack_received from host");
+    assert!(
+        got_ack,
+        "guest (sender) did not receive ack_received from host"
+    );
 }

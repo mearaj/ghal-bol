@@ -5,8 +5,8 @@
 mod imp {
     use std::sync::OnceLock;
 
-    use jni::objects::{Global, JClass};
     use jni::Env;
+    use jni::objects::{Global, JClass};
 
     static DAEMON_NATIVE_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 

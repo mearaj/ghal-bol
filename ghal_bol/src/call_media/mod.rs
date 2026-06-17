@@ -25,19 +25,17 @@ pub use audio_device::set_android_audio_ready;
 pub fn android_p2p_context_ready() -> bool {
     audio_device::is_android_audio_ready()
 }
-#[cfg(target_os = "android")]
-pub use android_audio::{
-    ensure_voice_audio_mode, reset_voice_audio_mode_flag, set_speakerphone,
-};
 #[cfg(not(target_os = "android"))]
 pub use android_audio::set_speakerphone;
-pub use codec::{
-    AudioCodec, OpusDecoderCodec, OpusEncoderCodec, FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE_HZ,
-};
+#[cfg(target_os = "android")]
+pub use android_audio::{ensure_voice_audio_mode, reset_voice_audio_mode_flag, set_speakerphone};
 #[cfg(test)]
 pub use codec::NullCodec;
+pub use codec::{
+    AudioCodec, FRAME_MS, FRAME_SAMPLES, OpusDecoderCodec, OpusEncoderCodec, SAMPLE_RATE_HZ,
+};
 pub use jitter::Playout;
-pub use session::{run_media_session, MediaControls};
+pub use session::{MediaControls, run_media_session};
 
 pub(crate) use crypto::MediaCrypto;
 use jitter::JitterBuffer;
@@ -199,7 +197,9 @@ mod tests {
     }
 
     fn ramp(base: i16) -> Vec<i16> {
-        (0..FRAME_SAMPLES).map(|i| base.wrapping_add(i as i16)).collect()
+        (0..FRAME_SAMPLES)
+            .map(|i| base.wrapping_add(i as i16))
+            .collect()
     }
 
     fn engine_a() -> MediaEngine {
@@ -238,7 +238,9 @@ mod tests {
     fn reorder_is_sorted_on_playout() {
         let mut a = engine_a();
         let mut b = engine_b();
-        let w: Vec<Vec<u8>> = (0..6).map(|i| a.on_capture(&ramp(i as i16 * 100)).unwrap()).collect();
+        let w: Vec<Vec<u8>> = (0..6)
+            .map(|i| a.on_capture(&ramp(i as i16 * 100)).unwrap())
+            .collect();
         // Deliver out of order.
         for idx in [2usize, 0, 1, 4, 3, 5] {
             b.on_wire(&w[idx]).unwrap();
@@ -339,7 +341,11 @@ mod tests {
         let mut decoded_any = false;
         for _ in 0..(DEFAULT_JITTER_TARGET + 2) {
             b.on_playout(&mut out).unwrap();
-            assert_eq!(out.len(), FRAME_SAMPLES, "opus frame must be one 20 ms frame");
+            assert_eq!(
+                out.len(),
+                FRAME_SAMPLES,
+                "opus frame must be one 20 ms frame"
+            );
             if out.iter().any(|&s| s != 0) {
                 decoded_any = true;
             }

@@ -2,6 +2,7 @@
 //!
 //! Does not store message content or transcripts. See workspace `README.md`.
 
+mod agent_pk;
 mod auth;
 mod config;
 mod db;

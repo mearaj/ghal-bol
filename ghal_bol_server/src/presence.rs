@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::error::{ApiResult, ServerError};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -74,14 +74,7 @@ impl PresenceStore {
                 ipv6 = excluded.ipv6,
                 ipv4 = excluded.ipv4,
                 last_heartbeat_unix_ms = excluded.last_heartbeat_unix_ms",
-            params![
-                key,
-                endpoints_json,
-                caps_json,
-                ipv6,
-                ipv4,
-                now_ms as i64,
-            ],
+            params![key, endpoints_json, caps_json, ipv6, ipv4, now_ms as i64,],
         )?;
         Ok(PeerRecord {
             public_key_hex: key,
@@ -113,11 +106,71 @@ impl PresenceStore {
         let conn = self.conn.lock().map_err(lock_err)?;
         match self.fetch_one(&conn, &key, cutoff) {
             Ok(r) => Ok(r),
-            Err(ServerError::NotFound(_)) => {
-                Err(ServerError::NotFound("peer not registered or presence expired".into()))
-            }
+            Err(ServerError::NotFound(_)) => Err(ServerError::NotFound(
+                "peer not registered or presence expired".into(),
+            )),
             Err(e) => Err(e),
         }
+    }
+
+    /// Fetch a peer record without TTL filtering (relay-driven presence updates).
+    pub fn get_stored(&self, public_key_hex: &str) -> ApiResult<PeerRecord> {
+        let key = public_key_hex.to_ascii_lowercase();
+        let conn = self.conn.lock().map_err(lock_err)?;
+        self.fetch_one(&conn, &key, 0)
+    }
+
+    /// Register or refresh a relay `/p2p-circuit` endpoint (server-authoritative WAN presence).
+    pub fn upsert_relay_circuit(
+        &self,
+        public_key_hex: &str,
+        circuit_ma: String,
+    ) -> Result<PeerRecord, ServerError> {
+        let key = public_key_hex.to_ascii_lowercase();
+        let mut endpoints = self
+            .get_stored(&key)
+            .map(|r| r.endpoints)
+            .unwrap_or_default();
+        endpoints.retain(|e| !(e.scheme == "libp2p" && e.host.contains("/p2p-circuit")));
+        endpoints.push(PeerEndpoint {
+            scheme: "libp2p".into(),
+            host: circuit_ma,
+            port: 0,
+        });
+        let caps = vec!["tcp".into(), "sync-v1".into()];
+        self.upsert(key, endpoints, caps, None, None)
+    }
+
+    /// Remove relay circuit endpoints; delete the row when nothing remains.
+    pub fn remove_relay_circuit(&self, public_key_hex: &str) -> Result<bool, ServerError> {
+        let key = public_key_hex.to_ascii_lowercase();
+        let record = match self.get_stored(&key) {
+            Ok(r) => r,
+            Err(ServerError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let before = record.endpoints.len();
+        let endpoints: Vec<_> = record
+            .endpoints
+            .into_iter()
+            .filter(|e| !(e.scheme == "libp2p" && e.host.contains("/p2p-circuit")))
+            .collect();
+        if endpoints.len() == before {
+            return Ok(false);
+        }
+        if endpoints.is_empty() {
+            let conn = self.conn.lock().map_err(lock_err)?;
+            conn.execute("DELETE FROM peers WHERE public_key_hex = ?1", params![key])?;
+            return Ok(true);
+        }
+        self.upsert(
+            key,
+            endpoints,
+            record.transport_capabilities,
+            record.ipv6,
+            record.ipv4,
+        )?;
+        Ok(true)
     }
 
     pub fn list_online(&self, ttl: Duration) -> Result<Vec<PeerRecord>, ServerError> {
@@ -179,13 +232,12 @@ fn row_to_peer_record(row: &rusqlite::Row<'_>) -> Result<PeerRecord, rusqlite::E
             format!("endpoints json: {e}"),
         )))
     })?;
-    let transport_capabilities: Vec<String> =
-        serde_json::from_str(&caps_json).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("capabilities json: {e}"),
-            )))
-        })?;
+    let transport_capabilities: Vec<String> = serde_json::from_str(&caps_json).map_err(|e| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("capabilities json: {e}"),
+        )))
+    })?;
     Ok(PeerRecord {
         public_key_hex: row.get(0)?,
         endpoints,

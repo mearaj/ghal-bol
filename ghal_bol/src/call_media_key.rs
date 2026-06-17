@@ -21,13 +21,15 @@ pub struct CallMediaKeys {
 }
 
 fn peer_secp256k1_from_hex(peer_public_key_hex: &str) -> Result<PublicKey, String> {
-    let libp2p =
-        crate::public_key_util::secp256k1_public_key_from_hex(peer_public_key_hex.trim())?;
+    let libp2p = crate::public_key_util::secp256k1_public_key_from_hex(peer_public_key_hex.trim())?;
     PublicKey::from_slice(&libp2p.to_bytes()).map_err(|e| format!("peer pubkey: {e}"))
 }
 
 /// Sorted `local_hex || peer_hex` (lowercase) so both peers expand identical HKDF `info`.
-fn contact_pair_binding(local_public_key_hex: &str, peer_public_key_hex: &str) -> Result<Vec<u8>, String> {
+fn contact_pair_binding(
+    local_public_key_hex: &str,
+    peer_public_key_hex: &str,
+) -> Result<Vec<u8>, String> {
     let mut a = local_public_key_hex.trim().to_ascii_lowercase();
     let mut b = peer_public_key_hex.trim().to_ascii_lowercase();
     if a.len() != 66 {
@@ -117,8 +119,7 @@ mod tests {
     fn pk_hex(sk: &SecretKey) -> String {
         let secp = Secp256k1::new();
         let bytes = sk.public_key(&secp).serialize();
-        let libp2p =
-            libp2p_identity::secp256k1::PublicKey::try_from_bytes(&bytes).expect("pk");
+        let libp2p = libp2p_identity::secp256k1::PublicKey::try_from_bytes(&bytes).expect("pk");
         crate::public_key_util::secp256k1_public_key_to_hex(&libp2p)
     }
 

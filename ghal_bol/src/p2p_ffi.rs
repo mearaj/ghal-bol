@@ -65,7 +65,8 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_send_text_dm(
     text_utf8: *const c_char,
 ) -> *mut c_char {
     let run = || -> *mut c_char {
-        let recipient = match unsafe { utf8(recipient_public_key_hex_utf8, "recipient public key") } {
+        let recipient = match unsafe { utf8(recipient_public_key_hex_utf8, "recipient public key") }
+        {
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
@@ -89,7 +90,8 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_requeue_outbound_dm(
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
-        let recipient = match unsafe { utf8(recipient_public_key_hex_utf8, "recipient public key") } {
+        let recipient = match unsafe { utf8(recipient_public_key_hex_utf8, "recipient public key") }
+        {
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
@@ -97,7 +99,11 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_requeue_outbound_dm(
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
-        json_ok(p2p_runtime::p2p_requeue_outbound_dm(&message_id, &recipient, &text))
+        json_ok(p2p_runtime::p2p_requeue_outbound_dm(
+            &message_id,
+            &recipient,
+            &text,
+        ))
     };
     run()
 }
@@ -179,7 +185,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_set_foreground_peer(
 
 /// Voice-call signaling. JSON config — see `p2p_runtime::p2p_call_signal`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_signal(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_signal(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "call config") } {
             Ok(s) => s,
@@ -196,7 +204,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_signal(config_json_utf8: *const c
 
 /// Native voice-call media control. JSON config — see `p2p_runtime::p2p_call_media`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_media(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_media(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "call media config") } {
             Ok(s) => s,
@@ -213,7 +223,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_media(config_json_utf8: *const c_
 
 /// Active call snapshot for UI re-sync. JSON config — see `p2p_runtime::p2p_call_status`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_status(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_status(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "call status config") } {
             Ok(s) => s,
@@ -250,10 +262,7 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_force_end_active_call(
             Ok(v) => v,
             Err(_) => serde_json::json!({}),
         };
-        let reason = v
-            .get("reason")
-            .and_then(|x| x.as_str())
-            .unwrap_or("ffi");
+        let reason = v.get("reason").and_then(|x| x.as_str()).unwrap_or("ffi");
         json_ok(p2p_runtime::p2p_force_end_active_call(reason))
     };
     run()
@@ -269,7 +278,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_take_incoming_call_wake(
 
 /// Native video-call control. JSON config — see `p2p_runtime::p2p_call_video`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "call video config") } {
             Ok(s) => s,
@@ -326,7 +337,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video_texture(
 /// Pull the latest decoded video frame (render path). JSON config — see
 /// `p2p_runtime::p2p_call_video_frame`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video_frame(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_p2p_call_video_frame(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "call video frame config") } {
             Ok(s) => s,

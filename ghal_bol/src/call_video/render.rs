@@ -4,7 +4,7 @@
 //! file; the Flutter embedder reads it into a platform `Texture` without JSON,
 //! base64, or Dart pixel work. See `docs/GHAL_BOL_VIDEO_NATIVE_V1.md`.
 
-use super::{i420_to_rgba_max_edge, RawVideoFrame};
+use super::{RawVideoFrame, i420_to_rgba_max_edge};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -71,11 +71,7 @@ fn sanitize_token(s: &str) -> String {
 /// Absolute path to the mmap file for `(call_id, track)`.
 pub fn shm_path(call_id: &str, track: &str) -> PathBuf {
     let root = video_shm_root();
-    let name = format!(
-        "{}_{}.rgba",
-        sanitize_token(call_id),
-        sanitize_token(track)
-    );
+    let name = format!("{}_{}.rgba", sanitize_token(call_id), sanitize_token(track));
     root.join(name)
 }
 

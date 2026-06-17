@@ -2,17 +2,19 @@
 
 use std::path::Path;
 
+use jni::EnvUnowned;
 use jni::errors::LogContextErrorAndDefault;
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, JNI_FALSE, JNI_TRUE};
-use jni::EnvUnowned;
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean};
 
 use crate::c_ffi::configure_android_data_directory;
 use crate::daemon::run_daemon;
 
 /// Must run once per `:p2p` process before any `reqwest`/coord HTTPS (see rustls-platform-verifier Android docs).
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_initRustlsPlatformVerifier<'local>(
+pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_initRustlsPlatformVerifier<
+    'local,
+>(
     mut unowned_env: EnvUnowned<'local>,
     _class: JClass<'local>,
     context: JObject<'local>,

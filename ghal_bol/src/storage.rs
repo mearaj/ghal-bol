@@ -6,8 +6,9 @@ use directories::ProjectDirs;
 use thiserror::Error;
 
 use crate::keystore_v1::{
-    DecryptedIdentity, KeystoreError, KeystoreV1, create_keystore_v1, create_keystore_v1_from_secret,
-    parse_secret_key_hex, secret_key_hex_from_identity, unlock_keystore_v1,
+    DecryptedIdentity, KeystoreError, KeystoreV1, create_keystore_v1,
+    create_keystore_v1_from_secret, parse_secret_key_hex, secret_key_hex_from_identity,
+    unlock_keystore_v1,
 };
 
 /// Product / packaging id for **`ghal_bol`** (Rust keystore storage root via `directories`).
@@ -30,7 +31,10 @@ pub struct StorageConfig {
 
 impl StorageConfig {
     pub fn new(app_namespace: impl Into<String>) -> Self {
-        Self { app_namespace: app_namespace.into(), override_data_dir: None }
+        Self {
+            app_namespace: app_namespace.into(),
+            override_data_dir: None,
+        }
     }
 
     pub fn with_override_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -53,7 +57,9 @@ pub enum KeystoreStorageError {
     #[error("invalid app_namespace")]
     BadNamespace,
 
-    #[error("ANDROID_LIBRARY_NAMESPACE must be qualifier.org.application (three dot-separated segments)")]
+    #[error(
+        "ANDROID_LIBRARY_NAMESPACE must be qualifier.org.application (three dot-separated segments)"
+    )]
     InvalidLibraryNamespace,
 }
 
@@ -78,7 +84,7 @@ pub(crate) fn sanitize_namespace(ns: &str) -> Result<(), KeystoreStorageError> {
 /// Resolves [`ProjectDirs`] from [`ANDROID_LIBRARY_NAMESPACE`] (`com.ghalbol`).
 pub fn project_dirs_for_library() -> Result<ProjectDirs, KeystoreStorageError> {
     return ProjectDirs::from_path(PathBuf::from(ANDROID_LIBRARY_NAMESPACE))
-    .ok_or(KeystoreStorageError::NoDataDir);
+        .ok_or(KeystoreStorageError::NoDataDir);
 }
 
 pub fn base_data_dir(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageError> {
@@ -136,7 +142,9 @@ pub fn keystore_v1_file_exists(cfg: &StorageConfig) -> Result<bool, KeystoreStor
     Ok(path.exists())
 }
 
-pub fn load_keystore_v1(cfg: &StorageConfig) -> Result<Option<StoredKeystore>, KeystoreStorageError> {
+pub fn load_keystore_v1(
+    cfg: &StorageConfig,
+) -> Result<Option<StoredKeystore>, KeystoreStorageError> {
     let path = keystore_v1_path(cfg)?;
     if !path.exists() {
         return Ok(None);
@@ -146,7 +154,10 @@ pub fn load_keystore_v1(cfg: &StorageConfig) -> Result<Option<StoredKeystore>, K
     Ok(Some(StoredKeystore { path, keystore: ks }))
 }
 
-pub fn save_keystore_v1(cfg: &StorageConfig, ks: &KeystoreV1) -> Result<PathBuf, KeystoreStorageError> {
+pub fn save_keystore_v1(
+    cfg: &StorageConfig,
+    ks: &KeystoreV1,
+) -> Result<PathBuf, KeystoreStorageError> {
     let path = keystore_v1_path(cfg)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -199,16 +210,18 @@ pub fn reveal_secret_key_hex_v1(
     cfg: &StorageConfig,
     password: &str,
 ) -> Result<String, KeystoreStorageError> {
-    let stored = load_keystore_v1(cfg)?
-        .ok_or(KeystoreStorageError::Crypto(KeystoreError::Invalid("no keystore on disk")))?;
+    let stored = load_keystore_v1(cfg)?.ok_or(KeystoreStorageError::Crypto(
+        KeystoreError::Invalid("no keystore on disk"),
+    ))?;
     let id = unlock_keystore_v1(password, &stored.keystore)?;
     Ok(secret_key_hex_from_identity(&id))
 }
 
 /// Export encrypted `keystore_v1.json` contents (password still required to decrypt elsewhere).
 pub fn export_keystore_json_v1(cfg: &StorageConfig) -> Result<String, KeystoreStorageError> {
-    let stored = load_keystore_v1(cfg)?
-        .ok_or(KeystoreStorageError::Crypto(KeystoreError::Invalid("no keystore on disk")))?;
+    let stored = load_keystore_v1(cfg)?.ok_or(KeystoreStorageError::Crypto(
+        KeystoreError::Invalid("no keystore on disk"),
+    ))?;
     Ok(stored.keystore.to_json_string()?)
 }
 
@@ -258,8 +271,7 @@ mod tests {
     #[test]
     fn keystore_v1_file_exists_false_until_saved() {
         let td = TempDir::new().unwrap();
-        let cfg = StorageConfig::new("dev.exists")
-            .with_override_data_dir(td.path());
+        let cfg = StorageConfig::new("dev.exists").with_override_data_dir(td.path());
         assert!(!keystore_v1_file_exists(&cfg).unwrap());
         let _ = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
         assert!(keystore_v1_file_exists(&cfg).unwrap());
@@ -268,8 +280,7 @@ mod tests {
     #[test]
     fn create_persists_then_unlocks() {
         let td = TempDir::new().unwrap();
-        let cfg = StorageConfig::new("dev.test")
-            .with_override_data_dir(td.path());
+        let cfg = StorageConfig::new("dev.test").with_override_data_dir(td.path());
 
         let id1 = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
         let id2 = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
@@ -280,8 +291,7 @@ mod tests {
     #[test]
     fn reset_first_time_removes_keystore() {
         let td = TempDir::new().unwrap();
-        let cfg = StorageConfig::new("dev.reset")
-            .with_override_data_dir(td.path());
+        let cfg = StorageConfig::new("dev.reset").with_override_data_dir(td.path());
         let _ = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
         assert!(keystore_v1_file_exists(&cfg).unwrap());
         reset_first_time_identity_v1(&cfg).unwrap();
@@ -291,8 +301,7 @@ mod tests {
     #[test]
     fn import_secret_hex_persists() {
         let td = TempDir::new().unwrap();
-        let cfg = StorageConfig::new("dev.import")
-            .with_override_data_dir(td.path());
+        let cfg = StorageConfig::new("dev.import").with_override_data_dir(td.path());
         let sk = {
             let (_ks, id) = create_keystore_v1("old", None).unwrap();
             id.secp256k1_secret().secret_bytes()
@@ -306,10 +315,8 @@ mod tests {
     #[test]
     fn export_import_keystore_json_roundtrip() {
         let td = TempDir::new().unwrap();
-        let cfg_a = StorageConfig::new("dev.export")
-            .with_override_data_dir(td.path().join("a"));
-        let cfg_b = StorageConfig::new("dev.export")
-            .with_override_data_dir(td.path().join("b"));
+        let cfg_a = StorageConfig::new("dev.export").with_override_data_dir(td.path().join("a"));
+        let cfg_b = StorageConfig::new("dev.export").with_override_data_dir(td.path().join("b"));
         let id1 = create_or_unlock_identity_v1(&cfg_a, "pw").unwrap();
         let json = export_keystore_json_v1(&cfg_a).unwrap();
         let id2 = import_keystore_from_json_v1(&cfg_b, "pw", &json).unwrap();
@@ -319,8 +326,7 @@ mod tests {
     #[test]
     fn wrong_password_on_existing_keystore_fails() {
         let td = TempDir::new().unwrap();
-        let cfg = StorageConfig::new("dev.test")
-            .with_override_data_dir(td.path());
+        let cfg = StorageConfig::new("dev.test").with_override_data_dir(td.path());
 
         let _ = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
         let err = create_or_unlock_identity_v1(&cfg, "nope").unwrap_err();
@@ -337,8 +343,7 @@ mod tests {
     #[test]
     fn default_namespace_keystore_lives_at_base_not_nested() {
         let td = TempDir::new().unwrap();
-        let cfg = StorageConfig::new(ANDROID_LIBRARY_NAMESPACE)
-            .with_override_data_dir(td.path());
+        let cfg = StorageConfig::new(ANDROID_LIBRARY_NAMESPACE).with_override_data_dir(td.path());
         let path = keystore_v1_path(&cfg).unwrap();
         assert_eq!(path, td.path().join("keystore_v1.json"));
     }
@@ -346,8 +351,7 @@ mod tests {
     #[test]
     fn other_namespace_keystore_has_subdir() {
         let td = TempDir::new().unwrap();
-        let cfg = StorageConfig::new("dev.test")
-            .with_override_data_dir(td.path());
+        let cfg = StorageConfig::new("dev.test").with_override_data_dir(td.path());
         let path = keystore_v1_path(&cfg).unwrap();
         assert_eq!(path, td.path().join("dev.test").join("keystore_v1.json"));
     }
@@ -360,4 +364,3 @@ mod tests {
         assert!(!path.ends_with("com.ghalbol"));
     }
 }
-

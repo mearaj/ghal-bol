@@ -129,9 +129,8 @@ pub fn outbound_invite_active(peer_pk_hex: &str, call_id: &str) -> bool {
         .lock()
         .ok()
         .and_then(|g| {
-            g.get(&key).map(|c| {
-                c.phase == CallPhase::OutgoingRinging && c.call_id == cid
-            })
+            g.get(&key)
+                .map(|c| c.phase == CallPhase::OutgoingRinging && c.call_id == cid)
         })
         .unwrap_or(false)
 }
@@ -347,11 +346,19 @@ pub fn apply_inbound(peer_pk_hex: &str, call_id: &str, kind: CallSigKind) -> Res
 mod tests {
     use super::*;
     use crate::call_sig_v1::CallSigKind;
+    use std::sync::{Mutex, OnceLock};
 
-    const PK: &str = "0305b1b0d27745e0a38a7254ea100abc38857b51ded2ac7ea88d3063fb8da21784";
+    fn lock_call_state_tests() -> std::sync::MutexGuard<'static, ()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn glare_simultaneous_outbound_invites() {
+        let _lock = lock_call_state_tests();
+        // Each test must use a unique key because `call_state` is global process state and
+        // lib tests run concurrently.
+        const PK: &str = "0305b1b0d27745e0a38a7254ea100abc38857b51ded2ac7ea88d3063fb8da21784";
         clear_all_calls();
         apply_outbound(PK, "call-bbb", CallSigKind::Invite).unwrap();
         assert_eq!(phase_for_peer(PK), CallPhase::OutgoingRinging);
@@ -364,14 +371,13 @@ mod tests {
         apply_outbound(PK, "call-aaa", CallSigKind::Invite).unwrap();
         assert!(apply_inbound(PK, "call-bbb", CallSigKind::Invite).is_err());
         assert_eq!(phase_for_peer(PK), CallPhase::OutgoingRinging);
-        assert_eq!(
-            snapshot_for_peer(PK).call_id.as_deref(),
-            Some("call-aaa")
-        );
+        assert_eq!(snapshot_for_peer(PK).call_id.as_deref(), Some("call-aaa"));
     }
 
     #[test]
     fn expire_stale_ringing_clears_old_inbound() {
+        let _lock = lock_call_state_tests();
+        const PK: &str = "03f1b1b0d27745e0a38a7254ea100abc38857b51ded2ac7ea88d3063fb8da21784";
         clear_all_calls();
         let t0 = now_ms();
         apply_inbound(PK, "call-stale", CallSigKind::Invite).unwrap();

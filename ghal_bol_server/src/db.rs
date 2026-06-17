@@ -9,9 +9,8 @@ pub const SCHEMA_VERSION: i32 = 1;
 pub fn open_and_migrate(path: &Path) -> Result<Connection, ServerError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ServerError::Internal(format!("create db directory: {e}"))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ServerError::Internal(format!("create db directory: {e}")))?;
         }
     }
     let conn = Connection::open(path)?;
@@ -27,11 +26,9 @@ pub fn open_and_migrate(path: &Path) -> Result<Connection, ServerError> {
 
 pub fn migrate(conn: &Connection) -> Result<(), ServerError> {
     let version: i32 = conn
-        .query_row(
-            "SELECT version FROM schema_version LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(0);
 
     if version == 0 {

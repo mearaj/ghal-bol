@@ -9,8 +9,8 @@ use std::sync::{Mutex, OnceLock};
 
 use tokio::sync::mpsc;
 
-use super::session::VideoControls;
 use super::RawVideoFrame;
+use super::session::VideoControls;
 
 static FRAME_TX: OnceLock<Mutex<Option<mpsc::Sender<RawVideoFrame>>>> = OnceLock::new();
 static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -46,7 +46,11 @@ pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_pushCameraFrame<'
         }
         if let Ok(guard) = frame_tx().lock() {
             if let Some(tx) = guard.as_ref() {
-                let _ = tx.try_send(RawVideoFrame { width: w, height: h, data: bytes });
+                let _ = tx.try_send(RawVideoFrame {
+                    width: w,
+                    height: h,
+                    data: bytes,
+                });
                 let n = JNI_FRAMES_RX.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == 1 {
                     crate::p2p::native_log::info(
@@ -63,7 +67,7 @@ pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_pushCameraFrame<'
 #[cfg(target_os = "android")]
 fn start_camera_jni() -> Result<(), String> {
     use jni::objects::JValue;
-    use jni::{jni_sig, jni_str, JavaVM};
+    use jni::{JavaVM, jni_sig, jni_str};
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
     let class = crate::android_jni_cache::daemon_native_class()?;
@@ -83,7 +87,7 @@ fn start_camera_jni() -> Result<(), String> {
 
 #[cfg(target_os = "android")]
 fn stop_camera_jni() {
-    use jni::{jni_sig, jni_str, JavaVM};
+    use jni::{JavaVM, jni_sig, jni_str};
     CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
     JNI_FRAMES_RX.store(0, Ordering::Relaxed);
     if let Ok(mut g) = frame_tx().lock() {

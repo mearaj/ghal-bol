@@ -3,9 +3,9 @@
 //! Media (WebRTC / Opus) is phase 2; this module is sign, seal, parse only.
 
 use libp2p_identity::Keypair;
+use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use secp256k1::SecretKey;
 
 use crate::public_key_util::secp256k1_public_key_from_hex;
 use crate::secp256k1_seal::{open_sealed_secp256k1, seal_to_secp256k1_public};
@@ -100,9 +100,7 @@ fn canonical_sign_bytes(env: &CallSigEnvelope) -> Result<Vec<u8>, String> {
 
 pub fn sign_call_envelope(env: &mut CallSigEnvelope, sender: &Keypair) -> Result<(), String> {
     let bytes = canonical_sign_bytes(env)?;
-    let sig = sender
-        .sign(&bytes)
-        .map_err(|e| format!("sign: {e}"))?;
+    let sig = sender.sign(&bytes).map_err(|e| format!("sign: {e}"))?;
     env.signature_hex = Some(hex::encode(sig));
     Ok(())
 }
@@ -213,8 +211,8 @@ pub fn parse_call_envelope(
     let payload = if env.ciphertext_hex.trim().is_empty() {
         Value::Object(Default::default())
     } else {
-        let sealed = hex::decode(env.ciphertext_hex.trim())
-            .map_err(|e| format!("ciphertext hex: {e}"))?;
+        let sealed =
+            hex::decode(env.ciphertext_hex.trim()).map_err(|e| format!("ciphertext hex: {e}"))?;
         let plain = open_sealed_secp256k1(my_secret, &sealed)?;
         if plain.is_empty() {
             Value::Object(Default::default())

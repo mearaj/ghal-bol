@@ -11,14 +11,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::Router;
+use ghal_bol::DmDialAddr;
 use ghal_bol::coord::{CoordEndpoint, CoordHttpClient};
 use ghal_bol::coord_runtime;
 use ghal_bol::create_keystore_v1;
 use ghal_bol::p2p::{
-    run_gossip_chat_node_with_std_io, DmPeer, GossipChatEvent, GossipChatConfig, OutboundCmd,
+    DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, run_gossip_chat_node_with_std_io,
 };
-use ghal_bol::DmDialAddr;
-use ghal_bol_server::{router, AppState, ServerConfig};
+use ghal_bol_server::{AppState, ServerConfig, router};
 use tokio::net::TcpListener;
 
 fn coord_base_url() -> String {
@@ -28,9 +28,7 @@ fn coord_base_url() -> String {
         common::spawn_p2p_thread("coord-test-server", move || {
             let rt = common::p2p_tokio_runtime();
             rt.block_on(async {
-                let listener = TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("coord bind");
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("coord bind");
                 let url = format!("http://{}", listener.local_addr().expect("addr"));
                 let state = Arc::new(
                     AppState::open_in_memory(ServerConfig::default()).expect("coord mem db"),
@@ -70,9 +68,10 @@ fn wait_tcp_listen(ev_rx: &mpsc::Receiver<GossipChatEvent>) -> DmDialAddr {
             Ok(GossipChatEvent::Listening(a)) => {
                 if let Some(dm) = DmDialAddr::parse(&a.to_string()) {
                     addrs.push(dm);
-                    if addrs.iter().any(|x| {
-                        x.host.starts_with("127.") || x.host.starts_with("192.168.")
-                    }) {
+                    if addrs
+                        .iter()
+                        .any(|x| x.host.starts_with("127.") || x.host.starts_with("192.168."))
+                    {
                         return pick_loopback_or_lan_dm(&addrs);
                     }
                 }
@@ -120,7 +119,11 @@ fn guest_dials_host_via_coord_lookup() {
     let stop_host_t = Arc::clone(&stop_host);
     let host_thread = common::spawn_p2p_thread("coord-test-host", move || {
         common::block_on_local(run_gossip_chat_node_with_std_io(
-            cfg_host, id_host, out_host_rx, ev_host_tx, stop_host_t,
+            cfg_host,
+            id_host,
+            out_host_rx,
+            ev_host_tx,
+            stop_host_t,
         ))
         .expect("host gossip node");
     });
@@ -134,8 +137,7 @@ fn guest_dials_host_via_coord_lookup() {
     };
     register_on_coord(&client, &host_sk, &host_pk, reg_host, dm_listen.port);
 
-    let mut cfg_guest =
-        GossipChatConfig::from_unlocked_identity("coord-test", &id_guest).unwrap();
+    let mut cfg_guest = GossipChatConfig::from_unlocked_identity("coord-test", &id_guest).unwrap();
     cfg_guest
         .dm_peers
         .push(DmPeer::from_public_key_hex(host_pk.clone()).expect("dm peer"));
@@ -147,7 +149,11 @@ fn guest_dials_host_via_coord_lookup() {
     let stop_guest_t = Arc::clone(&stop_guest);
     let guest_thread = common::spawn_p2p_thread("coord-test-guest", move || {
         common::block_on_local(run_gossip_chat_node_with_std_io(
-            cfg_guest, id_guest, out_guest_rx, ev_guest_tx, stop_guest_t,
+            cfg_guest,
+            id_guest,
+            out_guest_rx,
+            ev_guest_tx,
+            stop_guest_t,
         ))
         .expect("guest gossip node");
     });
@@ -177,17 +183,16 @@ fn guest_dials_host_via_coord_lookup() {
             done: Some(done_tx),
         })
         .unwrap();
-    done_rx.recv_timeout(Duration::from_secs(15)).unwrap().unwrap();
+    done_rx
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap()
+        .unwrap();
 
     let mut got = false;
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match ev_host_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(GossipChatEvent::DmMessage {
-                msg_kind,
-                text,
-                ..
-            }) if msg_kind == "text" => {
+            Ok(GossipChatEvent::DmMessage { msg_kind, text, .. }) if msg_kind == "text" => {
                 assert_eq!(text.as_deref(), Some("coord-path-hello"));
                 got = true;
                 break;

@@ -3,7 +3,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ghal_bol_server::registration_message_digest;
-use ghal_bol_server::{router, AppState, RelayInfo, ServerConfig};
+use ghal_bol_server::{AppState, RelayInfo, ServerConfig, router};
 use secp256k1::{Secp256k1, SecretKey};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -28,10 +28,7 @@ async fn json_request(
         }
         None => Body::empty(),
     };
-    app.clone()
-        .oneshot(req.body(body).unwrap())
-        .await
-        .unwrap()
+    app.clone().oneshot(req.body(body).unwrap()).await.unwrap()
 }
 
 async fn json_body(resp: axum::response::Response) -> serde_json::Value {
@@ -157,7 +154,10 @@ async fn sqlite_file_persistence() {
         Some(serde_json::json!({ "public_key_hex": pk_hex })),
     )
     .await;
-    let nonce_hex = json_body(ch).await["nonce_hex"].as_str().unwrap().to_string();
+    let nonce_hex = json_body(ch).await["nonce_hex"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let mut nonce = [0u8; 32];
     nonce.copy_from_slice(&hex::decode(&nonce_hex).unwrap());
     let msg = registration_message_digest(&nonce, &pk_hex);

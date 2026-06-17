@@ -104,7 +104,10 @@ impl DecryptedIdentity {
     }
 }
 
-fn derive_master_key(password: &[u8], kdf: &KeystoreV1KdfParams) -> Result<[u8; 32], KeystoreError> {
+fn derive_master_key(
+    password: &[u8],
+    kdf: &KeystoreV1KdfParams,
+) -> Result<[u8; 32], KeystoreError> {
     if kdf.salt.len() < 16 {
         return Err(KeystoreError::Invalid("salt too short"));
     }
@@ -153,7 +156,9 @@ fn keypair_from_secret_bytes(sk: &[u8]) -> Result<(Keypair, SecretKey), Keystore
 pub fn parse_secret_key_hex(secret_hex: &str) -> Result<[u8; 32], KeystoreError> {
     let s = secret_hex.trim();
     if s.len() != 64 {
-        return Err(KeystoreError::Invalid("secret key hex must be 64 characters"));
+        return Err(KeystoreError::Invalid(
+            "secret key hex must be 64 characters",
+        ));
     }
     let bytes = hex::decode(s).map_err(|_| KeystoreError::Invalid("invalid secret key hex"))?;
     let arr: [u8; 32] = bytes
@@ -205,7 +210,12 @@ pub fn create_keystore_v1_from_secret(
     let keystore = KeystoreV1 {
         format: "keystore_v1".to_string(),
         kdf,
-        identity_public_key: keypair.public().try_into_secp256k1().unwrap().to_bytes().to_vec(),
+        identity_public_key: keypair
+            .public()
+            .try_into_secp256k1()
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
         identity_nonce: nonce.to_vec(),
         identity_ciphertext: ct,
     };
@@ -228,7 +238,10 @@ pub fn secret_key_hex_from_identity(id: &DecryptedIdentity) -> String {
     hex::encode(id.secp256k1_secret().secret_bytes())
 }
 
-pub fn unlock_keystore_v1(password: &str, keystore: &KeystoreV1) -> Result<DecryptedIdentity, KeystoreError> {
+pub fn unlock_keystore_v1(
+    password: &str,
+    keystore: &KeystoreV1,
+) -> Result<DecryptedIdentity, KeystoreError> {
     if keystore.format != "keystore_v1" {
         return Err(KeystoreError::Invalid("unknown format"));
     }

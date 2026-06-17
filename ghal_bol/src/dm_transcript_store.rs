@@ -109,11 +109,7 @@ pub fn thread_view(
     conversation_keys: &[String],
     match_inbound_from_peer_id: Option<&str>,
 ) -> Result<TranscriptThreadView, TranscriptStoreError> {
-    let lines = load_merged(
-        app_namespace,
-        conversation_keys,
-        match_inbound_from_peer_id,
-    )?;
+    let lines = load_merged(app_namespace, conversation_keys, match_inbound_from_peer_id)?;
     let revision = thread_revision_for_keys(app_namespace, conversation_keys);
     Ok(TranscriptThreadView { revision, lines })
 }
@@ -212,7 +208,10 @@ impl StoredChatLine {
             text,
             outgoing: obj.get("outgoing").and_then(|v| v.as_bool()) == Some(true),
             from: obj.get("from").and_then(|v| v.as_str()).map(str::to_string),
-            message_id: obj.get("message_id").and_then(|v| v.as_str()).map(str::to_string),
+            message_id: obj
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             delivery: obj
                 .get("delivery")
                 .and_then(|v| v.as_str())
@@ -237,7 +236,9 @@ pub enum TranscriptStoreError {
 }
 
 pub fn resolve_transcript_path(app_namespace: &str) -> Result<PathBuf, TranscriptStoreError> {
-    Ok(chat_transcript_v1_path(&storage_config_for_namespace(app_namespace))?)
+    Ok(chat_transcript_v1_path(&storage_config_for_namespace(
+        app_namespace,
+    ))?)
 }
 
 fn decode_root_lenient(raw: &str) -> Option<Value> {
@@ -310,11 +311,7 @@ fn pick_better_duplicate(a: &StoredChatLine, b: &StoredChatLine) -> StoredChatLi
     }
     let at = a.created_at_ms.unwrap_or(0);
     let bt = b.created_at_ms.unwrap_or(0);
-    if bt > at {
-        b.clone()
-    } else {
-        a.clone()
-    }
+    if bt > at { b.clone() } else { a.clone() }
 }
 
 fn dedupe_lines(lines: Vec<StoredChatLine>) -> Vec<StoredChatLine> {
@@ -336,7 +333,10 @@ fn dedupe_lines(lines: Vec<StoredChatLine>) -> Vec<StoredChatLine> {
     }
     let mut kept: Vec<StoredChatLine> = by_mid.into_values().chain(no_mid).collect();
     kept.sort_by(|a, b| {
-        let c = a.created_at_ms.unwrap_or(0).cmp(&b.created_at_ms.unwrap_or(0));
+        let c = a
+            .created_at_ms
+            .unwrap_or(0)
+            .cmp(&b.created_at_ms.unwrap_or(0));
         if c != std::cmp::Ordering::Equal {
             return c;
         }
@@ -471,8 +471,7 @@ pub fn save_thread(
     let deduped = dedupe_lines(lines);
     // UI full-save must not downgrade delivery/read ticks already written by :p2p on poll.
     let expanded = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
-    let disk_rows =
-        load_merged_unlocked(app_namespace, &expanded, None, &path).unwrap_or_default();
+    let disk_rows = load_merged_unlocked(app_namespace, &expanded, None, &path).unwrap_or_default();
     let disk_by_mid: HashMap<String, StoredChatLine> = disk_rows
         .iter()
         .filter_map(|r| {
@@ -580,12 +579,7 @@ pub fn append_if_new(
                 .collect()
         })
         .unwrap_or_default();
-    let mid = line
-        .message_id
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let mid = line.message_id.as_deref().unwrap_or("").trim().to_string();
     for e in &existing {
         if !mid.is_empty() && e.message_id.as_deref().unwrap_or("").trim() == mid.as_str() {
             flow_log::info(
@@ -604,9 +598,7 @@ pub fn append_if_new(
     );
     flow_log::info(
         "Transcript",
-        format!(
-            "append line conv={conversation_key} mid={mid} outgoing={outgoing} len={text_len}",
-        ),
+        format!("append line conv={conversation_key} mid={mid} outgoing={outgoing} len={text_len}",),
     );
     write_root_unlocked(&path, &all)?;
     bump_transcript_revision(app_namespace, conversation_key);
@@ -629,10 +621,7 @@ pub fn patch_outgoing_delivery(
     }
     let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
     let mut all = read_root_unlocked(&path)?;
-    let Some(ns_obj) = all
-        .get_mut(app_namespace)
-        .and_then(|v| v.as_object_mut())
-    else {
+    let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
         return Ok(false);
     };
     let keys = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
@@ -684,10 +673,7 @@ pub fn patch_inbound_read_ack_sent_for_thread(
     }
     let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
     let mut all = read_root_unlocked(&path)?;
-    let Some(ns_obj) = all
-        .get_mut(app_namespace)
-        .and_then(|v| v.as_object_mut())
-    else {
+    let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
         return Ok(false);
     };
     let keys = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);

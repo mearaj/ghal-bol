@@ -35,7 +35,9 @@ unsafe fn utf8(c: *const c_char, ctx: &'static str) -> Result<String, String> {
 ///
 /// Keys use the **unlocked device private key** and **both** 66-hex public keys (yours + contact).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_call_media_key_hex(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_call_media_key_hex(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "call media key config") } {
             Ok(s) => s,

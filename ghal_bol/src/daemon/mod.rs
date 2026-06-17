@@ -9,4 +9,4 @@ pub use paths::{
     take_incoming_call_wake, touch_incoming_call_wake,
 };
 pub use server::{probe_existing_daemon, run_daemon, socket_path_from_env_or_default};
-pub use ui_session::{suppress_ui_exit_hangup_ms, ui_process_exiting, UiSessionGuard};
+pub use ui_session::{UiSessionGuard, suppress_ui_exit_hangup_ms, ui_process_exiting};

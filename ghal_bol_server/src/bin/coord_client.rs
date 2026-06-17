@@ -50,10 +50,7 @@ async fn main() -> ExitCode {
         "demo-two-peers" => run_demo_two_peers(&client, &base).await,
         "register" => {
             let host = args.get(i).map(|s| s.as_str()).unwrap_or("127.0.0.1");
-            let port: u16 = args
-                .get(i + 1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(4433);
+            let port: u16 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(4433);
             let seed = args
                 .get(i + 2)
                 .and_then(|s| s.parse::<u8>().ok())
@@ -154,7 +151,11 @@ async fn register_peer(
         .await
         .map_err(|e| e.to_string())?;
     if !ch.status().is_success() {
-        return Err(format!("challenge HTTP {}: {}", ch.status(), ch.text().await.unwrap_or_default()));
+        return Err(format!(
+            "challenge HTTP {}: {}",
+            ch.status(),
+            ch.text().await.unwrap_or_default()
+        ));
     }
     let ch_body: serde_json::Value = ch.json().await.map_err(|e| e.to_string())?;
     let nonce_hex = ch_body["nonce_hex"].as_str().ok_or("missing nonce_hex")?;
@@ -178,18 +179,16 @@ async fn register_peer(
         .await
         .map_err(|e| e.to_string())?;
     if !reg.status().is_success() {
-        return Err(format!("register HTTP {}: {}", reg.status(), reg.text().await.unwrap_or_default()));
+        return Err(format!(
+            "register HTTP {}: {}",
+            reg.status(),
+            reg.text().await.unwrap_or_default()
+        ));
     }
     reg.json().await.map_err(|e| e.to_string())
 }
 
-async fn run_register(
-    client: &reqwest::Client,
-    base: &str,
-    seed: u8,
-    host: &str,
-    port: u16,
-) -> u8 {
+async fn run_register(client: &reqwest::Client, base: &str, seed: u8, host: &str, port: u16) -> u8 {
     let peer = peer_from_seed(seed);
     match register_peer(client, base, &peer, host, port).await {
         Ok(v) => {
@@ -204,11 +203,7 @@ async fn run_register(
 }
 
 async fn run_lookup(client: &reqwest::Client, base: &str, pk: &str) -> u8 {
-    match client
-        .get(format!("{base}/v1/peers/{pk}"))
-        .send()
-        .await
-    {
+    match client.get(format!("{base}/v1/peers/{pk}")).send().await {
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
@@ -261,11 +256,17 @@ async fn run_demo_two_peers(client: &reqwest::Client, base: &str) -> u8 {
     let a = peer_from_seed(0x0a);
     let b = peer_from_seed(0x0b);
     println!("Registering peer A …");
-    if register_peer(client, base, &a, "10.0.0.1", 4433).await.is_err() {
+    if register_peer(client, base, &a, "10.0.0.1", 4433)
+        .await
+        .is_err()
+    {
         return 1;
     }
     println!("Registering peer B …");
-    if register_peer(client, base, &b, "10.0.0.2", 4444).await.is_err() {
+    if register_peer(client, base, &b, "10.0.0.2", 4444)
+        .await
+        .is_err()
+    {
         return 1;
     }
     println!("\nA looks up B:");

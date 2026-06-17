@@ -2,7 +2,7 @@
 //!
 //! Presence and endpoint discovery only — no chat transcripts or message payloads.
 
-use ghal_bol_server::{app, relay, AppState, RelayConfig, ServerConfig};
+use ghal_bol_server::{AppState, RelayConfig, ServerConfig, app, relay};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    match relay::start(RelayConfig::from_env(&relay_data_dir)) {
+    match relay::start(
+        RelayConfig::from_env(&relay_data_dir),
+        Arc::clone(&state.presence),
+    ) {
         Ok(Some(info)) => state.set_relay_info(info),
         Ok(None) => {}
         Err(e) => tracing::warn!(error = %e, "relay node failed to start — continuing HTTP only"),
@@ -65,8 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
     }
 
-    let mut servers: Vec<JoinHandle<()>> =
-        vec![spawn_http_server(listener, app.clone(), Arc::clone(&shutdown))];
+    let mut servers: Vec<JoinHandle<()>> = vec![spawn_http_server(
+        listener,
+        app.clone(),
+        Arc::clone(&shutdown),
+    )];
     if let Some(listener6) = counterpart {
         servers.push(spawn_http_server(listener6, app, Arc::clone(&shutdown)));
     }

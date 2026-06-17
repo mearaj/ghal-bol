@@ -67,9 +67,7 @@ pub(crate) fn is_coord_ipv4_relay_listen(ma: &Multiaddr) -> bool {
 pub(crate) fn wan_coord_listen_fingerprint(addrs: &[Multiaddr]) -> Vec<String> {
     let mut keys: Vec<String> = addrs
         .iter()
-        .filter(|ma| {
-            is_coord_ipv4_relay_listen(ma) || is_coord_register_tcp_multiaddr(ma)
-        })
+        .filter(|ma| is_coord_ipv4_relay_listen(ma) || is_coord_register_tcp_multiaddr(ma))
         .map(|ma| ma.to_string())
         .collect();
     keys.sort();
@@ -207,7 +205,8 @@ pub(crate) fn detect_local_network_profile() -> LocalNetworkProfile {
         }
         if iface_name_is_tether(name) {
             p.has_tether_iface = true;
-            if name.to_ascii_lowercase().contains("usb") || name.to_ascii_lowercase().contains("rndis")
+            if name.to_ascii_lowercase().contains("usb")
+                || name.to_ascii_lowercase().contains("rndis")
             {
                 p.has_usb_iface = true;
             }
@@ -264,7 +263,10 @@ pub(crate) fn is_public_bootstrap_ipv4(ip: std::net::Ipv4Addr) -> bool {
 
 /// Resolve a Ghal Bol relay advertised by coord (`GET /v1/relay`) into concrete TCP dial
 /// multiaddrs `(PeerId, /ip4/<public-ip>/tcp/<port>/p2p/<id>)`.
-pub(crate) fn resolve_relay_bootnodes(peer_str: &str, addrs: &[String]) -> Vec<(PeerId, Multiaddr)> {
+pub(crate) fn resolve_relay_bootnodes(
+    peer_str: &str,
+    addrs: &[String],
+) -> Vec<(PeerId, Multiaddr)> {
     let Ok(peer) = PeerId::from_str(peer_str) else {
         native_log::warn("relay", format!("ghalbol relay bad peer id: {peer_str}"));
         return Vec::new();
@@ -298,7 +300,10 @@ fn relay_base_addr_to_dial_multiaddrs(addr: &str, peer: PeerId) -> Vec<Multiaddr
         i += 1;
     }
     let (Some((h, is_dns, is_v6)), Some(p)) = (host, port) else {
-        native_log::warn("relay", format!("ghalbol relay addr not TCP host/port: {addr}"));
+        native_log::warn(
+            "relay",
+            format!("ghalbol relay addr not TCP host/port: {addr}"),
+        );
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -356,24 +361,12 @@ pub(crate) fn relay_circuit_listen_addr(base: &Multiaddr) -> Option<Multiaddr> {
 }
 
 /// Lower rank = preferred bootstrap TCP family for this profile.
-pub(crate) fn relay_bootstrap_family_rank(
-    ma: &Multiaddr,
-    mobile: bool,
-    ipv6_degraded: bool,
-) -> u8 {
+pub(crate) fn relay_bootstrap_family_rank(ma: &Multiaddr, mobile: bool, ipv6_degraded: bool) -> u8 {
     let s = ma.to_string();
     if s.contains("/ip4/") {
-        if mobile || ipv6_degraded {
-            0
-        } else {
-            1
-        }
+        if mobile || ipv6_degraded { 0 } else { 1 }
     } else if s.contains("/ip6/") {
-        if mobile || ipv6_degraded {
-            1
-        } else {
-            0
-        }
+        if mobile || ipv6_degraded { 1 } else { 0 }
     } else {
         2
     }
@@ -549,8 +542,7 @@ pub(crate) fn filter_wan_preferred_dm_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<M
         if is_relay_circuit_multiaddr(ma) {
             return false;
         }
-        ipv4_from_ma_str(&ma.to_string())
-            .is_some_and(|ip| !ip.is_private() && !ip.is_loopback())
+        ipv4_from_ma_str(&ma.to_string()).is_some_and(|ip| !ip.is_private() && !ip.is_loopback())
     });
     if has_routable_public {
         return sorted
@@ -730,10 +722,17 @@ mod tests {
     fn relay_bootnode_ip4_base_builds_dialable_circuit_addr() {
         let peer = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X";
         let nodes = resolve_relay_bootnodes(peer, &["/ip4/203.0.113.7/tcp/4002".to_string()]);
-        assert_eq!(nodes.len(), 1, "public ip4 relay base should resolve to 1 addr");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "public ip4 relay base should resolve to 1 addr"
+        );
         let (p, ma) = &nodes[0];
         assert_eq!(p.to_string(), peer);
-        assert_eq!(ma.to_string(), format!("/ip4/203.0.113.7/tcp/4002/p2p/{peer}"));
+        assert_eq!(
+            ma.to_string(),
+            format!("/ip4/203.0.113.7/tcp/4002/p2p/{peer}")
+        );
         // The resulting addr must be trusted for dialing like any other bootstrap.
         assert!(is_trusted_bootstrap_dial_addr(ma));
     }
@@ -742,9 +741,14 @@ mod tests {
     fn relay_bootnode_rejects_private_and_bad_inputs() {
         let peer = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X";
         // RFC1918 base is not a public relay endpoint.
-        assert!(resolve_relay_bootnodes(peer, &["/ip4/192.168.1.5/tcp/4002".to_string()]).is_empty());
+        assert!(
+            resolve_relay_bootnodes(peer, &["/ip4/192.168.1.5/tcp/4002".to_string()]).is_empty()
+        );
         // Bad peer id.
-        assert!(resolve_relay_bootnodes("not-a-peer", &["/ip4/203.0.113.7/tcp/4002".to_string()]).is_empty());
+        assert!(
+            resolve_relay_bootnodes("not-a-peer", &["/ip4/203.0.113.7/tcp/4002".to_string()])
+                .is_empty()
+        );
         // Missing tcp/port.
         assert!(resolve_relay_bootnodes(peer, &["/ip4/203.0.113.7".to_string()]).is_empty());
     }
@@ -824,8 +828,14 @@ mod tests {
             "/ip6/2600:1900:4000:8dad::/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF"
                 .parse()
                 .unwrap();
-        assert!(relay_bootstrap_family_rank(&v4, false, false) > relay_bootstrap_family_rank(&v6, false, false));
-        assert!(relay_bootstrap_family_rank(&v4, false, true) < relay_bootstrap_family_rank(&v6, false, true));
+        assert!(
+            relay_bootstrap_family_rank(&v4, false, false)
+                > relay_bootstrap_family_rank(&v6, false, false)
+        );
+        assert!(
+            relay_bootstrap_family_rank(&v4, false, true)
+                < relay_bootstrap_family_rank(&v6, false, true)
+        );
     }
 
     #[test]
@@ -890,5 +900,4 @@ mod tests {
         let out = sort_dm_dial_addrs_wan_first(vec![lan.clone(), relay.clone()]);
         assert_eq!(out[0], relay);
     }
-
 }

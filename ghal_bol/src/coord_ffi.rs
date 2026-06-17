@@ -30,7 +30,9 @@ unsafe fn utf8(c: *const c_char, ctx: &'static str) -> Result<String, String> {
 
 /// JSON config: `{ "base_urls": ["https://coord.example.com"], "insecure_tls": false }`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_coord_set_base_url(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_coord_set_base_url(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "coord config") } {
             Ok(s) => s,
@@ -55,7 +57,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_coord_set_base_url(config_json_utf8: *cons
 
 /// Lookup peer endpoints: `{ "public_key_hex": "<66-hex>" }`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_coord_lookup_peer(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_coord_lookup_peer(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "coord lookup") } {
             Ok(s) => s,

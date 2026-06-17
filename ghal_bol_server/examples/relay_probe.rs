@@ -18,7 +18,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use libp2p::core::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{identify, identity, ping, relay, Multiaddr, PeerId};
+use libp2p::{Multiaddr, PeerId, identify, identity, ping, relay};
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
 struct Behaviour {

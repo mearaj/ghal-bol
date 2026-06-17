@@ -12,11 +12,9 @@ fn sysfs_has_wifi_iface() -> bool {
     let Ok(entries) = std::fs::read_dir("/sys/class/net") else {
         return false;
     };
-    entries.flatten().any(|e| {
-        e.file_name()
-            .to_string_lossy()
-            .starts_with("wl")
-    })
+    entries
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("wl"))
 }
 
 fn read_any_wifi_oper_up() -> bool {

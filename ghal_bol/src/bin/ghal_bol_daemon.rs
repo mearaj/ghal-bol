@@ -14,7 +14,10 @@ fn main() {
         process::exit(if ok { 0 } else { 1 });
     }
     if probe_existing_daemon(&socket_path) {
-        eprintln!("ghal_bol_daemon already running at {}", socket_path.display());
+        eprintln!(
+            "ghal_bol_daemon already running at {}",
+            socket_path.display()
+        );
         return;
     }
     if let Err(e) = run_daemon(&socket_path) {

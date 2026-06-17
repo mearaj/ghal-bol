@@ -6,9 +6,9 @@ use std::os::raw::c_char;
 use serde_json::Value;
 
 use crate::contacts_v1::{
-    self, contacts_change_version, find_by_peer_id, find_by_public_key, list_contacts,
-    merge_discovered_peer_id, record_inbound_preview, remove_contact, set_contact_trust,
-    upsert_contact, SavedContact,
+    self, SavedContact, contacts_change_version, find_by_peer_id, find_by_public_key,
+    list_contacts, merge_discovered_peer_id, record_inbound_preview, remove_contact,
+    set_contact_trust, upsert_contact,
 };
 
 fn json_ok(v: Value) -> *mut c_char {
@@ -48,7 +48,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_contacts_change_version() -> *mut c_char {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_contacts_list(app_namespace_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_contacts_list(
+    app_namespace_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let ns = match unsafe { utf8(app_namespace_utf8, "app_namespace") } {
             Ok(s) => s,
@@ -153,7 +155,11 @@ pub unsafe extern "C" fn ghal_bol_ffi_contacts_find(
         };
         let found = if let Some(pk) = q.get("public_key_hex").and_then(|v| v.as_str()) {
             find_by_public_key(&ns, pk).ok().flatten()
-        } else if let Some(pid) = q.get("libp2p_peer_id").or_else(|| q.get("peer_id")).and_then(|v| v.as_str()) {
+        } else if let Some(pid) = q
+            .get("libp2p_peer_id")
+            .or_else(|| q.get("peer_id"))
+            .and_then(|v| v.as_str())
+        {
             find_by_peer_id(&ns, pid).ok().flatten()
         } else {
             None
@@ -220,7 +226,10 @@ pub unsafe extern "C" fn ghal_bol_ffi_contacts_record_inbound_preview(
             .and_then(|x| x.as_str())
             .unwrap_or("");
         let preview = v.get("preview").and_then(|x| x.as_str()).unwrap_or("");
-        let mark_unread = v.get("mark_unread").and_then(|x| x.as_bool()).unwrap_or(false);
+        let mark_unread = v
+            .get("mark_unread")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let at = v.get("message_at_ms").and_then(|x| x.as_i64());
         match record_inbound_preview(&ns, pk, preview, mark_unread, at) {
             Ok(()) => json_ok(serde_json::json!({

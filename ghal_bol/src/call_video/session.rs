@@ -11,8 +11,8 @@
 //! voice session, all device I/O (camera, display) lives in the backend, so the
 //! same loop runs on desktop (nokhwa), Android (Camera2), and headless tests.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -27,7 +27,6 @@ pub struct VideoStreams {
     /// Decoded frames to hand to the display/render surface.
     pub render_tx: mpsc::Sender<RawVideoFrame>,
 }
-
 
 /// Shared control flags for one video session (observable by FFI/logs).
 #[derive(Clone, Default)]
@@ -188,7 +187,13 @@ impl MockVideoBackend {
         capture_frames: Vec<RawVideoFrame>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<RawVideoFrame>>>) {
         let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
-        (Self { capture_frames, rendered: Arc::clone(&rendered) }, rendered)
+        (
+            Self {
+                capture_frames,
+                rendered: Arc::clone(&rendered),
+            },
+            rendered,
+        )
     }
 }
 
@@ -216,7 +221,10 @@ impl VideoCaptureBackend for MockVideoBackend {
                 }
             }
         });
-        Ok(VideoStreams { capture_rx, render_tx })
+        Ok(VideoStreams {
+            capture_rx,
+            render_tx,
+        })
     }
 }
 
@@ -234,7 +242,11 @@ mod tests {
     }
 
     fn frame(tag: u8) -> RawVideoFrame {
-        RawVideoFrame { width: 32, height: 24, data: vec![tag; 32 * 24] }
+        RawVideoFrame {
+            width: 32,
+            height: 24,
+            data: vec![tag; 32 * 24],
+        }
     }
 
     fn engine(local_is_a: bool) -> VideoEngine {
@@ -289,8 +301,14 @@ mod tests {
         let rendered = b_rendered.lock().unwrap();
         assert!(!rendered.is_empty(), "B rendered no frames from A");
         // The exact frames A captured must reappear (NullVideoCodec is lossless).
-        assert!(rendered.iter().any(|f| *f == frame(1)), "first frame missing");
-        assert!(rendered.iter().any(|f| *f == frame(8)), "later frame missing");
+        assert!(
+            rendered.iter().any(|f| *f == frame(1)),
+            "first frame missing"
+        );
+        assert!(
+            rendered.iter().any(|f| *f == frame(8)),
+            "later frame missing"
+        );
         assert!(a_ctl.sent() >= 8, "A should have sent its captured frames");
     }
 }

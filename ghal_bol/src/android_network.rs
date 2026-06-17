@@ -3,7 +3,7 @@
 #[cfg(target_os = "android")]
 mod imp {
     use jni::objects::{JObject, JObjectArray, JValue};
-    use jni::{jni_sig, jni_str, Env, JavaVM};
+    use jni::{Env, JavaVM, jni_sig, jni_str};
 
     pub fn wifi_transport_linked() -> bool {
         if !crate::call_media::android_p2p_context_ready() {
@@ -24,8 +24,7 @@ mod imp {
         let ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
         vm.attach_current_thread(|env| -> jni::errors::Result<bool> {
-            let context =
-                unsafe { JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
+            let context = unsafe { JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
             let class_ctx = env.find_class(jni_str!("android/content/Context"))?;
             let conn_service = env
                 .get_static_field(

@@ -6,8 +6,8 @@ use std::os::raw::c_char;
 use serde_json::Value;
 
 use crate::dm_transcript_store::{
-    append_if_new, patch_inbound_read_ack_sent_for_thread, patch_outgoing_delivery,
-    resolve_transcript_path, save_thread, thread_view, StoredChatLine,
+    StoredChatLine, append_if_new, patch_inbound_read_ack_sent_for_thread, patch_outgoing_delivery,
+    resolve_transcript_path, save_thread, thread_view,
 };
 
 fn json_ok(v: Value) -> *mut c_char {
@@ -82,9 +82,7 @@ pub unsafe extern "C" fn ghal_bol_ffi_transcript_load_merged(
                     .collect()
             })
             .unwrap_or_default();
-        let from_peer = q
-            .get("match_inbound_from_peer_id")
-            .and_then(|v| v.as_str());
+        let from_peer = q.get("match_inbound_from_peer_id").and_then(|v| v.as_str());
         match crate::dm_transcript_store::thread_view(&ns, &keys, from_peer) {
             Ok(view) => json_ok(serde_json::json!({
                 "ok": true,
@@ -122,7 +120,11 @@ pub unsafe extern "C" fn ghal_bol_ffi_transcript_save(
         let lines: Vec<StoredChatLine> = v
             .get("lines")
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(|i| StoredChatLine::from_json(i)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|i| StoredChatLine::from_json(i))
+                    .collect()
+            })
             .unwrap_or_default();
         match save_thread(&ns, conv, lines) {
             Ok(()) => json_ok(serde_json::json!({ "ok": true })),
@@ -187,7 +189,10 @@ pub unsafe extern "C" fn ghal_bol_ffi_transcript_patch_outgoing_delivery(
             Ok(v) => v,
             Err(e) => return json_err(format!("patch json: {e}")),
         };
-        let conv = v.get("conversation_key").and_then(|x| x.as_str()).unwrap_or("");
+        let conv = v
+            .get("conversation_key")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         let mid = v.get("message_id").and_then(|x| x.as_str()).unwrap_or("");
         let delivery = v.get("delivery").and_then(|x| x.as_str()).unwrap_or("");
         match patch_outgoing_delivery(&ns, conv, mid, delivery) {

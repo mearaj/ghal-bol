@@ -43,7 +43,8 @@ impl CoordHttpClient {
         if base.is_empty() {
             return Err("coord base url empty".into());
         }
-        let mut b = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20));
+        let mut b =
+            reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20));
         if insecure_tls {
             b = b.danger_accept_invalid_certs(true);
         }
@@ -57,7 +58,9 @@ impl CoordHttpClient {
         builder: reqwest::blocking::RequestBuilder,
     ) -> reqwest::blocking::RequestBuilder {
         if self.base.contains("ngrok") {
-            builder.header("ngrok-skip-browser-warning", "1")
+            builder
+                .header("ngrok-skip-browser-warning", "1")
+                .header("Accept", "application/json")
         } else {
             builder
         }
@@ -116,7 +119,11 @@ impl CoordHttpClient {
             .send()
             .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
-            return Err(format!("register HTTP {}: {}", resp.status(), resp.text().unwrap_or_default()));
+            return Err(format!(
+                "register HTTP {}: {}",
+                resp.status(),
+                resp.text().unwrap_or_default()
+            ));
         }
         let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
         serde_json::from_value(v["peer"].clone()).map_err(|e| e.to_string())

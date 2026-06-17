@@ -3,7 +3,7 @@
 //! Display resolution is handled separately in [`super::render`] (GPU texture shm).
 //! This layer scales **encode** resolution and H.264 bitrate from transport pressure.
 
-use super::{i420_downscale_max_edge, RawVideoFrame};
+use super::{RawVideoFrame, i420_downscale_max_edge};
 
 /// Target camera capture (even dimensions). HW/backends may deliver closest size (desktop nokhwa).
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

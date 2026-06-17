@@ -8,7 +8,7 @@ mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use jni::objects::{JObject, JValue};
-    use jni::{jni_sig, jni_str, Env, JavaVM};
+    use jni::{Env, JavaVM, jni_sig, jni_str};
 
     use super::super::audio_device::is_android_audio_ready;
 
@@ -24,8 +24,7 @@ mod imp {
         let ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
         vm.attach_current_thread(|env| -> jni::errors::Result<()> {
-            let context =
-                unsafe { JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
+            let context = unsafe { JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
             let class_ctx = env.find_class(jni_str!("android/content/Context"))?;
             let audio_service = env
                 .get_static_field(
@@ -55,11 +54,7 @@ mod imp {
         with_audio_manager(|env, am| {
             let class_am = env.find_class(jni_str!("android/media/AudioManager"))?;
             let mode_in_comm = env
-                .get_static_field(
-                    &class_am,
-                    jni_str!("MODE_IN_COMMUNICATION"),
-                    jni_sig!(int),
-                )?
+                .get_static_field(&class_am, jni_str!("MODE_IN_COMMUNICATION"), jni_sig!(int))?
                 .i()?;
             env.call_method(
                 am,

@@ -10,13 +10,18 @@
 //! presence. Protocol stack (tcp + noise + yamux + relay/identify/ping) and libp2p version
 //! are kept identical to the `ghal_bol` client.
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{identify, identity, ping, relay, Multiaddr, Swarm};
+use libp2p::{Multiaddr, PeerId, Swarm, identify, identity, ping, relay};
+
+use crate::agent_pk::parse_pk_from_agent_version;
+use crate::presence::PresenceStore;
 
 /// Relay coordinates advertised to clients via `GET /v1/relay`.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -191,7 +196,10 @@ fn build_swarm(
                 // Same identify protocol as the ghal_bol client so observed-addr exchange
                 // (used by client AutoNAT/DCUtR) interoperates.
                 identify::Config::new_with_signed_peer_record("/ghal-bol/1.0.0".to_string(), key)
-                    .with_agent_version(format!("ghal_bol_server_relay/{}", env!("CARGO_PKG_VERSION")))
+                    .with_agent_version(format!(
+                        "ghal_bol_server_relay/{}",
+                        env!("CARGO_PKG_VERSION")
+                    ))
                     .with_push_listen_addr_updates(false),
             ),
             ping: ping::Behaviour::new(ping::Config::new()),
@@ -207,6 +215,7 @@ fn build_swarm(
 /// within a Tokio runtime (the binary's `#[tokio::main]`).
 pub fn start(
     cfg: RelayConfig,
+    presence: Arc<PresenceStore>,
 ) -> Result<Option<RelayInfo>, Box<dyn std::error::Error + Send + Sync>> {
     if !cfg.enabled {
         tracing::info!("relay disabled (GHAL_BOL_RELAY_ENABLE=0)");
@@ -274,11 +283,127 @@ pub fn start(
         "relay v2 node started"
     );
 
-    tokio::spawn(run_relay(swarm));
+    let ctx = Arc::new(RelayLoopCtx {
+        presence,
+        relay_info: info.clone(),
+        peer_keys: Mutex::new(HashMap::new()),
+        accepted_reservations: Mutex::new(HashSet::new()),
+    });
+    tokio::spawn(run_relay(swarm, ctx));
     Ok(Some(info))
 }
 
-async fn run_relay(mut swarm: Swarm<RelayBehaviour>) {
+struct RelayLoopCtx {
+    presence: Arc<PresenceStore>,
+    relay_info: RelayInfo,
+    peer_keys: Mutex<HashMap<PeerId, String>>,
+    accepted_reservations: Mutex<HashSet<PeerId>>,
+}
+
+impl RelayLoopCtx {
+    fn pk_for_peer(&self, peer_id: PeerId) -> Option<String> {
+        self.peer_keys.lock().ok()?.get(&peer_id).cloned()
+    }
+
+    fn note_peer_pk(&self, peer_id: PeerId, pk: String) {
+        if let Ok(mut m) = self.peer_keys.lock() {
+            m.insert(peer_id, pk);
+        }
+    }
+
+    fn on_identify(&self, peer_id: PeerId, agent_version: &str) {
+        let Some(pk) = parse_pk_from_agent_version(agent_version) else {
+            return;
+        };
+        self.note_peer_pk(peer_id, pk);
+        self.try_register_relay_presence(peer_id);
+    }
+
+    fn on_reservation_accepted(&self, peer_id: PeerId) {
+        if let Ok(mut s) = self.accepted_reservations.lock() {
+            s.insert(peer_id);
+        }
+        self.try_register_relay_presence(peer_id);
+    }
+
+    fn end_reservation(&self, peer_id: PeerId) {
+        if let Ok(mut s) = self.accepted_reservations.lock() {
+            s.remove(&peer_id);
+        }
+        self.clear_reservation(peer_id);
+    }
+
+    fn clear_reservation(&self, peer_id: PeerId) {
+        let Some(pk) = self.pk_for_peer(peer_id) else {
+            return;
+        };
+        let store = Arc::clone(&self.presence);
+        match store.remove_relay_circuit(&pk) {
+            Ok(removed) => tracing::info!(
+                public_key = %pk,
+                removed,
+                "coord presence cleared after relay reservation end"
+            ),
+            Err(e) => tracing::warn!(public_key = %pk, error = %e, "relay presence remove failed"),
+        }
+        if let Ok(mut m) = self.peer_keys.lock() {
+            m.remove(&peer_id);
+        }
+    }
+
+    fn try_register_relay_presence(&self, peer_id: PeerId) {
+        let accepted = self
+            .accepted_reservations
+            .lock()
+            .ok()
+            .is_some_and(|s| s.contains(&peer_id));
+        if !accepted {
+            return;
+        }
+        let Some(pk) = self.pk_for_peer(peer_id) else {
+            tracing::debug!(%peer_id, "relay reservation accepted — awaiting identify pk");
+            return;
+        };
+        let Some(circuit_ma) = relay_circuit_multiaddr(&self.relay_info, peer_id) else {
+            tracing::warn!(%peer_id, "relay circuit multiaddr build failed");
+            return;
+        };
+        if let Ok(existing) = self.presence.get_stored(&pk) {
+            let already = existing.endpoints.iter().any(|e| {
+                e.scheme == "libp2p" && e.host.contains("/p2p-circuit") && e.host == circuit_ma
+            });
+            if already {
+                return;
+            }
+        }
+        let store = Arc::clone(&self.presence);
+        match store.upsert_relay_circuit(&pk, circuit_ma) {
+            Ok(peer) => tracing::info!(
+                public_key = %pk,
+                %peer_id,
+                endpoints = peer.endpoints.len(),
+                "coord presence registered from relay reservation"
+            ),
+            Err(e) => {
+                tracing::warn!(public_key = %pk, %peer_id, error = %e, "relay presence upsert failed")
+            }
+        }
+    }
+}
+
+fn relay_circuit_multiaddr(relay_info: &RelayInfo, client_peer: PeerId) -> Option<String> {
+    let relay_pk = relay_info.peer_id.parse::<PeerId>().ok()?;
+    let base = relay_info
+        .addrs
+        .iter()
+        .find(|a| a.contains("/ip4/"))
+        .or_else(|| relay_info.addrs.first())?;
+    Some(format!(
+        "{base}/p2p/{relay_pk}/p2p-circuit/p2p/{client_peer}"
+    ))
+}
+
+async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
     loop {
         match swarm.select_next_some().await {
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -294,6 +419,7 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>) {
                     renewed,
                 } => {
                     tracing::info!(%src_peer_id, renewed, "relay reservation ACCEPTED");
+                    ctx.on_reservation_accepted(src_peer_id);
                 }
                 relay::Event::ReservationReqDenied {
                     src_peer_id,
@@ -303,9 +429,11 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>) {
                 }
                 relay::Event::ReservationTimedOut { src_peer_id } => {
                     tracing::info!(%src_peer_id, "relay reservation timed out");
+                    ctx.end_reservation(src_peer_id);
                 }
                 relay::Event::ReservationClosed { src_peer_id } => {
                     tracing::info!(%src_peer_id, "relay reservation closed");
+                    ctx.end_reservation(src_peer_id);
                 }
                 relay::Event::CircuitReqAccepted {
                     src_peer_id,
@@ -340,10 +468,16 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>) {
                     "relay client connected"
                 );
             }
-            SwarmEvent::ConnectionClosed {
-                peer_id, cause, ..
-            } => {
+            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 tracing::info!(%peer_id, ?cause, "relay client disconnected");
+                ctx.end_reservation(peer_id);
+            }
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                info,
+                ..
+            })) => {
+                ctx.on_identify(peer_id, &info.agent_version);
             }
             _ => {}
         }

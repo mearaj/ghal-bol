@@ -22,7 +22,10 @@ pub struct MediaCrypto {
 impl MediaCrypto {
     pub fn new(frame_key: &[u8; 32], local_is_a: bool) -> Self {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(frame_key));
-        Self { cipher, dir: if local_is_a { 0 } else { 1 } }
+        Self {
+            cipher,
+            dir: if local_is_a { 0 } else { 1 },
+        }
     }
 
     fn nonce(dir: u8, counter: u64) -> [u8; 12] {
@@ -71,6 +74,11 @@ impl MediaCrypto {
         let ts = u32::from_le_bytes(pt[0..4].try_into().unwrap());
         let flags = pt[4];
         let payload = pt[5..].to_vec();
-        Ok(MediaFrame { seq: counter, ts, flags, payload })
+        Ok(MediaFrame {
+            seq: counter,
+            ts,
+            flags,
+            payload,
+        })
     }
 }

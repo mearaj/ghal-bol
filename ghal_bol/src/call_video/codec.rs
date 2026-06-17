@@ -61,7 +61,10 @@ impl VideoEncoder for NullVideoCodec {
         data.extend_from_slice(&frame.width.to_le_bytes());
         data.extend_from_slice(&frame.height.to_le_bytes());
         data.extend_from_slice(&frame.data);
-        Ok(EncodedVideoFrame { keyframe: true, data })
+        Ok(EncodedVideoFrame {
+            keyframe: true,
+            data,
+        })
     }
 }
 
@@ -73,6 +76,10 @@ impl VideoDecoder for NullVideoCodec {
         }
         let width = u32::from_le_bytes(frame.data[0..4].try_into().unwrap());
         let height = u32::from_le_bytes(frame.data[4..8].try_into().unwrap());
-        Ok(Some(RawVideoFrame { width, height, data: frame.data[8..].to_vec() }))
+        Ok(Some(RawVideoFrame {
+            width,
+            height,
+            data: frame.data[8..].to_vec(),
+        }))
     }
 }

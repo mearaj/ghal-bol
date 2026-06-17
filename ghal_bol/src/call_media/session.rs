@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::{MediaEngine, FRAME_SAMPLES, FRAME_MS};
+use super::{FRAME_MS, FRAME_SAMPLES, MediaEngine};
 
 /// Channels handed back by an [`AudioBackend`] when capture/playback start.
 pub struct AudioStreams {
@@ -144,7 +144,10 @@ impl MockAudioBackend {
     pub fn new(capture_frames: Vec<Vec<i16>>) -> (Self, Arc<std::sync::Mutex<Vec<Vec<i16>>>>) {
         let played = Arc::new(std::sync::Mutex::new(Vec::new()));
         (
-            Self { capture_frames, played: Arc::clone(&played) },
+            Self {
+                capture_frames,
+                played: Arc::clone(&played),
+            },
             played,
         )
     }
@@ -175,7 +178,10 @@ impl AudioBackend for MockAudioBackend {
                 }
             }
         });
-        Ok(AudioStreams { capture_rx, playout_tx })
+        Ok(AudioStreams {
+            capture_rx,
+            playout_tx,
+        })
     }
     fn stop(&mut self) {}
 }
@@ -183,7 +189,7 @@ impl AudioBackend for MockAudioBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_media::{NullCodec, MediaEngine};
+    use crate::call_media::{MediaEngine, NullCodec};
 
     fn key() -> [u8; 32] {
         let mut k = [0u8; 32];
@@ -194,7 +200,9 @@ mod tests {
     }
 
     fn tone(base: i16) -> Vec<i16> {
-        (0..FRAME_SAMPLES).map(|i| base.wrapping_add((i % 64) as i16 * 100)).collect()
+        (0..FRAME_SAMPLES)
+            .map(|i| base.wrapping_add((i % 64) as i16 * 100))
+            .collect()
     }
 
     #[tokio::test]
@@ -215,8 +223,20 @@ mod tests {
         let a_ctl = MediaControls::new();
         let b_ctl = MediaControls::new();
 
-        let a = tokio::spawn(run_media_session(a_eng, a_audio, a2b_tx, b2a_rx, a_ctl.clone()));
-        let b = tokio::spawn(run_media_session(b_eng, b_audio, b2a_tx, a2b_rx, b_ctl.clone()));
+        let a = tokio::spawn(run_media_session(
+            a_eng,
+            a_audio,
+            a2b_tx,
+            b2a_rx,
+            a_ctl.clone(),
+        ));
+        let b = tokio::spawn(run_media_session(
+            b_eng,
+            b_audio,
+            b2a_tx,
+            a2b_rx,
+            b_ctl.clone(),
+        ));
 
         tokio::time::sleep(Duration::from_millis(600)).await;
         a_ctl.request_stop();

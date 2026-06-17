@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::session::{AudioBackend, AudioStreams};
 use super::FRAME_SAMPLES;
+use super::session::{AudioBackend, AudioStreams};
 
 /// Engine sample rate (mono). The codec and jitter buffer all assume this.
 const ENGINE_RATE: u32 = super::SAMPLE_RATE_HZ;
@@ -124,19 +124,28 @@ fn f32_to_i16(v: f32) -> i16 {
 /// session clock alive so the transport/jitter/stats path is fully exercised.
 /// Used where cpal has no usable I/O: Android before JNI audio init and any
 /// platform without a cpal host (desktop always uses [`CpalAudioBackend`]).
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+#[cfg(any(
+    test,
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 pub struct SilenceAudioBackend {
     stop: Arc<AtomicBool>,
 }
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+#[cfg(any(
+    test,
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 impl Default for SilenceAudioBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+#[cfg(any(
+    test,
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 impl SilenceAudioBackend {
     pub fn new() -> Self {
         Self {
@@ -145,7 +154,10 @@ impl SilenceAudioBackend {
     }
 }
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+#[cfg(any(
+    test,
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 impl AudioBackend for SilenceAudioBackend {
     fn start(&mut self) -> Result<AudioStreams, String> {
         let (cap_tx, capture_rx) = mpsc::channel::<Vec<i16>>(64);
@@ -158,9 +170,7 @@ impl AudioBackend for SilenceAudioBackend {
                     break;
                 }
                 tick.tick().await;
-                if cap_tx.try_send(vec![0i16; FRAME_SAMPLES]).is_err()
-                    && cap_tx.is_closed()
-                {
+                if cap_tx.try_send(vec![0i16; FRAME_SAMPLES]).is_err() && cap_tx.is_closed() {
                     break;
                 }
             }
@@ -300,18 +310,14 @@ mod cpal_backend {
         let playout_buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let cap = playout_cap(out_rate, out_channels);
 
-        let out_stream = match build_output_stream(
-            &out_dev,
-            &out_cfg,
-            out_fmt,
-            Arc::clone(&playout_buf),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = ready_tx.send(Err(e));
-                return;
-            }
-        };
+        let out_stream =
+            match build_output_stream(&out_dev, &out_cfg, out_fmt, Arc::clone(&playout_buf)) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
 
         // ---- Input (mic) — optional; a call still works one-way if absent ----
         let in_stream = match &in_dev {
@@ -342,7 +348,9 @@ mod cpal_backend {
                 }
             },
             None => {
-                super::log_audio_warn("no default input device — call is playback-only".to_string());
+                super::log_audio_warn(
+                    "no default input device — call is playback-only".to_string(),
+                );
                 None
             }
         };

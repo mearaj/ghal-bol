@@ -10,8 +10,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::app_paths::{contacts_v1_path, storage_config_for_namespace};
-use crate::flow_log::{self, short_hex};
 use crate::dm_transport::normalize_contact_pk;
+use crate::flow_log::{self, short_hex};
 use crate::public_key_util::{legacy_public_key_from_peer_id_str, secp256k1_public_key_from_hex};
 use crate::storage::KeystoreStorageError;
 
@@ -113,7 +113,10 @@ impl SavedContact {
             .unwrap_or(false);
         Some(Self {
             public_key_hex: pk,
-            display_alias: obj.get("display_alias").and_then(|v| v.as_str()).map(str::to_string),
+            display_alias: obj
+                .get("display_alias")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             last_message_preview: obj
                 .get("last_message_preview")
                 .and_then(|v| v.as_str())
@@ -218,8 +221,16 @@ fn write_all(path: &Path, all: &HashMap<String, Vec<SavedContact>>) -> Result<()
     Ok(())
 }
 
-fn with_store<T>(app_namespace: &str, f: impl FnOnce(&Path, HashMap<String, Vec<SavedContact>>) -> Result<(T, HashMap<String, Vec<SavedContact>>), ContactsError>) -> Result<T, ContactsError> {
-    let _guard = io_chain().lock().map_err(|_| ContactsError::Io(std::io::Error::other("contacts io mutex poisoned")))?;
+fn with_store<T>(
+    app_namespace: &str,
+    f: impl FnOnce(
+        &Path,
+        HashMap<String, Vec<SavedContact>>,
+    ) -> Result<(T, HashMap<String, Vec<SavedContact>>), ContactsError>,
+) -> Result<T, ContactsError> {
+    let _guard = io_chain()
+        .lock()
+        .map_err(|_| ContactsError::Io(std::io::Error::other("contacts io mutex poisoned")))?;
     let cfg = storage_config_for_namespace(app_namespace);
     let path = contacts_v1_path(&cfg)?;
     let mut all = read_all(&path)?;
@@ -244,14 +255,25 @@ pub fn list_contacts(app_namespace: &str) -> Result<Vec<SavedContact>, ContactsE
     let all = read_all(&path)?;
     let mut list = all.get(app_namespace).cloned().unwrap_or_default();
     list.sort_by(|a, b| {
-        let ta = a.last_message_at_ms.or(a.updated_at_ms).or(a.created_at_ms).unwrap_or(0);
-        let tb = b.last_message_at_ms.or(b.updated_at_ms).or(b.created_at_ms).unwrap_or(0);
+        let ta = a
+            .last_message_at_ms
+            .or(a.updated_at_ms)
+            .or(a.created_at_ms)
+            .unwrap_or(0);
+        let tb = b
+            .last_message_at_ms
+            .or(b.updated_at_ms)
+            .or(b.created_at_ms)
+            .unwrap_or(0);
         tb.cmp(&ta)
     });
     Ok(list)
 }
 
-pub fn find_by_public_key(app_namespace: &str, public_key_hex: &str) -> Result<Option<SavedContact>, ContactsError> {
+pub fn find_by_public_key(
+    app_namespace: &str,
+    public_key_hex: &str,
+) -> Result<Option<SavedContact>, ContactsError> {
     let pk = public_key_hex.trim().to_lowercase();
     if !is_valid_public_key_hex(&pk) {
         return Ok(None);
@@ -262,7 +284,10 @@ pub fn find_by_public_key(app_namespace: &str, public_key_hex: &str) -> Result<O
 }
 
 /// Lookup by public key hex, or legacy libp2p PeerId string on disk (migrated to pk).
-pub fn find_by_peer_id(app_namespace: &str, conversation_key: &str) -> Result<Option<SavedContact>, ContactsError> {
+pub fn find_by_peer_id(
+    app_namespace: &str,
+    conversation_key: &str,
+) -> Result<Option<SavedContact>, ContactsError> {
     let k = conversation_key.trim();
     if k.is_empty() {
         return Ok(None);
@@ -276,7 +301,10 @@ pub fn find_by_peer_id(app_namespace: &str, conversation_key: &str) -> Result<Op
     Ok(None)
 }
 
-pub fn upsert_contact(app_namespace: &str, contact: SavedContact) -> Result<SavedContact, ContactsError> {
+pub fn upsert_contact(
+    app_namespace: &str,
+    contact: SavedContact,
+) -> Result<SavedContact, ContactsError> {
     let now = now_ms();
     with_store(app_namespace, |_path, mut all| {
         let list = all.entry(app_namespace.to_string()).or_default();
@@ -508,12 +536,11 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{create_or_unlock_identity_v1, StorageConfig};
+    use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
     use tempfile::TempDir;
 
     /// Guest-scanned host public key (66-hex secp256k1) — never the local identity under test.
-    const REMOTE_PK: &str =
-        "02f229f167ac2337144dbeba4392a6300c8fe97fb061efdb4f81ec9f29dec76936";
+    const REMOTE_PK: &str = "02f229f167ac2337144dbeba4392a6300c8fe97fb061efdb4f81ec9f29dec76936";
 
     #[test]
     fn upsert_display_alias_set_and_clear() {

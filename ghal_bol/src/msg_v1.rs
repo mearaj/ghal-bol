@@ -6,9 +6,9 @@
 //! sender resends text until acked. `ack_request` is not used on the wire.
 
 use libp2p_identity::Keypair;
+use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use secp256k1::SecretKey;
 
 use crate::public_key_util::secp256k1_public_key_from_hex;
 use crate::secp256k1_seal::{open_sealed_secp256k1, seal_to_secp256k1_public};
@@ -78,9 +78,7 @@ fn canonical_sign_bytes(env: &MsgEnvelope) -> Result<Vec<u8>, String> {
 
 pub fn sign_envelope(env: &mut MsgEnvelope, sender: &Keypair) -> Result<(), String> {
     let bytes = canonical_sign_bytes(env)?;
-    let sig = sender
-        .sign(&bytes)
-        .map_err(|e| format!("sign: {e}"))?;
+    let sig = sender.sign(&bytes).map_err(|e| format!("sign: {e}"))?;
     env.signature_hex = Some(hex::encode(sig));
     Ok(())
 }
@@ -188,7 +186,8 @@ pub fn parse_envelope(
             let sealed = hex::decode(env.ciphertext_hex.trim())
                 .map_err(|e| format!("ciphertext hex: {e}"))?;
             let plain = open_sealed_secp256k1(my_secret, &sealed)?;
-            let v: Value = serde_json::from_slice(&plain).map_err(|e| format!("inner json: {e}"))?;
+            let v: Value =
+                serde_json::from_slice(&plain).map_err(|e| format!("inner json: {e}"))?;
             let text = v
                 .get("text")
                 .and_then(|t| t.as_str())

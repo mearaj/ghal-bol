@@ -17,12 +17,12 @@
 //! keyed by a **distinct** video media key (different HKDF `info`), so audio and
 //! video never share a `(key, nonce)` space.
 
+#[cfg(target_os = "android")]
+mod android_video;
 mod capture;
 mod codec;
 #[cfg(not(target_arch = "wasm32"))]
 mod codec_h264;
-#[cfg(target_os = "android")]
-mod android_video;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop_video;
 mod jitter;
@@ -31,19 +31,19 @@ mod quality;
 mod render;
 mod session;
 
-pub use codec::{RawVideoFrame, VideoDecoder, VideoEncoder};
+pub use capture::{desktop_capture_backend, spawn_camera_capture};
 #[cfg(test)]
 pub use codec::NullVideoCodec;
+pub use codec::{RawVideoFrame, VideoDecoder, VideoEncoder};
 #[cfg(not(target_arch = "wasm32"))]
 pub use codec_h264::{H264Decoder, H264Encoder};
-pub use capture::{desktop_capture_backend, spawn_camera_capture};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use desktop_video::push_camera_frame;
-pub use session::{run_video_session, VideoControls, VideoStreams};
+pub use session::{VideoControls, VideoStreams, run_video_session};
 
 use crate::call_media::{MediaCrypto, MediaFrame};
 use jitter::VideoJitter;
-use packet::{fragment_frame, Reassembler, VideoChunk};
+use packet::{Reassembler, VideoChunk, fragment_frame};
 
 use std::collections::HashMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -294,7 +294,13 @@ pub fn i420_to_rgba_max_edge(frame: &RawVideoFrame, max_edge: u32) -> (Vec<u8>, 
 /// planar I420 for the encoder. Done natively so the desktop capture path does no
 /// per-pixel work on the Flutter UI isolate. `is_rgba` false means BGRA byte order.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub fn packed_to_i420(src: &[u8], stride: usize, width: u32, height: u32, is_rgba: bool) -> Option<RawVideoFrame> {
+pub fn packed_to_i420(
+    src: &[u8],
+    stride: usize,
+    width: u32,
+    height: u32,
+    is_rgba: bool,
+) -> Option<RawVideoFrame> {
     let w = (width as usize) & !1;
     let h = (height as usize) & !1;
     if w == 0 || h == 0 || stride < w * 4 {
@@ -329,7 +335,11 @@ pub fn packed_to_i420(src: &[u8], stride: usize, width: u32, height: u32, is_rgb
             }
         }
     }
-    Some(RawVideoFrame { width: w as u32, height: h as u32, data: out })
+    Some(RawVideoFrame {
+        width: w as u32,
+        height: h as u32,
+        data: out,
+    })
 }
 
 /// Drop frame slots for a call that has ended.
@@ -489,8 +499,8 @@ impl VideoEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::codec::EncodedVideoFrame;
+    use super::*;
 
     fn key() -> [u8; 32] {
         let mut k = [0u8; 32];
@@ -501,7 +511,11 @@ mod tests {
     }
 
     fn frame(w: u32, h: u32, fill: u8, len: usize) -> RawVideoFrame {
-        RawVideoFrame { width: w, height: h, data: vec![fill; len] }
+        RawVideoFrame {
+            width: w,
+            height: h,
+            data: vec![fill; len],
+        }
     }
 
     #[test]
@@ -531,7 +545,11 @@ mod tests {
     #[test]
     fn i420_to_rgba_handles_undersized_input() {
         // Truncated data must not panic — returns a zeroed buffer of the right size.
-        let rgba = i420_to_rgba(&RawVideoFrame { width: 8, height: 8, data: vec![0u8; 3] });
+        let rgba = i420_to_rgba(&RawVideoFrame {
+            width: 8,
+            height: 8,
+            data: vec![0u8; 3],
+        });
         assert_eq!(rgba.len(), 8 * 8 * 4);
     }
 
@@ -539,7 +557,11 @@ mod tests {
     fn i420_to_rgba_max_edge_downscales_640x480() {
         let (w, h) = (640usize, 480usize);
         let i420_len = w * h + 2 * (w / 2) * (h / 2);
-        let frame = RawVideoFrame { width: w as u32, height: h as u32, data: vec![128u8; i420_len] };
+        let frame = RawVideoFrame {
+            width: w as u32,
+            height: h as u32,
+            data: vec![128u8; i420_len],
+        };
         let (rgba, ow, oh) = i420_to_rgba_max_edge(&frame, 360);
         assert_eq!(ow, 320);
         assert_eq!(oh, 240);
@@ -548,10 +570,26 @@ mod tests {
 
     fn engine_a() -> VideoEngine {
         // Small chunk size so multi-chunk frames are exercised.
-        VideoEngine::with_params(&key(), true, Box::new(NullVideoCodec), Box::new(NullVideoCodec), 16, 8, 16)
+        VideoEngine::with_params(
+            &key(),
+            true,
+            Box::new(NullVideoCodec),
+            Box::new(NullVideoCodec),
+            16,
+            8,
+            16,
+        )
     }
     fn engine_b() -> VideoEngine {
-        VideoEngine::with_params(&key(), false, Box::new(NullVideoCodec), Box::new(NullVideoCodec), 16, 8, 16)
+        VideoEngine::with_params(
+            &key(),
+            false,
+            Box::new(NullVideoCodec),
+            Box::new(NullVideoCodec),
+            16,
+            8,
+            16,
+        )
     }
 
     #[test]
@@ -619,7 +657,10 @@ mod tests {
             b.on_wire(w).unwrap();
         }
         // f0 never completes; the buffer recovers to the next keyframe (f1).
-        let rendered = b.on_render().unwrap().expect("f1 should render after f0 loss");
+        let rendered = b
+            .on_render()
+            .unwrap()
+            .expect("f1 should render after f0 loss");
         assert_eq!(rendered, f1);
     }
 
@@ -648,14 +689,22 @@ mod tests {
             fn decode(&mut self, f: &EncodedVideoFrame) -> Result<Option<RawVideoFrame>, String> {
                 let w = u32::from_le_bytes(f.data[0..4].try_into().unwrap());
                 let h = u32::from_le_bytes(f.data[4..8].try_into().unwrap());
-                Ok(Some(RawVideoFrame { width: w, height: h, data: f.data[8..].to_vec() }))
+                Ok(Some(RawVideoFrame {
+                    width: w,
+                    height: h,
+                    data: f.data[8..].to_vec(),
+                }))
             }
         }
         let mut a = VideoEngine::with_params(
             &key(),
             true,
-            Box::new(DeltaCodec { sent_keyframe: false }),
-            Box::new(DeltaCodec { sent_keyframe: false }),
+            Box::new(DeltaCodec {
+                sent_keyframe: false,
+            }),
+            Box::new(DeltaCodec {
+                sent_keyframe: false,
+            }),
             64,
             8,
             16,
@@ -663,8 +712,12 @@ mod tests {
         let mut b = VideoEngine::with_params(
             &key(),
             false,
-            Box::new(DeltaCodec { sent_keyframe: false }),
-            Box::new(DeltaCodec { sent_keyframe: false }),
+            Box::new(DeltaCodec {
+                sent_keyframe: false,
+            }),
+            Box::new(DeltaCodec {
+                sent_keyframe: false,
+            }),
             64,
             8,
             16,
@@ -677,8 +730,14 @@ mod tests {
         for w in &wdelta {
             b.on_wire(w).unwrap();
         }
-        assert!(b.on_render().unwrap().is_none(), "must not render a delta before a keyframe");
-        assert!(b.take_keyframe_request(), "should request a keyframe while stalled");
+        assert!(
+            b.on_render().unwrap().is_none(),
+            "must not render a delta before a keyframe"
+        );
+        assert!(
+            b.take_keyframe_request(),
+            "should request a keyframe while stalled"
+        );
         // Now deliver the keyframe → it renders.
         for w in &wkf {
             b.on_wire(w).unwrap();
@@ -709,7 +768,11 @@ mod tests {
             for (i, b) in data[..w * h].iter_mut().enumerate() {
                 *b = (i as u8).wrapping_add(t);
             }
-            RawVideoFrame { width: w as u32, height: h as u32, data }
+            RawVideoFrame {
+                width: w as u32,
+                height: h as u32,
+                data,
+            }
         }
         let mut a = VideoEngine::new_h264(&key(), true).expect("h264 a");
         let mut b = VideoEngine::new_h264(&key(), false).expect("h264 b");

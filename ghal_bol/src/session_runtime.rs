@@ -75,6 +75,8 @@ pub fn session_unlocked() -> bool {
 }
 
 /// Used by [`crate::c_ffi::ghal_bol_ffi_create_or_unlock_identity`] after unlock.
-pub(crate) fn install_unlocked_identity(ident: crate::DecryptedIdentity) -> Result<(), &'static str> {
+pub(crate) fn install_unlocked_identity(
+    ident: crate::DecryptedIdentity,
+) -> Result<(), &'static str> {
     install_session(ident)
 }

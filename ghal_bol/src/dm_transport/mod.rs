@@ -3,5 +3,5 @@
 pub mod addr;
 pub mod contact_pk;
 
-pub use addr::{coord_endpoints_to_dial_addrs, DmDialAddr};
-pub use contact_pk::{normalize_contact_pk, ContactPk};
+pub use addr::{DmDialAddr, coord_endpoints_to_dial_addrs};
+pub use contact_pk::{ContactPk, normalize_contact_pk};

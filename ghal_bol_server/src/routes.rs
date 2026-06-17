@@ -1,7 +1,7 @@
+use crate::AppState;
 use crate::auth::{ChallengeStore, verify_registration_signature};
 use crate::error::{ApiResult, ServerError};
 use crate::presence::{PeerEndpoint, PeerRecord};
-use crate::AppState;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -154,11 +154,10 @@ async fn register(
     let endpoints = expand_libp2p_dns4_circuit_endpoints(req.endpoints);
 
     let store = Arc::clone(&state.app.presence);
-    let peer = tokio::task::spawn_blocking(move || {
-        store.upsert(pk, endpoints, caps, req.ipv6, req.ipv4)
-    })
-    .await
-    .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
+    let peer =
+        tokio::task::spawn_blocking(move || store.upsert(pk, endpoints, caps, req.ipv6, req.ipv4))
+            .await
+            .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
 
     tracing::info!(
         public_key = %peer.public_key_hex,
@@ -330,6 +329,11 @@ fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {
                 }
             }
             "libp2p" => {
+                if ep.host.contains("/p2p-circuit") {
+                    return Err(ServerError::BadRequest(
+                        "relay circuit endpoints are registered by the relay server on reservation, not POST /v1/register".into(),
+                    ));
+                }
                 if ep.host.len() < 12 || ep.host.len() > 512 {
                     return Err(ServerError::BadRequest(
                         "libp2p multiaddr length invalid".into(),

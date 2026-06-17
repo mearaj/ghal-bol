@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::storage::{namespace_data_dir, StorageConfig, KeystoreStorageError};
+use crate::storage::{KeystoreStorageError, StorageConfig, namespace_data_dir};
 
 /// `{namespace_data_dir}/ghal_bol/` — contacts, transcript, relay cache.
 pub fn ui_data_dir(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageError> {

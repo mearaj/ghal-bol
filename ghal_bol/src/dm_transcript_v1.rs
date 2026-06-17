@@ -20,7 +20,9 @@ use std::path::Path;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::dm_transcript_store::{patch_inbound_read_ack_sent_at_path, read_root_unlocked, with_transcript_path};
+use crate::dm_transcript_store::{
+    patch_inbound_read_ack_sent_at_path, read_root_unlocked, with_transcript_path,
+};
 
 #[derive(Clone, Debug)]
 pub struct PendingInboundReadAckRow {
@@ -165,7 +167,9 @@ pub fn pending_outbound_rows(
     with_transcript_path(path, |path| {
         let root = read_root_unlocked(path)?;
         pending_outbound_from_root(&root, app_namespace).map_err(|e| {
-            crate::dm_transcript_store::TranscriptStoreError::Io(std::io::Error::other(e.to_string()))
+            crate::dm_transcript_store::TranscriptStoreError::Io(std::io::Error::other(
+                e.to_string(),
+            ))
         })
     })
     .map_err(|e| TranscriptError::Io(std::io::Error::other(e.to_string())))
@@ -182,7 +186,9 @@ pub fn pending_inbound_read_ack_rows(
     with_transcript_path(path, |path| {
         let root = read_root_unlocked(path)?;
         pending_inbound_read_ack_from_root(&root, app_namespace).map_err(|e| {
-            crate::dm_transcript_store::TranscriptStoreError::Io(std::io::Error::other(e.to_string()))
+            crate::dm_transcript_store::TranscriptStoreError::Io(std::io::Error::other(
+                e.to_string(),
+            ))
         })
     })
     .map_err(|e| TranscriptError::Io(std::io::Error::other(e.to_string())))

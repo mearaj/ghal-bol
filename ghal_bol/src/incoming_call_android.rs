@@ -38,7 +38,7 @@ fn short_display_name(pk: &str) -> String {
 #[cfg(target_os = "android")]
 fn show_jni(display_name: &str, public_key_hex: &str) -> Result<(), String> {
     use jni::objects::JValue;
-    use jni::{jni_sig, jni_str, JavaVM};
+    use jni::{JavaVM, jni_sig, jni_str};
 
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
@@ -68,7 +68,7 @@ fn show_jni(display_name: &str, public_key_hex: &str) -> Result<(), String> {
 #[cfg(target_os = "android")]
 fn dismiss_jni() -> Result<(), String> {
     use jni::objects::JValue;
-    use jni::{jni_sig, jni_str, JavaVM};
+    use jni::{JavaVM, jni_sig, jni_str};
 
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };

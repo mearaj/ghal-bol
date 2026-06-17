@@ -60,8 +60,8 @@ pub fn open_sealed_secp256k1(recipient_sk: &SecretKey, sealed: &[u8]) -> Result<
     let nonce_start = ep_end;
     let nonce_end = nonce_start + AES_GCM_NONCE_LEN;
     let ct_start = nonce_end;
-    let ephemeral_pub =
-        PublicKey::from_slice(&sealed[ep_start..ep_end]).map_err(|e| format!("ephemeral pubkey: {e}"))?;
+    let ephemeral_pub = PublicKey::from_slice(&sealed[ep_start..ep_end])
+        .map_err(|e| format!("ephemeral pubkey: {e}"))?;
     let shared = secp256k1::ecdh::SharedSecret::new(&ephemeral_pub, recipient_sk);
     let mut shared_arr = [0u8; 32];
     shared_arr.copy_from_slice(&shared.secret_bytes());

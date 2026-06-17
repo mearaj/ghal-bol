@@ -2,7 +2,7 @@
 
 use crate::error::{ApiResult, ServerError};
 use rand::Rng;
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
+use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -23,11 +23,7 @@ pub struct ChallengeStore {
 }
 
 impl ChallengeStore {
-    pub fn issue(
-        &mut self,
-        public_key_hex: &str,
-        ttl: Duration,
-    ) -> ApiResult<PendingChallenge> {
+    pub fn issue(&mut self, public_key_hex: &str, ttl: Duration) -> ApiResult<PendingChallenge> {
         validate_public_key_hex(public_key_hex)?;
         let mut nonce = [0u8; 32];
         rand::rng().fill_bytes(&mut nonce);

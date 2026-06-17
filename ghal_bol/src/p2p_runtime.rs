@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dm_transport::DmDialAddr;
 use crate::peer_id_util::peer_id_from_secp256k1_public_key_hex;
@@ -12,18 +12,18 @@ use crate::peer_id_util::secp256k1_public_key_hex_from_peer_id;
 use libp2p::Multiaddr;
 use serde_json::Value;
 
-use crate::session_runtime::unlocked_identity_clone;
-use crate::dm_event_handler::{apply_p2p_event_json, clear_p2p_handler_context, set_foreground_peer,
-    set_p2p_handler_context};
 use crate::call_sig_v1::CallSigKind;
 use crate::call_state;
+use crate::dm_event_handler::{
+    apply_p2p_event_json, clear_p2p_handler_context, set_foreground_peer, set_p2p_handler_context,
+};
 use crate::msg_v1::MsgKind;
 use crate::p2p::{
-    native_log, queue_read_ack_catchup,
-    run_gossip_chat_node_with_std_io, set_drop_pending_call_invite_hook,
-    sync_foreground_peer_now, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd,
-    DEFAULT_GOSSIP_TOPIC,
+    DEFAULT_GOSSIP_TOPIC, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, native_log,
+    queue_read_ack_catchup, run_gossip_chat_node_with_std_io, set_drop_pending_call_invite_hook,
+    sync_foreground_peer_now,
 };
+use crate::session_runtime::unlocked_identity_clone;
 
 struct P2pHolder {
     out_tx: std::sync::mpsc::Sender<OutboundCmd>,
@@ -101,13 +101,13 @@ pub fn purge_stale_pending_call_invites(now_ms: i64) {
     let Ok(mut q) = pending_p2p_events_mx().lock() else {
         return;
     };
-    q.retain(|ev| {
-        match ev {
-            GossipChatEvent::CallSignal { signal, created_at_ms, .. } if signal == "invite" => {
-                call_state::call_invite_is_live(*created_at_ms, now_ms)
-            }
-            _ => true,
-        }
+    q.retain(|ev| match ev {
+        GossipChatEvent::CallSignal {
+            signal,
+            created_at_ms,
+            ..
+        } if signal == "invite" => call_state::call_invite_is_live(*created_at_ms, now_ms),
+        _ => true,
     });
 }
 
@@ -317,7 +317,11 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             "kind": "outbound_sent",
             "message_id": message_id,
         }),
-        GossipChatEvent::NativeLog { level, tag, message } => serde_json::json!({
+        GossipChatEvent::NativeLog {
+            level,
+            tag,
+            message,
+        } => serde_json::json!({
             "kind": "native_log",
             "level": level,
             "tag": tag,
@@ -504,11 +508,7 @@ pub fn p2p_start(config: &Value) -> Value {
             crate::incoming_call_notify::set_desktop_app_id(ns);
         }
         for dm in &gossip_cfg.dm_peers {
-            let pk = dm
-                .public_key_hex
-                .as_deref()
-                .unwrap_or("")
-                .trim();
+            let pk = dm.public_key_hex.as_deref().unwrap_or("").trim();
             if pk.len() != 66 {
                 continue;
             }
@@ -566,9 +566,7 @@ pub fn p2p_start(config: &Value) -> Value {
             Err(e) => {
                 let msg = format!("tokio runtime build failed: {e}");
                 native_log::error("p2p", msg.clone());
-                let _ = ev_tx.send(GossipChatEvent::NodeStopped {
-                    error: Some(msg),
-                });
+                let _ = ev_tx.send(GossipChatEvent::NodeStopped { error: Some(msg) });
                 native_log::set_sink(None);
                 clear_p2p_holder();
                 return;
@@ -606,9 +604,7 @@ pub fn p2p_start(config: &Value) -> Value {
                 Some(msg)
             }
         };
-        let _ = ev_tx.send(GossipChatEvent::NodeStopped {
-            error: stop_err,
-        });
+        let _ = ev_tx.send(GossipChatEvent::NodeStopped { error: stop_err });
         clear_p2p_holder();
     });
 
@@ -685,7 +681,10 @@ pub fn p2p_call_signal(config: &Value) -> Value {
         Ok(k) => k,
         Err(e) => return json_err(e),
     };
-    let payload = config.get("payload").cloned().unwrap_or(Value::Object(Default::default()));
+    let payload = config
+        .get("payload")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
     let signal_id = config
         .get("signal_id")
         .and_then(|x| x.as_str())
@@ -932,7 +931,10 @@ pub fn p2p_call_video(config: &Value) -> Value {
             call_id: call_id.clone(),
         },
         "set_camera_enabled" => {
-            let enabled = config.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+            let enabled = config
+                .get("enabled")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
             OutboundCmd::CallVideoSetCameraEnabled {
                 call_id: call_id.clone(),
                 enabled,
@@ -1014,7 +1016,11 @@ pub fn p2p_call_video_push_camera_frame(config: &Value) -> Value {
                     None => return json_err("packed frame: bad dimensions/stride"),
                 }
             }
-            _ => crate::call_video::RawVideoFrame { width, height, data },
+            _ => crate::call_video::RawVideoFrame {
+                width,
+                height,
+                data,
+            },
         };
         crate::call_video::push_camera_frame(frame);
         return json_ok(serde_json::json!({
@@ -1208,7 +1214,10 @@ fn enqueue_send_text_dm(
         })
         .is_err()
     {
-        native_log::warn("outbound", format!("send_text failed: node stopped? msg_id={message_id}"));
+        native_log::warn(
+            "outbound",
+            format!("send_text failed: node stopped? msg_id={message_id}"),
+        );
         return json_err("p2p send failed (node stopped?)");
     }
     json_ok(serde_json::json!({
@@ -1296,10 +1305,7 @@ pub fn p2p_register_dm_peer(public_key_hex: &str) -> Value {
     } else {
         pk_trim.to_string()
     };
-    native_log::info(
-        "session",
-        format!("register_dm_peer pk={pk_short}"),
-    );
+    native_log::info("session", format!("register_dm_peer pk={pk_short}"));
     if out_tx
         .send(OutboundCmd::RegisterDmPeer {
             peer_id: None,
@@ -1345,9 +1351,7 @@ pub fn p2p_set_app_ui_visible(visible: bool) -> Value {
 /// Close order: room `None` → foreground leave drain → read gate off.
 /// Open order: ui visible + room set → read gate on → foreground peer (enter catch-up).
 pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) -> Value {
-    let room = room_public_key_hex
-        .map(str::trim)
-        .filter(|s| s.len() == 66);
+    let room = room_public_key_hex.map(str::trim).filter(|s| s.len() == 66);
     native_log::info(
         "session",
         format!(
@@ -1400,16 +1404,35 @@ fn native_log_should_forward_to_ui(line: &native_log::NativeLogLine) -> bool {
     let tag = line.tag.as_str();
     let connectivity = matches!(
         tag,
-        "flow" | "net" | "p2p" | "swarm" | "kad" | "listen" | "relay" | "coord" | "mdns"
-            | "dial" | "autonat" | "dcutr" | "upnp" | "stream"
+        "flow"
+            | "net"
+            | "p2p"
+            | "swarm"
+            | "kad"
+            | "listen"
+            | "relay"
+            | "coord"
+            | "mdns"
+            | "dial"
+            | "autonat"
+            | "dcutr"
+            | "upnp"
+            | "stream"
     );
     if connectivity {
         return line.level == "info" || (line.level == "debug" && native_log::verbose_enabled());
     }
     let dm_flow = matches!(
         tag,
-        "DM/store" | "Contacts" | "Transcript" | "outbound" | "outbox" | "delivery_ack"
-            | "read_ack" | "session" | "Storage"
+        "DM/store"
+            | "Contacts"
+            | "Transcript"
+            | "outbound"
+            | "outbox"
+            | "delivery_ack"
+            | "read_ack"
+            | "session"
+            | "Storage"
     );
     if dm_flow && (line.level == "info" || line.level == "debug") {
         return true;
@@ -1466,14 +1489,8 @@ fn enrich_transcript_poll_fields(j: &mut Value) {
     };
     let rev = crate::dm_transcript_store::thread_revision_for_view(&ns, &view_key);
     if let Some(obj) = j.as_object_mut() {
-        obj.insert(
-            "conversation_key".to_string(),
-            Value::String(view_key),
-        );
-        obj.insert(
-            "transcript_revision".to_string(),
-            Value::Number(rev.into()),
-        );
+        obj.insert("conversation_key".to_string(), Value::String(view_key));
+        obj.insert("transcript_revision".to_string(), Value::Number(rev.into()));
     }
 }
 

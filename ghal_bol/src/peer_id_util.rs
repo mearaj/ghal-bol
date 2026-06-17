@@ -1,8 +1,8 @@
 //! Derive libp2p **PeerId** from a secp256k1 public key (hex).
 
 use libp2p::identity::PeerId;
-use libp2p_identity::PublicKey;
 use libp2p::multihash::Multihash;
+use libp2p_identity::PublicKey;
 
 const MULTIHASH_IDENTITY_CODE: u64 = 0;
 
@@ -13,7 +13,9 @@ pub fn peer_id_from_secp256k1_public_key_hex(hex_s: &str) -> Result<String, Stri
 }
 
 /// Parse 66-hex-char compressed secp256k1 public key.
-pub fn secp256k1_public_key_from_hex(hex_s: &str) -> Result<libp2p_identity::secp256k1::PublicKey, String> {
+pub fn secp256k1_public_key_from_hex(
+    hex_s: &str,
+) -> Result<libp2p_identity::secp256k1::PublicKey, String> {
     let s = hex_s.trim();
     if s.len() != 66 {
         return Err("public_key_hex: expected 66 hex chars (compressed secp256k1)".to_string());

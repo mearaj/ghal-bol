@@ -47,7 +47,13 @@ impl VideoChunk {
             return Err("video chunk indices invalid".to_string());
         }
         let data = payload[VIDEO_CHUNK_HEADER_LEN..].to_vec();
-        Ok(VideoChunk { frame_seq, chunk_idx, chunk_cnt, keyframe, data })
+        Ok(VideoChunk {
+            frame_seq,
+            chunk_idx,
+            chunk_cnt,
+            keyframe,
+            data,
+        })
     }
 }
 
@@ -99,7 +105,10 @@ pub struct Reassembler {
 
 impl Reassembler {
     pub fn new(max_pending: usize) -> Self {
-        Self { pending: HashMap::new(), max_pending: max_pending.max(2) }
+        Self {
+            pending: HashMap::new(),
+            max_pending: max_pending.max(2),
+        }
     }
 
     /// Push a received chunk. Returns the completed `(frame_seq, frame)` when the
@@ -119,7 +128,13 @@ impl Reassembler {
             for (_, d) in p.chunks {
                 data.extend_from_slice(&d);
             }
-            return Some((fs, EncodedVideoFrame { keyframe: p.keyframe, data }));
+            return Some((
+                fs,
+                EncodedVideoFrame {
+                    keyframe: p.keyframe,
+                    data,
+                },
+            ));
         }
         while self.pending.len() > self.max_pending {
             let oldest = self.pending.keys().min().copied();

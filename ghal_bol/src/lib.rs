@@ -13,67 +13,67 @@
 //! **Android:** the Flutter app and [`ANDROID_LIBRARY_NAMESPACE`] both use **`com.ghalbol`**
 //! for packaging and the keystore data-directory root.
 
-mod app_paths;
-mod flow_log;
-mod preferences_v1;
-#[cfg(not(target_arch = "wasm32"))]
-mod preferences_ffi;
-mod c_ffi;
-mod connect_invite_v1;
-mod contacts_v1;
-mod contacts_ffi;
-mod dm_event_handler;
-mod dm_transcript_store;
-mod invite_ffi;
-mod keystore_v1;
-mod dm_transcript_v1;
-mod msg_v1;
-#[cfg(not(target_arch = "wasm32"))]
-mod call_sig_v1;
-#[cfg(not(target_arch = "wasm32"))]
-mod call_media_key;
-#[cfg(not(target_arch = "wasm32"))]
-mod call_ffi;
-#[cfg(not(target_arch = "wasm32"))]
-mod call_state;
-#[cfg(not(target_arch = "wasm32"))]
-mod call_media;
-#[cfg(not(target_arch = "wasm32"))]
-mod call_video;
-mod peer_id_util;
-mod public_key_util;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod coord;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod coord_runtime;
-#[cfg(not(target_arch = "wasm32"))]
-mod coord_ffi;
-#[cfg(not(target_arch = "wasm32"))]
-mod dm_transport;
-#[cfg(not(target_arch = "wasm32"))]
-mod p2p_runtime;
-#[cfg(not(target_arch = "wasm32"))]
-mod p2p_ffi;
-#[cfg(not(target_arch = "wasm32"))]
-mod session_runtime;
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-pub mod daemon;
-#[cfg(not(target_arch = "wasm32"))]
-mod incoming_call_notify;
-#[cfg(target_os = "android")]
-mod incoming_call_android;
 #[cfg(target_os = "android")]
 mod android_daemon;
 #[cfg(target_os = "android")]
 mod android_jni_cache;
 #[cfg(target_os = "android")]
 mod android_network;
+mod app_paths;
+mod c_ffi;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_ffi;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_media;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_media_key;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_sig_v1;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_state;
+#[cfg(not(target_arch = "wasm32"))]
+mod call_video;
+mod connect_invite_v1;
+mod contacts_ffi;
+mod contacts_v1;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod coord;
+#[cfg(not(target_arch = "wasm32"))]
+mod coord_ffi;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod coord_runtime;
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+pub mod daemon;
+mod dm_event_handler;
+mod dm_transcript_store;
+mod dm_transcript_v1;
+#[cfg(not(target_arch = "wasm32"))]
+mod dm_transport;
+mod flow_log;
+#[cfg(target_os = "android")]
+mod incoming_call_android;
+#[cfg(not(target_arch = "wasm32"))]
+mod incoming_call_notify;
+mod invite_ffi;
+mod keystore_v1;
 #[cfg(target_os = "linux")]
 mod linux_network;
+mod msg_v1;
+#[cfg(not(target_arch = "wasm32"))]
+mod p2p_ffi;
+#[cfg(not(target_arch = "wasm32"))]
+mod p2p_runtime;
+mod peer_id_util;
+#[cfg(not(target_arch = "wasm32"))]
+mod preferences_ffi;
+mod preferences_v1;
+mod public_key_util;
+mod secp256k1_seal;
+#[cfg(not(target_arch = "wasm32"))]
+mod session_runtime;
+mod storage;
 #[cfg(not(target_arch = "wasm32"))]
 mod transcript_ffi;
-mod storage;
-mod secp256k1_seal;
 
 pub use keystore_v1::{
     DecryptedIdentity, KeystoreError, KeystoreV1, KeystoreV1KdfParams, Libp2pIdentityError,

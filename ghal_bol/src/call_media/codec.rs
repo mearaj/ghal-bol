@@ -33,23 +33,26 @@ pub struct OpusEncoderCodec {
 impl OpusEncoderCodec {
     pub fn new() -> Result<Self, String> {
         use audiopus::{Application, Channels, SampleRate};
-        let mut enc = audiopus::coder::Encoder::new(
-            SampleRate::Hz48000,
-            Channels::Mono,
-            Application::Voip,
-        )
-        .map_err(|e| format!("opus encoder: {e}"))?;
+        let mut enc =
+            audiopus::coder::Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)
+                .map_err(|e| format!("opus encoder: {e}"))?;
         // Loss resilience: in-band FEC + an assumed packet-loss percentage.
         let _ = enc.set_inband_fec(true);
         let _ = enc.set_packet_loss_perc(10);
-        Ok(Self { enc, buf: vec![0u8; OPUS_MAX_PACKET] })
+        Ok(Self {
+            enc,
+            buf: vec![0u8; OPUS_MAX_PACKET],
+        })
     }
 }
 
 impl AudioCodec for OpusEncoderCodec {
     fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>, String> {
         if pcm.len() != FRAME_SAMPLES {
-            return Err(format!("frame must be {FRAME_SAMPLES} samples, got {}", pcm.len()));
+            return Err(format!(
+                "frame must be {FRAME_SAMPLES} samples, got {}",
+                pcm.len()
+            ));
         }
         let n = self
             .enc
@@ -110,7 +113,10 @@ pub struct NullCodec;
 impl AudioCodec for NullCodec {
     fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>, String> {
         if pcm.len() != FRAME_SAMPLES {
-            return Err(format!("frame must be {FRAME_SAMPLES} samples, got {}", pcm.len()));
+            return Err(format!(
+                "frame must be {FRAME_SAMPLES} samples, got {}",
+                pcm.len()
+            ));
         }
         let mut out = Vec::with_capacity(pcm.len() * 2);
         for s in pcm {
@@ -125,7 +131,11 @@ impl AudioCodec for NullCodec {
             None => out.resize(FRAME_SAMPLES, 0),
             Some(b) => {
                 if b.len() != FRAME_SAMPLES * 2 {
-                    return Err(format!("null payload {} bytes, want {}", b.len(), FRAME_SAMPLES * 2));
+                    return Err(format!(
+                        "null payload {} bytes, want {}",
+                        b.len(),
+                        FRAME_SAMPLES * 2
+                    ));
                 }
                 out.reserve(FRAME_SAMPLES);
                 for ch in b.chunks_exact(2) {

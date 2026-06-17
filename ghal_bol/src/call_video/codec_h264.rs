@@ -8,10 +8,10 @@
 //! Frame format: `RawVideoFrame.data` is planar **I420** (YUV 4:2:0):
 //! `Y (w*h) || U (w/2 * h/2) || V (w/2 * h/2)`. Width/height must be even.
 
+use openh264::OpenH264API;
 use openh264::decoder::Decoder;
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod};
 use openh264::formats::YUVSource;
-use openh264::OpenH264API;
 
 /// Default target bitrate / frame rate for a realtime call. Congestion control will
 /// drive these adaptively later (see docs); fixed for the first working version.
@@ -148,8 +148,15 @@ impl VideoEncoder for H264Encoder {
         if force_keyframe {
             self.enc.force_intra_frame();
         }
-        let src = I420View { width: w, height: h, data: &frame.data };
-        let bitstream = self.enc.encode(&src).map_err(|e| format!("h264 encode: {e}"))?;
+        let src = I420View {
+            width: w,
+            height: h,
+            data: &frame.data,
+        };
+        let bitstream = self
+            .enc
+            .encode(&src)
+            .map_err(|e| format!("h264 encode: {e}"))?;
         let data = bitstream.to_vec();
         let keyframe = force_keyframe || annexb_has_keyframe(&data);
         Ok(EncodedVideoFrame { keyframe, data })
@@ -200,7 +207,11 @@ impl VideoDecoder for H264Decoder {
             let off = row * sv;
             data.extend_from_slice(&vb[off..off + cw]);
         }
-        Ok(Some(RawVideoFrame { width: w as u32, height: h as u32, data }))
+        Ok(Some(RawVideoFrame {
+            width: w as u32,
+            height: h as u32,
+            data,
+        }))
     }
 }
 
@@ -221,7 +232,11 @@ mod tests {
             data[off + c] = 128;
             data[off + cw * ch + c] = 128;
         }
-        RawVideoFrame { width: w as u32, height: h as u32, data }
+        RawVideoFrame {
+            width: w as u32,
+            height: h as u32,
+            data,
+        }
     }
 
     #[test]
@@ -230,15 +245,22 @@ mod tests {
         let mut dec = H264Decoder::new().expect("decoder");
         let (w, h) = (64, 48);
 
-        let first = enc.encode(&gradient_i420(w, h, 0), false).expect("encode 1");
-        assert!(first.keyframe, "first H.264 frame must be a keyframe (SPS/PPS/IDR)");
+        let first = enc
+            .encode(&gradient_i420(w, h, 0), false)
+            .expect("encode 1");
+        assert!(
+            first.keyframe,
+            "first H.264 frame must be a keyframe (SPS/PPS/IDR)"
+        );
         assert!(!first.data.is_empty());
 
         // Decode the keyframe (carries SPS/PPS) — must yield a picture of the right size.
         let mut got = dec.decode(&first).expect("decode 1");
         if got.is_none() {
             // Feed one more frame; some decoders need a follow-up NAL to emit.
-            let second = enc.encode(&gradient_i420(w, h, 10), false).expect("encode 2");
+            let second = enc
+                .encode(&gradient_i420(w, h, 10), false)
+                .expect("encode 2");
             got = dec.decode(&second).expect("decode 2");
         }
         let frame = got.expect("a decoded frame");
@@ -252,13 +274,20 @@ mod tests {
         let (w, h) = (128, 96);
         let raw = i420_len(w, h);
         let f = enc.encode(&gradient_i420(w, h, 0), true).expect("encode");
-        assert!(f.data.len() < raw, "encoded frame should be smaller than raw I420");
+        assert!(
+            f.data.len() < raw,
+            "encoded frame should be smaller than raw I420"
+        );
     }
 
     #[test]
     fn h264_rejects_bad_dimensions() {
         let mut enc = H264Encoder::new().expect("encoder");
-        let bad = RawVideoFrame { width: 65, height: 48, data: vec![0u8; 10] };
+        let bad = RawVideoFrame {
+            width: 65,
+            height: 48,
+            data: vec![0u8; 10],
+        };
         assert!(enc.encode(&bad, false).is_err());
     }
 }

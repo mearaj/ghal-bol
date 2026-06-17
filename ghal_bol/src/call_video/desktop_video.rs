@@ -9,8 +9,8 @@ use std::sync::{Mutex, OnceLock};
 
 use tokio::sync::mpsc;
 
-use super::session::VideoControls;
 use super::RawVideoFrame;
+use super::session::VideoControls;
 
 static FRAME_TX: OnceLock<Mutex<Option<mpsc::Sender<RawVideoFrame>>>> = OnceLock::new();
 static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);

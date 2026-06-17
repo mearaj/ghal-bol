@@ -35,10 +35,7 @@ pub(crate) fn configure_android_data_directory(path: &str) {
 /// Android / `:p2p` data root when configured (shared with UI via `app_flutter`).
 #[cfg(target_os = "android")]
 pub(crate) fn optional_android_data_dir() -> Option<PathBuf> {
-    android_data_dir_mx()
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
+    android_data_dir_mx().lock().ok().and_then(|g| g.clone())
 }
 
 pub(crate) fn resolved_storage_config(ns: &str) -> crate::StorageConfig {
@@ -67,7 +64,9 @@ unsafe fn utf8_trace(c: *const c_char, ctx: &'static str) -> Result<String, Stri
 
 fn json_ok(v: serde_json::Value) -> *mut c_char {
     CString::new(v.to_string())
-        .unwrap_or_else(|_| CString::new(r#"{"ok":false,"error":"ffi encoding ok payload"}"#).unwrap())
+        .unwrap_or_else(|_| {
+            CString::new(r#"{"ok":false,"error":"ffi encoding ok payload"}"#).unwrap()
+        })
         .into_raw()
 }
 
@@ -215,7 +214,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_reveal_secret_key_hex(
 
 /// Returns UTF-8 JSON `{ ok, keystore_json? }` (encrypted keystore file contents).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_export_keystore_json(app_namespace_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_export_keystore_json(
+    app_namespace_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let ns = match unsafe { utf8_trace(app_namespace_utf8, "app_namespace") } {
             Ok(s) => s,
@@ -289,7 +290,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_reset_first_time_identity(
 /// Returns UTF-8 JSON `{ "ok": true, "keystore_exists": <bool> }` for [app_namespace_utf8],
 /// using the same storage paths as [`ghal_bol_ffi_create_or_unlock_identity`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_ffi_keystore_exists(app_namespace_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_ffi_keystore_exists(
+    app_namespace_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let ns = match unsafe { utf8_trace(app_namespace_utf8, "app_namespace") } {
             Ok(s) => s,
