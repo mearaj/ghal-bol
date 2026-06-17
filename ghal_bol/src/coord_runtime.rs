@@ -282,6 +282,14 @@ fn peer_record_has_relay_circuit(record: &crate::coord::CoordPeerRecord) -> bool
     })
 }
 
+/// During LAN↔WAN handover coord HTTP may flap while the relay server still has our circuit.
+pub fn try_restore_relay_presence_from_coord() -> bool {
+    let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
+        return false;
+    };
+    promote_relay_presence_if_visible(&ident.public_key_hex())
+}
+
 fn promote_relay_presence_if_visible(pk: &str) -> bool {
     if COORD_REGISTERED.load(Ordering::Relaxed) {
         return true;
@@ -958,11 +966,18 @@ pub fn coord_register_tick(listen_snapshot: &[Multiaddr]) {
         return;
     }
     if presence_is_stale() {
-        crate::flow_log::warn(
-            "coord",
-            "presence stale (no recent heartbeat) — re-registering",
-        );
-        COORD_REGISTERED.store(false, Ordering::Relaxed);
+        if try_restore_relay_presence_from_coord() {
+            crate::flow_log::info(
+                "coord",
+                "presence stale but relay circuit still on coord — keeping registered",
+            );
+        } else {
+            crate::flow_log::warn(
+                "coord",
+                "presence stale (no recent heartbeat) — re-registering",
+            );
+            COORD_REGISTERED.store(false, Ordering::Relaxed);
+        }
     }
     rebuild_coord_endpoints_from_listen(listen_snapshot);
     if !has_coord_endpoints() {
@@ -1357,7 +1372,12 @@ fn start_heartbeat_loop(public_key_hex: String) {
                 if !any_ok {
                     let fails = COORD_CONSEC_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
                     if fails >= 3 {
-                        COORD_REGISTERED.store(false, Ordering::Relaxed);
+                        if promote_relay_presence_if_visible(&public_key_hex) {
+                            COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
+                            COORD_LAST_OK_MS.store(unix_ms_now(), Ordering::Relaxed);
+                        } else {
+                            COORD_REGISTERED.store(false, Ordering::Relaxed);
+                        }
                     }
                     spawn_register_presence_inner(true);
                 } else {

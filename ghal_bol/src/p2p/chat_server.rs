@@ -1678,18 +1678,20 @@ impl SessionState {
         if pk.len() != 66 {
             return false;
         }
+        let handover_coord_degraded = wifi_lan_handover_active(self)
+            && crate::coord_runtime::coord_http_degraded();
+        // On LAN with dead coord HTTP, hammering lookup every upkeep tick hides mDNS recovery.
+        let lookup_min_ms = if handover_coord_degraded {
+            15_000
+        } else {
+            min_interval_ms
+        };
         if self.is_pk_reconnect_urgent(pk, now_ms) {
             let Ok(mut m) = self.last_coord_lookup_ms.write() else {
                 return true;
             };
             let last = m.get(pk).copied().unwrap_or(0);
-            let min_gap =
-                if wifi_lan_handover_active(self) && crate::coord_runtime::coord_http_degraded() {
-                    // On LAN with dead coord HTTP, hammering lookup every 800ms hides mDNS recovery.
-                    15_000
-                } else {
-                    800
-                };
+            let min_gap = if handover_coord_degraded { 15_000 } else { 800 };
             if now_ms.saturating_sub(last) < min_gap {
                 return false;
             }
@@ -1707,7 +1709,7 @@ impl SessionState {
             return true;
         };
         let last = m.get(pk).copied().unwrap_or(0);
-        if now_ms.saturating_sub(last) < min_interval_ms {
+        if now_ms.saturating_sub(last) < lookup_min_ms {
             return false;
         }
         m.insert(pk.to_string(), now_ms);

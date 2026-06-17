@@ -125,8 +125,10 @@ A. Swarm up          p2p_start, dm_peers registered
 B. Relay bootstrap   TCP to GET /v1/relay peer (log: bootstrap connection)
 C. Own reservation   listen_on(…/p2p-circuit) after Identify on HOP
                      (log: reservation accepted, relay listen addr)
-D. Coord register    POST /v1/register with /p2p-circuit endpoint
-                     (log: coord registered, server: peer registered)
+D. Coord presence    Client POST /v1/register with public + optional LAN tcp only;
+                     relay server upserts `/p2p-circuit` on reservation (identify `;pk=`).
+                     CGNAT-only clients poll GET /v1/peers/self until circuit visible.
+                     (log: coord registered or relay presence visible, server: peer registered)
 
 Cross-device (after BOTH at phase D)
 ────────────────────────────────────
@@ -142,7 +144,8 @@ G. Stream + outbox   ConnectionEstablished → /ghal-bol/msg/1.0.0 → resync ou
 | Log pattern | Phase stuck | Meaning |
 |-------------|-------------|---------|
 | `waiting for relay/public listen endpoint before coord register` | B or C | No publishable WAN addr yet — reservation not accepted |
-| `reservation accepted` but no `coord registered` | D | Relay OK; coord HTTPS/register failed |
+| `reservation accepted` but no `coord registered` | D | Relay OK; client register failed and relay presence poll did not see circuit yet |
+| `register HTTP 400` … `relay circuit endpoints are registered by the relay server` | D | Client must not POST `/p2p-circuit` — server owns circuit presence on reservation |
 | `register — reason=coord register HTTP transport failed` | D | **HTTPS** to coord broken (VPN/DNS/TLS) — not libp2p |
 | `lookup — category=peer_not_on_coord` (404) | Remote still A–D | **Expected** until remote finishes pipeline; outbox waits; lookups stop after first 404 until real disconnect (`mark_dm_reconnect_urgent`) |
 | `issue=no_dial_addrs \| reason=no dial addrs — coord has no record` | E blocked by remote D | Same as 404 — do not treat as “dial broken” |
@@ -677,6 +680,7 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 | 2026-06-16 | **LAN stability (verified short test):** cold-start LAN and Wi‑Fi off/on on same subnet recover on Linux + Android. Fixes: `linux_network.rs` (sysfs operstate → `notify_network_change`); `platform_wifi_linked`; full `kick_lan` on connectivity notify and in `lan_handover_upkeep` (not soft mDNS-only); `dm_down_on_lan` on 1s poll when streams down. § “LAN stability — cold start and Wi‑Fi toggle”. Removed port ranking / upkeep LAN re-dial (earlier). |
 | 2026-06-16 | **Event-driven async (general rule):** § “Event-driven async — avoid assumed timers”; A/B subscriber model for connect, handover, lookup, reserve, stream, register. AGENTS + DESIGN.md aligned. |
 | 2026-06-16 | **Architecture:** Android Wi‑Fi probe in Rust (`android_network.rs`); `:p2p` Kotlin registers callbacks only; removed Flutter `p2p_notify_network_change`. |
+| 2026-06-17 | **Hybrid coord presence (P4–P6):** clients POST public/LAN tcp only; `ghal_bol_server` relay upserts `/p2p-circuit` on reservation; clients poll coord when register payload empty; keep `coord_registered` during handover when relay circuit still visible; throttle coord lookup during handover + degraded HTTP; do not drop WAN relay when stale direct counters linger after `left LAN`. |
 | 2026-06-16 | **LAN connect model (supersedes port-ranking experiments):** mDNS event-driven dial only; `connect_dm_peer_now` coord/WAN-only; removed `rank_mdns_lan_tcp_candidates` / highest-port heuristics; 45s handover grace defers coord while waiting for fresh `Discovered`. § “Ephemeral LAN TCP ports”, § “LAN relay vs mDNS race”. |
 | 2026-06-15 | **Ephemeral LAN ports / stale mDNS cache:** documented ephemeral TCP + candidate-set lifecycle; stopped upkeep re-dials to stale ports. § “Ephemeral LAN TCP ports”. |
 | 2026-06-15 | **Wi‑Fi return handover:** `has_rfc1918_on_wifi` + `lan_restored`; soft handover on mobile-data→LAN; immediate mDNS purge on `lan → mobile-data`. |
