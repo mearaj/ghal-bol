@@ -1327,8 +1327,12 @@ impl SessionState {
     }
 
     /// STORY: during LAN handover, coord must not race mDNS — WAN fallback only after LAN tries fail.
+    /// Peers that left the LAN (mDNS `Expired`) must not wait out Wi‑Fi grace.
     fn coord_blocked_for_lan_handover(&self, peer: PeerId, now_ms: i64) -> bool {
-        self.in_wifi_switch_handover_grace(now_ms) && !self.lan_candidates_exhausted(peer)
+        if !self.in_wifi_switch_handover_grace(now_ms) || !self.peer_on_local_lan(peer) {
+            return false;
+        }
+        !self.lan_candidates_exhausted(peer)
     }
 
     /// Drop cached LAN TCP addrs after handover — stale ports must not dial before fresh mDNS.
@@ -1351,6 +1355,9 @@ impl SessionState {
             return false;
         }
         if !self.within_lan_handover_grace(now_ms) {
+            return false;
+        }
+        if !self.peer_on_local_lan(peer) {
             return false;
         }
         // Post-handover: wait for direct LAN TCP mDNS before coord relay — not forever,
@@ -4261,6 +4268,28 @@ fn sync_published_listen_from_swarm(
     *v != before
 }
 
+/// On full network handover (left LAN / mobile-data): reopen streams when outbox pending on a live link.
+fn nudge_dm_streams_pending_outbox_on_wan_handover(
+    swarm: &Swarm<ChatBehaviour>,
+    session: &SessionState,
+) {
+    for peer in session.dm_peer_ids() {
+        if !session.should_dial_libp2p_peer(peer) {
+            continue;
+        }
+        if !swarm.is_connected(&peer) || session.dm_peer_stream_up(peer) {
+            continue;
+        }
+        if session.peer_has_pending_outbox(peer) {
+            native_log::info(
+                "outbox",
+                format!("WAN handover — reopen DM stream for {peer} (pending outbox)"),
+            );
+            session.request_dm_stream_reopen(peer);
+        }
+    }
+}
+
 /// Re-register on coord, refresh relay reservations, and reconnect DM peers after any network
 /// or public-reachability change (interface handover, OS callback, or new relay circuit).
 fn refresh_coord_reachability_after_network_change(
@@ -4299,6 +4328,7 @@ fn refresh_coord_reachability_after_network_change(
     }
     notify_dm_presence_wake();
     notify_stream_reopen();
+    nudge_dm_streams_pending_outbox_on_wan_handover(swarm, session);
     crate::coord_runtime::schedule_register_presence_force();
     ensure_coord_relays_connected(swarm, session, coord_relays);
     retry_stalled_relay_reservations(swarm, session, true);

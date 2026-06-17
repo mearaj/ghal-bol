@@ -251,19 +251,30 @@ fn fetch_ghalbol_relay_for_base(
     base: &str,
     cache_path: Option<&std::path::Path>,
 ) -> Option<(String, Vec<String>)> {
+    let base_norm = base.trim().trim_end_matches('/');
+    let is_ngrok_dev = base_norm.contains("ngrok");
     let client = client_for(base).ok()?;
     for attempt in 0..3 {
         match client.get_relay() {
             Ok((peer, addrs)) if !peer.is_empty() && !addrs.is_empty() => {
-                write_relay_cache(cache_path, &peer, &addrs);
+                write_relay_cache(cache_path, base_norm, &peer, &addrs);
                 return Some((peer, addrs));
             }
             Ok(_) => {
-                if let Some(cached) = read_relay_cache(cache_path) {
+                if is_ngrok_dev {
                     crate::flow_log::warn(
                         "relay",
                         format!(
-                            "coord {base} GET /v1/relay empty — using cached relay {} ({} addr(s))",
+                            "coord {base_norm} GET /v1/relay empty — ngrok dev: not using stale relay cache"
+                        ),
+                    );
+                    return None;
+                }
+                if let Some(cached) = read_relay_cache(cache_path, base_norm) {
+                    crate::flow_log::warn(
+                        "relay",
+                        format!(
+                            "coord {base_norm} GET /v1/relay empty — using cached relay {} ({} addr(s))",
                             &cached.0[..cached.0.len().min(12)],
                             cached.1.len()
                         ),
@@ -273,16 +284,27 @@ fn fetch_ghalbol_relay_for_base(
                 crate::flow_log::warn(
                     "relay",
                     format!(
-                        "coord {base} GET /v1/relay: no relay advertised yet (WAN blocked until server exposes relay)"
+                        "coord {base_norm} GET /v1/relay: no relay advertised yet (WAN blocked until server exposes relay)"
                     ),
                 );
                 return None;
             }
             Err(_) if attempt + 1 < 3 => std::thread::sleep(Duration::from_millis(500)),
-            Err(_) => return read_relay_cache(cache_path),
+            Err(e) => {
+                if is_ngrok_dev {
+                    crate::flow_log::warn(
+                        "relay",
+                        format!(
+                            "coord {base_norm} GET /v1/relay failed ({e}) — ngrok dev: not using stale relay cache"
+                        ),
+                    );
+                    return None;
+                }
+                return read_relay_cache(cache_path, base_norm);
+            }
         }
     }
-    read_relay_cache(cache_path)
+    read_relay_cache(cache_path, base_norm)
 }
 
 /// Fetch `/v1/relay` from **every** configured coord server (one relay per host).
@@ -325,13 +347,42 @@ pub fn fetch_all_ghalbol_relays(
 }
 
 fn relay_after_http_miss(cache_path: Option<&std::path::Path>) -> Option<(String, Vec<String>)> {
-    read_relay_cache(cache_path)
+    let base = coord_base_urls()
+        .first()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    read_relay_cache(cache_path, &base)
 }
 
-fn read_relay_cache(path: Option<&std::path::Path>) -> Option<(String, Vec<String>)> {
+fn read_relay_cache(path: Option<&std::path::Path>, coord_base: &str) -> Option<(String, Vec<String>)> {
     let path = path?;
     let bytes = std::fs::read(path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let base_norm = coord_base.trim().trim_end_matches('/');
+    if !base_norm.is_empty() {
+        match v.get("coord_base").and_then(|x| x.as_str()) {
+            Some(cached_base) => {
+                let cached_norm = cached_base.trim().trim_end_matches('/');
+                if cached_norm != base_norm {
+                    crate::flow_log::warn(
+                        "relay",
+                        format!(
+                            "ignoring relay cache — coord base mismatch ({cached_norm} != {base_norm})"
+                        ),
+                    );
+                    return None;
+                }
+            }
+            None if base_norm.contains("ngrok") => {
+                crate::flow_log::warn(
+                    "relay",
+                    "ignoring legacy relay cache on ngrok dev coord (no coord_base field)",
+                );
+                return None;
+            }
+            None => {}
+        }
+    }
     let peer = v["peer_id"].as_str()?.trim().to_string();
     let addrs: Vec<String> = v["addrs"]
         .as_array()?
@@ -350,9 +401,15 @@ fn read_relay_cache(path: Option<&std::path::Path>) -> Option<(String, Vec<Strin
     Some((peer, addrs))
 }
 
-fn write_relay_cache(path: Option<&std::path::Path>, peer: &str, addrs: &[String]) {
+fn write_relay_cache(
+    path: Option<&std::path::Path>,
+    coord_base: &str,
+    peer: &str,
+    addrs: &[String],
+) {
     let Some(path) = path else { return };
     let body = serde_json::json!({
+        "coord_base": coord_base.trim().trim_end_matches('/'),
         "peer_id": peer,
         "addrs": addrs,
         "cached_at_ms": unix_ms_now(),

@@ -191,7 +191,8 @@ fn build_swarm(
                 // Same identify protocol as the ghal_bol client so observed-addr exchange
                 // (used by client AutoNAT/DCUtR) interoperates.
                 identify::Config::new_with_signed_peer_record("/ghal-bol/1.0.0".to_string(), key)
-                    .with_agent_version(format!("ghal_bol_server_relay/{}", env!("CARGO_PKG_VERSION"))),
+                    .with_agent_version(format!("ghal_bol_server_relay/{}", env!("CARGO_PKG_VERSION")))
+                    .with_push_listen_addr_updates(false),
             ),
             ping: ping::Behaviour::new(ping::Config::new()),
         })?

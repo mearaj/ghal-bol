@@ -51,9 +51,24 @@ impl CoordHttpClient {
         Ok(Self { http, base })
     }
 
+    /// ngrok free tier returns an HTML interstitial unless this header is set.
+    fn with_headers(
+        &self,
+        builder: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        if self.base.contains("ngrok") {
+            builder.header("ngrok-skip-browser-warning", "1")
+        } else {
+            builder
+        }
+    }
+
     pub fn health(&self) -> Result<bool, String> {
         let url = format!("{}/health", self.base);
-        let resp = self.http.get(&url).send().map_err(|e| e.to_string())?;
+        let resp = self
+            .with_headers(self.http.get(&url))
+            .send()
+            .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("health HTTP {}", resp.status()));
         }
@@ -72,8 +87,7 @@ impl CoordHttpClient {
         let pk = public_key_hex.trim().to_ascii_lowercase();
         let ch_url = format!("{}/v1/register/challenge", self.base);
         let ch: serde_json::Value = self
-            .http
-            .post(&ch_url)
+            .with_headers(self.http.post(&ch_url))
             .json(&serde_json::json!({ "public_key_hex": pk }))
             .send()
             .map_err(|e| e.to_string())?
@@ -89,8 +103,7 @@ impl CoordHttpClient {
 
         let reg_url = format!("{}/v1/register", self.base);
         let resp = self
-            .http
-            .post(&reg_url)
+            .with_headers(self.http.post(&reg_url))
             .json(&serde_json::json!({
                 "public_key_hex": pk,
                 "nonce_hex": nonce_hex,
@@ -113,8 +126,7 @@ impl CoordHttpClient {
         let pk = public_key_hex.trim().to_ascii_lowercase();
         let url = format!("{}/v1/heartbeat", self.base);
         let resp = self
-            .http
-            .post(&url)
+            .with_headers(self.http.post(&url))
             .json(&serde_json::json!({ "public_key_hex": pk }))
             .send()
             .map_err(|e| e.to_string())?;
@@ -129,7 +141,10 @@ impl CoordHttpClient {
     /// Returns `(peer_id, base_addrs)`; empty when the server runs no relay.
     pub fn get_relay(&self) -> Result<(String, Vec<String>), String> {
         let url = format!("{}/v1/relay", self.base);
-        let resp = self.http.get(&url).send().map_err(|e| e.to_string())?;
+        let resp = self
+            .with_headers(self.http.get(&url))
+            .send()
+            .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("relay HTTP {}", resp.status()));
         }
@@ -154,7 +169,10 @@ impl CoordHttpClient {
     pub fn lookup(&self, public_key_hex: &str) -> Result<CoordPeerRecord, String> {
         let pk = public_key_hex.trim().to_ascii_lowercase();
         let url = format!("{}/v1/peers/{}", self.base, pk);
-        let resp = self.http.get(&url).send().map_err(|e| e.to_string())?;
+        let resp = self
+            .with_headers(self.http.get(&url))
+            .send()
+            .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("lookup HTTP {}", resp.status()));
         }
