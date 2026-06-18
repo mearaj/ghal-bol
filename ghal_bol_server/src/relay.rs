@@ -433,7 +433,12 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
                 }
                 relay::Event::ReservationClosed { src_peer_id } => {
                     tracing::info!(%src_peer_id, "relay reservation closed");
-                    ctx.end_reservation(src_peer_id);
+                    // Bootstrap happy-eyeballs closes spare TCP hops; libp2p emits
+                    // ReservationClosed while the client re-reserves on another link.
+                    // Only ReservationTimedOut is authoritative for coord purge.
+                    if let Ok(mut s) = ctx.accepted_reservations.lock() {
+                        s.remove(&src_peer_id);
+                    }
                 }
                 relay::Event::CircuitReqAccepted {
                     src_peer_id,
@@ -470,7 +475,9 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 tracing::info!(%peer_id, ?cause, "relay client disconnected");
-                ctx.end_reservation(peer_id);
+                // Do not clear coord presence here — bootstrap happy-eyeballs and HOP
+                // prune close spare TCP links while the reservation stays live. Only
+                // ReservationClosed / ReservationTimedOut are authoritative.
             }
             SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received {
                 peer_id,

@@ -92,4 +92,6 @@ pub use storage::{
 #[cfg(not(target_arch = "wasm32"))]
 pub mod p2p;
 #[cfg(not(target_arch = "wasm32"))]
+pub use dm_event_handler::set_p2p_handler_context;
+#[cfg(not(target_arch = "wasm32"))]
 pub use dm_transport::DmDialAddr;

@@ -226,7 +226,6 @@ pub fn set_app_ui_visible(visible: bool) {
         // Only on inactive→active edge — sync_ui_session repeats visible=true at startup.
         if !was {
             notify_dm_presence_wake();
-            crate::coord_runtime::schedule_register_presence_force();
         }
     }
 }
@@ -672,6 +671,9 @@ struct SessionState {
     relay_reserve_last_attempt_ms: RwLock<HashMap<PeerId, i64>>,
     /// One in-flight `listen_on(/p2p-circuit)` per relay until accepted or timeout.
     relay_reserve_in_flight_ms: RwLock<HashMap<PeerId, i64>>,
+    /// Last `ReservationReqAccepted` per relay — libp2p closes the old circuit listener during
+    /// renewal; must not treat that gap as "circuit gone" and re-issue `listen_on`.
+    relay_reservation_accepted_ms: RwLock<HashMap<PeerId, i64>>,
     /// Live bootstrap TCP links per coord relay (for HOP anchor + prune).
     bootstrap_tcp_conns: RwLock<HashMap<PeerId, HashMap<ConnectionId, Multiaddr>>>,
     /// Identify completed on bootstrap HOP (libp2p relay client expects this before reserve).
@@ -765,8 +767,10 @@ struct SessionState {
     last_mdns_restart_ms: RwLock<i64>,
     /// Throttle Wi‑Fi LAN reopen attempts (connectivity callback only).
     last_lan_recovery_ms: RwLock<i64>,
-    /// Last LAN handover (mDNS restart / candidate purge) — grace window for coord deferral.
+    /// Last LAN handover (mDNS restart / candidate purge) — diagnostic only.
     last_lan_handover_ms: RwLock<i64>,
+    /// DM peers waiting for fresh mDNS + ephemeral listen after a LAN event (Wi‑Fi flap, mDNS expire).
+    lan_listen_rediscovery_peers: RwLock<HashSet<PeerId>>,
     /// Drop asymmetric/zombie libp2p links after `open_stream` timeout (swarm loop disconnect).
     pending_dm_link_reset: RwLock<HashSet<PeerId>>,
     /// Throttle repetitive coord lookup INFO logs (especially peer_not_on_coord).
@@ -883,6 +887,7 @@ impl SessionState {
             relay_reserve_requested: RwLock::new(HashSet::new()),
             relay_reserve_last_attempt_ms: RwLock::new(HashMap::new()),
             relay_reserve_in_flight_ms: RwLock::new(HashMap::new()),
+            relay_reservation_accepted_ms: RwLock::new(HashMap::new()),
             bootstrap_tcp_conns: RwLock::new(HashMap::new()),
             bootstrap_identified: RwLock::new(HashSet::new()),
             bootstrap_tcp_since_ms: RwLock::new(HashMap::new()),
@@ -931,6 +936,7 @@ impl SessionState {
             last_mdns_restart_ms: RwLock::new(0),
             last_lan_recovery_ms: RwLock::new(0),
             last_lan_handover_ms: RwLock::new(0),
+            lan_listen_rediscovery_peers: RwLock::new(HashSet::new()),
             pending_dm_link_reset: RwLock::new(HashSet::new()),
             coord_lookup_info_log_ms: RwLock::new(HashMap::new()),
             call_media: Mutex::new(HashMap::new()),
@@ -1167,6 +1173,7 @@ impl SessionState {
             if let Ok(mut e) = self.lan_candidates_exhausted.write() {
                 e.remove(&peer);
             }
+            self.clear_lan_listen_rediscovery(peer);
         }
         added
     }
@@ -1263,7 +1270,57 @@ impl SessionState {
         if self.peer_mdns_lan_addr(peer).is_some() {
             return false;
         }
-        self.forget_peer_on_local_lan(peer)
+        if self.forget_peer_on_local_lan(peer) {
+            self.request_lan_listen_rediscovery(peer);
+            return true;
+        }
+        false
+    }
+
+    fn request_lan_listen_rediscovery(&self, peer: PeerId) {
+        if let Ok(mut s) = self.lan_listen_rediscovery_peers.write() {
+            s.insert(peer);
+        }
+    }
+
+    fn clear_lan_listen_rediscovery(&self, peer: PeerId) {
+        if let Ok(mut s) = self.lan_listen_rediscovery_peers.write() {
+            s.remove(&peer);
+        }
+    }
+
+    fn lan_listen_rediscovery_requested(&self, peer: PeerId) -> bool {
+        self.lan_listen_rediscovery_peers
+            .read()
+            .ok()
+            .is_some_and(|s| s.contains(&peer))
+    }
+
+    fn any_lan_listen_rediscovery_pending(&self) -> bool {
+        self.lan_listen_rediscovery_peers
+            .read()
+            .ok()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// DM contacts that had mDNS or `peers_on_local_lan` before a handover purge.
+    fn dm_peers_with_lan_history(&self) -> Vec<PeerId> {
+        let on_lan: HashSet<PeerId> = self
+            .peers_on_local_lan
+            .read()
+            .ok()
+            .map(|m| m.keys().copied().collect())
+            .unwrap_or_default();
+        let with_mdns: HashSet<PeerId> = self
+            .peer_mdns_lan_candidate_addrs
+            .read()
+            .ok()
+            .map(|m| m.keys().copied().collect())
+            .unwrap_or_default();
+        self.dm_peer_ids()
+            .into_iter()
+            .filter(|p| on_lan.contains(p) || with_mdns.contains(p))
+            .collect()
     }
 
     /// Next LAN TCP addr for failover only — first publishable candidate in mDNS discovery order.
@@ -1291,6 +1348,7 @@ impl SessionState {
         if let Ok(mut s) = self.lan_candidates_exhausted.write() {
             s.insert(peer);
         }
+        self.clear_lan_listen_rediscovery(peer);
     }
 
     fn clear_lan_candidates_exhausted(&self, peer: PeerId) {
@@ -1327,9 +1385,8 @@ impl SessionState {
     }
 
     /// STORY: during LAN handover, coord must not race mDNS — WAN fallback only after LAN tries fail.
-    /// Peers that left the LAN (mDNS `Expired`) must not wait out Wi‑Fi grace.
     fn coord_blocked_for_lan_handover(&self, peer: PeerId, now_ms: i64) -> bool {
-        if !self.in_wifi_switch_handover_grace(now_ms) || !self.peer_on_local_lan(peer) {
+        if !self.in_wifi_switch_handover_grace(now_ms) || !wifi_lan_handover_active(self) {
             return false;
         }
         !self.lan_candidates_exhausted(peer)
@@ -1354,15 +1411,15 @@ impl SessionState {
         if !self.is_dm_contact(peer) {
             return false;
         }
-        if !self.within_lan_handover_grace(now_ms) {
+        if !self.within_lan_handover_grace(now_ms) || !wifi_lan_handover_active(self) {
             return false;
         }
-        if !self.peer_on_local_lan(peer) {
+        if self.lan_candidates_exhausted(peer) {
             return false;
         }
         // Post-handover: wait for direct LAN TCP mDNS before coord relay — not forever,
         // and not based on relay-circuit mDNS (misleading RFC1918 /p2p-circuit addrs).
-        self.peer_mdns_lan_addr(peer).is_none() && wifi_lan_handover_active(self)
+        self.peer_mdns_lan_addr(peer).is_none()
     }
 
     /// Any registered DM contact without a live chat stream while on LAN (Wi‑Fi flap / switch).
@@ -1859,6 +1916,7 @@ impl SessionState {
                 if let Ok(mut m) = self.dm_no_writer_since_ms.write() {
                     m.remove(&peer);
                 }
+                self.clear_lan_listen_rediscovery(peer);
             } else {
                 s.remove(&peer);
             }
@@ -2037,13 +2095,14 @@ impl SessionState {
             .and_then(|m| m.get(pk).copied())
     }
 
-    /// Throttle coord HTTP for peers absent from coord (404). Urgent reconnect and presence-wake
-    /// bypass; otherwise retry on backoff (not permanent silence — remote may register anytime).
+    /// Throttle coord HTTP for peers absent from coord (404) or transport errors.
     fn should_skip_coord_lookup_pk(&self, pk_hex: &str, now_ms: i64) -> bool {
         let Some(cat) = self.coord_lookup_category_for_pk(pk_hex) else {
             return false;
         };
-        if cat != super::connectivity_diag::CoordLookupCategory::PeerNotOnCoord {
+        if cat != super::connectivity_diag::CoordLookupCategory::PeerNotOnCoord
+            && cat != super::connectivity_diag::CoordLookupCategory::CoordHttpUnreachable
+        {
             return false;
         }
         if self.is_pk_reconnect_urgent(pk_hex, now_ms) {
@@ -2148,12 +2207,15 @@ impl SessionState {
         self.outbox.read().ok().map(|g| g.len()).unwrap_or(0)
     }
 
-    /// True when relay/public listen addrs changed since the last non-empty snapshot.
+    /// True when relay/public listen addrs changed since the last snapshot (including first circuit).
     fn wan_listen_fp_changed(&self, fp: &[String]) -> bool {
+        if fp.is_empty() {
+            return false;
+        }
         let Ok(mut last) = self.last_wan_listen_fp.write() else {
             return false;
         };
-        let changed = !last.is_empty() && *last != fp;
+        let changed = last.is_empty() || *last != *fp;
         *last = fp.to_vec();
         changed
     }
@@ -3237,7 +3299,9 @@ fn chat_behaviour(
     let identify_cfg =
         libp2p::identify::Config::new_with_signed_peer_record("/ghal-bol/1.0.0".to_string(), key)
             .with_agent_version(format!("ghal_bol/{};pk={}", env!("CARGO_PKG_VERSION"), pk))
-            .with_push_listen_addr_updates(true);
+            // Push on every ephemeral LAN listen port floods the coord relay identify handler
+            // (server logs: "at capacity") → phase D pk never parsed → peer 404 on coord.
+            .with_push_listen_addr_updates(false);
     let mdns =
         match libp2p::mdns::tokio::Behaviour::new(libp2p::mdns::Config::default(), local_peer_id) {
             Ok(b) => {
@@ -3440,14 +3504,6 @@ fn issue_bootstrap_dials(
         if has_tracked_bootstrap_tcp(session, peer) {
             continue;
         }
-        // CGNAT probe `listen_on` can leave a relay peer connected without a tracked base TCP HOP.
-        if swarm.is_connected(&peer) && session.is_bootstrap_peer(peer) {
-            native_log::info(
-                "dial",
-                format!("bootstrap stale link without HOP {peer} — redial base TCP"),
-            );
-            let _ = swarm.disconnect_peer_id(peer);
-        }
         if !session.should_issue_bootstrap_dial(peer, now_ms, force) {
             continue;
         }
@@ -3464,10 +3520,22 @@ fn issue_bootstrap_dials(
                 addrs.retain(|ma| !ma.to_string().contains("/ip6/"));
             }
         }
-        if addrs.is_empty() {
-            continue;
-        }
+        // One dial per address family per pass — happy-eyeballs without prune storms mid-reservation.
+        let mut dialed_v4 = false;
+        let mut dialed_v6 = false;
         for ma in addrs {
+            let is_v6 = ma.to_string().contains("/ip6/");
+            if is_v6 {
+                if dialed_v6 {
+                    continue;
+                }
+                dialed_v6 = true;
+            } else {
+                if dialed_v4 {
+                    continue;
+                }
+                dialed_v4 = true;
+            }
             if let Ok(mut m) = session.bootstrap_relay_addr.write() {
                 m.entry(peer).or_insert_with(|| ma.clone());
             }
@@ -3501,6 +3569,8 @@ fn ensure_coord_relays_connected(
 
 /// Per-relay throttle for `listen_on(/p2p-circuit)`.
 const RELAY_RESERVE_THROTTLE_MS: i64 = 10_000;
+/// libp2p closes the old circuit listener during reservation renewal — ignore only this gap.
+const RELAY_RENEWAL_GAP_MS: i64 = 3_000;
 /// Faster probe retries on CGNAT while bootstrap TCP is still pending (cellular can be slow).
 const CGNAT_PROBE_THROTTLE_MS: i64 = 2_500;
 /// Do not re-issue `listen_on` while a reservation is in flight (libp2p cancels the prior attempt).
@@ -3602,6 +3672,23 @@ fn clear_relay_reserve_in_flight(session: &SessionState, relay: PeerId) {
     }
 }
 
+fn note_relay_reservation_accepted(session: &SessionState, relay: PeerId, now_ms: i64) {
+    if let Ok(mut m) = session.relay_reservation_accepted_ms.write() {
+        m.insert(relay, now_ms);
+    }
+}
+
+fn any_relay_reservation_accepted_recently(session: &SessionState, now_ms: i64, window_ms: i64) -> bool {
+    session
+        .relay_reservation_accepted_ms
+        .read()
+        .ok()
+        .is_some_and(|m| {
+            m.values()
+                .any(|t| now_ms.saturating_sub(*t) < window_ms)
+        })
+}
+
 fn any_relay_reserve_in_flight(session: &SessionState, now_ms: i64) -> bool {
     session
         .relay_reserve_in_flight_ms
@@ -3677,6 +3764,13 @@ fn prune_duplicate_relay_bootstrap_connections(
         return conns.values().next().cloned();
     }
     let now_ms = chrono_now_ms();
+    // Keep all HOP links while reserve/listen is in flight or circuit is already up.
+    if any_relay_reserve_in_flight(session, now_ms) || relay_circuit_listening(swarm) {
+        return bootstrap_hop_anchor(session, relay);
+    }
+    if !bootstrap_hop_ready_for_listen(session, relay, now_ms) {
+        return bootstrap_hop_anchor(session, relay);
+    }
     let mut ranked: Vec<(ConnectionId, Multiaddr, u8)> = conns
         .iter()
         .map(|(id, ma)| {
@@ -3757,8 +3851,12 @@ fn on_bootstrap_tcp_connected(
     session.note_bootstrap_connected();
     note_bootstrap_tcp_conn(session, peer_id, connection_id, &remote);
     note_bootstrap_tcp_since(session, peer_id, chrono_now_ms());
-    schedule_bootstrap_relay_reserve(session, peer_id, chrono_now_ms());
-    if bootstrap_relay_conn_count(session, peer_id) > 1 {
+    let now_ms = chrono_now_ms();
+    schedule_bootstrap_relay_reserve(session, peer_id, now_ms);
+    if bootstrap_relay_conn_count(session, peer_id) > 1
+        && bootstrap_hop_ready_for_listen(session, peer_id, now_ms)
+        && !relay_circuit_listening(swarm)
+    {
         let _ = prune_duplicate_relay_bootstrap_connections(swarm, session, peer_id);
     }
     // Reservation runs from Identify + `ensure_wan_relay_circuit` after HOP settle — not here
@@ -4165,28 +4263,6 @@ fn swarm_listen_addrs_for_coord(swarm: &Swarm<ChatBehaviour>) -> Vec<Multiaddr> 
     out
 }
 
-/// Merge live RFC1918 DM TCP from swarm listeners into the publish cache (Wi‑Fi handover).
-fn sync_lan_published_listen_from_swarm(
-    swarm: &Swarm<ChatBehaviour>,
-    session: &SessionState,
-) -> bool {
-    let mut batch = Vec::new();
-    for ma in swarm.listeners() {
-        if !super::network_transport::is_dm_listen_tcp_multiaddr(ma)
-            || super::network_transport::is_relay_circuit_multiaddr(ma)
-        {
-            continue;
-        }
-        let expanded = expand_listen_addresses(ma);
-        if expanded.is_empty() {
-            batch.push(ma.clone());
-        } else {
-            batch.extend(expanded);
-        }
-    }
-    session.merge_published_listen(batch)
-}
-
 /// Coord registration must be based on what libp2p is *actually* listening on.
 /// Using only the cached `published_listen` snapshot can temporarily drop relay circuits
 /// during churn, which makes coord think we have "no endpoints" and flaps registration.
@@ -4283,6 +4359,9 @@ fn refresh_coord_reachability_after_network_change(
     }
     session.clear_coord_lookup_backoff_all();
     clear_wan_listen_state_for_handover(session);
+    if !session.network_profile_snapshot().has_active_lan() {
+        session.purge_mdns_lan_candidates_for_dm_peers();
+    }
     let _ = sync_published_listen_from_swarm(session, swarm);
     crate::coord_runtime::coord_invalidate_presence_on_network_change();
     crate::coord_runtime::rebuild_coord_endpoints_from_listen(&coord_register_listen_snapshot(
@@ -4318,9 +4397,14 @@ fn handle_lan_path_restored(
     let _ = sync_published_listen_from_swarm(session, swarm);
     let now_ms = chrono_now_ms();
     session.note_lan_handover(now_ms);
+    let lan_history = session.dm_peers_with_lan_history();
     session.purge_mdns_lan_candidates_for_dm_peers();
+    let rediscover = lan_rediscovery_peer_set(session, lan_history);
     for peer in session.dm_peer_ids() {
         session.clear_lan_candidates_exhausted(peer);
+    }
+    for peer in rediscover {
+        session.request_lan_listen_rediscovery(peer);
     }
     ensure_lan_tcp_listen(swarm, session, true);
     restart_mdns_behaviour(swarm, session, true);
@@ -4328,8 +4412,12 @@ fn handle_lan_path_restored(
     notify_dm_presence_wake();
     notify_stream_reopen();
     refresh_coord_presence_soft(swarm, session, coord_relays);
-    crate::coord_runtime::schedule_register_presence_force();
-    ensure_coord_relays_connected(swarm, session, coord_relays);
+    let need_bootstrap = ghalbol_relay_peer(session)
+        .map(|relay| !has_tracked_bootstrap_tcp(session, relay))
+        .unwrap_or(true);
+    if need_bootstrap {
+        ensure_coord_relays_connected(swarm, session, coord_relays);
+    }
 }
 
 /// On-LAN DHCP / interface drift — listen sync + mDNS/LAN DM rediscovery (Wi‑Fi flap while profile stays `lan`).
@@ -4391,26 +4479,32 @@ fn kick_lan_dm_rediscovery_after_handover(
         return;
     }
     native_log::info("net", format!("LAN DM rediscovery — {reason}"));
+    let lan_history = session.dm_peers_with_lan_history();
     session.note_lan_handover(now_ms);
     session.purge_mdns_lan_candidates_for_dm_peers();
     for peer in session.dm_peer_ids() {
         session.clear_lan_candidates_exhausted(peer);
         session.clear_lan_dial_in_flight(peer);
     }
+    let rediscover = lan_rediscovery_peer_set(session, lan_history);
+    for peer in rediscover {
+        session.request_lan_listen_rediscovery(peer);
+    }
     ensure_lan_tcp_listen(swarm, session, true);
     restart_mdns_behaviour(swarm, session, true);
     session.mark_dm_reconnect_urgent_unless_live_direct_stream();
     notify_dm_presence_wake();
-    // STORY.md network switch: reset coord backoff, reopen streams, refresh coord presence.
     session.clear_coord_lookup_backoff_all();
     notify_stream_reopen();
-    crate::coord_runtime::schedule_register_presence_force();
 }
 
 /// After full DM disconnect — reopen streams and rediscover without nuking a link that may reconnect.
 fn recover_dm_peer_after_disconnect(session: &SessionState, peer: PeerId) {
     notify_stream_reopen();
     let now_ms = chrono_now_ms();
+    if session.peer_on_local_lan(peer) {
+        session.request_lan_listen_rediscovery(peer);
+    }
     if session.defer_coord_for_lan_rediscovery(peer, now_ms) {
         native_log::info(
             "net",
@@ -4527,6 +4621,16 @@ fn kick_relay_ipv4_circuit_recovery(
     if relay_circuit_listening(swarm) {
         return;
     }
+    let now_ms = chrono_now_ms();
+    let bootstrap_up = session.any_bootstrap_connected.load(Ordering::Relaxed);
+    if bootstrap_up {
+        if any_relay_reserve_in_flight(session, now_ms) {
+            return;
+        }
+        if any_relay_reservation_accepted_recently(session, now_ms, RELAY_RENEWAL_GAP_MS) {
+            return;
+        }
+    }
     native_log::warn("relay", log_ctx.to_string());
     if let Some(ghalbol) = ghalbol_relay_peer(session) {
         clear_relay_reserve_in_flight(session, ghalbol);
@@ -4545,11 +4649,8 @@ fn kick_relay_ipv4_circuit_recovery(
     }
     notify_relay_refresh();
     session.begin_wan_recovery();
-    crate::coord_runtime::schedule_register_presence_force();
+    crate::coord_runtime::schedule_coord_presence_after_relay();
     session.mark_dm_reconnect_urgent_unless_live_direct_stream();
-    if session.network_profile_snapshot().has_active_lan() {
-        kick_lan_dm_rediscovery_after_handover(swarm, session, log_ctx, false);
-    }
     notify_coord_lookup();
     let _ = ensure_wan_relay_circuit(swarm, session, None, false);
 }
@@ -4607,6 +4708,11 @@ fn run_wan_recovery_pass(
         }
     }
     let listen = coord_register_listen_snapshot(swarm, session);
+    if listen_ready_for_node(session, true, swarm)
+        && !crate::coord_runtime::coord_is_registered()
+    {
+        let _ = crate::coord_runtime::try_restore_relay_presence_from_coord();
+    }
     crate::coord_runtime::coord_register_tick(&listen);
     finish_wan_recovery_if_ready(session, swarm);
 }
@@ -4753,6 +4859,14 @@ async fn maybe_refresh_ghalbol_relay(
         return;
     }
     ensure_coord_relays_connected(swarm, session, &merged_nodes);
+    if relay_circuit_listening(swarm) {
+        let bootstrap_ok = ghalbol_relay_peer(session)
+            .map(|p| has_tracked_bootstrap_tcp(session, p) && swarm.is_connected(&p))
+            .unwrap_or(false);
+        if bootstrap_ok && crate::coord_runtime::coord_link_recently_ok() {
+            return;
+        }
+    }
     let force_res = force || session.wan_recovery_active.load(Ordering::Relaxed);
     ensure_wan_relay_circuit(swarm, session, Some(&merged_nodes), force_res);
 }
@@ -4794,6 +4908,7 @@ fn dial_bootstrap_peers(
     }
 }
 
+#[cfg(all(not(target_os = "android"), not(feature = "test-minimal-swarm")))]
 fn listen_ephemeral(swarm: &mut Swarm<ChatBehaviour>, ma: &str) -> Result<(), ChatServerError> {
     let parsed = parse_ma(ma)?;
     match swarm.listen_on(parsed) {
@@ -4907,6 +5022,11 @@ fn try_recover_lan_after_wifi_available(
     if !wifi_linked && !connectivity_notify {
         return false;
     }
+    // Mobile-data off/on: profile key often unchanged — LAN rediscovery is wrong here; WAN
+    // recovery runs from the connectivity-notify branch in `network_tick`.
+    if connectivity_notify && !wifi_linked && !on_lan {
+        return false;
+    }
     let now_ms = chrono_now_ms();
     if !session.should_run_lan_recovery(now_ms) {
         return false;
@@ -4969,11 +5089,6 @@ fn ensure_lan_tcp_listen(swarm: &mut Swarm<ChatBehaviour>, session: &SessionStat
             native_log::info("net", "LAN handover — fresh ephemeral TCP listen for mDNS");
         }
     }
-    if sync_lan_published_listen_from_swarm(swarm, session) {
-        crate::coord_runtime::rebuild_coord_endpoints_from_listen(&coord_register_listen_snapshot(
-            swarm, session,
-        ));
-    }
 }
 
 /// On LAN: full handover when link down + no mDNS candidate; stream reopen only when candidate exists.
@@ -4984,6 +5099,10 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
     }
     let needs_mdns_nudge = session.dm_peer_ids().iter().any(|p| {
         if !session.should_dial_libp2p_peer(*p) {
+            return false;
+        }
+        // Off-LAN contacts (e.g. phone on mobile data) are WAN/coord only — not mDNS.
+        if !peer_expects_lan_discovery(session, *p) {
             return false;
         }
         let link_down = !swarm.is_connected(p) || !session.dm_peer_stream_up(*p);
@@ -5005,7 +5124,7 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
         .iter()
         .any(|p| session.should_dial_libp2p_peer(*p) && !session.dm_peer_stream_up(*p));
     if in_grace && stream_down && session.should_run_lan_recovery(now_ms) {
-        native_log::info("net", "LAN handover upkeep — reopen DM streams (STORY)");
+        native_log::info("net", "LAN handover upkeep — reopen DM streams");
         notify_stream_reopen();
     }
 }
@@ -5480,6 +5599,24 @@ fn is_direct_lan_tcp_ma(ma: &Multiaddr) -> bool {
         return false;
     }
     super::network_transport::ipv4_from_ma_str(&ma.to_string()).is_some_and(|ip| ip.is_private())
+}
+
+/// Peer may be reachable on local mDNS/LAN (not a mobile-data / off-LAN WAN-only contact).
+fn peer_expects_lan_discovery(session: &SessionState, peer: PeerId) -> bool {
+    session.peer_on_local_lan(peer)
+        || session.lan_listen_rediscovery_requested(peer)
+        || session.peer_mdns_lan_addr(peer).is_some()
+}
+
+fn lan_rediscovery_peer_set(session: &SessionState, lan_history: Vec<PeerId>) -> Vec<PeerId> {
+    if !lan_history.is_empty() {
+        return lan_history;
+    }
+    session
+        .dm_peer_ids()
+        .into_iter()
+        .filter(|p| peer_expects_lan_discovery(session, *p))
+        .collect()
 }
 
 fn is_direct_lan_tcp_mdns_candidate(ma: &Multiaddr) -> bool {
@@ -7839,13 +7976,14 @@ fn apply_pending_dm_link_resets(swarm: &mut Swarm<ChatBehaviour>, session: &Sess
 
 /// Routed dial: mDNS/identify supply addresses via peerstore.
 fn try_routed_dial(swarm: &mut Swarm<ChatBehaviour>, session: &SessionState, peer: PeerId) {
-    // On mobile-data/CGNAT with coord configured, avoid blind peer-id dials from stale
-    // peerstore entries; explicit coord/mDNS address dials are safer.
-    if crate::coord_runtime::coord_is_configured()
-        && session.prefers_mobile_coord_strategy()
-        && !crate::coord_runtime::coord_http_degraded()
-    {
-        return;
+    if crate::coord_runtime::coord_is_configured() {
+        if session.prefers_mobile_coord_strategy() && !crate::coord_runtime::coord_http_degraded() {
+            return;
+        }
+        // Wi‑Fi desktop: off-LAN contacts are coord/relay only — blind peerstore dials hit stale LAN/`::1`.
+        if !peer_expects_lan_discovery(session, peer) {
+            return;
+        }
     }
     try_routed_dial_impl(swarm, session, peer);
 }
@@ -7954,13 +8092,11 @@ fn ingest_identify_listen_addrs(
     if swarm.is_connected(&peer) && session.peer_has_direct_connection(peer) {
         return;
     }
-    // On mobile-data/CGNAT with coord configured, direct listen addrs are often stale/unreachable.
-    // Do not pollute peerstore with them; rely on coord relay-circuit dials instead.
-    if crate::coord_runtime::coord_is_configured()
-        && session.prefers_mobile_coord_strategy()
-        && !crate::coord_runtime::coord_http_degraded()
-    {
-        return;
+    // Stale identify/LAN addrs must not pollute peerstore for off-LAN WAN contacts.
+    if crate::coord_runtime::coord_is_configured() && !crate::coord_runtime::coord_http_degraded() {
+        if session.prefers_mobile_coord_strategy() || !peer_expects_lan_discovery(session, peer) {
+            return;
+        }
     }
     let ranked = sort_dm_dial_addrs_for_profile(
         session,
@@ -8067,10 +8203,7 @@ fn dial_dm_peer_addr(
     // LAN (mDNS) or RFC1918 while Wi‑Fi is active.
     if crate::coord_runtime::coord_is_configured() && session.prefers_mobile_coord_strategy() {
         let on_lan = session.peer_on_local_lan(peer)
-            || (session.network_profile_snapshot().has_active_lan()
-                && super::network_transport::ipv4_from_ma_str(&addr.to_string()).is_some_and(
-                    |ip| ip.is_private() && !super::network_transport::is_cgnat_ipv4(ip),
-                ));
+            || peer_expects_lan_discovery(session, peer);
         if !is_relay && !on_lan {
             let now = chrono_now_ms();
             if session.should_log_dial_skip(peer, now, 8_000) {
@@ -8510,6 +8643,7 @@ fn handle_swarm_event(
                 if !session.is_dm_contact(peer) {
                     continue;
                 }
+                session.request_lan_listen_rediscovery(peer);
                 dm_left_lan = true;
                 if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&peer) {
                     session.mark_dm_reconnect_urgent(&pk);
@@ -8567,29 +8701,34 @@ fn handle_swarm_event(
                     let _ = sync_published_listen_from_swarm(session, swarm);
                 } else if matches!(reason, Ok(())) {
                     let _ = sync_published_listen_from_swarm(session, swarm);
-                    let bootstrap_up = session.any_bootstrap_connected.load(Ordering::Relaxed);
-                    let wan_rec = session.wan_recovery_active.load(Ordering::Relaxed);
-                    if !bootstrap_up {
-                        kick_relay_ipv4_circuit_recovery(
-                            swarm,
-                            session,
-                            &addresses,
-                            "relay circuit closed cleanly (bootstrap down) — re-reserve",
-                        );
-                    } else if wan_rec && !relay_circuit_listening(swarm) {
-                        kick_relay_ipv4_circuit_recovery(
-                            swarm,
-                            session,
-                            &addresses,
-                            "relay circuit closed during WAN recovery — re-reserve",
-                        );
-                    } else {
-                        native_log::info(
-                            "relay",
-                            "relay circuit listener closed cleanly — libp2p renewal; \
-                             not re-issuing listen_on (would cancel live reservation)",
-                        );
+                    if relay_circuit_listening(swarm) {
+                        let _ = sync_published_listen_from_swarm(session, swarm);
+                        return;
                     }
+                    let now_ms = chrono_now_ms();
+                    let bootstrap_up = session.any_bootstrap_connected.load(Ordering::Relaxed);
+                    if bootstrap_up && any_relay_reserve_in_flight(session, now_ms) {
+                        return;
+                    }
+                    if bootstrap_up
+                        && any_relay_reservation_accepted_recently(session, now_ms, RELAY_RENEWAL_GAP_MS)
+                    {
+                        native_log::debug(
+                            "relay",
+                            "relay circuit closed cleanly during renewal — not re-issuing listen_on",
+                        );
+                        return;
+                    }
+                    kick_relay_ipv4_circuit_recovery(
+                        swarm,
+                        session,
+                        &addresses,
+                        if !bootstrap_up {
+                            "relay circuit closed cleanly (bootstrap down) — re-reserve"
+                        } else {
+                            "relay circuit closed cleanly — re-reserve"
+                        },
+                    );
                 } else {
                     kick_relay_ipv4_circuit_recovery(
                         swarm,
@@ -8617,20 +8756,19 @@ fn handle_swarm_event(
                 if is_relay {
                     let _ = session.merge_published_listen(vec![address.clone()]);
                     native_log::info("relay", format!("relay listen addr {address}"));
+                    let _ = session.merge_published_listen(swarm.listeners().cloned().collect());
+                    crate::coord_runtime::rebuild_coord_endpoints_from_listen(
+                        &session.published_listen_snapshot(),
+                    );
+                    crate::coord_runtime::coord_note_relay_circuit_ready();
+                    finish_wan_recovery_if_ready(session, swarm);
                 } else {
                     let expanded = expand_listen_addresses(&address);
                     let _ = session.merge_published_listen(expanded);
+                    let _ = session.merge_published_listen(swarm.listeners().cloned().collect());
                 }
-                let _ = session.merge_published_listen(swarm.listeners().cloned().collect());
-                crate::coord_runtime::rebuild_coord_endpoints_from_listen(
-                    &session.published_listen_snapshot(),
-                );
                 if should_emit_listening_event(&address) {
                     emit(GossipChatEvent::Listening(address.clone()));
-                }
-                if super::network_transport::is_coord_relay_tcp_circuit_multiaddr(&address) {
-                    crate::coord_runtime::schedule_register_presence_force();
-                    finish_wan_recovery_if_ready(session, swarm);
                 }
             }
         }
@@ -8660,10 +8798,9 @@ fn handle_swarm_event(
                                 !super::network_transport::is_relay_circuit_multiaddr(ma)
                             });
                         }
-                        crate::coord_runtime::coord_invalidate_presence_on_network_change();
+                        crate::coord_runtime::mark_coord_relay_hop_lost();
                         notify_relay_refresh();
                         session.begin_wan_recovery();
-                        crate::coord_runtime::schedule_register_presence_force();
                         session.mark_dm_reconnect_urgent_unless_live_direct_stream();
                         notify_coord_lookup();
                     }
@@ -8931,6 +9068,7 @@ fn handle_swarm_event(
             libp2p::relay::client::Event::ReservationReqAccepted { relay_peer_id, .. },
         )) => {
             clear_relay_reserve_in_flight(session, relay_peer_id);
+            note_relay_reservation_accepted(session, relay_peer_id, chrono_now_ms());
             native_log::info("relay", format!("reservation accepted on {relay_peer_id}"));
             crate::coord_runtime::coord_note_relay_reservation(relay_peer_id);
             let relay_addrs: Vec<Multiaddr> = swarm
@@ -8945,7 +9083,7 @@ fn handle_swarm_event(
             crate::coord_runtime::rebuild_coord_endpoints_from_listen(
                 &session.published_listen_snapshot(),
             );
-            crate::coord_runtime::schedule_coord_presence_after_relay();
+            crate::coord_runtime::coord_note_relay_circuit_ready();
             // Relay circuit live — publish WAN presence and wake peer rediscovery.
             notify_dm_presence_wake();
             finish_wan_recovery_if_ready(session, swarm);
@@ -9088,7 +9226,7 @@ fn coord_dial_from_lookup_addrs(
     // handover when mDNS was purged and the peer has not re-announced yet (Android OEM flaps).
     if session.network_profile_snapshot().has_active_lan() {
         let allow_coord_lan = session.peer_mdns_lan_addr(target).is_none()
-            && session.within_lan_handover_grace(now_ms);
+            && session.lan_listen_rediscovery_requested(target);
         if !allow_coord_lan {
             ranked.retain(|ma| !is_direct_lan_tcp_ma(ma));
         }
@@ -9096,6 +9234,16 @@ fn coord_dial_from_lookup_addrs(
     // Never dial relay from coord lookup while mDNS LAN is viable — races cancel LAN TCP (TRANSPORT.md).
     if session.should_defer_coord_relay_for_lan(swarm, target, now_ms) {
         ranked.retain(|ma| !super::network_transport::is_relay_circuit_multiaddr(ma));
+        if ranked.is_empty() {
+            return;
+        }
+    }
+    // Mobile-data and off-LAN WAN peers: relay circuit only (coord may still list stale LAN TCP).
+    if session.prefers_mobile_coord_strategy()
+        || (crate::coord_runtime::coord_is_configured()
+            && !peer_expects_lan_discovery(session, target))
+    {
+        ranked.retain(|ma| super::network_transport::is_relay_circuit_multiaddr(ma));
         if ranked.is_empty() {
             return;
         }
@@ -9180,26 +9328,13 @@ async fn coord_lookup_dm_peer(
     if connected && !wan_additive {
         return;
     }
-    let mut skip_coord_http = if absent_never {
+    let skip_coord_http = if absent_never {
         session.should_skip_coord_lookup_pk(pk, now_ms)
     } else if !urgent {
         session.should_skip_coord_lookup_pk(pk, now_ms)
     } else {
         false
     };
-    if !skip_coord_http
-        && !urgent
-        && crate::coord_runtime::coord_is_configured()
-        && session.prefers_mobile_coord_strategy()
-        && !crate::coord_runtime::coord_is_registered()
-        && !crate::coord_runtime::coord_http_degraded()
-    {
-        skip_coord_http = true;
-        native_log::debug(
-            "coord",
-            format!("lookup {pk} HTTP skipped (self not registered yet) — mDNS active"),
-        );
-    }
     if !skip_coord_http {
         match crate::coord_runtime::lookup_dial_multiaddrs_for_public_key_async(pk).await {
             Ok(addrs) => {
@@ -9256,6 +9391,10 @@ async fn coord_lookup_dm_peer(
                 session.set_coord_lookup_category(pk, cat);
                 if cat == super::connectivity_diag::CoordLookupCategory::PeerNotOnCoord {
                     session.note_coord_lookup_not_found(pk, now_ms);
+                } else if cat == super::connectivity_diag::CoordLookupCategory::CoordHttpUnreachable
+                {
+                    session.note_coord_lookup_not_found(pk, now_ms);
+                    crate::coord_runtime::note_coord_transport_failure();
                 } else {
                     crate::coord_runtime::note_coord_transport_failure();
                 }
@@ -9543,7 +9682,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                     Arc::clone(&writers),
                     Some(events_tx.clone()),
                 );
-                let handover_grace = session.in_wifi_switch_handover_grace(now_ms);
+                let lan_rediscovery_pending = session.any_lan_listen_rediscovery_pending();
                 // Fast reconnect: urgent peers — coord lookup even during LAN handover when
                 // mDNS has no candidate yet (STORY.md network switch).
                 for pk in session.urgent_reconnect_pks(now_ms) {
@@ -9565,7 +9704,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                     }
                     coord_lookup_dm_peer(&mut swarm, session.as_ref(), &pk).await;
                 }
-                if crate::coord_runtime::coord_is_configured() && !handover_grace {
+                if crate::coord_runtime::coord_is_configured() && !lan_rediscovery_pending {
                     let listen = coord_register_listen_snapshot(&swarm, session.as_ref());
                     crate::coord_runtime::coord_register_tick(&listen);
                     for pk in session.dm_public_keys() {
@@ -9671,7 +9810,19 @@ pub async fn run_gossip_chat_node_with_std_io(
                         );
                         handover = true;
                     } else {
-                        if try_recover_lan_after_wifi_available(
+                        let profile = session.network_profile_snapshot();
+                        if profile.on_mobile_data_path()
+                            || (!profile.has_active_lan() && profile.needs_relay_for_wan())
+                        {
+                            refresh_coord_reachability_after_network_change(
+                                &mut swarm,
+                                session.as_ref(),
+                                &coord_relays,
+                                "connectivity notify — mobile/WAN path refresh",
+                                true,
+                            );
+                            handover = true;
+                        } else if try_recover_lan_after_wifi_available(
                             &mut swarm,
                             session.as_ref(),
                             &coord_relays,
@@ -9702,8 +9853,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                     try_wan_relay_recovery(&mut swarm, session.as_ref());
                 }
                 if crate::coord_runtime::coord_is_configured() {
-                    let synced =
-                        sync_published_listen_from_swarm(session.as_ref(), &swarm);
+                    let _ = sync_published_listen_from_swarm(session.as_ref(), &swarm);
                     let snap = coord_register_listen_snapshot(&swarm, session.as_ref());
                     let fp =
                         super::network_transport::wan_coord_listen_fingerprint(&snap);
@@ -9716,9 +9866,6 @@ pub async fn run_gossip_chat_node_with_std_io(
                             "WAN listen addrs changed — refresh coord presence",
                             false,
                         );
-                    } else if synced {
-                        crate::coord_runtime::rebuild_coord_endpoints_from_listen(&snap);
-                        crate::coord_runtime::schedule_register_presence_force();
                     }
                 }
                 if session.wan_recovery_active.load(Ordering::Relaxed) {
@@ -9970,89 +10117,3 @@ pub async fn run_gossip_chat_node_with_std_io(
     }
 }
 
-#[cfg(test)]
-mod mdns_connect_tests {
-    use super::*;
-    use crate::p2p::network_transport;
-    use libp2p::Multiaddr;
-
-    fn test_session() -> SessionState {
-        let (_ks, identity) =
-            crate::keystore_v1::create_keystore_v1("test-mdns-port", None).unwrap();
-        SessionState::new(
-            identity,
-            &[],
-            HashSet::new(),
-            None,
-            None,
-            network_transport::detect_local_network_profile(),
-            None,
-            None,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn merge_keeps_all_lan_tcp_until_expired_or_dial_fail() {
-        let session = test_session();
-        let peer = PeerId::random();
-        let first: Multiaddr =
-            "/ip4/192.168.1.38/tcp/43377/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        let second: Multiaddr =
-            "/ip4/192.168.1.38/tcp/33527/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert!(session.merge_mdns_lan_candidate(peer, &first));
-        assert!(session.merge_mdns_lan_candidate(peer, &second));
-        let addrs = session
-            .peer_mdns_lan_candidate_addrs
-            .read()
-            .unwrap()
-            .get(&peer)
-            .cloned()
-            .unwrap();
-        assert_eq!(addrs.len(), 2);
-        assert_eq!(session.peer_mdns_lan_addr(peer), Some(first.clone()));
-        session.remove_mdns_lan_candidate(peer, Some(&first));
-        assert_eq!(session.peer_mdns_lan_addr(peer), Some(second));
-    }
-
-    #[test]
-    fn peer_mdns_lan_addr_failover_uses_discovery_order_not_port() {
-        let session = test_session();
-        let peer = PeerId::random();
-        let first: Multiaddr =
-            "/ip4/192.168.1.38/tcp/45735/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        let second: Multiaddr =
-            "/ip4/192.168.1.37/tcp/36131/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert!(session.merge_mdns_lan_candidate(peer, &first));
-        assert!(session.merge_mdns_lan_candidate(peer, &second));
-        assert_eq!(session.peer_mdns_lan_addr(peer), Some(first));
-    }
-
-    #[test]
-    fn merge_skips_non_lan_tcp_addrs() {
-        let session = test_session();
-        let peer = PeerId::random();
-        let relay: Multiaddr =
-            "/dns4/coord.ghalbol.com/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
-                .parse()
-                .unwrap();
-        assert!(!session.merge_mdns_lan_candidate(peer, &relay));
-    }
-
-    #[test]
-    fn android_wifi_transport_hint_sets_wifi_iface() {
-        set_android_wifi_transport_available(true);
-        let p = detected_network_with_platform_hints();
-        assert!(p.has_wifi_iface);
-        assert!(p.has_rfc1918_on_wifi);
-        set_android_wifi_transport_available(false);
-    }
-}

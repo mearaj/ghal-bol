@@ -67,6 +67,12 @@ build_abi() {
   local abi="$1"
   local build="$OUT_DIR/build/$abi"
   local prefix="$OUT_DIR/$abi"
+  # x86 emulator ABIs: skip AVX2 silk paths — NSQ_del_dec_avx2.c triggers -Wcast-align
+  # under NDK Clang and we don't need AVX2 on Android x86 targets.
+  local extra_cmake=()
+  case "$abi" in
+    x86|x86_64) extra_cmake+=(-DOPUS_X86_MAY_HAVE_AVX2=OFF) ;;
+  esac
   echo ""
   echo "==> [$abi] CMake configure Opus (static, PIC, android-$ANDROID_API)"
   rm -rf "$build"
@@ -81,6 +87,7 @@ build_abi() {
     -DCMAKE_INSTALL_PREFIX="$prefix" \
     -DOPUS_BUILD_PROGRAMS=OFF \
     -DOPUS_BUILD_TESTING=OFF \
+    "${extra_cmake[@]}" \
     -S "$OPUS_SRC" -B "$build"
   cmake --build "$build" --target install --config Release
   if [[ ! -f "$prefix/lib/libopus.a" ]]; then

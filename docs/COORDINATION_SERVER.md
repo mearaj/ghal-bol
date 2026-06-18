@@ -73,7 +73,11 @@ COORD_URL=https://YOUR.ngrok-free.dev ./ghal_bol_server/deploy/smoke_coord.sh
 
 Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256k1 ECDSA DER).
 
+**Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: `tcp` / `quic` (public routable and optional RFC1918 LAN). **`libp2p` `/p2p-circuit` in the register body is rejected (400)** — the co-located relay upserts the circuit when the client’s reservation is accepted, using identify `agent_version` `ghal_bol/<ver>;pk=<device_pubkey_hex>`. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
+
 `GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` or empty `addrs` when no public relay is configured (dev: bore not running).
+
+**Server log (healthy WAN):** `relay reservation ACCEPTED` → `coord presence registered from relay reservation` → optional `peer registered` when client POSTs LAN/public tcp.
 
 ## Troubleshooting
 

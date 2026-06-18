@@ -48,6 +48,51 @@ impl PresenceStore {
         })
     }
 
+    /// WAN-dialable endpoints only: relay `/p2p-circuit` or public routable IPv4 TCP.
+    /// LAN RFC1918, loopback, and CGNAT must never appear in coord lookup (mDNS covers LAN).
+    fn filter_wan_presence_endpoints(endpoints: Vec<PeerEndpoint>) -> Vec<PeerEndpoint> {
+        endpoints
+            .into_iter()
+            .filter(|e| is_wan_dialable_endpoint(e))
+            .collect()
+    }
+
+    /// Client POST /v1/register — merge TCP endpoints but never drop server relay circuits.
+    pub fn merge_client_register(
+        &self,
+        public_key_hex: String,
+        client_endpoints: Vec<PeerEndpoint>,
+        transport_capabilities: Vec<String>,
+        ipv6: Option<String>,
+        ipv4: Option<String>,
+    ) -> Result<PeerRecord, ServerError> {
+        let key = public_key_hex.to_ascii_lowercase();
+        let relay_keep: Vec<PeerEndpoint> = self
+            .get_stored(&key)
+            .ok()
+            .map(|r| {
+                r.endpoints
+                    .into_iter()
+                    .filter(|e| e.scheme == "libp2p" && e.host.contains("/p2p-circuit"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut endpoints: Vec<PeerEndpoint> = client_endpoints
+            .into_iter()
+            .filter(|e| !(e.scheme == "libp2p" && e.host.contains("/p2p-circuit")))
+            .collect();
+        for relay_ep in relay_keep {
+            if !endpoints
+                .iter()
+                .any(|e| e.scheme == "libp2p" && e.host == relay_ep.host)
+            {
+                endpoints.push(relay_ep);
+            }
+        }
+        let endpoints = Self::filter_wan_presence_endpoints(endpoints);
+        self.upsert(key, endpoints, transport_capabilities, ipv6, ipv4)
+    }
+
     pub fn upsert(
         &self,
         public_key_hex: String,
@@ -57,6 +102,7 @@ impl PresenceStore {
         ipv4: Option<String>,
     ) -> Result<PeerRecord, ServerError> {
         let key = public_key_hex.to_ascii_lowercase();
+        let endpoints = Self::filter_wan_presence_endpoints(endpoints);
         let now_ms = unix_ms_now();
         let endpoints_json = serde_json::to_string(&endpoints)
             .map_err(|e| ServerError::Internal(format!("endpoints json: {e}")))?;
@@ -149,15 +195,19 @@ impl PresenceStore {
             Err(ServerError::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),
         };
-        let before = record.endpoints.len();
-        let endpoints: Vec<_> = record
-            .endpoints
-            .into_iter()
-            .filter(|e| !(e.scheme == "libp2p" && e.host.contains("/p2p-circuit")))
-            .collect();
-        if endpoints.len() == before {
+        let had_circuit = record.endpoints.iter().any(|e| {
+            e.scheme == "libp2p" && e.host.contains("/p2p-circuit")
+        });
+        if !had_circuit {
             return Ok(false);
         }
+        let endpoints = Self::filter_wan_presence_endpoints(
+            record
+                .endpoints
+                .into_iter()
+                .filter(|e| !(e.scheme == "libp2p" && e.host.contains("/p2p-circuit")))
+                .collect(),
+        );
         if endpoints.is_empty() {
             let conn = self.conn.lock().map_err(lock_err)?;
             conn.execute("DELETE FROM peers WHERE public_key_hex = ?1", params![key])?;
@@ -262,6 +312,29 @@ fn unix_ms_now() -> u64 {
 
 fn lock_err<T>(_: std::sync::PoisonError<T>) -> ServerError {
     ServerError::Internal("database lock poisoned".into())
+}
+
+fn is_wan_dialable_endpoint(ep: &PeerEndpoint) -> bool {
+    match ep.scheme.as_str() {
+        "libp2p" => ep.host.contains("/p2p-circuit"),
+        "tcp" => is_public_routable_tcp_host(&ep.host) && ep.port != 0,
+        _ => false,
+    }
+}
+
+fn is_public_routable_tcp_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.is_empty() || host.contains(':') {
+        return false;
+    }
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_link_local()
+        && !(ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
 }
 
 impl From<rusqlite::Error> for ServerError {

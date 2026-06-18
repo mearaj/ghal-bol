@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::dm_transcript_store::{
     StoredChatLine, append_if_new, patch_inbound_read_ack_sent_for_thread, patch_outgoing_delivery,
-    resolve_transcript_path, save_thread, thread_view,
+    resolve_transcript_path, save_thread,
 };
 
 fn json_ok(v: Value) -> *mut c_char {

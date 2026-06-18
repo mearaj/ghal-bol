@@ -593,7 +593,7 @@ If sends stay `queued` / `not connected yet`, the break is in the **native chain
 
 After **Create identity** succeeds, `onUnlockedSession` runs `GhalBolBackground.ensureRunning` (same callback as unlock of an existing keystore). That starts the poll loop and async `syncContacts` → `p2p_start` in `:p2p` / daemon. It does **not** wait for opening a chat.
 
-Coord HTTP register in Rust waits until listen addrs (often relay on CGNAT) are publishable — see `coord_runtime.rs`. WAN relay recovery runs when coord URL is configured (`chat_server.rs` coord tick).
+Coord HTTP register in Rust waits until listen addrs are publishable — see `coord_runtime.rs`. **Hybrid model:** clients POST public/LAN `tcp` only; relay server owns `/p2p-circuit` presence on reservation; CGNAT clients poll coord for self-circuit when register payload is empty (`promote_relay_presence_if_visible`). WAN relay recovery runs when coord URL is configured (`chat_server.rs` coord tick). Full detail: [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”, § “LAN ↔ WAN handover”.
 
 ### Dial strategy — WAN first (native — `chat_server.rs`, not Flutter)
 

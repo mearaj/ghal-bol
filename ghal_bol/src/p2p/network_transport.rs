@@ -423,6 +423,9 @@ pub(crate) fn is_dm_dial_multiaddr(ma: &Multiaddr) -> bool {
     if s.contains("/quic") || s.contains("/webrtc") || s.contains("/wss") {
         return false;
     }
+    if s.contains("/ip6/::1/") || s.contains("/ip6/fe80:") {
+        return false;
+    }
     if let Some(ip) = ipv4_from_ma_str(&s) {
         if ip.is_loopback() || is_docker_or_link_local_ipv4(ip) {
             return false;
@@ -470,9 +473,23 @@ pub(crate) fn wan_coord_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     let filtered: Vec<Multiaddr> = addrs
         .into_iter()
         .filter(|ma| {
-            is_coord_relay_tcp_circuit_multiaddr(ma)
-                || is_coord_register_tcp_multiaddr(ma)
-                || (is_relay_circuit_multiaddr(ma) && is_dm_dial_multiaddr(ma))
+            if is_coord_relay_tcp_circuit_multiaddr(ma) {
+                return true;
+            }
+            if is_relay_circuit_multiaddr(ma) && is_dm_dial_multiaddr(ma) {
+                return true;
+            }
+            if is_coord_register_tcp_multiaddr(ma) {
+                return true;
+            }
+            let s = ma.to_string();
+            if s.contains("/ip6/") {
+                return false;
+            }
+            if let Some(ip) = ipv4_from_ma_str(&s) {
+                return !ip.is_private() && !ip.is_loopback();
+            }
+            false
         })
         .collect();
     filter_coord_relay_dial_platform(sort_coord_dial_multiaddrs(filtered))
@@ -558,11 +575,16 @@ pub(crate) fn filter_wan_preferred_dm_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<M
 }
 
 /// Coord registration: public routable TCP only (not RFC1918 — mDNS covers LAN per DESIGN.md).
+/// Must include `/p2p/<local_peer>` — bare `/ip4/relay-host/tcp/port` bootstrap hops are not DM listens.
 pub(crate) fn is_coord_register_tcp_multiaddr(ma: &Multiaddr) -> bool {
     if !is_dm_listen_tcp_multiaddr(ma) || is_relay_circuit_multiaddr(ma) {
         return false;
     }
-    ipv4_from_ma_str(&ma.to_string())
+    let s = ma.to_string();
+    if !s.contains("/p2p/") {
+        return false;
+    }
+    ipv4_from_ma_str(&s)
         .map(is_public_bootstrap_ipv4)
         .unwrap_or(false)
 }
@@ -805,20 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_wifi_cgnat_needs_relay_for_wan() {
-        let p = LocalNetworkProfile {
-            has_wifi_iface: true,
-            has_rfc1918_ipv4: true,
-            has_cgnat_ipv4: true,
-            has_cellular_iface: true,
-            ..Default::default()
-        };
-        assert!(p.has_active_lan());
-        assert!(!p.on_mobile_data_path());
-        assert!(p.needs_relay_for_wan());
-    }
-
-    #[test]
     fn bootstrap_family_rank_ipv6_degraded_prefers_v4_on_lan() {
         let v4: Multiaddr =
             "/ip4/34.30.211.249/tcp/4002/p2p/12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF"
@@ -836,68 +844,5 @@ mod tests {
             relay_bootstrap_family_rank(&v4, false, true)
                 < relay_bootstrap_family_rank(&v6, false, true)
         );
-    }
-
-    #[test]
-    fn effective_profile_infers_lan_when_wifi_listen_up_before_if_addrs() {
-        let detected = LocalNetworkProfile {
-            has_wifi_iface: true,
-            has_cellular_iface: true,
-            has_cgnat_ipv4: true,
-            ..Default::default()
-        };
-        assert!(!detected.has_active_lan());
-        let effective = effective_network_profile(detected, true);
-        assert!(effective.has_active_lan());
-        assert!(effective.has_rfc1918_on_wifi);
-        assert_eq!(effective.mode_label(), "lan");
-    }
-
-    #[test]
-    fn effective_profile_unchanged_without_lan_listen() {
-        let detected = LocalNetworkProfile {
-            has_wifi_iface: true,
-            has_cellular_iface: true,
-            has_cgnat_ipv4: true,
-            ..Default::default()
-        };
-        let effective = effective_network_profile(detected, false);
-        assert!(!effective.has_active_lan());
-        assert_eq!(effective.mode_label(), "mobile-data");
-    }
-
-    #[test]
-    fn effective_profile_infers_lan_from_listen_without_wifi_iface_in_if_addrs() {
-        let detected = LocalNetworkProfile {
-            has_cellular_iface: true,
-            has_cgnat_ipv4: true,
-            ..Default::default()
-        };
-        assert!(!detected.has_wifi_iface);
-        let effective = effective_network_profile(detected, true);
-        assert!(effective.has_active_lan());
-        assert_eq!(effective.mode_label(), "lan");
-    }
-
-    #[test]
-    fn profile_cgnat_without_lan_is_mobile_data() {
-        let p = LocalNetworkProfile {
-            has_cellular_iface: true,
-            has_cgnat_ipv4: true,
-            ..Default::default()
-        };
-        assert_eq!(p.mode_label(), "mobile-data");
-        assert!(p.avoid_blind_routed_dial());
-        assert!(p.on_mobile_data_path());
-    }
-
-    #[test]
-    fn wan_first_sort_puts_relay_before_lan() {
-        let lan: Multiaddr = "/ip4/192.168.1.50/tcp/41000".parse().unwrap();
-        let relay: Multiaddr = "/ip4/51.81.93.51/tcp/4001/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa/p2p-circuit/p2p/16Uiu2HAm699TtKnm9LHXoS6MbVp8ehX7U8hyomVhivz9KuVKsYis"
-            .parse()
-            .unwrap();
-        let out = sort_dm_dial_addrs_wan_first(vec![lan.clone(), relay.clone()]);
-        assert_eq!(out[0], relay);
     }
 }

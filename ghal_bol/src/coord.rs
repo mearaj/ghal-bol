@@ -180,42 +180,25 @@ impl CoordHttpClient {
             .with_headers(self.http.get(&url))
             .send()
             .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("lookup HTTP {}", resp.status()));
+        let status = resp.status();
+        let body = resp.text().map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!("lookup HTTP {}: {}", status, truncate_body(&body)));
         }
-        resp.json().map_err(|e| e.to_string())
+        serde_json::from_str(&body).map_err(|e| {
+            format!(
+                "lookup JSON parse: {e} (body: {})",
+                truncate_body(&body)
+            )
+        })
     }
 }
 
-/// Turn coordination endpoints into dial multiaddr strings (legacy JSON shape).
-pub fn endpoints_to_dial_multiaddr_strings(endpoints: &[CoordEndpoint]) -> Vec<String> {
-    let mut out = Vec::new();
-    for ep in endpoints {
-        let host = ep.host.trim();
-        let port = ep.port;
-        if host.is_empty() {
-            continue;
-        }
-        if ep.scheme == "libp2p" {
-            out.push(host.to_string());
-            continue;
-        }
-        if port == 0 {
-            continue;
-        }
-        let is_ip6 = host.contains(':');
-        let ma = if ep.scheme == "quic" {
-            if is_ip6 {
-                format!("/ip6/{host}/udp/{port}/quic-v1")
-            } else {
-                format!("/ip4/{host}/udp/{port}/quic-v1")
-            }
-        } else if is_ip6 {
-            format!("/ip6/{host}/tcp/{port}")
-        } else {
-            format!("/ip4/{host}/tcp/{port}")
-        };
-        out.push(ma);
+fn truncate_body(body: &str) -> String {
+    let t = body.trim();
+    if t.len() <= 120 {
+        t.to_string()
+    } else {
+        format!("{}…", &t[..120])
     }
-    out
 }

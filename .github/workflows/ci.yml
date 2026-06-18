@@ -35,9 +35,6 @@ jobs:
       - name: Unit tests (ghal_bol_server)
         run: cargo test -p ghal_bol_server
 
-      # dm_two_peer_delivery (two-node libp2p DM) overflows GHA thread stacks; not a product bug.
-      # Run locally when needed: cargo test -p ghal_bol --test dm_two_peer_delivery
-
   flutter:
     name: Flutter analyze & test
     runs-on: ubuntu-latest

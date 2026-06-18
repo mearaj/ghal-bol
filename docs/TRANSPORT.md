@@ -155,6 +155,77 @@ G. Stream + outbox   ConnectionEstablished → /ghal-bol/msg/1.0.0 → resync ou
 | `issue=… ResourceLimitExceeded` | F | Relay server rate limiters — redeploy `ghal_bol_server` |
 | `dm peer connected` + `outbox resync` | G ✓ | Pending transcript outbox drains — no new user send required |
 
+---
+
+## Hybrid coord presence (WAN directory + relay circuit)
+
+**Problem this solves:** CGNAT/mobile peers cannot publish a dialable public TCP port. They still need a **coord phone-book entry** so the other device can `GET /v1/peers/{pk}` and dial a `/p2p-circuit` multiaddr. Posting the circuit from the client was fragile (400 storms, wrong addrs, heartbeat blocking the swarm thread).
+
+**Model (shipping): split who owns what on coord**
+
+| Endpoint type | Who registers it | How |
+|---------------|------------------|-----|
+| **Public TCP** (`tcp://routable-ip:port`) | **Client** | `POST /v1/register` when device has a routable inbound listen (rare on phones; desktop may have one). Multiaddr must end with `/p2p/<local_peer_id>` — never the relay bootstrap hop. |
+| **LAN TCP** (`tcp://192.168.x:port`) | **Never on coord** | Same-subnet peers use mDNS direct TCP only — not in `POST /v1/register`. |
+| **`libp2p` `/p2p-circuit/…`** | **Relay server** | On `reservation ACCEPTED` + identify `agent_version` `ghal_bol/<ver>;pk=<66-hex>`, `ghal_bol_server` upserts the circuit into SQLite (`presence.rs`). Clients **must not** POST `/p2p-circuit` (server returns 400). |
+
+**Client files:** `coord_runtime.rs` (`endpoints_for_coord_register`, `schedule_coord_presence_after_relay`, `promote_relay_presence_if_visible`), `chat_server.rs` (reservation hook, WAN recovery). **Server files:** `relay.rs`, `agent_pk.rs`, `presence.rs`, `routes.rs`.
+
+**CGNAT-only path (phone on mobile data):**
+
+1. Reserve circuit on coord relay (phases B–C).
+2. Server writes `/p2p-circuit` to coord on reservation.
+3. Client has **no** public/LAN tcp for `POST /v1/register` → `schedule_coord_presence_after_relay()` polls `GET /v1/peers/{self}` until circuit visible → sets `coord_registered=true` without blocking libp2p (no synchronous heartbeat `join` on the swarm thread).
+
+**ngrok dev:** coord HTTP client sends `ngrok-skip-browser-warning` + `Accept: application/json` on all requests (`coord.rs`). Lookup errors include response body snippets when JSON parse fails (ngrok HTML interstitial).
+
+**Do not regress:**
+
+- Client `POST` of `libp2p` circuit endpoints (400 + register storm).
+- Registering **relay bootstrap** TCP (`/ip4/<relay-host>/tcp/<relay-port>/p2p/<relay_peer>` or bare relay IP:port) as your own endpoint — not a DM listen socket.
+- Dropping WAN relay circuits on mobile-data because stale `peers_direct_conns` still thinks “direct LAN up” after `left LAN` (`prefer_direct_dm_path_over_relay` requires active LAN + peer on LAN + live direct count).
+- LAN handover upkeep (`kick_lan_dm_rediscovery`) while `wan_recovery_active` or while relay circuit is missing — WAN recovery must re-reserve first.
+- **`lan_handover_upkeep` kicking LAN for WAN-only roster peers** — offline contacts never seen on mDNS must not trigger `link down, no mDNS candidate yet` every 5s (churns ephemeral listen + `notify_stream_reopen`, breaks relay to mobile-data peers). Gate on `peer_on_local_lan`.
+- Re-issuing `listen_on(/p2p-circuit)` on every libp2p “listener closed cleanly” during an in-flight re-reserve (renewal window).
+
+---
+
+## LAN ↔ WAN handover (both directions — verified 2026-06-18)
+
+**Policy:** LAN and WAN are **additive**, not replacements. Wi‑Fi with mDNS covers on-LAN peers; coord + relay covers everyone else (including contacts on mobile data while you are still on Wi‑Fi).
+
+```text
+On LAN (mDNS Discovered)
+  → direct TCP dial / upgrade (additive; do not tear down relay stream mid-message)
+
+Peer leaves LAN (mDNS Expired, last candidate gone)
+  → forget_peer_on_local_lan immediately
+  → coord lookup + relay dial (urgent reconnect; no 404 backoff)
+
+left LAN / mobile-data (full handover)
+  → purge mDNS LAN state; keep coord heartbeats where possible
+  → WAN recovery: bootstrap + reserve + hybrid presence
+  → do NOT drop peer relay link because old direct counter was stale
+
+Wi‑Fi return
+  → kick_lan_dm_rediscovery (fresh ephemeral TCP + mDNS restart)
+  → mDNS Discovered → direct path again (seconds)
+```
+
+**Stream-first unchanged:** one DM stream per contact; `dm_upkeep` owns reconnect; discovery (coord/mDNS) runs when stream is down. Handover code **must not** add parallel competing `swarm.dial` paths — see § “Stream-first symmetric connect”.
+
+**Log signatures of healthy switching:**
+
+| Leg | Healthy signs |
+|-----|----------------|
+| **LAN** | `mdns discovered` → `dm connection established … (direct)` → `chat_ready` / `stream=true` |
+| **WAN** | `reservation accepted` → `relay listen addr` → `coord registered` or `relay presence visible` → `coord_lookup_peer ok — dialing` → `dm connection established … (relay)` |
+| **LAN return after WAN** | `mdns discovered` on new ephemeral port &lt; few s → `conn=true,stream=true` without manual restart |
+
+**Known noisy but OK during handover:** `LAN DM rediscovery — link down, no mDNS candidate yet` briefly before `mdns discovered`; ephemeral TCP port change every handover (by design — see § “Ephemeral LAN TCP ports”).
+
+---
+
 ### libp2p community lessons (relay v2 — applies directly)
 
 | Issue | Lesson for Ghal Bol |
@@ -677,6 +748,8 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 
 | Date | Change |
 |------|--------|
+| 2026-06-18 | **WAN + LAN + switching verified (dev):** hybrid coord presence stable on Linux desktop + Android over ngrok + bore. Fixes: never register relay bootstrap TCP as client endpoint; prune stale published LAN ports; defer LAN upkeep during WAN recovery; relay renewal vs re-reserve race; `prefer_direct_dm_path_over_relay` only on active LAN; coord lookup error bodies. § “Hybrid coord presence”, § “LAN ↔ WAN handover”. |
+| 2026-06-18 | **Relay reservation cancel loop (root WAN flap):** clean `ListenerClosed` during libp2p renewal was calling `kick_relay` → new `listen_on` every ~2s, cancelling the live reservation. Track `ReservationReqAccepted` time; skip re-reserve during renewal window; skip `notify_dm_presence_wake` on renewals; do not call `ensure_wan_relay_circuit` when circuit already listening. Throttle coord re-register when HTTP transport down. |
 | 2026-06-16 | **LAN stability (verified short test):** cold-start LAN and Wi‑Fi off/on on same subnet recover on Linux + Android. Fixes: `linux_network.rs` (sysfs operstate → `notify_network_change`); `platform_wifi_linked`; full `kick_lan` on connectivity notify and in `lan_handover_upkeep` (not soft mDNS-only); `dm_down_on_lan` on 1s poll when streams down. § “LAN stability — cold start and Wi‑Fi toggle”. Removed port ranking / upkeep LAN re-dial (earlier). |
 | 2026-06-16 | **Event-driven async (general rule):** § “Event-driven async — avoid assumed timers”; A/B subscriber model for connect, handover, lookup, reserve, stream, register. AGENTS + DESIGN.md aligned. |
 | 2026-06-16 | **Architecture:** Android Wi‑Fi probe in Rust (`android_network.rs`); `:p2p` Kotlin registers callbacks only; removed Flutter `p2p_notify_network_change`. |

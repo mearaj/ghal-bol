@@ -154,10 +154,11 @@ async fn register(
     let endpoints = expand_libp2p_dns4_circuit_endpoints(req.endpoints);
 
     let store = Arc::clone(&state.app.presence);
-    let peer =
-        tokio::task::spawn_blocking(move || store.upsert(pk, endpoints, caps, req.ipv6, req.ipv4))
-            .await
-            .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
+    let peer = tokio::task::spawn_blocking(move || {
+        store.merge_client_register(pk, endpoints, caps, req.ipv6, req.ipv4)
+    })
+    .await
+    .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
 
     tracing::info!(
         public_key = %peer.public_key_hex,
@@ -311,6 +312,21 @@ fn resolve_libp2p_circuit_dns_to_ip(host: &str) -> Vec<String> {
     v6
 }
 
+fn is_public_routable_tcp_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.is_empty() || host.contains(':') {
+        return false;
+    }
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_link_local()
+        && !(ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
+}
+
 fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {
     if endpoints.is_empty() {
         return Err(ServerError::BadRequest("endpoints empty".into()));
@@ -326,6 +342,13 @@ fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {
                 }
                 if ep.port == 0 {
                     return Err(ServerError::BadRequest("endpoint port required".into()));
+                }
+                if ep.scheme == "tcp" && !is_public_routable_tcp_host(&ep.host) {
+                    return Err(ServerError::BadRequest(
+                        "coord register accepts public routable IPv4 TCP only — \
+                         LAN uses mDNS; CGNAT/mobile WAN uses relay circuit on reservation"
+                            .into(),
+                    ));
                 }
             }
             "libp2p" => {
