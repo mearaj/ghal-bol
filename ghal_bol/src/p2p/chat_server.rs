@@ -5759,9 +5759,8 @@ async fn handle_inbound_stream(
                 if a.kind == MsgKind::AckReceived {
                     session.complete_outbound(&a.ref_id);
                     // Peer confirms they got our `ack_read` for their text (ref_id = their message id).
-                    if session.has_pending_read_ack(&a.ref_id)
-                        || session.has_seen_inbound_id(&a.ref_id)
-                    {
+                    // Only after we actually queued/sent `ack_read` — not merely because we saw inbound id.
+                    if session.has_pending_read_ack(&a.ref_id) {
                         session.mark_read_ack_confirmed(&a.ref_id);
                     }
                 }
@@ -7359,11 +7358,24 @@ fn bootstrap_outbox_from_transcript(session: &SessionState, path: &Path, app_nam
 }
 
 fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId) {
-    let (path, ns) = match (&session.transcript_path, &session.app_namespace) {
-        (Some(p), Some(n)) if !p.trim().is_empty() && !n.trim().is_empty() => {
-            (p.as_str(), n.trim())
-        }
-        _ => return,
+    let ns = session
+        .app_namespace
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let Some(ns) = ns else {
+        return;
+    };
+    let path_buf = session
+        .transcript_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(Path::new)
+        .map(|p| p.to_path_buf())
+        .or_else(|| crate::dm_transcript_store::resolve_transcript_path(ns).ok());
+    let Some(path_buf) = path_buf else {
+        return;
     };
     let Some(dm) = session.dm_peer_for_libp2p(peer) else {
         return;
@@ -7371,16 +7383,21 @@ fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId)
     let Some(signing) = dm.public_key_hex.as_deref() else {
         return;
     };
-    let Ok(rows) = crate::dm_transcript_v1::pending_inbound_read_ack_rows(Path::new(path), ns)
+    let lookup_keys = crate::dm_event_handler::inbound_transcript_lookup_keys(
+        ns,
+        signing,
+        signing,
+        &peer.to_string(),
+    );
+    let key_set: std::collections::HashSet<String> = lookup_keys.into_iter().collect();
+    let Ok(rows) =
+        crate::dm_transcript_v1::pending_inbound_read_ack_rows(path_buf.as_path(), ns)
     else {
         return;
     };
-    let mut keys = std::collections::HashSet::new();
-    keys.insert(peer.to_string());
-    keys.insert(signing.to_string());
     let mut seeded = 0usize;
     for row in rows {
-        if !keys.contains(row.conversation_key.as_str()) {
+        if !key_set.contains(row.conversation_key.as_str()) {
             continue;
         }
         if session.is_read_ack_confirmed(&row.message_id) {
@@ -7390,7 +7407,7 @@ fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId)
         seeded += 1;
     }
     if seeded > 0 {
-        native_log::debug(
+        native_log::info(
             "read_ack",
             format!("seeded {seeded} pending read ack(s) for {peer} from transcript"),
         );

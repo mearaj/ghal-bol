@@ -152,9 +152,9 @@ Before changing ack policy, verify:
 9. **Room-enter backlog:** `ACK_BURST_MAX_ROUNDS = 1` (one pass over the queue); do not use multi-hundred-round bursts.
 10. **Poll emit gate:** `GossipChatEvent::DmMessage` for acks only when outbox/transcript state actually advances (see DESIGN.md § “Read receipts — wire volume”).
 11. **`apply_inbound_ack`:** return `stores_updated = false` when `patch_outgoing_delivery` / `patch_inbound_read_ack_sent` returns unchanged.
-12. **Confirm loop:** inbound `ack_read` → always wire `ack_received` back; inbound `ack_received` with pending read ack → `mark_read_ack_confirmed`.
+12. **Confirm loop:** inbound `ack_read` → always wire `ack_received` back; inbound `ack_received` with pending read ack → `mark_read_ack_confirmed`. **`mark_read_ack_confirmed` only when `has_pending_read_ack`** — never `has_seen_inbound_id` alone (false `read_ack_sent` on disk; § DESIGN.md “Fixed 2026-06-19”).
 13. **Leave drain:** `pending_read_acks` not cleared on leave; `set_app_ack_read_enabled(false)` does not clear foreground — hub `SetForegroundPeer(null)` first.
-14. **Transcript keys:** `load_merged` / patch paths expand peer id + `public_key_hex` so old threads and ack patches match (see DESIGN.md § “Transcript threads”).
+14. **Transcript keys:** `load_merged` / patch paths expand peer id + `public_key_hex` so old threads and ack patches match (see DESIGN.md § “Transcript threads”). Poll replay dedupe and `apply_inbound_ack` use **`inbound_transcript_lookup_keys`** — single-bucket ack apply caused `has_out=false` / stuck delivery tick (§ “Fixed 2026-06-19”).
 15. **Truthful ticks:** UI shows `delivery` / read only after `dm_event_handler` patches transcript; `stores_updated` only on real change.
 
 ### Android background listener

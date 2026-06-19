@@ -108,9 +108,12 @@ pub(crate) fn os_network_snapshot_to_json(
     })
 }
 
-/// Authoritative OS snapshot for UI (daemon RPC / in-process FFI). Refreshes OS truth first.
+/// Authoritative OS snapshot for UI (daemon RPC / in-process FFI).
+/// `:p2p` `network_tick` owns probes — UI RPC reads the cached snapshot only.
 pub(crate) fn network_snapshot_for_ui(source: &str) -> serde_json::Value {
-    refresh_os_network_truth();
+    if source == "ffi" {
+        refresh_os_network_truth();
+    }
     let snap = os_network_snapshot();
     log_ui_network_if_changed(&snap, source);
     os_network_snapshot_to_json(&snap, source)

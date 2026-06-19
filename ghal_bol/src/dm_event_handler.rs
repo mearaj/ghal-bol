@@ -73,23 +73,32 @@ pub fn set_foreground_peer(public_key_hex: Option<String>) {
     let Ok(mut g) = state_mx().lock() else {
         return;
     };
-    if let Some(st) = g.as_mut() {
-        st.foreground_public_key_hex = public_key_hex
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty() && is_valid_public_key_hex(s));
-        flow_log::info(
-            "DM/store",
-            format!(
-                "foreground pk={}",
-                st.foreground_public_key_hex
-                    .as_ref()
-                    .map(|s| short_hex(s))
-                    .unwrap_or_else(|| "(none)".to_string())
-            ),
-        );
-        if let Some(pk) = st.foreground_public_key_hex.as_deref() {
-            let _ = clear_unread(&st.app_namespace, pk);
+    let Some(st) = g.as_mut() else {
+        return;
+    };
+    let prev = st.foreground_public_key_hex.clone();
+    let new_pk = public_key_hex
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty() && is_valid_public_key_hex(s));
+    if let Some(old) = prev.as_deref() {
+        if new_pk.as_deref() != Some(old) {
+            // Leaving or switching rooms — in-room seen mail must not linger as hub unread.
+            let _ = clear_unread(&st.app_namespace, old);
         }
+    }
+    st.foreground_public_key_hex = new_pk;
+    flow_log::info(
+        "DM/store",
+        format!(
+            "foreground pk={}",
+            st.foreground_public_key_hex
+                .as_ref()
+                .map(|s| short_hex(s))
+                .unwrap_or_else(|| "(none)".to_string())
+        ),
+    );
+    if let Some(pk) = st.foreground_public_key_hex.as_deref() {
+        let _ = clear_unread(&st.app_namespace, pk);
     }
 }
 
@@ -238,6 +247,55 @@ pub fn apply_p2p_event_json(ev: &Value) -> bool {
     false
 }
 
+/// Transcript keys for poll replay — pk + peer-id buckets (DESIGN.md § Transcript threads).
+pub(crate) fn inbound_transcript_lookup_keys(
+    ns: &str,
+    conv_key: &str,
+    sender_pk: &str,
+    wire_peer_id: &str,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut push = |k: &str| {
+        let t = k.trim();
+        if !t.is_empty() && !keys.iter().any(|x| x == t) {
+            keys.push(t.to_string());
+        }
+    };
+    push(conv_key);
+    if is_valid_public_key_hex(sender_pk) {
+        push(sender_pk);
+    }
+    if !wire_peer_id.is_empty() {
+        push(wire_peer_id);
+    }
+    if let Ok(Some(c)) = find_by_public_key(ns, sender_pk) {
+        push(&c.conversation_key());
+    }
+    if let Ok(Some(c)) = find_by_peer_id(ns, wire_peer_id) {
+        push(&c.conversation_key());
+        if c.has_public_key() {
+            push(&c.public_key_hex);
+        }
+    }
+    keys
+}
+
+fn inbound_text_already_in_transcript(
+    ns: &str,
+    msg_id: &str,
+    conv_key: &str,
+    sender_pk: &str,
+    wire_peer_id: &str,
+) -> bool {
+    if msg_id.is_empty() {
+        return false;
+    }
+    let keys = inbound_transcript_lookup_keys(ns, conv_key, sender_pk, wire_peer_id);
+    let rows = load_merged(ns, &keys, Some(wire_peer_id)).unwrap_or_default();
+    rows.iter()
+        .any(|r| !r.outgoing && r.message_id.as_deref().map(str::trim) == Some(msg_id))
+}
+
 fn contact_is_blocked(ns: &str, sender_pk: &str, from_key: &str) -> bool {
     if is_valid_public_key_hex(sender_pk) {
         if let Ok(Some(c)) = find_by_public_key(ns, sender_pk) {
@@ -257,6 +315,7 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
         .unwrap_or_default();
     let sender_pk = public_key_hex_from_event(ev);
     let from_key = conversation_key_from_event(ev);
+    let wire_peer_id = ev.get("from").and_then(|v| v.as_str()).unwrap_or("").trim();
     let text = ev.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let msg_id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("").trim();
     if text.is_empty() || from_key.is_empty() {
@@ -273,7 +332,7 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
         );
         return false;
     }
-    if contact_is_blocked(ns, &sender_pk, &from_key) {
+    if contact_is_blocked(ns, &sender_pk, wire_peer_id) {
         flow_log::info(
             "DM/store",
             format!(
@@ -310,13 +369,11 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
         });
 
     // Wire persists on receive; poll replays the same event — bump unread/append only once per id.
-    let poll_replay = if !msg_id.is_empty() {
-        let rows = load_merged(ns, std::slice::from_ref(&conv_key), None).unwrap_or_default();
-        rows.iter()
-            .any(|r| !r.outgoing && r.message_id.as_deref().map(str::trim) == Some(msg_id))
-    } else {
-        false
-    };
+    let poll_replay =
+        inbound_text_already_in_transcript(ns, msg_id, &conv_key, &sender_pk, wire_peer_id);
+    if poll_replay {
+        skip_unread = true;
+    }
     if poll_replay {
         flow_log::info(
             "DM/store",
@@ -367,11 +424,16 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
         .filter(|&t| t > 0)
         .unwrap_or_else(now_ms);
     let local_id = format!("bg-{created_at_ms}-{}", from_key.len());
+    let line_from = if !wire_peer_id.is_empty() {
+        wire_peer_id.to_string()
+    } else {
+        from_key.clone()
+    };
     let line = StoredChatLine {
         local_id,
         text: text.to_string(),
         outgoing: false,
-        from: Some(from_key.clone()),
+        from: Some(line_from.clone()),
         message_id: ev.get("id").and_then(|v| v.as_str()).map(str::to_string),
         delivery: "pending".to_string(),
         created_at_ms: Some(created_at_ms),
@@ -385,7 +447,7 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
             flow_log::info(
                 "DM/store",
                 format!(
-                    "transcript append inbound id={msg_id} conv={conv_key} from={from_key} len={}",
+                    "transcript append inbound id={msg_id} conv={conv_key} from={line_from} len={}",
                     text.len()
                 ),
             );
@@ -445,7 +507,9 @@ fn apply_inbound_ack(ns: &str, ev: &Value, msg_kind: &str) -> bool {
     }
 
     let conv = contact.conversation_key();
-    let rows = load_merged(ns, &[conv.clone()], None).unwrap_or_default();
+    let wire_peer_id = ev.get("from").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let lookup_keys = inbound_transcript_lookup_keys(ns, &conv, &sender_pk, wire_peer_id);
+    let rows = load_merged(ns, &lookup_keys, Some(wire_peer_id)).unwrap_or_default();
     let has_outgoing = rows
         .iter()
         .any(|r| r.outgoing && r.message_id.as_deref() == Some(ref_id));
@@ -585,6 +649,37 @@ mod tests {
             "peer_id": "12D3KooWOnlyWireId"
         });
         assert!(conversation_key_from_event(&ev).is_empty());
+    }
+
+    #[test]
+    fn apply_inbound_text_poll_replay_peer_id_bucket_no_double_unread() {
+        const NS: &str = "test.unread.peer_id_bucket";
+        let _store = isolated_store(NS);
+        const PEER_ID: &str = "16Uiu2HAmTestPeerIdBucketReplay";
+        let line = StoredChatLine {
+            local_id: "bg-1".to_string(),
+            text: "hello".to_string(),
+            outgoing: false,
+            from: Some(PEER_ID.to_string()),
+            message_id: Some("peer-bucket-1".to_string()),
+            delivery: "pending".to_string(),
+            created_at_ms: Some(1000),
+            read_ack_sent: false,
+        };
+        append_if_new(NS, PEER_ID, line).unwrap();
+        let ev = json!({
+            "kind": "dm_message",
+            "msg_kind": "text",
+            "id": "peer-bucket-1",
+            "from": PEER_ID,
+            "text": "hello",
+            "sender_public_key_hex": PK_A,
+            "created_at_ms": 1000
+        });
+        assert!(!apply_p2p_event_json(&ev));
+        let c = find_by_public_key(NS, PK_A).unwrap().unwrap();
+        assert_eq!(c.unread_count, 0);
+        clear_p2p_handler_context();
     }
 
     #[test]

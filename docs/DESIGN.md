@@ -349,6 +349,44 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Canonical rule:** P2P session sync must stay **low volume**. Linux read ticks were fixed **2026-06-15** with the **`inactive`/Linux** rule above — **not** the reverted patch. If read gate drifts again, use debounced **`GhalBolUiSession.nudge()`** + verify `setVisible(true)` on room open; **never** per-frame `build()` loops, **`lastApplySucceeded`**, or duplicate hub+bridge reapply.
 
+#### Fixed 2026-06-19 — delivery/read ticks (confirm loop + transcript keys)
+
+**Symptoms (Android ↔ Linux desktop, same LAN):**
+
+| Symptom | What users saw |
+|---------|----------------|
+| Sender stuck on **single tick** | Android sent text; desktop got it (`ack_received` on wire) but poll never patched `delivery=delivered` — `inbound ack no matching row: kind=ack_received has_out=false` |
+| **False read** on desktop | Hub showed thread as read / zero unread while the chat room was **closed**; or thousands of inbound rows had `read_ack_sent: true` on disk though the peer never received `ack_read` (no blue tick on their side) |
+| **Unread drift** | Opening a room cleared unread; leaving or switching rooms left stale unread on the old contact |
+| **Ack storm** (bad intermediate fix) | `seeded 1320 pending read ack(s)`, hundreds of `ack_read` per second, `poll drain saturated batch=32 totalEvents=196` — P2P connect degraded |
+
+**Root causes (native, not Flutter):**
+
+1. **Confirm loop treated “saw inbound text” as “sent `ack_read`”.** In `chat_server.rs`, inbound `ack_received` called `mark_read_ack_confirmed` when `has_pending_read_ack(ref_id) **or** has_seen_inbound_id(ref_id)`. Every accepted inbound text id enters the seen set. A peer’s unrelated `ack_received` (e.g. confirming *their* delivery ack) could flip **`read_ack_sent=true`** on disk **without** this device ever queueing `ack_read` — violating § “Read receipts — wire volume, confirm loop” (`read_ack_sent` only after **our** `ack_read` and peer confirm).
+
+2. **Poll and ack patches used a single conversation bucket.** `apply_inbound_ack` and poll-replay dedupe called `load_merged` with one key (`public_key_hex` from the event) while older lines lived under the **libp2p peer id** bucket (or vice versa). Outbound acks did not patch ticks; poll replay re-appended unread for the same `message_id`.
+
+3. **Foreground leave did not clear hub unread** for the room being left — only entering a room called `clear_unread`.
+
+**Fix (shipped — Rust only):**
+
+| Area | Change |
+|------|--------|
+| Confirm loop | `mark_read_ack_confirmed` only when `has_pending_read_ack(ref_id)` — **removed** `has_seen_inbound_id` from that branch (`chat_server.rs`) |
+| Merged keys | `inbound_transcript_lookup_keys` in `dm_event_handler.rs` — pk + wire peer id + contact buckets; used by poll-replay dedupe, `apply_inbound_ack`, and `seed_read_acks_for_peer_from_transcript` |
+| Hub unread | `set_foreground_peer`: `clear_unread` on **leave/switch** (old pk) and on **enter** (new pk) |
+| Room-enter seed | Still `pending_inbound_read_ack_rows` only (`read_ack_sent: false` on disk); seed keys expanded via `inbound_transcript_lookup_keys` — **not** “all inbound rows” |
+
+**Attempted fixes that were reverted (do not reintroduce):**
+
+- Seeding **every** unconfirmed inbound row on room enter (ignoring `read_ack_sent`) → wire/poll ack storm.
+- Extra hub/bridge `p2p_sync_ui_session` / `nudge` / per-open session reapply — fought P2P startup (see § “FORBIDDEN — reverted 2026-06-15”).
+- Gating contact `unread_count` on the native read gate instead of `foreground_public_key_hex` — hid real unread when the room was closed.
+
+**Legacy transcript note:** Rows written while the loose confirm loop was active may still show `read_ack_sent: true` without the peer ever getting a blue tick. **New** messages after this fix follow the normative confirm loop. Repairing old rows is optional data hygiene, not required for new chat.
+
+**Code:** `ghal_bol/src/p2p/chat_server.rs` (`handle_inbound_stream`, `seed_read_acks_for_peer_from_transcript`), `ghal_bol/src/dm_event_handler.rs` (`inbound_transcript_lookup_keys`, `set_foreground_peer`, `apply_inbound_ack`). Tests: `apply_inbound_text_poll_replay_peer_id_bucket_no_double_unread`.
+
 ### Regression symptoms (treat as bugs)
 
 | Log / behaviour | Likely cause |
@@ -363,6 +401,9 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | Android/iOS: chat dead, `stream_ready_count=0`, many `room closed` + `leave drain` at hub open | **Regression:** forbidden session-sync patch or hub foreground storm — check log for burst `sync_ui_session` / `set_foreground_peer (none)` before first `chat_ready`. |
 | App “empty” after session churn, `conv=solo rows=0`, files still on disk under `ghal_bol/` | UI/session desync — not directory wipe. Do not create new identity; fix foreground sync. See forbidden patch table above. |
 | Single tick while peer “read” it | Recipient never sent `ack_read` (room/gate closed on **their** device) — check their logs for `ack_read sent`, not sender UI |
+| `inbound ack no matching row` / `has_out=false` on `ack_received` | Ack patch used single transcript bucket — fix merged keys (`inbound_transcript_lookup_keys`). § “Fixed 2026-06-19”. |
+| Desktop `read_ack_sent=true` on mass inbound, peer no blue tick | Loose confirm loop (`has_seen_inbound_id` in `mark_read_ack_confirmed`) — § “Fixed 2026-06-19”. |
+| `seeded N pending read ack(s)` with N ≫ room backlog (hundreds+) | Room-enter seed ignoring `read_ack_sent` or seeding all inbound — revert to `pending_inbound_read_ack_rows` only. |
 
 **Do not fix floods by:** larger poll batches, Dart-side ack filtering alone, or “dedupe” without fixing confirm + retry cadence in Rust.
 
@@ -376,6 +417,8 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 - Showing ticks from Flutter logic without a transcript/poll patch (fake delivered/read).
 - Loading chat with a **single** conversation key when history spans peer id + public key buckets.
 - Setting `read_ack_sent` on enter without sender `ack_received` confirm.
+- **`mark_read_ack_confirmed` on `has_seen_inbound_id`** — receiving inbound text must not count as having sent `ack_read`; confirm only when `has_pending_read_ack` (§ “Fixed 2026-06-19”).
+- **Room-enter seed of all inbound rows** or seed without `read_ack_sent: false` filter — causes ack/poll storms.
 - Sender emitting `ack_request`.
 - Mutual-QR / “both sides must scan” requirement.
 - **High-volume `ack_read` retry** (burst rounds ≫ 1, upkeep every tick without `last_send_ms`, or 128×512 style bursts).
@@ -500,8 +543,8 @@ Historically, some threads were stored under the **public key** before PeerId wa
 | Operation | Key rule |
 |-----------|----------|
 | **Write** (append/save) | Canonical key = `SavedContact.conversationKey` (peer id preferred). |
-| **Read** (chat UI, ack patch, seed on enter/leave) | **`load_merged`** expands to **peer id + public key** for the same contact (`expand_conversation_keys` in Rust; `allConversationKeys` in Flutter). |
-| **Patch delivery / read_ack_sent** | Try all expanded keys so old rows under `public_key_hex` still get ticks and confirms. |
+| **Read** (chat UI, ack patch, seed on enter/leave) | **`load_merged`** expands to **peer id + public key** for the same contact (`expand_conversation_keys` in Rust; `allConversationKeys` in Flutter). Poll replay and inbound ack apply use **`inbound_transcript_lookup_keys`** (`dm_event_handler.rs`) — same rule, wire `from` peer id included. |
+| **Patch delivery / read_ack_sent** | Try all expanded keys so old rows under `public_key_hex` still get ticks and confirms. **`apply_inbound_ack`** must use merged keys — single-bucket patch caused stuck single-tick (§ “Fixed 2026-06-19”). |
 
 **Symptom if broken:** hub preview shows `last_message_preview` (contacts) but the chat pane is empty, or outbound ticks never update for old messages — usually a **key mismatch**, not missing P2P.
 
