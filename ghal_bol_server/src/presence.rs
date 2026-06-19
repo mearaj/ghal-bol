@@ -2,6 +2,7 @@
 
 use crate::db;
 use crate::error::{ApiResult, ServerError};
+use crate::endpoint_expand;
 use crate::relay_live::RelayLiveRegistry;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -175,7 +176,10 @@ impl PresenceStore {
         if n == 0 {
             return Err(ServerError::NotFound("peer not registered".into()));
         }
-        self.fetch_one(&conn, &key, 0)
+        match self.fetch_one(&conn, &key, 0) {
+            Ok(r) => self.prepare_peer_lookup(r),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get(&self, public_key_hex: &str, ttl: Duration) -> ApiResult<PeerRecord> {
@@ -183,16 +187,7 @@ impl PresenceStore {
         let cutoff = heartbeat_cutoff_ms(ttl);
         let conn = self.conn.lock().map_err(lock_err)?;
         match self.fetch_one(&conn, &key, cutoff) {
-            Ok(mut r) => {
-                r.endpoints = self.filter_wan_presence_endpoints(r.endpoints);
-                self.relay_live.apply_live_relay_gate(&mut r);
-                if r.endpoints.is_empty() {
-                    return Err(ServerError::NotFound(
-                        "peer not registered or presence expired".into(),
-                    ));
-                }
-                Ok(r)
-            }
+            Ok(r) => self.prepare_peer_lookup(r),
             Err(ServerError::NotFound(_)) => Err(ServerError::NotFound(
                 "peer not registered or presence expired".into(),
             )),
@@ -224,6 +219,7 @@ impl PresenceStore {
             host: circuit_ma,
             port: 0,
         });
+        let endpoints = endpoint_expand::expand_libp2p_circuit_endpoints(endpoints);
         let caps = vec!["tcp".into(), "sync-v1".into()];
         self.upsert(key, endpoints, caps, None, None)
     }
@@ -277,14 +273,25 @@ impl PresenceStore {
         let rows = stmt.query_map([cutoff as i64], row_to_peer_record)?;
         let mut out = Vec::new();
         for row in rows {
-            let mut r = row?;
-            r.endpoints = self.filter_wan_presence_endpoints(r.endpoints);
-            self.relay_live.apply_live_relay_gate(&mut r);
-            if !r.endpoints.is_empty() {
+            let r = row?;
+            if let Ok(r) = self.prepare_peer_lookup(r) {
                 out.push(r);
             }
         }
         Ok(out)
+    }
+
+    /// WAN-filter, expand DNS circuits for dialers, apply live relay gate.
+    fn prepare_peer_lookup(&self, mut r: PeerRecord) -> ApiResult<PeerRecord> {
+        r.endpoints = self.filter_wan_presence_endpoints(r.endpoints);
+        r.endpoints = endpoint_expand::expand_libp2p_circuit_endpoints(r.endpoints);
+        self.relay_live.apply_live_relay_gate(&mut r);
+        if r.endpoints.is_empty() {
+            return Err(ServerError::NotFound(
+                "peer not registered or presence expired".into(),
+            ));
+        }
+        Ok(r)
     }
 
     pub fn purge_expired(&self, ttl: Duration) -> Result<u64, ServerError> {
@@ -472,6 +479,25 @@ mod tests {
                 .iter()
                 .any(|e| e.scheme == "tcp" && e.host == "159.223.110.159"),
             "bootstrap tcp must not be stored"
+        );
+    }
+
+    #[test]
+    fn relay_circuit_upsert_expands_dns6() {
+        let store = PresenceStore::open_in_memory().expect("db");
+        let pk = "bb".repeat(32);
+        let dns6 = "/dns6/coord.ghalbol.com/tcp/4002/p2p/12D3KooW/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk";
+        store
+            .upsert_relay_circuit(&pk, dns6.into())
+            .expect("upsert");
+        let stored = store.get_stored(&pk).expect("stored");
+        assert!(
+            stored
+                .endpoints
+                .iter()
+                .any(|e| e.host.contains("/dns4/coord.ghalbol.com/tcp/4002")),
+            "stored endpoints: {:?}",
+            stored.endpoints.iter().map(|e| &e.host).collect::<Vec<_>>()
         );
     }
 }

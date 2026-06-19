@@ -8,7 +8,6 @@ use axum::{Json, Router};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -152,7 +151,7 @@ async fn register(
     };
 
     validate_endpoints(&req.endpoints, &state.app.presence.relay_bootstrap_tcp_snapshot())?;
-    let endpoints = expand_libp2p_dns4_circuit_endpoints(req.endpoints);
+    let endpoints = crate::endpoint_expand::expand_libp2p_circuit_endpoints(req.endpoints);
 
     let store = Arc::clone(&state.app.presence);
     let peer = tokio::task::spawn_blocking(move || {
@@ -218,99 +217,6 @@ async fn list_peers(State(state): State<Arc<RouteState>>) -> ApiResult<Json<Peer
         .await
         .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
     Ok(Json(PeerListResponse { peers }))
-}
-
-/// Duplicate `/dns4|/dns6|/dns/…/p2p-circuit` libp2p endpoints with resolved `/ip6/…` **and**
-/// `/ip4/…` aliases so TCP-only clients (Android has no libp2p DNS transport) can dial the relay
-/// circuit by concrete IP. Both families are emitted — IPv6 first (preferred when reachable) — so a
-/// dual-stack or IPv6-only dialer can use the IPv6 alias and an IPv4 dialer the IPv4 one.
-fn expand_libp2p_dns4_circuit_endpoints(endpoints: Vec<PeerEndpoint>) -> Vec<PeerEndpoint> {
-    let mut out = endpoints;
-    let mut extra: Vec<PeerEndpoint> = Vec::new();
-    for ep in &out {
-        if ep.scheme != "libp2p" || !ep.host.contains("/p2p-circuit") {
-            continue;
-        }
-        for host in resolve_libp2p_circuit_dns_to_ip(&ep.host) {
-            if !out.iter().any(|e| e.scheme == "libp2p" && e.host == host)
-                && !extra.iter().any(|e| e.host == host)
-            {
-                extra.push(PeerEndpoint {
-                    scheme: "libp2p".into(),
-                    host,
-                    port: 0,
-                });
-            }
-        }
-    }
-    out.extend(extra);
-    out
-}
-
-/// Resolve the `/dns*` relay hop of a circuit multiaddr into concrete `/ip6/…` and `/ip4/…`
-/// circuit multiaddrs (IPv6 first). Empty when the host is already a literal IP or unresolvable.
-fn resolve_libp2p_circuit_dns_to_ip(host: &str) -> Vec<String> {
-    if host.contains("/ip4/") || host.contains("/ip6/") {
-        return Vec::new();
-    }
-    let segs: Vec<&str> = host.split('/').filter(|s| !s.is_empty()).collect();
-    let mut dns_host: Option<&str> = None;
-    let mut port: Option<u16> = None;
-    let mut p2p_idx: Option<usize> = None;
-    let mut i = 0;
-    while i < segs.len() {
-        match segs[i] {
-            "dns4" | "dns6" | "dns" | "dnsaddr" => {
-                if i + 1 < segs.len() {
-                    dns_host = Some(segs[i + 1]);
-                    i += 2;
-                    continue;
-                }
-            }
-            "tcp" => {
-                if i + 1 < segs.len() {
-                    port = segs[i + 1].parse().ok();
-                    i += 2;
-                    continue;
-                }
-            }
-            "p2p" => {
-                p2p_idx = Some(i);
-                break;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let (Some(dns), Some(p), Some(p2p_start)) = (dns_host, port, p2p_idx) else {
-        return Vec::new();
-    };
-    let suffix = format!("/{}", segs[p2p_start..].join("/"));
-    let Ok(resolved) = format!("{dns}:{p}").to_socket_addrs() else {
-        return Vec::new();
-    };
-    let mut v6 = Vec::new();
-    let mut v4 = Vec::new();
-    for sa in resolved {
-        match sa.ip() {
-            std::net::IpAddr::V6(ip) => {
-                let a = format!("/ip6/{ip}/tcp/{p}{suffix}");
-                if !v6.contains(&a) {
-                    v6.push(a);
-                }
-            }
-            std::net::IpAddr::V4(ip) if !ip.is_private() && !ip.is_loopback() => {
-                let a = format!("/ip4/{ip}/tcp/{p}{suffix}");
-                if !v4.contains(&a) {
-                    v4.push(a);
-                }
-            }
-            std::net::IpAddr::V4(_) => {}
-        }
-    }
-    // IPv6 first (preferred), then IPv4.
-    v6.extend(v4);
-    v6
 }
 
 fn is_public_routable_tcp_host(host: &str) -> bool {

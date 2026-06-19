@@ -6,6 +6,7 @@ mod agent_pk;
 mod auth;
 mod config;
 mod db;
+mod endpoint_expand;
 mod error;
 mod presence;
 mod relay_live;

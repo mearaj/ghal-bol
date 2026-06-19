@@ -19,6 +19,7 @@ if [[ "${LIVE_ONLY:-0}" != "1" ]]; then
 fi
 
 echo "== build server + coord_client =="
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/target}"
 cargo build --release -p ghal_bol_server
 
 COORD_URL="${COORD_URL:-}"
@@ -30,7 +31,7 @@ if [[ -z "${COORD_URL}" ]]; then
   exit 0
 fi
 
-CLIENT="${WORKSPACE_ROOT}/target/release/coord_client"
+CLIENT="${CARGO_TARGET_DIR}/release/coord_client"
 # -k must come before <base_url> (coord_client parse order).
 CLIENT_ARGS=()
 if [[ "${COORD_INSECURE_TLS}" == "1" ]]; then

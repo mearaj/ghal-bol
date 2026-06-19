@@ -171,9 +171,9 @@ async fn register_peer(
             "public_key_hex": pk,
             "nonce_hex": nonce_hex,
             "signature_hex": hex::encode(sig.serialize_der()),
-            "endpoints": [{ "scheme": "quic", "host": quic_host, "port": quic_port }],
+            "endpoints": [{ "scheme": "tcp", "host": quic_host, "port": quic_port }],
             "ipv4": quic_host,
-            "transport_capabilities": ["quic", "sync-v1"]
+            "transport_capabilities": ["tcp", "sync-v1"]
         }))
         .send()
         .await
@@ -256,14 +256,14 @@ async fn run_demo_two_peers(client: &reqwest::Client, base: &str) -> u8 {
     let a = peer_from_seed(0x0a);
     let b = peer_from_seed(0x0b);
     println!("Registering peer A …");
-    if register_peer(client, base, &a, "10.0.0.1", 4433)
+    if register_peer(client, base, &a, "203.0.113.50", 4433)
         .await
         .is_err()
     {
         return 1;
     }
     println!("Registering peer B …");
-    if register_peer(client, base, &b, "10.0.0.2", 4444)
+    if register_peer(client, base, &b, "203.0.113.51", 4444)
         .await
         .is_err()
     {

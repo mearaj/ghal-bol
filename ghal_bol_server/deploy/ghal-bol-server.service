@@ -5,7 +5,7 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now ghal-bol-server
 #
-# Edit User, ExecStart, and GHAL_BOL_SERVER_DB before enabling.
+# Edit User, ExecStart, GHAL_BOL_SERVER_DB (replace REPLACE_VM_USER) before enabling.
 
 [Unit]
 Description=Ghal Bol coordination server
@@ -14,12 +14,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=mearajbhagad
-Group=mearajbhagad
-WorkingDirectory=/home/mearajbhagad
-ExecStart=/home/mearajbhagad/ghal_bol_server
+User=REPLACE_VM_USER
+Group=REPLACE_VM_USER
+WorkingDirectory=/home/REPLACE_VM_USER
+ExecStart=/home/REPLACE_VM_USER/ghal_bol_server
 Environment=GHAL_BOL_SERVER_LISTEN=127.0.0.1:8765
-Environment=GHAL_BOL_SERVER_DB=/home/mearajbhagad/.local/share/com.ghalbol/ghalbol_server
+Environment=GHAL_BOL_SERVER_DB=/home/REPLACE_VM_USER/.local/share/com.ghalbol/ghalbol_server
 Environment=RUST_LOG=info
 # libp2p Circuit Relay v2 (NAT traversal). HTTP stays on loopback behind nginx, but the relay
 # is a RAW TCP port that clients dial directly — open it in the cloud firewall (e.g. GCP ingress

@@ -128,7 +128,7 @@ Clients **never** persist relay bootstrap addrs to disk. Policy: [TRANSPORT.md](
 ```
 Starting bore: local 4002 -> bore.pub ...
 bore relay endpoint  : bore.pub:<port>
-advertising via /v1/relay: /ip4/159.223.110.159/tcp/<port>
+advertising via /v1/relay: /ip4/<bore-host>/tcp/<port>
 relay v2 node started ... advertised=["/ip4/…/tcp/<port>"]
 peer registered public_key=… endpoints=1    ← must appear after apps unlock
 ```
@@ -147,6 +147,8 @@ See [TRANSPORT.md](../../docs/TRANSPORT.md) § “WAN prerequisites” and [COOR
 
 ## Production (Google Cloud — `coord.ghalbol.com`)
 
+**Repeat deploys from laptop:** [GCP.md](GCP.md) — frozen project/zone/instance, `gcloud scp`/`ssh`, smoke checklist.
+
 Existing VM layout (unchanged by local bore work):
 
 ```text
@@ -160,7 +162,13 @@ Phones  →  coord.ghalbol.com:4002 (TCP)  ────────────�
 
 ### Deploy / update binary on the VM
 
-On the VM (or build elsewhere and copy the binary):
+From your laptop (after `gcp.env.local` — see [GCP.md](GCP.md)):
+
+```bash
+./ghal_bol_server/deploy/deploy_server.sh
+```
+
+Manual on-VM restart only:
 
 ```bash
 cargo build --release -p ghal_bol_server

@@ -10,6 +10,7 @@
 .env
 .env.local
 .env.*.local
+gcp.env.local
 # Flutter release coord config — local only; never commit
 ghal_bol_ui/env/.env.production
 
