@@ -91,4 +91,16 @@ abstract final class GhalBolDaemon {
     );
     return r["ok"] == true && r["unlocked"] == true;
   }
+
+  /// OS network truth from `:p2p` / `ghal_bol_daemon` (`android_network` / `linux_network`).
+  static Future<Map<String, dynamic>?> networkSnapshot() async {
+    if (!isSupported) return null;
+    if (!await GhalBolDaemonClient.probeDaemon()) return null;
+    final r = await GhalBolDaemonClient.instance.callState(
+      "network_snapshot",
+      ensureDaemon: false,
+    );
+    if (r["ok"] != true) return null;
+    return r;
+  }
 }

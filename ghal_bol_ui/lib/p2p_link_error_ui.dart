@@ -1,3 +1,5 @@
+import "package:ghal_bol_ui/network_helper.dart";
+
 /// Short user-facing P2P link errors. Full native text stays in [AppLog] only.
 const int kMaxUserP2pErrorLen = 72;
 
@@ -70,4 +72,13 @@ String? shortUserP2pError(String raw) {
     return "${s.substring(0, kMaxUserP2pErrorLen - 1)}…";
   }
   return s;
+}
+
+/// Prefer OS offline hint when we have a live probe and a non-transient P2P error.
+String? networkAwareUserP2pError(String raw) {
+  final snap = NetworkHelper.instance.snapshot.value;
+  if (snap.hasLiveSnapshot && snap.appearsOffline) {
+    return "No internet connection.";
+  }
+  return shortUserP2pError(raw);
 }

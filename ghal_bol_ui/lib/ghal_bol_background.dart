@@ -7,6 +7,7 @@ import "package:ghal_bol_ui/ghal_bol_daemon.dart";
 import "package:ghal_bol_ui/ghal_bol_listener_foreground.dart";
 import "package:ghal_bol_ui/ghal_bol_p2p.dart";
 import "package:ghal_bol_ui/ghal_bol_ui_session.dart";
+import "package:ghal_bol_ui/network_helper.dart";
 import "package:ghal_bol_ui/p2p_event_bridge.dart";
 import "package:ghal_bol_ui/p2p_network_coordinator.dart";
 import "package:ghal_bol_ui/session_credentials.dart";
@@ -46,6 +47,7 @@ class GhalBolBackground {
   static Future<void> stopForLogout() async {
     SessionFlowLog.step("logout_stop");
     SessionCredentials.clear();
+    await NetworkHelper.instance.stop();
     await P2pEventBridge.instance.stop();
     P2pNetworkCoordinator.invalidate();
     await ghalBolListenerForegroundStop();

@@ -1475,10 +1475,20 @@ impl SessionState {
     }
 
     fn take_relay_circuit_pending_peer(&self, peer: PeerId) -> bool {
-        self.dm_relay_circuit_pending
-            .read()
-            .ok()
-            .is_some_and(|s| s.contains(&peer))
+        let Ok(mut s) = self.dm_relay_circuit_pending.write() else {
+            return false;
+        };
+        s.remove(&peer)
+    }
+
+    fn peers_with_circuit_dial_in_flight(&self, now_ms: i64) -> Vec<PeerId> {
+        let Ok(m) = self.dm_circuit_dial_in_flight_ms.read() else {
+            return Vec::new();
+        };
+        m.iter()
+            .filter(|(_, start)| now_ms.saturating_sub(**start) < CIRCUIT_DIAL_IN_FLIGHT_MS)
+            .map(|(peer, _)| *peer)
+            .collect()
     }
 
     fn clear_relay_circuit_pending_peer(&self, peer: PeerId) {
@@ -8168,6 +8178,13 @@ fn apply_wan_coord_effects(
     }
 }
 
+fn is_bare_p2p_peer_multiaddr(ma: &Multiaddr, peer: PeerId) -> bool {
+    is_bare_peer_multiaddr(ma)
+        && ma
+            .iter()
+            .any(|p| matches!(p, Protocol::P2p(id) if id == peer))
+}
+
 fn dm_connection_is_relay(
     session: &SessionState,
     peer: PeerId,
@@ -8180,10 +8197,18 @@ fn dm_connection_is_relay(
         return false;
     }
     if super::network_transport::is_relay_circuit_multiaddr(remote) {
+        session.clear_relay_circuit_pending_peer(peer);
         return true;
     }
-    // Relay v2 inbound circuits often report as `/p2p/<peer>` without `/p2p-circuit` in the endpoint.
-    session.take_relay_circuit_pending_peer(peer)
+    // Relay v2 circuits often report as `/p2p/<peer>` without `/p2p-circuit` (#5741).
+    if session.take_relay_circuit_pending_peer(peer) {
+        return true;
+    }
+    // Real LAN direct always carries `/ip4/…/tcp/…`; bare `/p2p/<peer>` is relay misreport.
+    if is_bare_p2p_peer_multiaddr(remote, peer) && crate::coord_runtime::coord_is_configured() {
+        return true;
+    }
+    false
 }
 
 fn reconcile_lan_dial_in_flight(
@@ -9259,10 +9284,10 @@ fn handle_swarm_event(
                     session.clear_peer_coord_absent_state(&pk);
                     session.clear_dm_reconnect_urgent(&pk);
                 }
-                session.clear_circuit_dial_in_flight(peer_id);
                 session.clear_lan_dial_in_flight(peer_id);
                 session.clear_relay_circuit_dial_backoff(peer_id);
                 let is_relay = dm_connection_is_relay(session, peer_id, &endpoint);
+                session.clear_circuit_dial_in_flight(peer_id);
                 if is_relay {
                     session.note_dm_relay_connection(peer_id, connection_id);
                 } else {
@@ -9525,6 +9550,13 @@ fn handle_swarm_event(
                     "relay",
                     format!("relay-client: outbound circuit via {relay_peer_id}"),
                 );
+                // ConnectionEstablished may follow with bare `/p2p/<dest>` (#5741) — refresh pending.
+                let now_ms = chrono_now_ms();
+                for dest in session.peers_with_circuit_dial_in_flight(now_ms) {
+                    if session.is_dm_contact(dest) {
+                        session.note_relay_circuit_pending_peer(dest);
+                    }
+                }
             }
             other => native_log::info("relay", format!("relay-client: {other:?}")),
         },

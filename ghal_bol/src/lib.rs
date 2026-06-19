@@ -62,6 +62,8 @@ mod keystore_v1;
 mod linux_network;
 mod msg_v1;
 #[cfg(not(target_arch = "wasm32"))]
+mod network_ffi;
+#[cfg(not(target_arch = "wasm32"))]
 mod p2p_ffi;
 #[cfg(not(target_arch = "wasm32"))]
 mod p2p_runtime;

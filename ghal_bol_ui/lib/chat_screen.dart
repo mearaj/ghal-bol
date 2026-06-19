@@ -1648,7 +1648,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (kind == "send_failed") {
       final id = ev["message_id"]?.toString() ?? "";
       final err = ev["error"]?.toString() ?? "send failed";
-      final hint = shortUserP2pError(err);
+      final hint = networkAwareUserP2pError(err);
       AppLog.instance.w("Chat", "send_failed id=$id err=$err ui=${hint ?? "(hidden)"}");
       setState(() {
         _chatError = hint;
@@ -1677,7 +1677,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         AppLog.instance.flow("Chat", "dial_failed (transient): $err");
         return;
       }
-      final hint = shortUserP2pError(err);
+      final hint = networkAwareUserP2pError(err);
       if (hint == null) return;
       AppLog.instance.w("Chat", "dial_failed: $err");
       setState(() => _chatError = hint);
@@ -1759,7 +1759,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       AppLog.instance.w("Chat", "send_text_dm failed: ${r["error"]}");
       final err = r["error"]?.toString() ?? "send failed";
       final mid = line.messageId?.trim() ?? "";
-      final hint = shortUserP2pError(err);
+      final hint = networkAwareUserP2pError(err);
       AppLog.instance.w("Chat", "send_text_dm: $err ui=${hint ?? "(hidden)"}");
       setState(() {
         line.delivery = _MsgDelivery.pending;

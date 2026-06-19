@@ -71,6 +71,86 @@ fn probe_os_network_truth_platform() -> OsNetworkSnapshot {
     }
 }
 
+/// Fresh OS probe for the **Flutter UI process** (not the `:p2p` / daemon cached snapshot).
+pub(crate) fn probe_os_network_truth_ui() -> Option<OsNetworkSnapshot> {
+    #[cfg(target_os = "linux")]
+    {
+        return Some(crate::linux_network::probe_connectivity_truth());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+pub(crate) fn os_default_transport_label(t: OsDefaultTransport) -> &'static str {
+    match t {
+        OsDefaultTransport::Wifi => "wifi",
+        OsDefaultTransport::Cellular => "cell",
+        OsDefaultTransport::Ethernet => "ethernet",
+        OsDefaultTransport::None => "none",
+    }
+}
+
+/// JSON for Flutter `NetworkHelper` — mirrors `Native/flow` `os=` fields (display only).
+pub(crate) fn os_network_snapshot_to_json(
+    snap: &OsNetworkSnapshot,
+    source: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "source": source,
+        "default_transport": os_default_transport_label(snap.default_transport),
+        "internet_validated": snap.internet_validated,
+        "has_internet": snap.has_internet,
+        "wifi_link_up": snap.wifi_link_up,
+        "default_route_iface": snap.default_route_iface,
+    })
+}
+
+/// Authoritative OS snapshot for UI (daemon RPC / in-process FFI). Refreshes OS truth first.
+pub(crate) fn network_snapshot_for_ui(source: &str) -> serde_json::Value {
+    refresh_os_network_truth();
+    let snap = os_network_snapshot();
+    log_ui_network_if_changed(&snap, source);
+    os_network_snapshot_to_json(&snap, source)
+}
+
+fn log_ui_network_if_changed(snap: &OsNetworkSnapshot, source: &str) {
+    use std::sync::Mutex;
+    static LAST: std::sync::OnceLock<Mutex<Option<(OsDefaultTransport, bool, bool, bool)>>> =
+        std::sync::OnceLock::new();
+    let key = (
+        snap.default_transport,
+        snap.internet_validated,
+        snap.has_internet,
+        snap.wifi_link_up,
+    );
+    let mx = LAST.get_or_init(|| Mutex::new(None));
+    let Ok(mut g) = mx.lock() else {
+        return;
+    };
+    let changed = g.map(|prev| prev != key).unwrap_or(true);
+    if !changed {
+        return;
+    }
+    *g = Some(key);
+    let route = snap
+        .default_route_iface
+        .as_deref()
+        .unwrap_or("-");
+    native_log::info(
+        "network",
+        format!(
+            "ui snapshot source={source} os={}/validated={}/wifi={} route={route} internet={}",
+            os_default_transport_label(snap.default_transport),
+            snap.internet_validated,
+            if snap.wifi_link_up { "up" } else { "down" },
+            snap.has_internet,
+        ),
+    );
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LocalNetworkProfile {
     pub has_rfc1918_ipv4: bool,
@@ -1077,6 +1157,23 @@ mod tests {
             relay_bootstrap_family_rank(&v4, false, true)
                 < relay_bootstrap_family_rank(&v6, false, true)
         );
+    }
+
+    #[test]
+    fn os_network_snapshot_json_for_ui() {
+        let snap = OsNetworkSnapshot {
+            default_transport: OsDefaultTransport::Wifi,
+            internet_validated: true,
+            has_internet: true,
+            wifi_link_up: true,
+            default_route_iface: Some("wlan0".into()),
+        };
+        let j = os_network_snapshot_to_json(&snap, "test");
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["default_transport"], "wifi");
+        assert_eq!(j["internet_validated"], true);
+        assert_eq!(j["default_route_iface"], "wlan0");
+        assert_eq!(j["source"], "test");
     }
 
     #[test]

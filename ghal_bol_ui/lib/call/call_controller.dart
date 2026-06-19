@@ -20,6 +20,7 @@ import "package:ghal_bol_ui/ghal_bol_p2p.dart";
 import "package:ghal_bol_ui/identity_display_name.dart";
 import "package:ghal_bol_ui/p2p_event_bridge.dart";
 import "package:ghal_bol_ui/p2p_link_error_ui.dart";
+import "package:ghal_bol_ui/network_helper.dart";
 import "package:ghal_bol_ui/public_key_hex.dart";
 import "package:wakelock_plus/wakelock_plus.dart";
 
@@ -396,7 +397,7 @@ class CallController {
     if (kind == "dial_failed" && phase != CallUiPhase.idle) {
       final err = ev["error"]?.toString() ?? "dial failed";
       if (!isTransientP2pLinkError(err)) {
-        statusMessage = shortUserP2pError(err) ?? "Call link failed";
+        statusMessage = networkAwareUserP2pError(err) ?? "Call link failed";
         _notify();
       }
     }
@@ -538,6 +539,11 @@ class CallController {
   }) async {
     if (!GhalBolP2p.isAvailable) {
       _snack(context, "Calls need P2P — unlock and wait for network.");
+      return;
+    }
+    final net = NetworkHelper.instance.snapshot.value;
+    if (net.hasLiveSnapshot && net.appearsOffline) {
+      _snack(context, "No internet connection.");
       return;
     }
     if (phase != CallUiPhase.idle) {

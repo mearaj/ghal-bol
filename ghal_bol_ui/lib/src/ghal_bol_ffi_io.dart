@@ -133,6 +133,7 @@ abstract final class GhalBolFfi {
   static _NativeTwoPtrToPtrDart? _transcriptPatchReadAck;
   static _NativePtrToPtrDart? _buildConnectInviteUri;
   static _NativePtrToPtrDart? _parseConnectInviteUri;
+  static _NativePollPtrDart? _networkSnapshot;
   static bool _loaded = false;
   static String? _loadError;
 
@@ -392,6 +393,13 @@ abstract final class GhalBolFfi {
         _resetFirstTimeIdentity = null;
       }
       _loadServiceSymbols(lib);
+      try {
+        _networkSnapshot = lib.lookupFunction<_NativePollPtr, _NativePollPtrDart>(
+          "ghal_bol_ffi_network_snapshot",
+        );
+      } catch (_) {
+        _networkSnapshot = null;
+      }
       _lib = lib;
       _loaded = true;
       _loadError = null;
@@ -431,6 +439,7 @@ abstract final class GhalBolFfi {
       _exportKeystoreJson = null;
       _importKeystoreJson = null;
       _resetFirstTimeIdentity = null;
+      _networkSnapshot = null;
       _clearServiceSymbols();
       assert(() {
         if (!inFlutterTest) {
@@ -1493,6 +1502,23 @@ abstract final class GhalBolFfi {
 
   /// Contacts list only — do not require invite/transcript symbols (P2P still works via daemon).
   static bool get isContactsStoreAvailable => _loaded && _contactsList != null;
+
+  /// Linux UI-process OS network probe (`linux_network`). Android uses Kotlin channel.
+  static bool get isNetworkHelperAvailable =>
+      _loaded && _networkSnapshot != null && Platform.isLinux;
+
+  static Map<String, dynamic>? networkSnapshot() {
+    final fn = _networkSnapshot;
+    final free = _stringFree;
+    if (!isNetworkHelperAvailable || fn == null || free == null) return null;
+    final out = fn();
+    if (out == nullptr || out.address == 0) return null;
+    try {
+      return _parseSmallJson(out, free);
+    } catch (_) {
+      return null;
+    }
+  }
 
   static bool get isNativeServiceAvailable =>
       isContactsStoreAvailable &&

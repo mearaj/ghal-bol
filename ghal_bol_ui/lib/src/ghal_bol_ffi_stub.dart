@@ -250,6 +250,10 @@ abstract final class GhalBolFfi {
 
   static bool get isNativeServiceAvailable => false;
 
+  static bool get isNetworkHelperAvailable => false;
+
+  static Map<String, dynamic>? networkSnapshot() => null;
+
   static List<Map<String, dynamic>> contactsList(String _) => [];
 
   static Map<String, dynamic> contactsUpsert(String _, Map<String, dynamic> _) => {"ok": false};

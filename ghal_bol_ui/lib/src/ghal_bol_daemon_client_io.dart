@@ -443,7 +443,8 @@ class GhalBolDaemonClient {
     final err = result["error"]?.toString();
     if (method == "p2p_poll" ||
         method == "p2p_is_running" ||
-        method == "p2p_take_incoming_call_wake") {
+        method == "p2p_take_incoming_call_wake" ||
+        method == "network_snapshot") {
       if (!ok &&
           (method == "p2p_poll" || method == "p2p_is_running")) {
         final now = DateTime.now();

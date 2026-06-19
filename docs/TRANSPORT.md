@@ -378,6 +378,7 @@ After a toggle, **`os=` should flip within ~1s** (callback) or on the next tick 
 3. **Do not** call `p2p_notify_network_change` from Flutter — Android `:p2p` + Linux `network_tick` own handover.
 4. **Do not** infer “peer is on LAN” from local `profile=lan` alone — use mDNS for that peer or coord circuit for WAN.
 5. **Internet validated** (`NET_CAPABILITY_VALIDATED` / route operstate) is logged and used for urgency; brief `unvalidated` right after Wi‑Fi associate is normal — handover still keys off **default transport**.
+6. **Flutter `NetworkHelper`** (`ghal_bol_ui/lib/network_helper.dart`) — thin poll loop for **UI display only**. OS truth from **`ghal_bol`** via daemon RPC `network_snapshot` (`:p2p` / `ghal_bol_daemon` → `android_network` / `linux_network`). Linux in-process FFI fallback only when daemon is off. Rust logs: `Native/network` `ui snapshot …`; Flutter App log tag **`Network`**. **Never** gates P2P dial/ack/coord policy in Dart.
 
 ### Network-truth regressions
 
@@ -436,7 +437,7 @@ dm peer disconnected
 
 | libp2p behaviour | Ghal Bol impact | Mitigation |
 |------------------|-----------------|------------|
-| Inbound relay reports as `/p2p/<peer>` (not `/p2p-circuit`) — [#5741](https://github.com/libp2p/rust-libp2p/discussions/5741) | Misclassified “direct” on accept side | `InboundCircuitEstablished` → `dm_relay_circuit_pending` before `note_connection_path` |
+| Inbound/outbound relay reports as `/p2p/<peer>` (not `/p2p-circuit`) — [#5741](https://github.com/libp2p/rust-libp2p/discussions/5741) | Misclassified “direct” → false `dm_direct_conn_ids`, mux reconcile loop | `dm_relay_circuit_pending` on circuit events; bare `/p2p/<peer>` with coord → **relay** (LAN direct always has `/ip4/…/tcp/…`) |
 | Multiple connections per `PeerId` | Stream may attach to wrong mux | Prefer direct for **new** stream when both exist; **close direct only** on asymmetric recovery |
 | `open_stream` timeout on relay | Must not nuke relay TCP | `note_stream_open_failure`: reopen on relay if `peer_has_relay_connection` |
 | `PeerCondition::NotDialing` | Parallel dial storms | Separate LAN vs circuit app throttles; parallel **links** after connect |
