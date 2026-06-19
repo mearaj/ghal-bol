@@ -130,7 +130,7 @@ class P2pEventBridge {
   /// (Linux desktop) — not a per-frame retry; call from debounced poll hooks only.
   void nudgeUiSessionSnapshot() {
     if (!GhalBolP2p.isAvailable) return;
-    _scheduleUiSessionApply();
+    unawaited(GhalBolP2p.nudgeReadCatchup());
   }
 
   /// Wait until [setForegroundConversation] / [setUiVisible] has applied in native.

@@ -2,7 +2,7 @@
 
 This document is the **single design reference** for how Ghal Bol is meant to work: layers, messaging state, chat-room semantics, and P2P lifecycle. Wire-level detail lives in [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md); invites in [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
 
-**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md). **[STORY.md](STORY.md) § `# Story` onward** is human-authored connectivity policy (overrides conflicting guidance here) but **must not edit or revert it**; change this file and code instead. STORY’s opening sections (`Current issues`, `# Now`, `# Next`) are backlog notes — see AGENTS.md.
+**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md). Connectivity policy: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**.
 
 ## Goals
 
@@ -79,7 +79,7 @@ Implementation detail: [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (calls), [GH
 | **Guest** (scanner) | Knows host’s `public_key_hex` → derives PeerId → registers `dm_peer` → dials |
 | **Host** (QR shown) | May have **zero** contacts until first inbound connection or frame; first inbound text may create an **unknown** roster row until the user **Add**s or replies — see [Contact trust (`is_known` / `is_blocked`)](#contact-trust-is_known--is_blocked) |
 
-Both sides must run P2P. For **configured** contacts only (no public directory): **WAN first** — coord lookup + relay/public paths. Use **LAN** (mDNS `_ghalbol._tcp` / direct TCP) **only** when that peer is actually on the local LAN (mDNS discovery on this device), not because both happen to use `192.168.x` addresses from coord.
+Both sides must run P2P. For **configured** contacts only (no public directory): **WAN** (coord lookup + relay/public paths) and **LAN** (mDNS `_ghalbol._tcp` / direct TCP when that peer is on the local LAN) run **in parallel** on Wi‑Fi — both stay active when connected ([TRANSPORT.md](TRANSPORT.md) § “Both links active”). Do not use coord RFC1918 addrs alone as LAN; mDNS discovery on this device is required for the LAN path.
 
 ## Truthful status in the UI (critical)
 
@@ -101,7 +101,7 @@ Users must **never** see delivery or read ticks that the local device has not ea
 - Emitting a poll/UI event for every wire ack retry when transcript did not change.
 - Merging duplicate transcript rows in Dart that hide missing native acks.
 
-**Right:** show exactly what is in the native transcript after poll/FFI merge, with monotonic-only updates (pending → delivered → read).
+**Right:** show exactly what is in the native transcript after poll/FFI merge, with monotonic-only updates (pending → delivered → read). All LAN and WAN paths write to the **same** transcript store ([Unified message state (E)](#unified-message-state-e--single-source-of-truth-2026-06-17)); `read` never downgrades to `delivered` when duplicate acks arrive on different paths.
 
 ## Message state — intent and how Ghal Bol implements it
 
@@ -354,7 +354,8 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | Log / behaviour | Likely cause |
 |-----------------|--------------|
 | Same `ack_read` `ref=` many times per second | Read retry without confirm; burst rounds ≫ 1; upkeep ignoring `last_send_ms` |
-| `poll drain saturated` + `totalEvents` ≫ message count | Every wire retry emitted to UI; `stores_updated` on no-op transcript patch |
+| `poll drain saturated` + `totalEvents` ≫ message count | Every wire retry emitted to UI; `stores_updated` on no-op transcript patch; or **session-sync storm** (`chat room enter` / `sync_ui_session` every frame) flooding `NativeLog` poll events so delivery/read ack applies never reach Flutter |
+| Burst `chat room enter` / `sync_ui_session` while room unchanged | Repeated `SetForegroundPeer` for same peer — starves poll + upkeep; sender sees no delivery/read ticks though recipient got text | Use `p2p_sync_ui_session` dedupe + `p2p_nudge_read_catchup` for Linux nudge; hub skips re-sync when `_lastSyncedForegroundPk` matches |
 | `patch outbound delivery=read` in a tight loop on unlock | Draining stale poll queue; fix emit + apply gates |
 | `Large outgoing transaction` / app dies copying logs | Log + poll storm; fix native volume first |
 | Blue tick never appears | Confirm `ack_received` not sent or not applied; foreground/room gates wrong — not “send more ack_read” |
@@ -533,30 +534,77 @@ On daemon platforms the hub mounts one [`ChatScreen`](../ghal_bol_ui/lib/chat_sc
 
 ## P2P lifecycle
 
-### Stream-first symmetric connect (canonical connect model)
+### Stream-first symmetric connect (wire layer)
 
-**Ideas reference only:** older [protonet](https://github.com/mearaj/protonet) (`protonet-as-reference`, 4+ years) had one `chatStreams` entry per contact and 1 Hz upkeep — useful as a **historical sketch**, not a target to mirror. Ghal Bol’s connect layer is **stream-first and stricter**: one live DM mux per contact, upkeep noop while the writer is up, coord + relay + mDNS for discovery (not Kademlia), and no `disconnect_peer` while a route may still work.
+**Ideas reference only:** older [protonet](https://github.com/mearaj/protonet) (`protonet-as-reference`, 4+ years) had one `chatStreams` entry per contact and 1 Hz upkeep — useful as a **historical sketch**, not a target to mirror. Ghal Bol’s connect layer is **stream-first on the wire**: one live DM mux per contact, upkeep noop while the writer is up, coord + relay + mDNS for discovery (not Kademlia), and no `disconnect_peer` while a route may still work.
 
-The connect layer that made the original serverless libp2p build reliable: **both peers connected within a few seconds** with no coord server — only DHT bootstrap and the rules below. Ghal Bol **must keep this shape** in `:p2p` / daemon. WAN adds coord + relay for **discovery and dial addrs only**; it must not replace this model with competing dial policies.
+The connect layer that made the original serverless libp2p build reliable: **both peers connected within a few seconds** with no coord server — only DHT bootstrap and the rules below. Ghal Bol **must keep this wire shape** in `:p2p` / daemon. WAN adds coord + relay for **discovery**; LAN adds mDNS — **both run in parallel** ([TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”).
 
 | Rule | Meaning |
 |------|---------|
 | **Both listen** | Each node accepts inbound libp2p connections and inbound DM streams (`/ghal-bol/msg/1.0.0`). |
-| **One stream per contact** | At most one live DM stream per contact, keyed by `public_key_hex` / derived PeerId (`dm_peer_stream_up`). While the stream writer is live, `dm_upkeep` **does nothing** for that contact — no coord lookup, no `disconnect_peer`, no identify dials. If both sides open outbound before either accept wins the writer slot, extra inbound streams are **read-only** (process DM frames; do not drain) until the mux closes. |
+| **One stream per contact** | At most one live DM stream per contact, keyed by `public_key_hex` / derived PeerId (`dm_peer_stream_up`). While the stream writer is live, `dm_upkeep` **does nothing** for that contact — no coord lookup, no `disconnect_peer`, no identify dials. **Dual links:** when both LAN and WAN libp2p connections exist, **both stay up**; upkeep noop for the mux does **not** mean WAN is idle or should be closed. If both sides open outbound before either accept wins the writer slot, extra inbound streams are **read-only** (process DM frames; do not drain) until the mux closes. |
 | **Symmetric roles** | No permanent listener/caller. Either peer may accept inbound or open outbound; same stream handler on both paths. |
 | **Send = connect** | Outbound text uses: no stream → ensure libp2p connection → open one stream → write. UI never dials or owns connect policy. |
-| **Single upkeep owner** | `dm_upkeep` (~1s) walks contacts: **if stream up → skip**; else missing stream → one connect attempt; pending outbox drains when `chat_ready`. Discovery (coord lookup, mDNS) runs **only when stream is down**. |
+| **Parallel transport** | LAN (mDNS) and WAN (coord + relay) stacks and per-peer dials run **concurrently** — both links **active** when connected; see TRANSPORT.md § “Parallel LAN + WAN transport”. |
+| **Single upkeep owner** | `dm_upkeep` (~1s) walks contacts: **if stream up → skip**; else missing stream → connect attempts on any available path; pending outbox drains when `chat_ready`. |
 
-**PeerId** is derived from secp256k1 `public_key_hex` (already). **Discovery** is coord HTTP + relay (WAN) and mDNS (LAN) — a separate layer below stream-first.
+**PeerId** is derived from secp256k1 `public_key_hex` (already). **Discovery** is coord HTTP + relay (WAN) and mDNS (LAN) — parallel layers below the single wire mux.
 
-**Target latency:** when a route exists, `peer_connected` → `chat_ready` within **seconds**, as in the original build — not minutes of overlapping `swarm.dial` / coord lookup paths cancelling each other.
+**Target latency:** when a route exists, `peer_connected` → `chat_ready` within **seconds**, as in the original build — not minutes of blocked paths.
 
-**Violations (regressions):** racing LAN mDNS TCP and coord relay circuit dials before first connect; multiple code paths each dialling the same peer in the same second; extra “priority” flags that bypass in-flight defer and reintroduce races; Flutter dial policy. See [TRANSPORT.md](TRANSPORT.md) § “Stream-first symmetric connect”, § “LAN relay vs mDNS race”.
+**Violations (regressions):** tearing down relay when direct LAN connects; separate LAN/WAN message stores; downgrading `read` → `delivered` on duplicate acks; Flutter dial or transcript policy; uncoordinated dial spam (many dials/s per peer). See [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”.
+
+### Unified message state (E) — single source of truth (2026-06-17)
+
+**Problem:** If LAN and WAN were separate application paths with separate stores, duplicate frames during handover could race (e.g. WAN `ack_received` then LAN `ack_read` for the same message, or two transcript rows for one send).
+
+**Two layers — do not conflate:**
+
+| Layer | LAN | WAN | Interference rule |
+|-------|-----|-----|-------------------|
+| **Transport (libp2p)** | mDNS + direct TCP | coord + relay circuit | **Parallel** — both may connect and stay active; throttles only; never tear down relay when direct LAN appears ([TRANSPORT.md](TRANSPORT.md) § Parallel LAN + WAN) |
+| **Application (E)** | Same handler for every frame | Same handler for every frame | **One store** — path-agnostic merge; never separate “LAN transcript” vs “WAN transcript” |
+
+```text
+Peer A                          Peer B
+  │                               │
+  ├─ LAN link ──► /ghal-bol/msg ──┤
+  │                               │
+  └─ WAN link ──► /ghal-bol/msg ──┘
+                      │
+                      ▼
+              dm_event_handler + dm_transcript_store (E)
+              chat_transcript_v1.json — one row per message_id
+```
+
+**Model:** All message and ack state for a contact lives in **one Rust store (E)** — keyed by `conversation_key` / `message_id`, never by “which link delivered this frame”.
+
+| Concern | Owner | Store / API |
+|---------|--------|-------------|
+| Outbound queue | Rust `:p2p` | in-memory outbox + `dm_transcript_v1` pending rows |
+| Transcript lines | Rust **E** | `dm_transcript_store.rs` → `chat_transcript_v1.json` |
+| Inbound text | Rust **E** | `append_if_new` — dedupe by `message_id` |
+| Outbound delivery ticks | Rust **E** | `patch_outgoing_delivery` — **monotonic** rank: `sent` < `delivered` < `read` |
+| Inbound read-ack sent flag | Rust **E** | `patch_inbound_read_ack_sent_for_thread` |
+| Ack send/retry | Rust | `chat_server.rs` — not Flutter |
+| Wire mux | Rust | **One** live `/ghal-bol/msg/1.0.0` stream per contact when possible; frames from either link feed the same handler |
+
+**Merge rules (invariant):**
+
+- Duplicate inbound text (same `message_id` from LAN or WAN wire): **one row** (`append_if_new`).
+- Duplicate outbound acks for same `ref_id`: apply **higher** delivery rank only — **`read` always wins over `delivered`**; never downgrade. If E already has `read` from LAN and a late WAN `ack_received` arrives, E keeps `read` (`patch_outgoing_delivery` rank check).
+- **`ack_read` implies delivered** — product semantics: read tick on sender side only after recipient read; inbound `ack_received` after `ack_read` for the same id is a no-op rank-wise.
+- Flutter **reloads** native state on poll — no parallel Dart transcript writer, no path-specific caches.
+
+**Wrong (forbidden):** LAN path writes store C, WAN path writes store D; Flutter merges C+D; or clearing WAN link when LAN connects and losing in-flight acks on the relay mux without E having persisted state.
+
+**Supersedes:** any implication that LAN and WAN could own separate “C” and “D” stores per path.
 
 1. **Unlock** — UI: FFI `createOrUnlockIdentity`; daemon: `unlock` with the same namespace and password (must match public key). Both call `set_p2p_handler_context(app_namespace)`.
 2. **`p2p_start`** — `dm_peers: [{ "public_key_hex": "…" }]`, `bootstrap_peers: []`, `app_namespace`. If the node is **already running**, native still refreshes handler context and re-registers all `dm_peers` from config (daemon may survive UI restarts).
 3. **Contact added** (scan) → `sync_contacts` **hot-registers** keys on the **running** node — **no full `p2p_stop` / restart** for roster changes.
-4. **Route** → coord lookup + relay (WAN) or mDNS (LAN) supplies dial addrs only ([stream-first](#stream-first-symmetric-connect-canonical-connect-model) — one dial path per peer, no races).
+4. **Route** → coord lookup + relay (WAN) and mDNS (LAN) run **in parallel** — see [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”.
 5. **Connect** → libp2p `ConnectionEstablished` toward derived PeerId (guest from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
 6. **Stream** → open `/ghal-bol/msg/1.0.0` if none live (inbound accept or outbound open — same handler).
 7. **`chat_ready`** → outbound stream writer up; safe to send frames; outbox drains without opening a hub room.
@@ -595,28 +643,24 @@ After **Create identity** succeeds, `onUnlockedSession` runs `GhalBolBackground.
 
 Coord HTTP register in Rust waits until listen addrs are publishable — see `coord_runtime.rs`. **Hybrid model:** clients POST public/LAN `tcp` only; relay server owns `/p2p-circuit` presence on reservation; CGNAT clients poll coord for self-circuit when register payload is empty (`promote_relay_presence_if_visible`). WAN relay recovery runs when coord URL is configured (`chat_server.rs` coord tick). Full detail: [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”, § “LAN ↔ WAN handover”.
 
-### Dial strategy — WAN first (native — `chat_server.rs`, not Flutter)
+### Dial strategy — parallel LAN + WAN (native — `chat_server.rs`, not Flutter)
 
-| Default (remote / WAN) | LAN exception only |
-|------------------------|-------------------|
-| **WAN first:** coord lookup (try all configured servers; stop on first success) → relay circuit + public TCP when registered | **LAN only when the peer is on your LAN:** mDNS `Discovered` for that contact → direct TCP (`dial_mdns_peer`); **immediate** shift to LAN; **immediate** WAN fallback when LAN is lost |
+| LAN | WAN | Together |
+|-----|-----|----------|
+| mDNS `Discovered` → direct TCP for that contact | coord lookup → relay circuit + public TCP when registered | **Both stacks always on** on Wi‑Fi; per-peer both links may be connected |
 
 Rules:
 
-1. **Always try WAN/coord** for configured contacts while the network is up. Do not prefer RFC1918 addrs from coord presence for a peer who is not on your LAN.
-2. **LAN path is opt-in by discovery** — mDNS sighting (or an explicit same-LAN signal), not “both devices use 192.168.1.x”.
-3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): skip blind `DialOpts::peer_id` dials; dial explicit coord relay multiaddrs only (throttled). If bootstrap TCP is still pending, use probe-style `listen_on(…/p2p-circuit)` — see [TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”.
-4. **Wi‑Fi with LAN** still runs WAN/coord; mDNS is additive when a peer appears locally. **Defer coord relay dials** only while a **direct LAN dial is in flight** or a **direct** (non-relay) link is already open — not merely because mDNS lists candidates. After the LAN in-flight window expires (4–6s per candidate), coord lookup + relay dial run **sequentially** ([stream-first](#stream-first-symmetric-connect-canonical-connect-model)). Pending outbox schedules coord lookup on upkeep; it must **not** start a parallel relay dial while LAN is in flight ([TRANSPORT.md](TRANSPORT.md) § “LAN relay vs mDNS race”). Do **not** replace an in-flight relay-circuit dial for **45s** (`circuit_dial_in_flight_blocks` — libp2p oneshot cancel).
-5. **Outbound dial to peer’s relay circuit** (coord lookup result): proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Own circuit is for **registering** your WAN addr so peers can find you; it is not a prerequisite for dialing an already-registered peer. Per-peer throttle: `should_routed_dial` in `dial_dm_peer_addr` ([TRANSPORT.md](TRANSPORT.md) § “Outbound peer relay dials vs own reservation”).
-6. **Wi‑Fi toggle on LAN** — **event-driven** ([TRANSPORT.md](TRANSPORT.md) § “LAN stability — cold start and Wi‑Fi toggle”): Android `ConnectivityManager` or Linux `wl*` operstate → `notify_network_change` → **`kick_lan_dm_rediscovery_after_handover` once** (fresh ephemeral listen + force mDNS + purge candidates — same as cold start). **`lan_handover_upkeep`** repeats that full sequence (5s throttle) when link is down and no mDNS candidate — **not** soft mDNS-only restart. mDNS `Discovered` → dial; connect/disconnect/fail → notify subscribers. LAN dials remain **mDNS `Discovered` only** — never upkeep re-dial from cache.
+1. **Always run WAN/coord** while configured and network is up — even when mDNS shows LAN peers.
+2. **LAN path is opt-in by discovery** — mDNS sighting for that contact, not global LAN-first for all roster peers.
+3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): coord relay dials only (throttled). Probe-style `listen_on(…/p2p-circuit)` when bootstrap TCP down — [TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”.
+4. **Wi‑Fi with LAN:** mDNS and coord/relay dial **in parallel** for the same peer when stream is down — throttled, not mutually deferred. **Do not close relay links** when direct LAN connects; **both links stay active** (LAN + WAN each doing their job). See TRANSPORT.md § “Both links active”.
+5. **Outbound dial to peer’s relay circuit** after coord lookup: proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Throttle: `should_routed_dial` in `dial_dm_peer_addr`.
+6. **Wi‑Fi toggle on LAN** — event-driven ([TRANSPORT.md](TRANSPORT.md) § “LAN stability — cold start and Wi‑Fi toggle”): `kick_lan_dm_rediscovery_after_handover` + WAN recovery in parallel. LAN dials remain **mDNS `Discovered` only** — never upkeep re-dial from cache.
 
-**Event-driven rule (general):** avoid assumed timers whenever policy waits on async work with unknown duration — worker owns the work, subscribers react on reported facts, not “try again in N seconds.” Dial/handover is one application; same rule for lookup, reserve, stream open, register. See TRANSPORT.md § “Event-driven async — avoid assumed timers”.
+**Event-driven rule (general):** avoid assumed timers whenever policy waits on async work with unknown duration — worker owns the work, subscribers react on reported facts. See TRANSPORT.md § “Event-driven async — avoid assumed timers”.
 
-Coord register/lookup on a **5s** tick is **backup** only; primary reconnect after toggle is the event chain above. Send-text triggers immediate coord lookup when not connected. Throttles: coord `peer_not_on_server` backoff, storm throttles per peer/relay — not handover grace windows.
-
-**Caching (P2P):** avoid caches that can serve stale dial targets — especially anything that could race or override live mDNS or coord lookup. Only permitted on-disk cache: `ghalbol_relay.json` with invalidation on relay TCP failure. mDNS LAN uses a **live candidate set** (`peer_mdns_lan_candidate_addrs`): add on `Discovered`, remove on `Expired`/dial-fail — **not** a timer-driven dial cache and **not** port-ranked. **`dm_upkeep` must not re-dial LAN from that set**; LAN connect is mDNS event-driven only. See [TRANSPORT.md](TRANSPORT.md) § “Caching policy (P2P)”, § “Ephemeral LAN TCP ports”.
-
-**Anti-patterns (caused multi-minute stalls):** violating [stream-first symmetric connect](#stream-first-symmetric-connect-canonical-connect-model) (competing dial policies per peer); Dart dial policy; per-peer “internet up” heuristics; RFC1918 /24 matching on coord addrs; global LAN-first sort for every peer; **racing relay against in-flight LAN** (`mdns dialing` then `coord dialing` within ~2s); **uncoordinated coord-relay dial spam on CGNAT** (many `coord relay dial` per second — prevents bootstrap TCP from completing); **removing probe-style relay reservation on mobile-data** while Wi‑Fi tests still pass ([TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”); **blocking peer relay dials until own circuit listens** (`skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` — ~40s dead WAN on phones; use `should_routed_dial` only); **racing coord relay against mDNS LAN on Wi‑Fi before first connect** (gate `should_defer_coord_relay_for_lan` on `connected == true` — endless ~15s mDNS retries, no LAN chat); **deferring relay merely because mDNS lists LAN candidates** (WAN fallback never runs when peers are on different networks); **coord lookup or mDNS dial caches** that stale-addrs can break P2P; **`dm_upkeep` re-dialing stale LAN TCP ports** from `peer_mdns_lan_candidate_addrs` after peer listen rebinding (symptom: same `mdns dialing …/tcp/PORT` every ~20s while `listen_addrs` shows a different port — see TRANSPORT.md § “Ephemeral LAN TCP ports”); **port-ranking heuristics** (highest port, preferred addr, TTL) instead of mDNS event lifecycle; **timer-based async policy** (grace windows, tick-polled recovery, tuning `N`-second constants instead of worker→subscriber events) — see TRANSPORT.md § “Event-driven async”.
+**Anti-patterns:** separate LAN/WAN transcript or outbox stores; downgrading `read` → `delivered`; **closing relay when direct LAN connects**; **blocking LAN upkeep during WAN recovery**; Dart dial policy; **`dm_upkeep` re-dialing stale LAN TCP ports**; port-ranking heuristics; uncoordinated coord-relay dial spam on CGNAT; blocking peer relay dials until own circuit listens; coord lookup or mDNS **disk** caches; timer-based grace windows — see TRANSPORT.md § “Parallel LAN + WAN transport”, § “Ephemeral LAN TCP ports”.
 
 **Network watch:** Android connectivity + profile poll → WAN relay recovery when coord URL is set. UI lock does not stop `:p2p` / daemon / poll.
 
@@ -626,12 +670,20 @@ When two contacts are both online the link must stay **steady** and recover inst
 
 - **Keepalive ping** keeps an idle DM/relay connection alive (ping interval **15s** < `idle_connection_timeout` 45s/300s), so the next message reuses the live link instead of paying a reconnect.
 - **Urgent reconnect** after `dm connection closed`: the peer’s key is urgent for ~30s — coord lookup **skips** the `peer_not_on_server` backoff and the 1s upkeep tick retries immediately (`mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent`), cleared on reconnect.
-- **Reserve on all configured coord relays in parallel, throttled per relay** (`try_relay_reservations` / `try_relay_reservation`, per-relay `RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or WAN peer discovery ([STORY.md](STORY.md)). The anti-pattern is re-issuing `listen_on` **every tick** (a 1s storm), **not** covering all relays once — serializing onto a single relay let one pending-but-never-accepted reservation block the others and stalled WAN for minutes. See [TRANSPORT.md](TRANSPORT.md) § “Steady connection”.
+- **Reserve on all configured coord relays in parallel, throttled per relay** (`try_relay_reservations` / `try_relay_reservation`, per-relay `RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or WAN peer discovery ([TRANSPORT.md](TRANSPORT.md) § Connectivity lifecycle).
 - **CGNAT/mobile:** throttle bootstrap relay dials (`issue_bootstrap_dials`); probe-style `listen_on` at startup and when bootstrap TCP is not up yet — § “CGNAT / mobile-data relay reservation” in TRANSPORT.md. **Both peers** must `reservation accepted` + coord register for **bidirectional** coord visibility; one-sided success still means no chat. **Outbound** dial to a peer’s relay circuit after coord lookup does **not** wait for own reservation — see TRANSPORT.md § “Outbound peer relay dials vs own reservation”.
 
 ## Call UI lifecycle and privacy (do not regress)
 
 **Product invariant:** there must **never** be an active voice/video call (native media up, peer still in-call) when the user has **no UI session** to see or control it. This is a privacy and safety requirement — fixes have regressed when other call features landed; treat any orphan call as **P0**.
+
+**Signaling wire discipline (native — do not fake in Flutter):**
+
+- Outbound **ringing** only after `invite` is on the DM stream (`call_signal_sent`), not when FFI returns.
+- Drop queued/stale `invite` frames when the call ended or age > 45s — no ghost rings minutes later.
+- Caller shows **Answered** as soon as `accept` arrives; media connect is a separate phase.
+- Hangup/reject purges pending signals for that `call_id` on both native queue and poll buffer.
+- **Android:** `:p2p` posts the full-screen incoming-call notification when an `invite` arrives on the wire (UI process may be killed). Tapping it must restore ringing UI via `p2p_call_status` + poll.
 
 ### Process split (same on Linux and Android)
 

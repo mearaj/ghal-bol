@@ -117,14 +117,11 @@ Relay PeerId comes from:
 
 `~/.local/share/com.ghalbol/ghalbol_server/relay_ed25519.key`
 
-**Do not delete** this file. If it is regenerated, clients with old `ghalbol_relay.json` must refetch `/v1/relay`.
+**Do not delete** this file. If it is regenerated, clients pick up the new relay PeerId on the next live `GET /v1/relay`.
 
-### Client cache after server restart
+### Client relay coords
 
-Apps cache relay coords at `<app_data>/ghalbol_relay.json`. After bore port or relay PeerId changes:
-
-- Restart apps (or rebuild native with cache-invalidation on refused dial), **or**
-- Delete `ghalbol_relay.json` under the app data dir.
+Clients **never** persist relay bootstrap addrs to disk. Policy: [TRANSPORT.md](../../docs/TRANSPORT.md) § “Caching policy (canonical)” — transport data is live `GET /v1/relay` only. Legacy `ghalbol_relay.json` files are deleted on `:p2p` start. Bore assigns a new port each `run_server.sh` run; the next HTTP refetch picks it up automatically.
 
 ### Healthy server log pattern
 

@@ -86,6 +86,16 @@ cargo test -p ghal_bol_server --test http_api
 cargo test -p ghal_bol_server
 ```
 
+## Presence model (WAN directory)
+
+| Source | What may appear in SQLite | When removed |
+|--------|---------------------------|--------------|
+| Client `POST /v1/register` | **Public routable IPv4 TCP** only (peer’s own inbound DM listen) | Heartbeat TTL expiry (`GHAL_BOL_SERVER_PRESENCE_TTL_SECS`) |
+| Relay `reservation ACCEPTED` | `libp2p` `/p2p-circuit/…` (server-authoritative) | Relay reservation ends — **circuit row only**; public TCP from `POST` is kept |
+| **Never** | LAN RFC1918, CGNAT-only, relay bootstrap `GET /v1/relay` host:port, client-posted `/p2p-circuit` | Rejected at `POST` (400) or filtered at store |
+
+CGNAT/mobile peers rely on the relay row. Desktop peers with UPnP/public IP may have **both** public TCP and a circuit row. See [docs/TRANSPORT.md](../docs/TRANSPORT.md) § “Hybrid coord presence”.
+
 ## HTTP API (v1)
 
 | Method | Path | Body |

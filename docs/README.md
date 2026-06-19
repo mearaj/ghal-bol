@@ -2,11 +2,13 @@
 
 Canonical index — read [DESIGN.md](DESIGN.md) before changing P2P, acks, invites, or persistence.
 
+**Connectivity policy** (formerly in `STORY.md`, removed): [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**, § **Network truth**, § **Asymmetric LAN↔WAN mux recovery**; [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § **Client register & heartbeat policy**; [DESIGN.md](DESIGN.md) (acks/UI session). Human product backlog only: [ROADMAP.md](ROADMAP.md).
+
 | Document | Contents |
 |----------|----------|
 | [DESIGN.md](DESIGN.md) | **Canonical** layers, truthful UI ticks, message state, room open/close, transcript keys, contact trust |
-| [STORY.md](STORY.md) | **Human-only** connectivity / discovery story (agents: read, never edit) |
-| [TRANSPORT.md](TRANSPORT.md) | libp2p transport stack, discovery, WAN/LAN dial policy, relay, **§ CGNAT / mobile-data relay reservation**, **§ Outbound peer relay dials vs own reservation** |
+| [TRANSPORT.md](TRANSPORT.md) | libp2p transport, **Connectivity lifecycle**, **Network truth**, **Asymmetric mux recovery**, parallel LAN+WAN, relay/CGNAT |
+| [ROADMAP.md](ROADMAP.md) | Human product backlog (not agent specs) |
 | [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) | Wire format, `ack_received` / `ack_read`, upkeep |
 | [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Connect invites: `ghalbol.com`, `ghalbol://` |
 | [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Run/test `ghal_bol_server`, local dev stack, prod `coord.ghalbol.com`, **WAN troubleshooting** |

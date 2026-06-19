@@ -43,13 +43,29 @@ impl CoordHttpClient {
         if base.is_empty() {
             return Err("coord base url empty".into());
         }
-        let mut b =
-            reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20));
+        let mut b = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(12))
+            .timeout(std::time::Duration::from_secs(25));
         if insecure_tls {
             b = b.danger_accept_invalid_certs(true);
         }
         let http = b.build().map_err(|e| e.to_string())?;
         Ok(Self { http, base })
+    }
+
+    /// One immediate retry on transport errors (mobile/ngrok TLS flake).
+    fn send_with_transport_retry(
+        &self,
+        build: impl Fn(&reqwest::blocking::Client) -> reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response, String> {
+        match build(&self.http).send() {
+            Ok(resp) => Ok(resp),
+            Err(e) if e.is_connect() || e.is_timeout() || e.is_request() => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                build(&self.http).send().map_err(|e2| e2.to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// ngrok free tier returns an HTML interstitial unless this header is set.
@@ -68,10 +84,7 @@ impl CoordHttpClient {
 
     pub fn health(&self) -> Result<bool, String> {
         let url = format!("{}/health", self.base);
-        let resp = self
-            .with_headers(self.http.get(&url))
-            .send()
-            .map_err(|e| e.to_string())?;
+        let resp = self.send_with_transport_retry(|http| self.with_headers(http.get(&url)))?;
         if !resp.status().is_success() {
             return Err(format!("health HTTP {}", resp.status()));
         }
@@ -90,10 +103,10 @@ impl CoordHttpClient {
         let pk = public_key_hex.trim().to_ascii_lowercase();
         let ch_url = format!("{}/v1/register/challenge", self.base);
         let ch: serde_json::Value = self
-            .with_headers(self.http.post(&ch_url))
-            .json(&serde_json::json!({ "public_key_hex": pk }))
-            .send()
-            .map_err(|e| e.to_string())?
+            .send_with_transport_retry(|http| {
+                self.with_headers(http.post(&ch_url))
+                    .json(&serde_json::json!({ "public_key_hex": pk }))
+            })?
             .json()
             .map_err(|e| e.to_string())?;
         let nonce_hex = ch["nonce_hex"].as_str().ok_or("missing nonce_hex")?;
@@ -105,9 +118,8 @@ impl CoordHttpClient {
         let sig = secp.sign_ecdsa(msg, secret);
 
         let reg_url = format!("{}/v1/register", self.base);
-        let resp = self
-            .with_headers(self.http.post(&reg_url))
-            .json(&serde_json::json!({
+        let resp = self.send_with_transport_retry(|http| {
+            self.with_headers(http.post(&reg_url)).json(&serde_json::json!({
                 "public_key_hex": pk,
                 "nonce_hex": nonce_hex,
                 "signature_hex": hex::encode(sig.serialize_der()),
@@ -116,8 +128,7 @@ impl CoordHttpClient {
                 "ipv6": ipv6,
                 "transport_capabilities": ["tcp", "sync-v1"]
             }))
-            .send()
-            .map_err(|e| e.to_string())?;
+        })?;
         if !resp.status().is_success() {
             return Err(format!(
                 "register HTTP {}: {}",
@@ -132,11 +143,10 @@ impl CoordHttpClient {
     pub fn heartbeat(&self, public_key_hex: &str) -> Result<CoordPeerRecord, String> {
         let pk = public_key_hex.trim().to_ascii_lowercase();
         let url = format!("{}/v1/heartbeat", self.base);
-        let resp = self
-            .with_headers(self.http.post(&url))
-            .json(&serde_json::json!({ "public_key_hex": pk }))
-            .send()
-            .map_err(|e| e.to_string())?;
+        let resp = self.send_with_transport_retry(|http| {
+            self.with_headers(http.post(&url))
+                .json(&serde_json::json!({ "public_key_hex": pk }))
+        })?;
         if !resp.status().is_success() {
             return Err(format!("heartbeat HTTP {}", resp.status()));
         }
@@ -148,12 +158,21 @@ impl CoordHttpClient {
     /// Returns `(peer_id, base_addrs)`; empty when the server runs no relay.
     pub fn get_relay(&self) -> Result<(String, Vec<String>), String> {
         let url = format!("{}/v1/relay", self.base);
-        let resp = self
-            .with_headers(self.http.get(&url))
-            .send()
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("relay HTTP {}", resp.status()));
+        let resp = self.send_with_transport_retry(|http| self.with_headers(http.get(&url)))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            let lower = body.to_ascii_lowercase();
+            if lower.contains("<!doctype html")
+                || lower.contains("err_ngrok")
+                || lower.contains("ngrok gateway error")
+            {
+                return Err(format!(
+                    "coord HTTP transport failure {} (non-JSON body — ngrok offline or proxy error)",
+                    status
+                ));
+            }
+            return Err(format!("relay HTTP {}", status));
         }
         let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
         if v.get("enabled") == Some(&serde_json::Value::Bool(false)) {
@@ -176,10 +195,7 @@ impl CoordHttpClient {
     pub fn lookup(&self, public_key_hex: &str) -> Result<CoordPeerRecord, String> {
         let pk = public_key_hex.trim().to_ascii_lowercase();
         let url = format!("{}/v1/peers/{}", self.base, pk);
-        let resp = self
-            .with_headers(self.http.get(&url))
-            .send()
-            .map_err(|e| e.to_string())?;
+        let resp = self.send_with_transport_retry(|http| self.with_headers(http.get(&url)))?;
         let status = resp.status();
         let body = resp.text().map_err(|e| e.to_string())?;
         if !status.is_success() {

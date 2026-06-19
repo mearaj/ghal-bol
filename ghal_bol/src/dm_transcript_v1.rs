@@ -20,9 +20,7 @@ use std::path::Path;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::dm_transcript_store::{
-    patch_inbound_read_ack_sent_at_path, read_root_unlocked, with_transcript_path,
-};
+use crate::dm_transcript_store::{read_root_unlocked, with_transcript_path};
 
 #[derive(Clone, Debug)]
 pub struct PendingInboundReadAckRow {
@@ -192,15 +190,4 @@ pub fn pending_inbound_read_ack_rows(
         })
     })
     .map_err(|e| TranscriptError::Io(std::io::Error::other(e.to_string())))
-}
-
-/// Mark one inbound row as read-acked on disk (best-effort; keeps Flutter/native in sync after restart).
-#[allow(dead_code)] // path-based API; prefer `dm_transcript_store::patch_inbound_read_ack_sent_at_path`
-pub fn mark_inbound_read_ack_sent(
-    path: &Path,
-    app_namespace: &str,
-    message_id: &str,
-) -> Result<bool, TranscriptError> {
-    patch_inbound_read_ack_sent_at_path(path, app_namespace, message_id)
-        .map_err(|e| TranscriptError::Io(std::io::Error::other(e.to_string())))
 }

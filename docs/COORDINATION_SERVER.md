@@ -15,7 +15,26 @@ After unlock: configure the **coord server list** (today a single URL; the API i
 
 Set URLs in `ghal_bol_ui/env/.env.development` (debug) or `env/.env.production` (release) via `GHAL_BOL_COORD_URLS` (JSON array or comma-separated). No hardcoded coord URLs in the app binary.
 
-**WAN policy:** coord + co-located relay are **required** for internet peer discovery. When coord is unreachable, LAN (mDNS) still works; the node keeps retrying all configured servers. Do **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN peer lookup — **libp2p remains** for transport (relay, DCUtR, mDNS, streams). See [STORY.md](STORY.md) and [TRANSPORT.md](TRANSPORT.md).
+**WAN policy:** coord + co-located relay are **required** for internet peer discovery. When coord is unreachable, LAN (mDNS) still works; the node keeps retrying all configured servers. Do **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN peer lookup — **libp2p remains** for transport (relay, DCUtR, mDNS, streams). See [TRANSPORT.md](TRANSPORT.md) § Connectivity lifecycle.
+
+### Client register & heartbeat policy (`coord_runtime.rs`)
+
+**Goal (product):** stay registered with a **correct, dialable** WAN presence — steady and accurate, not spam. The client must **never** believe it is registered when coord does not list a valid endpoint for the peer.
+
+| Trigger | Action |
+|---------|--------|
+| Publishable endpoint set **changed** (public TCP and/or relay circuit) | Full `POST /v1/register` on **all** configured coord URLs (`schedule_register_presence_force`) |
+| Last register **failed** or never succeeded | Retry register (min gap **2s** between attempts) |
+| Relay **reservation accepted** (public TCP path) or **network handover** | Force re-register when endpoints change |
+| **Presence stale** — no successful heartbeat/self-lookup in **~70s** (`PRESENCE_STALE_MS`; server row TTL ~90s) | Force re-register |
+| **`:p2p` / daemon restart** (`p2p_start`) | Re-fetch `GET /v1/relay`, re-reserve if needed, register when endpoints known — do not trust prior process state |
+| Endpoints **unchanged** and recently registered | **Throttle** full register (min gap **10s** when `coord_registered`); use **`POST /v1/heartbeat` every 25s** instead |
+
+**Truthfulness:** `coord_registered` in logs is set only after HTTP success or relay-presence self-lookup (`GET /v1/peers/{self}` / relay presence poll). CGNAT-only peers may show circuit via **relay server upsert** before client `POST` succeeds — see § Hybrid presence below.
+
+**Lookup (peers):** try configured coord servers **in order**; **stop on first successful** lookup for that dial attempt. After a peer disconnect with internet still up, **repeat lookup from the first server**.
+
+Implementation: `should_throttle_register`, `spawn_register_presence_inner`, `coord_register_tick` in `ghal_bol/src/coord_runtime.rs`. Broader connectivity rules: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**.
 
 ## Run server
 
@@ -73,7 +92,7 @@ COORD_URL=https://YOUR.ngrok-free.dev ./ghal_bol_server/deploy/smoke_coord.sh
 
 Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256k1 ECDSA DER).
 
-**Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: `tcp` / `quic` (public routable and optional RFC1918 LAN). **`libp2p` `/p2p-circuit` in the register body is rejected (400)** — the co-located relay upserts the circuit when the client’s reservation is accepted, using identify `agent_version` `ghal_bol/<ver>;pk=<device_pubkey_hex>`. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
+**Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: **`tcp` / `quic` with globally routable IPv4** (the peer’s own inbound DM listen). **Rejected (400):** `/p2p-circuit`, RFC1918 LAN, CGNAT-only, relay bootstrap host:port from `GET /v1/relay`. The co-located relay **upserts** `/p2p-circuit` when the client’s reservation is accepted (identify `agent_version` `ghal_bol/<ver>;pk=<device_pubkey_hex>`). When the reservation ends, the server removes **only** the circuit row — public-TCP rows from `POST` stay. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
 
 `GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` or empty `addrs` when no public relay is configured (dev: bore not running).
 
@@ -88,6 +107,8 @@ Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256
 | `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | `nc -zv` on `/v1/relay` addr; restart `run_server.sh`; restart apps |
 | `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but bore skipped or relay disabled | See deploy README bore-skip reasons |
 | `peer registered` in **server** logs but lookup 404 | TTL expired (~90s) or wrong coord URL in app | Heartbeat/register failing; check app `coord_registered` |
+| `peer registered` but client `peer_on_coord_no_dial_addrs` | Row has relay bootstrap `tcp` or LAN-only — no `/p2p-circuit` | Phone lost reservation; client must not POST relay IP:port; wait for `reservation ACCEPTED` + server circuit upsert |
+| `relay circuit DENIED` … `NoReservation` | Destination peer has no active relay reservation | Remote `:p2p` dropped reservation (background/LAN handover); remote must re-reserve |
 | Works after second `run_server.sh` start | First start had no bore | Always confirm `Starting bore:` line appears |
 
 ### Dev session checklist
@@ -145,7 +166,6 @@ Two-device test: server running → desktop `flutter run` + QR → phone scan �
 
 ## Related
 
-- [STORY.md](STORY.md) — human-authored connectivity policy (agents: read only, never edit)
 - [TRANSPORT.md](TRANSPORT.md) — WAN/LAN dial policy, invites, multiple coord servers
 - [ghal_bol_server/README.md](../ghal_bol_server/README.md)
 - [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md)

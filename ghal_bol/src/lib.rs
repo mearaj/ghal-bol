@@ -42,6 +42,8 @@ pub mod coord;
 mod coord_ffi;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coord_runtime;
+#[cfg(not(target_arch = "wasm32"))]
+mod wan_coord;
 #[cfg(all(not(target_arch = "wasm32"), unix))]
 pub mod daemon;
 mod dm_event_handler;

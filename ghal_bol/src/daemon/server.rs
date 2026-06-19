@@ -249,6 +249,7 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
                 .filter(|s| !s.is_empty());
             Ok(p2p_runtime::p2p_sync_ui_session(ui_visible, room))
         }
+        "p2p_nudge_read_catchup" => Ok(p2p_runtime::p2p_nudge_read_catchup()),
         "p2p_set_foreground_peer" => {
             let pk = params
                 .get("public_key_hex")

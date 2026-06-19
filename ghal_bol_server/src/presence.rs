@@ -2,8 +2,10 @@
 
 use crate::db;
 use crate::error::{ApiResult, ServerError};
+use crate::relay_live::RelayLiveRegistry;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +33,10 @@ pub struct PeerRecord {
 #[derive(Clone)]
 pub struct PresenceStore {
     conn: Arc<Mutex<Connection>>,
+    /// `host:port` from `GET /v1/relay` — never dialable or POSTable as peer TCP.
+    relay_bootstrap_tcp: Arc<Mutex<HashSet<String>>>,
+    /// Live relay reservations — gates `/p2p-circuit` on coord lookup.
+    relay_live: RelayLiveRegistry,
 }
 
 impl PresenceStore {
@@ -38,6 +44,8 @@ impl PresenceStore {
         let conn = db::open_and_migrate(path)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            relay_bootstrap_tcp: Arc::new(Mutex::new(HashSet::new())),
+            relay_live: RelayLiveRegistry::default(),
         })
     }
 
@@ -45,15 +53,37 @@ impl PresenceStore {
         let conn = db::open_memory()?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            relay_bootstrap_tcp: Arc::new(Mutex::new(HashSet::new())),
+            relay_live: RelayLiveRegistry::default(),
         })
     }
 
+    pub fn relay_live(&self) -> &RelayLiveRegistry {
+        &self.relay_live
+    }
+
+    /// Remember relay bootstrap TCP bases (reject on client POST and coord lookup).
+    pub fn set_relay_bootstrap_addrs(&self, addrs: &[String]) {
+        if let Ok(mut g) = self.relay_bootstrap_tcp.lock() {
+            *g = relay_bootstrap_tcp_keys(addrs);
+        }
+    }
+
+    pub fn relay_bootstrap_tcp_snapshot(&self) -> HashSet<String> {
+        self.relay_bootstrap_tcp
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
     /// WAN-dialable endpoints only: relay `/p2p-circuit` or public routable IPv4 TCP.
-    /// LAN RFC1918, loopback, and CGNAT must never appear in coord lookup (mDNS covers LAN).
-    fn filter_wan_presence_endpoints(endpoints: Vec<PeerEndpoint>) -> Vec<PeerEndpoint> {
+    /// LAN RFC1918, loopback, CGNAT, and relay bootstrap TCP must never appear in coord lookup.
+    fn filter_wan_presence_endpoints(&self, endpoints: Vec<PeerEndpoint>) -> Vec<PeerEndpoint> {
+        let bootstraps = self.relay_bootstrap_tcp_snapshot();
         endpoints
             .into_iter()
-            .filter(|e| is_wan_dialable_endpoint(e))
+            .filter(|e| is_wan_dialable_endpoint(e, &bootstraps))
             .collect()
     }
 
@@ -77,9 +107,11 @@ impl PresenceStore {
                     .collect()
             })
             .unwrap_or_default();
+        let bootstraps = self.relay_bootstrap_tcp_snapshot();
         let mut endpoints: Vec<PeerEndpoint> = client_endpoints
             .into_iter()
             .filter(|e| !(e.scheme == "libp2p" && e.host.contains("/p2p-circuit")))
+            .filter(|e| !is_relay_bootstrap_tcp_endpoint(e, &bootstraps))
             .collect();
         for relay_ep in relay_keep {
             if !endpoints
@@ -89,7 +121,7 @@ impl PresenceStore {
                 endpoints.push(relay_ep);
             }
         }
-        let endpoints = Self::filter_wan_presence_endpoints(endpoints);
+        let endpoints = self.filter_wan_presence_endpoints(endpoints);
         self.upsert(key, endpoints, transport_capabilities, ipv6, ipv4)
     }
 
@@ -102,7 +134,7 @@ impl PresenceStore {
         ipv4: Option<String>,
     ) -> Result<PeerRecord, ServerError> {
         let key = public_key_hex.to_ascii_lowercase();
-        let endpoints = Self::filter_wan_presence_endpoints(endpoints);
+        let endpoints = self.filter_wan_presence_endpoints(endpoints);
         let now_ms = unix_ms_now();
         let endpoints_json = serde_json::to_string(&endpoints)
             .map_err(|e| ServerError::Internal(format!("endpoints json: {e}")))?;
@@ -151,7 +183,16 @@ impl PresenceStore {
         let cutoff = heartbeat_cutoff_ms(ttl);
         let conn = self.conn.lock().map_err(lock_err)?;
         match self.fetch_one(&conn, &key, cutoff) {
-            Ok(r) => Ok(r),
+            Ok(mut r) => {
+                r.endpoints = self.filter_wan_presence_endpoints(r.endpoints);
+                self.relay_live.apply_live_relay_gate(&mut r);
+                if r.endpoints.is_empty() {
+                    return Err(ServerError::NotFound(
+                        "peer not registered or presence expired".into(),
+                    ));
+                }
+                Ok(r)
+            }
             Err(ServerError::NotFound(_)) => Err(ServerError::NotFound(
                 "peer not registered or presence expired".into(),
             )),
@@ -201,7 +242,7 @@ impl PresenceStore {
         if !had_circuit {
             return Ok(false);
         }
-        let endpoints = Self::filter_wan_presence_endpoints(
+        let endpoints = self.filter_wan_presence_endpoints(
             record
                 .endpoints
                 .into_iter()
@@ -234,7 +275,16 @@ impl PresenceStore {
              ORDER BY last_heartbeat_unix_ms DESC",
         )?;
         let rows = stmt.query_map([cutoff as i64], row_to_peer_record)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut out = Vec::new();
+        for row in rows {
+            let mut r = row?;
+            r.endpoints = self.filter_wan_presence_endpoints(r.endpoints);
+            self.relay_live.apply_live_relay_gate(&mut r);
+            if !r.endpoints.is_empty() {
+                out.push(r);
+            }
+        }
+        Ok(out)
     }
 
     pub fn purge_expired(&self, ttl: Duration) -> Result<u64, ServerError> {
@@ -314,12 +364,38 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> ServerError {
     ServerError::Internal("database lock poisoned".into())
 }
 
-fn is_wan_dialable_endpoint(ep: &PeerEndpoint) -> bool {
+fn is_wan_dialable_endpoint(ep: &PeerEndpoint, relay_bootstraps: &HashSet<String>) -> bool {
     match ep.scheme.as_str() {
         "libp2p" => ep.host.contains("/p2p-circuit"),
-        "tcp" => is_public_routable_tcp_host(&ep.host) && ep.port != 0,
+        "tcp" => {
+            is_public_routable_tcp_host(&ep.host)
+                && ep.port != 0
+                && !is_relay_bootstrap_tcp_endpoint(ep, relay_bootstraps)
+        }
         _ => false,
     }
+}
+
+fn is_relay_bootstrap_tcp_endpoint(ep: &PeerEndpoint, relay_bootstraps: &HashSet<String>) -> bool {
+    ep.scheme == "tcp" && relay_bootstraps.contains(&format!("{}:{}", ep.host.trim(), ep.port))
+}
+
+fn relay_bootstrap_tcp_keys(addrs: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for addr in addrs {
+        let s = addr.trim();
+        if let Some(host) = s.split("/ip4/").nth(1).and_then(|r| r.split('/').next()) {
+            if let Some(port) = s
+                .split("/tcp/")
+                .nth(1)
+                .and_then(|r| r.split('/').next())
+                .and_then(|p| p.parse::<u16>().ok())
+            {
+                out.insert(format!("{host}:{port}"));
+            }
+        }
+    }
+    out
 }
 
 fn is_public_routable_tcp_host(host: &str) -> bool {
@@ -340,5 +416,62 @@ fn is_public_routable_tcp_host(host: &str) -> bool {
 impl From<rusqlite::Error> for ServerError {
     fn from(e: rusqlite::Error) -> Self {
         ServerError::Internal(format!("database: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wan_dialable_rejects_relay_bootstrap_tcp() {
+        let bootstraps = relay_bootstrap_tcp_keys(&["/ip4/159.223.110.159/tcp/28048".to_string()]);
+        let ep = PeerEndpoint {
+            scheme: "tcp".into(),
+            host: "159.223.110.159".into(),
+            port: 28048,
+        };
+        assert!(!is_wan_dialable_endpoint(&ep, &bootstraps));
+        let peer = PeerEndpoint {
+            scheme: "tcp".into(),
+            host: "203.0.113.50".into(),
+            port: 41234,
+        };
+        assert!(is_wan_dialable_endpoint(&peer, &bootstraps));
+    }
+
+    #[test]
+    fn merge_register_strips_client_relay_bootstrap_tcp() {
+        let store = PresenceStore::open_in_memory().expect("db");
+        store.set_relay_bootstrap_addrs(&["/ip4/159.223.110.159/tcp/28048".to_string()]);
+        let pk = "aa".repeat(32);
+        let circuit = PeerEndpoint {
+            scheme: "libp2p".into(),
+            host: "/ip4/159.223.110.159/tcp/28048/p2p/12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
+                .into(),
+            port: 0,
+        };
+        store
+            .upsert_relay_circuit(&pk, circuit.host.clone())
+            .expect("relay upsert");
+        let client_tcp = vec![PeerEndpoint {
+            scheme: "tcp".into(),
+            host: "159.223.110.159".into(),
+            port: 28048,
+        }];
+        let rec = store
+            .merge_client_register(pk.clone(), client_tcp, vec!["tcp".into()], None, None)
+            .expect("merge");
+        assert!(
+            rec.endpoints.iter().any(|e| e.scheme == "libp2p"),
+            "circuit must remain"
+        );
+        assert!(
+            !rec
+                .endpoints
+                .iter()
+                .any(|e| e.scheme == "tcp" && e.host == "159.223.110.159"),
+            "bootstrap tcp must not be stored"
+        );
     }
 }

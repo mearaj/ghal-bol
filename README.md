@@ -14,7 +14,7 @@ The system is designed around a simple principle:
 
 Unlike traditional messengers such as WhatsApp or Signal, Ghal Bol does not aim to provide permanent cloud-backed offline message guarantees. Instead, it focuses on deterministic realtime synchronization, direct peer communication, and decentralized temporary relaying.
 
-**Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md). Product connectivity story: [docs/STORY.md](docs/STORY.md) (human-maintained).
+**Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md).
 
 **Invites & coordination:** [docs/GHAL_BOL_URI_SCHEME.md](docs/GHAL_BOL_URI_SCHEME.md), [docs/COORDINATION_SERVER.md](docs/COORDINATION_SERVER.md)
 
@@ -97,12 +97,13 @@ Every peer in Ghal Bol acts as both:
 
 Peers communicate directly whenever possible.
 
-Preferred connection order for a configured contact ([STORY.md](docs/STORY.md), [TRANSPORT.md](docs/TRANSPORT.md)):
+Connection policy for a configured contact ([TRANSPORT.md](docs/TRANSPORT.md) § “Both links active”):
 
 1. Existing active session (resume)
-2. **WAN first** — coord lookup + relay circuit + public TCP when registered
-3. **LAN exception (per-peer):** when mDNS shows the contact on the local LAN → direct TCP immediately; losing LAN falls back to WAN without user-visible disruption
-4. **libp2p Circuit Relay v2** on a **Ghal Bol relay** (co-located with coord) for NAT/CGNAT, then **DCUtR** hole-punch to upgrade to a direct link
+2. **Parallel on Wi‑Fi:** coord lookup + relay circuit + public TCP (WAN) **and** mDNS → direct TCP (LAN) when the contact is on the local network — **both links stay active** when connected
+3. **Mobile-data / CGNAT:** WAN (coord + relay) only when no active LAN
+4. **LAN loss:** WAN is already connected — immediate fallback without tearing down coord
+5. **libp2p Circuit Relay v2** on a **Ghal Bol relay** (co-located with coord) for NAT/CGNAT; **DCUtR** may upgrade to direct without closing relay
 
 Peer **discovery over WAN requires coord + relay** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. The app does **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN discovery. Multiple coord servers are supported as a list (today a single production entry).
 

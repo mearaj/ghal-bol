@@ -10,7 +10,7 @@ Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/
 |-------|--------|
 | App framing | 4-byte little-endian length + UTF-8 JSON envelope |
 | Envelope tag | `ghal_bol_msg_v1` (`format_version`: **`2`**) |
-| **Transport (libp2p)** | Stream protocol `/ghal-bol/msg/1.0.0`; underneath QUIC/TCP, Noise, Yamux; LAN mDNS; WAN **coord lookup + relay** ([STORY.md](STORY.md)) |
+| **Transport (libp2p)** | Stream protocol `/ghal-bol/msg/1.0.0`; underneath QUIC/TCP, Noise, Yamux; LAN mDNS; WAN **coord lookup + relay** ([TRANSPORT.md](TRANSPORT.md)) |
 
 **Long-lived session:** one bidirectional channel per remote **PeerId** when possible. A dedicated writer task sends frames; inbound read loop on the same session.
 

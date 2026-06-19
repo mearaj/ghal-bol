@@ -10,10 +10,9 @@
 //! presence. Protocol stack (tcp + noise + yamux + relay/identify/ping) and libp2p version
 //! are kept identical to the `ghal_bol` client.
 
-use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -22,6 +21,7 @@ use libp2p::{Multiaddr, PeerId, Swarm, identify, identity, ping, relay};
 
 use crate::agent_pk::parse_pk_from_agent_version;
 use crate::presence::PresenceStore;
+use crate::relay_live::RelayLiveRegistry;
 
 /// Relay coordinates advertised to clients via `GET /v1/relay`.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -283,11 +283,11 @@ pub fn start(
         "relay v2 node started"
     );
 
+    let live = presence.relay_live().clone();
     let ctx = Arc::new(RelayLoopCtx {
         presence,
         relay_info: info.clone(),
-        peer_keys: Mutex::new(HashMap::new()),
-        accepted_reservations: Mutex::new(HashSet::new()),
+        live,
     });
     tokio::spawn(run_relay(swarm, ctx));
     Ok(Some(info))
@@ -296,19 +296,16 @@ pub fn start(
 struct RelayLoopCtx {
     presence: Arc<PresenceStore>,
     relay_info: RelayInfo,
-    peer_keys: Mutex<HashMap<PeerId, String>>,
-    accepted_reservations: Mutex<HashSet<PeerId>>,
+    live: RelayLiveRegistry,
 }
 
 impl RelayLoopCtx {
     fn pk_for_peer(&self, peer_id: PeerId) -> Option<String> {
-        self.peer_keys.lock().ok()?.get(&peer_id).cloned()
+        self.live.pk_for_peer(peer_id)
     }
 
     fn note_peer_pk(&self, peer_id: PeerId, pk: String) {
-        if let Ok(mut m) = self.peer_keys.lock() {
-            m.insert(peer_id, pk);
-        }
+        self.live.note_peer_pk(peer_id, pk);
     }
 
     fn on_identify(&self, peer_id: PeerId, agent_version: &str) {
@@ -319,45 +316,33 @@ impl RelayLoopCtx {
         self.try_register_relay_presence(peer_id);
     }
 
-    fn on_reservation_accepted(&self, peer_id: PeerId) {
-        if let Ok(mut s) = self.accepted_reservations.lock() {
-            s.insert(peer_id);
-        }
+    fn on_reservation_accepted(&self, peer_id: PeerId, renewed: bool) {
+        self.live.on_reservation_accepted(peer_id, renewed);
         self.try_register_relay_presence(peer_id);
     }
 
     fn end_reservation(&self, peer_id: PeerId) {
-        if let Ok(mut s) = self.accepted_reservations.lock() {
-            s.remove(&peer_id);
-        }
         self.clear_reservation(peer_id);
     }
 
     fn clear_reservation(&self, peer_id: PeerId) {
-        let Some(pk) = self.pk_for_peer(peer_id) else {
-            return;
-        };
-        let store = Arc::clone(&self.presence);
-        match store.remove_relay_circuit(&pk) {
-            Ok(removed) => tracing::info!(
-                public_key = %pk,
-                removed,
-                "coord presence cleared after relay reservation end"
-            ),
-            Err(e) => tracing::warn!(public_key = %pk, error = %e, "relay presence remove failed"),
+        let pk = self.pk_for_peer(peer_id);
+        if let Some(pk) = pk.as_deref() {
+            let store = Arc::clone(&self.presence);
+            match store.remove_relay_circuit(pk) {
+                Ok(removed) => tracing::info!(
+                    public_key = %pk,
+                    removed,
+                    "coord presence cleared after relay reservation end"
+                ),
+                Err(e) => tracing::warn!(public_key = %pk, error = %e, "relay presence remove failed"),
+            }
         }
-        if let Ok(mut m) = self.peer_keys.lock() {
-            m.remove(&peer_id);
-        }
+        self.live.on_reservation_end(peer_id);
     }
 
     fn try_register_relay_presence(&self, peer_id: PeerId) {
-        let accepted = self
-            .accepted_reservations
-            .lock()
-            .ok()
-            .is_some_and(|s| s.contains(&peer_id));
-        if !accepted {
+        if !self.live.is_peer_live(peer_id) {
             return;
         }
         let Some(pk) = self.pk_for_peer(peer_id) else {
@@ -419,7 +404,7 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
                     renewed,
                 } => {
                     tracing::info!(%src_peer_id, renewed, "relay reservation ACCEPTED");
-                    ctx.on_reservation_accepted(src_peer_id);
+                    ctx.on_reservation_accepted(src_peer_id, renewed);
                 }
                 relay::Event::ReservationReqDenied {
                     src_peer_id,
@@ -435,10 +420,8 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
                     tracing::info!(%src_peer_id, "relay reservation closed");
                     // Bootstrap happy-eyeballs closes spare TCP hops; libp2p emits
                     // ReservationClosed while the client re-reserves on another link.
-                    // Only ReservationTimedOut is authoritative for coord purge.
-                    if let Ok(mut s) = ctx.accepted_reservations.lock() {
-                        s.remove(&src_peer_id);
-                    }
+                    // Lookup gates on live registry — stale SQLite rows are not dialable.
+                    ctx.live.on_reservation_closed(src_peer_id);
                 }
                 relay::Event::CircuitReqAccepted {
                     src_peer_id,
@@ -452,6 +435,15 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
                     status,
                 } => {
                     tracing::warn!(%src_peer_id, %dst_peer_id, ?status, "relay circuit DENIED");
+                    let status_s = format!("{status:?}");
+                    // Stale coord mirror: lookup may still list dst circuit while reservation is gone.
+                    if status_s.contains("NoReservation") {
+                        ctx.end_reservation(dst_peer_id);
+                    } else if status_s.contains("ConnectionFailed") {
+                        if !ctx.live.is_peer_live(dst_peer_id) {
+                            ctx.clear_reservation(dst_peer_id);
+                        }
+                    }
                 }
                 relay::Event::CircuitClosed {
                     src_peer_id,

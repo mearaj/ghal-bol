@@ -1,5 +1,6 @@
 //! Network profile detection, relay/coord dial helpers, and listen-address utilities (no Kademlia).
 
+use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
 
@@ -8,7 +9,69 @@ use libp2p::{Multiaddr, PeerId};
 
 use super::native_log;
 
+/// OS-reported default network transport (ConnectivityManager / Linux default route).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum OsDefaultTransport {
+    #[default]
+    None,
+    Wifi,
+    Cellular,
+    Ethernet,
+}
+
+/// Authoritative OS network snapshot — updated on connectivity callbacks + each `network_tick`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OsNetworkSnapshot {
+    pub default_transport: OsDefaultTransport,
+    /// Android `NET_CAPABILITY_VALIDATED`; Linux: default route iface operstate up.
+    pub internet_validated: bool,
+    /// Android `NET_CAPABILITY_INTERNET` on the default network.
+    pub has_internet: bool,
+    /// Wi‑Fi link up (Android any-WiFi-network or Linux `wl*` operstate).
+    pub wifi_link_up: bool,
+    /// Linux: iface name carrying the default IPv4 route (e.g. `wlan0`, `eth0`).
+    pub default_route_iface: Option<String>,
+}
+
+static OS_NETWORK_SNAPSHOT: std::sync::OnceLock<std::sync::RwLock<OsNetworkSnapshot>> =
+    std::sync::OnceLock::new();
+
+fn os_network_mx() -> &'static std::sync::RwLock<OsNetworkSnapshot> {
+    OS_NETWORK_SNAPSHOT.get_or_init(|| std::sync::RwLock::new(OsNetworkSnapshot::default()))
+}
+
+/// Probe OS connectivity and cache — call on Android notify + each `network_tick`.
+pub(crate) fn refresh_os_network_truth() {
+    let snap = probe_os_network_truth_platform();
+    if let Ok(mut g) = os_network_mx().write() {
+        *g = snap;
+    }
+}
+
+pub(crate) fn os_network_snapshot() -> OsNetworkSnapshot {
+    os_network_mx()
+        .read()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+fn probe_os_network_truth_platform() -> OsNetworkSnapshot {
+    #[cfg(target_os = "android")]
+    {
+        return crate::android_network::probe_connectivity_truth();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return crate::linux_network::probe_connectivity_truth();
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    {
+        OsNetworkSnapshot::default()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LocalNetworkProfile {
     pub has_rfc1918_ipv4: bool,
     pub has_public_ipv4: bool,
@@ -26,6 +89,8 @@ pub(crate) struct LocalNetworkProfile {
     pub has_rfc1918_on_wifi: bool,
     /// Direct public IPv4 on an interface (VPS / rare home WAN).
     pub primary_public_ipv4: Option<std::net::Ipv4Addr>,
+    /// Cached OS truth merged on each profile detect (see `merge_os_network_truth`).
+    pub os: OsNetworkSnapshot,
 }
 
 /// Detects Wi‑Fi ↔ mobile, CGNAT/LAN IP changes, and direct public IPv4 churn.
@@ -35,6 +100,8 @@ pub(crate) fn network_handover_key(p: &LocalNetworkProfile) -> NetworkHandoverKe
         rfc1918_on_wifi: p.has_rfc1918_on_wifi,
         mobile_path: p.on_mobile_data_path(),
         mode: p.mode_label(),
+        os_default: p.os.default_transport,
+        os_validated: p.os.internet_validated,
         cgnat: p.primary_cgnat_ipv4,
         lan_v4: p.primary_rfc1918_ipv4,
         public_v4: p.primary_public_ipv4,
@@ -47,6 +114,8 @@ pub(crate) struct NetworkHandoverKey {
     pub rfc1918_on_wifi: bool,
     pub mobile_path: bool,
     pub mode: &'static str,
+    pub os_default: OsDefaultTransport,
+    pub os_validated: bool,
     pub cgnat: Option<std::net::Ipv4Addr>,
     pub lan_v4: Option<std::net::Ipv4Addr>,
     pub public_v4: Option<std::net::Ipv4Addr>,
@@ -76,8 +145,28 @@ pub(crate) fn wan_coord_listen_fingerprint(addrs: &[Multiaddr]) -> Vec<String> {
 }
 
 impl LocalNetworkProfile {
+    /// OS default network is cellular with no Wi‑Fi/Ethernet default — truth for mobile-data path.
+    pub(crate) fn os_on_cellular_default(&self) -> bool {
+        matches!(self.os.default_transport, OsDefaultTransport::Cellular)
+    }
+
+    /// OS default network is Wi‑Fi or Ethernet.
+    pub(crate) fn os_on_lan_default(&self) -> bool {
+        matches!(
+            self.os.default_transport,
+            OsDefaultTransport::Wifi | OsDefaultTransport::Ethernet
+        )
+    }
+
     /// Wi‑Fi, tether, or wired LAN — prefer mDNS/direct TCP; do not treat as cellular-only.
     pub(crate) fn has_active_lan(&self) -> bool {
+        // OS default route is cellular — not on LAN even when rmnet/CGNAT iface lingers in if_addrs.
+        if self.os_on_cellular_default() {
+            return false;
+        }
+        if self.os_on_lan_default() && self.os.wifi_link_up {
+            return true;
+        }
         if self.has_rfc1918_on_wifi {
             return true;
         }
@@ -106,7 +195,7 @@ impl LocalNetworkProfile {
         if self.has_active_lan() {
             return "lan";
         }
-        if self.has_cellular_iface || self.has_cgnat_ipv4 {
+        if self.on_mobile_data_path() {
             return "mobile-data";
         }
         if self.has_tether_iface || self.has_usb_iface {
@@ -125,7 +214,7 @@ impl LocalNetworkProfile {
         if self.has_active_lan() {
             return "prioritize mDNS/LAN TCP; coord/relay for WAN";
         }
-        if self.has_cellular_iface || self.has_cgnat_ipv4 {
+        if self.on_mobile_data_path() {
             return "prefer coord+relay, keep LAN fallback";
         }
         if self.has_tether_iface || self.has_usb_iface {
@@ -137,8 +226,32 @@ impl LocalNetworkProfile {
         "use coord + mDNS"
     }
 
+    /// Compact OS truth for `Native/flow` connectivity snapshots.
+    pub(crate) fn os_truth_label(&self) -> String {
+        let transport = match self.os.default_transport {
+            OsDefaultTransport::Wifi => "wifi",
+            OsDefaultTransport::Cellular => "cell",
+            OsDefaultTransport::Ethernet => "eth",
+            OsDefaultTransport::None => "none",
+        };
+        let validated = if self.os.internet_validated {
+            "validated"
+        } else {
+            "unvalidated"
+        };
+        let wifi = if self.os.wifi_link_up { "wifi_up" } else { "wifi_down" };
+        if let Some(iface) = &self.os.default_route_iface {
+            format!("os={transport}/{validated}/{wifi} route={iface}")
+        } else {
+            format!("os={transport}/{validated}/{wifi}")
+        }
+    }
+
     /// Cellular/CGNAT without an active LAN — needs relay for coord when URL is set.
     pub(crate) fn on_mobile_data_path(&self) -> bool {
+        if self.os_on_cellular_default() {
+            return true;
+        }
         !self.has_active_lan() && (self.has_cellular_iface || self.has_cgnat_ipv4)
     }
 
@@ -149,18 +262,35 @@ impl LocalNetworkProfile {
 }
 
 /// Android Wi‑Fi return can lag `if_addrs` while libp2p is already listening on RFC1918 TCP.
-/// Treat any live RFC1918 DM listen as active LAN for handover (not a dial cache).
+/// Only promote to LAN when the OS also reports Wi‑Fi linked — not from listen addr alone.
 pub(crate) fn effective_network_profile(
     detected: LocalNetworkProfile,
     has_rfc1918_dm_listen: bool,
+    platform_wifi_linked: bool,
 ) -> LocalNetworkProfile {
-    if detected.has_active_lan() || !has_rfc1918_dm_listen {
+    if detected.has_active_lan() || !has_rfc1918_dm_listen || !platform_wifi_linked {
         return detected;
     }
     let mut p = detected;
     p.has_rfc1918_ipv4 = true;
     p.has_rfc1918_on_wifi = true;
     p
+}
+
+/// Merge cached OS connectivity truth into an `if_addrs`-derived profile.
+pub(crate) fn merge_os_network_truth(p: &mut LocalNetworkProfile) {
+    p.os = os_network_snapshot();
+    if p.os.wifi_link_up {
+        p.has_wifi_iface = true;
+    }
+    if p.os_on_lan_default() {
+        if p.has_rfc1918_ipv4 || p.os.default_transport == OsDefaultTransport::Wifi {
+            p.has_rfc1918_on_wifi = true;
+        }
+    }
+    if p.os_on_cellular_default() {
+        p.has_rfc1918_on_wifi = false;
+    }
 }
 
 fn iface_name_is_wifi(name: &str) -> bool {
@@ -244,6 +374,7 @@ pub(crate) fn detect_local_network_profile() -> LocalNetworkProfile {
             }
         }
     }
+    merge_os_network_truth(&mut p);
     p
 }
 
@@ -469,27 +600,13 @@ pub(crate) fn tcp_dm_publish_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
 }
 
 /// Inbound coord lookup addrs to dial when coord is primary (WAN paths only).
+/// WAN = `/p2p-circuit` only — bare public TCP from coord is often relay bootstrap, not the peer.
 pub(crate) fn wan_coord_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     let filtered: Vec<Multiaddr> = addrs
         .into_iter()
         .filter(|ma| {
-            if is_coord_relay_tcp_circuit_multiaddr(ma) {
-                return true;
-            }
-            if is_relay_circuit_multiaddr(ma) && is_dm_dial_multiaddr(ma) {
-                return true;
-            }
-            if is_coord_register_tcp_multiaddr(ma) {
-                return true;
-            }
-            let s = ma.to_string();
-            if s.contains("/ip6/") {
-                return false;
-            }
-            if let Some(ip) = ipv4_from_ma_str(&s) {
-                return !ip.is_private() && !ip.is_loopback();
-            }
-            false
+            is_coord_relay_tcp_circuit_multiaddr(ma)
+                || (is_relay_circuit_multiaddr(ma) && is_dm_dial_multiaddr(ma))
         })
         .collect();
     filter_coord_relay_dial_platform(sort_coord_dial_multiaddrs(filtered))
@@ -574,6 +691,50 @@ pub(crate) fn filter_wan_preferred_dm_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<M
     sorted
 }
 
+/// Host:port keys (`159.223.110.159:28048`) from `GET /v1/relay` base multiaddrs.
+pub(crate) fn relay_bootstrap_tcp_keys(addrs: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for addr in addrs {
+        if let Some((host, port)) = relay_base_tcp_host_port(addr) {
+            out.insert(format!("{host}:{port}"));
+        }
+    }
+    out
+}
+
+/// Parse `/ip4/<host>/tcp/<port>` from a relay bootstrap base multiaddr.
+pub(crate) fn relay_base_tcp_host_port(addr: &str) -> Option<(String, u16)> {
+    let s = addr.trim();
+    let host = s.split("/ip4/").nth(1)?.split('/').next()?.to_string();
+    let port = s
+        .split("/tcp/")
+        .nth(1)?
+        .split('/')
+        .next()?
+        .parse()
+        .ok()?;
+    Some((host, port))
+}
+
+pub(crate) fn is_relay_bootstrap_tcp(
+    host: &str,
+    port: u16,
+    bootstraps: &HashSet<String>,
+) -> bool {
+    bootstraps.contains(&format!("{}:{port}", host.trim()))
+}
+
+/// Last `/p2p/<id>` on a multiaddr (local peer on DM listen, client peer on relay circuit).
+pub(crate) fn terminal_p2p_peer_id(ma: &Multiaddr) -> Option<PeerId> {
+    let mut last = None;
+    for p in ma.iter() {
+        if let Protocol::P2p(pid) = p {
+            last = Some(pid);
+        }
+    }
+    last
+}
+
 /// Coord registration: public routable TCP only (not RFC1918 — mDNS covers LAN per DESIGN.md).
 /// Must include `/p2p/<local_peer>` — bare `/ip4/relay-host/tcp/port` bootstrap hops are not DM listens.
 pub(crate) fn is_coord_register_tcp_multiaddr(ma: &Multiaddr) -> bool {
@@ -589,17 +750,49 @@ pub(crate) fn is_coord_register_tcp_multiaddr(ma: &Multiaddr) -> bool {
         .unwrap_or(false)
 }
 
-/// WAN coord dial filter: public TCP + relay only (drops RFC1918/CGNAT).
+/// POST /v1/register TCP: peer's own public DM listen — not relay bootstrap or relay hop.
+pub(crate) fn is_peer_own_coord_register_tcp(
+    ma: &Multiaddr,
+    local_peer_id: &str,
+    relay_bootstraps: &HashSet<String>,
+    preferred_relay_peer_id: Option<&str>,
+) -> bool {
+    if !is_coord_register_tcp_multiaddr(ma) {
+        return false;
+    }
+    let terminal = terminal_p2p_peer_id(ma)
+        .map(|p| p.to_string())
+        .unwrap_or_default();
+    if terminal != local_peer_id {
+        return false;
+    }
+    let s = ma.to_string();
+    if let Some(relay) = preferred_relay_peer_id {
+        if s.contains(&format!("/p2p/{relay}")) {
+            return false;
+        }
+    }
+    if let Some(ip) = ipv4_from_ma_str(&s) {
+        if let Some(port) = s
+            .split("/tcp/")
+            .nth(1)
+            .and_then(|p| p.split('/').next())
+            .and_then(|p| p.parse::<u16>().ok())
+        {
+            if is_relay_bootstrap_tcp(&ip.to_string(), port, relay_bootstraps) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// WAN coord dial filter: `/p2p-circuit` only (bare public TCP is often relay bootstrap, not peer DM).
 pub(crate) fn filter_coord_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
     sort_coord_dial_multiaddrs(
         addrs
             .into_iter()
-            .filter(|ma| {
-                is_relay_circuit_multiaddr(ma)
-                    || ipv4_from_ma_str(&ma.to_string())
-                        .map(is_public_bootstrap_ipv4)
-                        .unwrap_or(false)
-            })
+            .filter(|ma| is_relay_circuit_multiaddr(ma))
             .collect(),
     )
 }
@@ -660,7 +853,7 @@ fn local_ipv4_addrs() -> Vec<std::net::Ipv4Addr> {
 }
 
 /// docker0 / podman / common CNI bridges — not reachable for DM dial (see user logs: 172.17–172.20).
-fn is_docker_or_link_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
+pub(crate) fn is_docker_or_link_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
     let o = ip.octets();
     (o[0] == 169 && o[1] == 254) || (o[0] == 172 && (17..=20).contains(&o[1]))
 }
@@ -731,6 +924,46 @@ pub(crate) fn peer_id_from_multiaddr(ma: &Multiaddr) -> Option<PeerId> {
 mod tests {
     use super::*;
     use libp2p::Multiaddr;
+
+    #[test]
+    fn peer_own_coord_register_rejects_relay_bootstrap_hop() {
+        let local = "16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk";
+        let relay = "12D3KooWKUiRKKzspUQShSLWVwxgp1HnSAs3EgDLCQbXn5iGHGhF";
+        let bootstraps = relay_bootstrap_tcp_keys(&["/ip4/159.223.110.159/tcp/28048".to_string()]);
+        // Bootstrap hop accidentally ending with local peer id must still be rejected.
+        let hop: Multiaddr = format!("/ip4/159.223.110.159/tcp/28048/p2p/{relay}/p2p/{local}")
+            .parse()
+            .unwrap();
+        assert!(!is_peer_own_coord_register_tcp(
+            &hop,
+            local,
+            &bootstraps,
+            Some(relay),
+        ));
+        let own_public: Multiaddr = format!("/ip4/203.0.113.50/tcp/41234/p2p/{local}")
+            .parse()
+            .unwrap();
+        assert!(is_peer_own_coord_register_tcp(
+            &own_public,
+            local,
+            &bootstraps,
+            Some(relay),
+        ));
+        let bootstrap_as_own: Multiaddr =
+            format!("/ip4/159.223.110.159/tcp/28048/p2p/{local}").parse().unwrap();
+        assert!(!is_peer_own_coord_register_tcp(
+            &bootstrap_as_own,
+            local,
+            &bootstraps,
+            Some(relay),
+        ));
+    }
+
+    #[test]
+    fn relay_bootstrap_tcp_keys_parses_ip4_base() {
+        let keys = relay_bootstrap_tcp_keys(&["/ip4/159.223.110.159/tcp/28048".to_string()]);
+        assert!(keys.contains("159.223.110.159:28048"));
+    }
 
     #[test]
     fn publishable_rejects_docker_bridge_listen() {
@@ -844,5 +1077,49 @@ mod tests {
             relay_bootstrap_family_rank(&v4, false, true)
                 < relay_bootstrap_family_rank(&v6, false, true)
         );
+    }
+
+    #[test]
+    fn os_cellular_default_overrides_lingering_wifi_ifaces() {
+        let mut p = LocalNetworkProfile {
+            has_rfc1918_ipv4: true,
+            has_rfc1918_on_wifi: true,
+            has_wifi_iface: true,
+            has_cellular_iface: true,
+            ..Default::default()
+        };
+        p.os.default_transport = OsDefaultTransport::Cellular;
+        p.os.wifi_link_up = false;
+        assert!(!p.has_active_lan());
+        assert!(p.on_mobile_data_path());
+        assert_eq!(p.mode_label(), "mobile-data");
+    }
+
+    #[test]
+    fn os_wifi_default_is_lan_even_before_if_addrs_catch_up() {
+        let p = LocalNetworkProfile {
+            os: OsNetworkSnapshot {
+                default_transport: OsDefaultTransport::Wifi,
+                internet_validated: true,
+                has_internet: true,
+                wifi_link_up: true,
+                default_route_iface: Some("wlan0".to_string()),
+            },
+            ..Default::default()
+        };
+        assert!(p.has_active_lan());
+        assert!(!p.on_mobile_data_path());
+        assert_eq!(p.mode_label(), "lan");
+    }
+
+    #[test]
+    fn handover_key_changes_when_os_default_transport_changes() {
+        let mut wifi = LocalNetworkProfile::default();
+        wifi.os.default_transport = OsDefaultTransport::Wifi;
+        wifi.os.wifi_link_up = true;
+        let mut cell = wifi.clone();
+        cell.os.default_transport = OsDefaultTransport::Cellular;
+        cell.os.wifi_link_up = false;
+        assert_ne!(network_handover_key(&wifi), network_handover_key(&cell));
     }
 }

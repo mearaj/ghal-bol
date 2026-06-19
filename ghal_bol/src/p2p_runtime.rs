@@ -20,8 +20,8 @@ use crate::dm_event_handler::{
 use crate::msg_v1::MsgKind;
 use crate::p2p::{
     DEFAULT_GOSSIP_TOPIC, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, native_log,
-    queue_read_ack_catchup, run_gossip_chat_node_with_std_io, set_drop_pending_call_invite_hook,
-    sync_foreground_peer_now,
+    live_foreground_peer_for_catchup, queue_read_ack_catchup, run_gossip_chat_node_with_std_io,
+    set_drop_pending_call_invite_hook, sync_foreground_peer_now,
 };
 use crate::session_runtime::unlocked_identity_clone;
 
@@ -643,6 +643,7 @@ pub fn p2p_is_running() -> Value {
 
 pub fn p2p_stop() {
     native_log::info("p2p", "p2p_stop requested");
+    clear_ui_session_snapshot();
     crate::coord_runtime::stop_coord_presence();
     crate::p2p::set_app_ack_read_enabled(false);
     stop_p2p_node(Duration::from_secs(3));
@@ -1352,6 +1353,16 @@ pub fn p2p_set_app_ui_visible(visible: bool) -> Value {
 /// Open order: ui visible + room set → read gate on → foreground peer (enter catch-up).
 pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) -> Value {
     let room = room_public_key_hex.map(str::trim).filter(|s| s.len() == 66);
+    if ui_session_snapshot_unchanged(ui_visible, room) {
+        return json_ok(serde_json::json!({
+            "ok": true,
+            "unchanged": true,
+            "ui_visible": ui_visible,
+            "room": room,
+            "read_receipts": ui_visible && room.is_some(),
+        }));
+    }
+    record_ui_session_snapshot(ui_visible, room);
     native_log::info(
         "session",
         format!(
@@ -1394,6 +1405,45 @@ pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) 
         "room": room,
         "read_receipts": false,
     }))
+}
+
+/// Linux read-gate nudge — re-run in-room `ack_read` catch-up without re-issuing `SetForegroundPeer`.
+pub fn p2p_nudge_read_catchup() -> Value {
+    if let Ok(g) = p2p_mx().lock() {
+        if let Some(h) = g.as_ref() {
+            if let Some(peer) = live_foreground_peer_for_catchup() {
+                queue_read_ack_catchup(&h.out_tx, peer);
+            }
+        }
+    }
+    json_ok(serde_json::json!({ "ok": true }))
+}
+
+fn ui_session_snapshot_mx() -> &'static Mutex<Option<(bool, Option<String>)>> {
+    static S: OnceLock<Mutex<Option<(bool, Option<String>)>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+fn ui_session_snapshot_unchanged(ui_visible: bool, room: Option<&str>) -> bool {
+    let Ok(g) = ui_session_snapshot_mx().lock() else {
+        return false;
+    };
+    let Some((was_visible, was_room)) = g.as_ref() else {
+        return false;
+    };
+    *was_visible == ui_visible && was_room.as_deref() == room
+}
+
+fn record_ui_session_snapshot(ui_visible: bool, room: Option<&str>) {
+    if let Ok(mut g) = ui_session_snapshot_mx().lock() {
+        *g = Some((ui_visible, room.map(str::to_string)));
+    }
+}
+
+fn clear_ui_session_snapshot() {
+    if let Ok(mut g) = ui_session_snapshot_mx().lock() {
+        *g = None;
+    }
 }
 
 /// DM + libp2p connectivity — forward to Flutter App log (`Native/…` tags in export).
@@ -1440,7 +1490,22 @@ fn native_log_should_forward_to_ui(line: &native_log::NativeLogLine) -> bool {
     false
 }
 
+fn foreground_room_unchanged(public_key_hex: Option<&str>) -> bool {
+    let want = public_key_hex
+        .map(str::trim)
+        .filter(|s| s.len() == 66)
+        .map(str::to_lowercase);
+    match (want, live_foreground_peer_for_catchup()) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a == b.to_ascii_lowercase(),
+        _ => false,
+    }
+}
+
 pub fn p2p_set_foreground_peer(public_key_hex: Option<&str>) -> Value {
+    if foreground_room_unchanged(public_key_hex) {
+        return json_ok(serde_json::json!({ "ok": true, "unchanged": true }));
+    }
     let label = public_key_hex
         .map(str::trim)
         .filter(|s| !s.is_empty())

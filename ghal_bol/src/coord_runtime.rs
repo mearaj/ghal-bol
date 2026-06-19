@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 const MAX_COORD_ENDPOINTS: usize = 16;
-/// Max coord/relay servers in the configured list (STORY.md).
+/// Max coord/relay servers in the configured list (TRANSPORT.md).
 const MAX_COORD_SERVERS: usize = 8;
 
 struct CoordGlobals {
@@ -22,6 +22,10 @@ struct CoordGlobals {
     registered_on: Mutex<HashSet<String>>,
     /// Bootstrap relay we last reserved on (prefer matching circuit for coord register).
     preferred_relay_peer_id: Mutex<Option<String>>,
+    /// libp2p local peer id — coord POST TCP must terminate on this id.
+    local_peer_id: Mutex<Option<String>>,
+    /// `host:port` keys from `GET /v1/relay` — never POST these as peer TCP.
+    relay_bootstrap_tcp: Mutex<HashSet<String>>,
     heartbeat_stop: AtomicBool,
     heartbeat_join: Mutex<Option<JoinHandle<()>>>,
 }
@@ -37,6 +41,14 @@ static COORD_LAST_REG_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
 /// Avoid flapping `coord_registered` on one transient mobile-data failure.
 static COORD_CONSEC_FAILS: AtomicU64 = AtomicU64::new(0);
 static RELAY_PRESENCE_CHECK_PENDING: AtomicBool = AtomicBool::new(false);
+static RELAY_PRESENCE_POLL_LAST_END_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Fast poll after reservation (ngrok flap ~seconds); slow poll until mirror or circuit down.
+const RELAY_PRESENCE_POLL_FAST_MS: u64 = 500;
+const RELAY_PRESENCE_POLL_FAST_ATTEMPTS: u32 = 12;
+const RELAY_PRESENCE_POLL_SLOW_MS: u64 = 2_000;
+const RELAY_PRESENCE_POLL_SLOW_ATTEMPTS: u32 = 30;
+const RELAY_PRESENCE_RESCHEDULE_MIN_MS: u64 = 5_000;
 
 /// Backoff repeated coord peer lookups from the daemon/UI RPC path.
 /// Key: peer public_key_hex.
@@ -101,9 +113,42 @@ fn coord_globals() -> &'static CoordGlobals {
         endpoints: Mutex::new(Vec::new()),
         registered_on: Mutex::new(HashSet::new()),
         preferred_relay_peer_id: Mutex::new(None),
+        local_peer_id: Mutex::new(None),
+        relay_bootstrap_tcp: Mutex::new(HashSet::new()),
         heartbeat_stop: AtomicBool::new(false),
         heartbeat_join: Mutex::new(None),
     })
+}
+
+/// Set once when the libp2p swarm starts (coord POST TCP must end with this peer id).
+pub fn coord_set_local_peer_id(peer: libp2p::PeerId) {
+    if let Ok(mut g) = coord_globals().local_peer_id.lock() {
+        *g = Some(peer.to_string());
+    }
+}
+
+fn coord_local_peer_id() -> Option<String> {
+    coord_globals().local_peer_id.lock().ok().and_then(|g| g.clone())
+}
+
+fn coord_relay_bootstrap_tcp_keys() -> HashSet<String> {
+    coord_globals()
+        .relay_bootstrap_tcp
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// Remember relay bootstrap host:ports from `GET /v1/relay` (never POST as peer TCP).
+pub fn coord_note_relay_bootstrap_addrs(addrs: &[String]) {
+    let keys = crate::p2p::network_transport::relay_bootstrap_tcp_keys(addrs);
+    if keys.is_empty() {
+        return;
+    }
+    if let Ok(mut g) = coord_globals().relay_bootstrap_tcp.lock() {
+        g.extend(keys);
+    }
 }
 
 fn normalize_coord_url(url: &str) -> Option<String> {
@@ -220,7 +265,7 @@ pub fn coord_note_relay_reservation(relay_peer_id: libp2p::PeerId) {
     }
 }
 
-/// Coord URL is set — WAN peer discovery requires coord/relay lookup (STORY.md).
+/// Coord URL is set — WAN peer discovery requires coord/relay lookup (TRANSPORT.md).
 /// mDNS/LAN still works without coord; coord HTTP retries continue in the background.
 pub fn wan_discovery_via_coord_only() -> bool {
     coord_is_configured()
@@ -258,23 +303,67 @@ fn schedule_check_relay_presence_once() {
 
 #[cfg(not(test))]
 fn schedule_check_relay_presence_once_impl() {
-    if RELAY_PRESENCE_CHECK_PENDING.swap(true, Ordering::AcqRel) {
+    if RELAY_PRESENCE_CHECK_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    let now = unix_ms_now();
+    let last_end = RELAY_PRESENCE_POLL_LAST_END_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last_end) < RELAY_PRESENCE_RESCHEDULE_MIN_MS
+        && !COORD_REGISTERED.load(Ordering::Relaxed)
+        && last_end > 0
+    {
+        return;
+    }
+    if RELAY_PRESENCE_CHECK_PENDING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return;
     }
     std::thread::Builder::new()
         .name("ghalbol-coord-relay-poll".into())
         .spawn(|| {
-            for attempt in 0..12 {
-                if attempt > 0 {
-                    std::thread::sleep(Duration::from_millis(500));
+            let mut attempt: u32 = 0;
+            let poll_once = |attempt: u32| -> bool {
+                if !coord_is_configured() {
+                    return true;
                 }
                 let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
-                    break;
+                    return true;
                 };
                 if refresh_relay_presence_from_coord(&ident.public_key_hex()) {
+                    return true;
+                }
+                if crate::wan_coord::local_relay_circuit_listening()
+                    && (attempt == 2 || attempt == 7 || attempt % 15 == 0)
+                {
+                    crate::p2p::notify_relay_refresh();
+                    if has_public_coord_register_endpoints() {
+                        spawn_register_presence_inner(true);
+                    }
+                }
+                false
+            };
+            while attempt < RELAY_PRESENCE_POLL_FAST_ATTEMPTS {
+                if attempt > 0 {
+                    std::thread::sleep(Duration::from_millis(RELAY_PRESENCE_POLL_FAST_MS));
+                }
+                if poll_once(attempt) {
                     break;
                 }
+                attempt += 1;
             }
+            while attempt < RELAY_PRESENCE_POLL_FAST_ATTEMPTS + RELAY_PRESENCE_POLL_SLOW_ATTEMPTS {
+                if !crate::wan_coord::local_relay_circuit_listening() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(RELAY_PRESENCE_POLL_SLOW_MS));
+                if poll_once(attempt) {
+                    break;
+                }
+                attempt += 1;
+            }
+            RELAY_PRESENCE_POLL_LAST_END_MS.store(unix_ms_now(), Ordering::Relaxed);
             RELAY_PRESENCE_CHECK_PENDING.store(false, Ordering::Release);
         })
         .ok();
@@ -317,6 +406,9 @@ fn refresh_relay_presence_from_coord(pk: &str) -> bool {
                 any_http_ok = true;
             }
             Err(e) => {
+                if coord_lookup_err_means_http_reachable(&e) {
+                    any_http_ok = true;
+                }
                 crate::flow_log::debug(
                     "coord",
                     format!(
@@ -376,9 +468,12 @@ fn recover_coord_presence_after_server_drop(pk: &str) {
     }
 }
 
-/// Bootstrap HOP to coord relay dropped — our `/p2p-circuit` on coord may be stale until re-reserved.
+/// Bootstrap HOP to coord relay dropped — reconcile WAN presence without tearing down
+/// parallel LAN+WAN when local relay circuit listen is still up.
 pub fn mark_coord_relay_hop_lost() {
-    COORD_REGISTERED.store(false, Ordering::Relaxed);
+    if !crate::wan_coord::local_relay_circuit_listening() {
+        COORD_REGISTERED.store(false, Ordering::Relaxed);
+    }
     schedule_check_relay_presence_once();
 }
 
@@ -395,208 +490,79 @@ pub fn coord_invalidate_presence_on_network_change() {
 /// Fetch the coordinator's co-located relay (`GET /v1/relay`): `(peer_id, base_addrs)`.
 ///
 /// Blocking HTTP — call from a blocking context (e.g. `spawn_blocking`). A few quick retries
-/// absorb a transient coord hiccup at startup.
-///
-/// Resilience (the relay must survive coord-HTTP outages, not just the happy path):
-/// - **Found** → persist to `cache_path` and return it.
-/// - **Reachable but relay not advertised yet** → keep using disk cache if present (STORY.md).
-/// - **Unreachable** (HTTP error / flaky mobile data at launch) → fall back to the last cached
-///   relay if present, so we still prefer our reliable relay over the flaky public bootstraps.
-///
-/// The relay PeerId is stable, so a previously cached entry stays valid across restarts and
-/// network handovers (wifi ⇄ mobile ⇄ LAN). Returns `None` when no coord URL is set.
-fn fetch_ghalbol_relay_for_base(
-    base: &str,
-    cache_path: Option<&std::path::Path>,
-) -> Option<(String, Vec<String>)> {
+/// absorb a transient coord hiccup at startup. Live HTTP only — no on-disk relay cache
+/// (TRANSPORT.md § “Caching policy (canonical)”).
+fn fetch_ghalbol_relay_for_base(base: &str) -> Option<(String, Vec<String>)> {
     let base_norm = base.trim().trim_end_matches('/');
-    let is_ngrok_dev = base_norm.contains("ngrok");
     let client = client_for(base).ok()?;
     for attempt in 0..3 {
         match client.get_relay() {
             Ok((peer, addrs)) if !peer.is_empty() && !addrs.is_empty() => {
-                write_relay_cache(cache_path, base_norm, &peer, &addrs);
                 return Some((peer, addrs));
             }
             Ok(_) => {
-                if is_ngrok_dev {
-                    crate::flow_log::warn(
-                        "relay",
-                        format!(
-                            "coord {base_norm} GET /v1/relay empty — ngrok dev: not using stale relay cache"
-                        ),
-                    );
-                    return None;
-                }
-                if let Some(cached) = read_relay_cache(cache_path, base_norm) {
-                    crate::flow_log::warn(
-                        "relay",
-                        format!(
-                            "coord {base_norm} GET /v1/relay empty — using cached relay {} ({} addr(s))",
-                            &cached.0[..cached.0.len().min(12)],
-                            cached.1.len()
-                        ),
-                    );
-                    return Some(cached);
-                }
                 crate::flow_log::warn(
                     "relay",
                     format!(
-                        "coord {base_norm} GET /v1/relay: no relay advertised yet (WAN blocked until server exposes relay)"
+                        "coord {base_norm} GET /v1/relay empty — WAN blocked until server exposes relay"
                     ),
                 );
                 return None;
             }
             Err(_) if attempt + 1 < 3 => std::thread::sleep(Duration::from_millis(500)),
             Err(e) => {
-                if is_ngrok_dev {
-                    crate::flow_log::warn(
-                        "relay",
-                        format!(
-                            "coord {base_norm} GET /v1/relay failed ({e}) — ngrok dev: not using stale relay cache"
-                        ),
-                    );
-                    return None;
-                }
-                return read_relay_cache(cache_path, base_norm);
+                crate::flow_log::warn(
+                    "relay",
+                    format!("coord {base_norm} GET /v1/relay failed ({e})"),
+                );
+                return None;
             }
         }
     }
-    read_relay_cache(cache_path, base_norm)
+    None
 }
 
 /// Fetch `/v1/relay` from **every** configured coord server (one relay per host).
-pub fn fetch_all_ghalbol_relays(
-    cache_path: Option<std::path::PathBuf>,
-) -> Vec<(String, Vec<String>)> {
+pub fn fetch_all_ghalbol_relays() -> Vec<(String, Vec<String>)> {
     let urls = coord_base_urls();
     if urls.is_empty() {
-        return relay_after_http_miss(cache_path.as_deref())
-            .into_iter()
-            .collect();
+        return Vec::new();
     }
     let mut out = Vec::new();
     let mut seen_peer = HashSet::new();
-    for (i, base) in urls.iter().enumerate() {
-        let per_host_cache = cache_path.as_ref().map(|p| {
-            if urls.len() == 1 {
-                p.clone()
-            } else {
-                p.parent().map_or_else(
-                    || p.with_file_name(format!("ghalbol_relay_{i}.json")),
-                    |dir| dir.join(format!("ghalbol_relay_{i}.json")),
-                )
-            }
-        });
-        if let Some((peer, addrs)) = fetch_ghalbol_relay_for_base(base, per_host_cache.as_deref()) {
+    for base in urls.iter() {
+        if let Some((peer, addrs)) = fetch_ghalbol_relay_for_base(base) {
+            coord_note_relay_bootstrap_addrs(&addrs);
             if seen_peer.insert(peer.clone()) {
                 out.push((peer, addrs));
             }
         }
     }
-    if out.is_empty() {
-        if let Some(fallback) = relay_after_http_miss(cache_path.as_deref()) {
-            out.push(fallback);
-        }
-    }
     out
 }
 
-fn relay_after_http_miss(cache_path: Option<&std::path::Path>) -> Option<(String, Vec<String>)> {
-    let base = coord_base_urls()
-        .first()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .unwrap_or_default();
-    read_relay_cache(cache_path, &base)
-}
-
-fn read_relay_cache(
-    path: Option<&std::path::Path>,
-    coord_base: &str,
-) -> Option<(String, Vec<String>)> {
-    let path = path?;
-    let bytes = std::fs::read(path).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let base_norm = coord_base.trim().trim_end_matches('/');
-    if !base_norm.is_empty() {
-        match v.get("coord_base").and_then(|x| x.as_str()) {
-            Some(cached_base) => {
-                let cached_norm = cached_base.trim().trim_end_matches('/');
-                if cached_norm != base_norm {
-                    crate::flow_log::warn(
-                        "relay",
-                        format!(
-                            "ignoring relay cache — coord base mismatch ({cached_norm} != {base_norm})"
-                        ),
-                    );
-                    return None;
-                }
+/// Delete legacy `ghalbol_relay*.json` files from the identity data dir (`:p2p` start).
+pub fn purge_legacy_relay_cache_files(data_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let legacy = name.as_ref() == "ghalbol_relay.json"
+            || (name.starts_with("ghalbol_relay_") && name.ends_with(".json"));
+        if legacy {
+            if std::fs::remove_file(entry.path()).is_ok() {
+                crate::flow_log::info("relay", format!("purged legacy relay cache {name}"));
             }
-            None if base_norm.contains("ngrok") => {
-                crate::flow_log::warn(
-                    "relay",
-                    "ignoring legacy relay cache on ngrok dev coord (no coord_base field)",
-                );
-                return None;
-            }
-            None => {}
         }
     }
-    let peer = v["peer_id"].as_str()?.trim().to_string();
-    let addrs: Vec<String> = v["addrs"]
-        .as_array()?
-        .iter()
-        .filter_map(|x| x.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if peer.is_empty() || addrs.is_empty() {
-        return None;
-    }
-    crate::flow_log::info(
-        "relay",
-        format!(
-            "using cached ghalbol relay {peer} ({} addr(s))",
-            addrs.len()
-        ),
-    );
-    Some((peer, addrs))
 }
 
-fn write_relay_cache(
-    path: Option<&std::path::Path>,
-    coord_base: &str,
-    peer: &str,
-    addrs: &[String],
-) {
-    let Some(path) = path else { return };
-    let body = serde_json::json!({
-        "coord_base": coord_base.trim().trim_end_matches('/'),
-        "peer_id": peer,
-        "addrs": addrs,
-        "cached_at_ms": unix_ms_now(),
-    });
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(s) = serde_json::to_string(&body) {
-        let _ = std::fs::write(path, s);
-    }
-}
-
-#[cfg(test)]
-fn clear_relay_cache(path: Option<&std::path::Path>) {
-    clear_relay_cache_file(path);
-}
-
-/// Drop stale on-disk relay coordinates (e.g. bore port changed or tunnel died).
-pub fn invalidate_cached_ghalbol_relay(cache_path: Option<&std::path::Path>) {
-    clear_relay_cache_file(cache_path);
-}
-
-fn clear_relay_cache_file(path: Option<&std::path::Path>) {
-    if let Some(path) = path {
-        let _ = std::fs::remove_file(path);
+/// Relay TCP failed — purge any leftover legacy cache files in `data_dir`.
+pub fn invalidate_cached_ghalbol_relay(data_dir: Option<&std::path::Path>) {
+    if let Some(dir) = data_dir {
+        purge_legacy_relay_cache_files(dir);
     }
 }
 
@@ -622,20 +588,27 @@ pub fn coord_link_recently_ok() -> bool {
     last > 0 && unix_ms_now().saturating_sub(last) < PRESENCE_STALE_MS
 }
 
-/// Coord URL is set but HTTP register/heartbeat/lookup has not succeeded recently — LAN/mDNS
-/// still works; keep retrying live coord HTTP (STORY.md — no stale peer dial cache).
+/// Coord URL is set but coord HTTP transport has not succeeded recently — LAN/mDNS still works.
+/// Self not yet on coord (`awaiting_coord_mirror`) is **not** transport degradation when HTTP
+/// recently returned 200/404 (TRANSPORT.md § WAN phases — ngrok flap recovery).
 pub fn coord_http_degraded() -> bool {
     if !coord_is_configured() {
         return false;
     }
-    if !COORD_REGISTERED.load(Ordering::Relaxed) {
-        return true;
-    }
-    if COORD_CONSEC_FAILS.load(Ordering::Relaxed) >= 1 {
+    // One transient mobile/ngrok flake must not flip WAN to degraded for minutes.
+    if COORD_CONSEC_FAILS.load(Ordering::Relaxed) >= 2 {
         return true;
     }
     let last = COORD_LAST_OK_MS.load(Ordering::Relaxed);
     last == 0 || unix_ms_now().saturating_sub(last) >= PRESENCE_STALE_MS
+}
+
+fn coord_lookup_err_means_http_reachable(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("404")
+        || e.contains("peer_not_on")
+        || e.contains("not registered")
+        || e.contains("no dialable endpoints")
 }
 
 /// Record a coord HTTP transport failure (lookup/register/heartbeat) — flips degraded quickly.
@@ -777,8 +750,14 @@ fn listen_addrs_to_coord_endpoints(addrs: &[Multiaddr]) -> Vec<CoordEndpoint> {
         }
     }
     if has_relay {
+        let bootstraps = coord_relay_bootstrap_tcp_keys();
         eps.retain(|e| {
-            e.scheme == "libp2p" || (e.scheme == "tcp" && is_coord_publishable_host(&e.host))
+            e.scheme == "libp2p"
+                || (e.scheme == "tcp"
+                    && is_coord_publishable_host(&e.host)
+                    && !crate::p2p::network_transport::is_relay_bootstrap_tcp(
+                        &e.host, e.port, &bootstraps,
+                    ))
         });
     }
     eps.sort_by_key(|e| {
@@ -883,18 +862,24 @@ fn multiaddr_to_coord_endpoints(ma: &Multiaddr) -> Vec<CoordEndpoint> {
             port: 0,
         }];
     }
-    if !crate::p2p::network_transport::is_coord_register_tcp_multiaddr(ma) {
+    let preferred_relay = coord_globals()
+        .preferred_relay_peer_id
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let local = match coord_local_peer_id() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    if !crate::p2p::network_transport::is_peer_own_coord_register_tcp(
+        ma,
+        &local,
+        &coord_relay_bootstrap_tcp_keys(),
+        preferred_relay.as_deref(),
+    ) {
         return Vec::new();
     }
-    let s = ma.to_string();
-    if let Ok(g) = coord_globals().preferred_relay_peer_id.lock() {
-        if let Some(relay) = g.as_ref() {
-            if s.contains(&format!("/p2p/{relay}")) {
-                return Vec::new();
-            }
-        }
-    }
-    if let Some(dm) = DmDialAddr::parse(&s) {
+    if let Some(dm) = DmDialAddr::parse(&ma.to_string()) {
         return vec![CoordEndpoint {
             scheme: "tcp".into(),
             host: dm.host,
@@ -917,7 +902,22 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
         .iter()
         .filter(|ma| {
             crate::p2p::network_transport::is_coord_ipv4_relay_listen(ma)
-                || crate::p2p::network_transport::is_coord_register_tcp_multiaddr(ma)
+                || {
+                    let local = coord_local_peer_id();
+                    let preferred = coord_globals()
+                        .preferred_relay_peer_id
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone());
+                    local.is_some_and(|local| {
+                        crate::p2p::network_transport::is_peer_own_coord_register_tcp(
+                            ma,
+                            &local,
+                            &coord_relay_bootstrap_tcp_keys(),
+                            preferred.as_deref(),
+                        )
+                    })
+                }
         })
         .cloned()
         .collect();
@@ -982,24 +982,45 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
     }
 }
 
+/// Remote peer circuit dial failed — coord row may be stale; clear lookup backoff for urgent retry.
+pub fn note_remote_peer_circuit_stale(public_key_hex: &str) {
+    clear_coord_lookup_backoff_for_pk(public_key_hex);
+}
+
+fn coord_heartbeat_running() -> bool {
+    coord_globals()
+        .heartbeat_join
+        .lock()
+        .ok()
+        .and_then(|j| j.as_ref().map(|h| !h.is_finished()))
+        .unwrap_or(false)
+}
+
+/// Start the coord heartbeat/presence thread while awaiting phase D (circuit mirror on coord).
+pub fn ensure_coord_presence_polling() {
+    if !coord_is_configured() || COORD_REGISTERED.load(Ordering::Relaxed) {
+        return;
+    }
+    if coord_heartbeat_running() {
+        return;
+    }
+    let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
+        return;
+    };
+    start_heartbeat_loop(ident.public_key_hex());
+}
+
 /// Drain pending register work and sync endpoint snapshot.
 pub fn coord_register_tick(listen_snapshot: &[Multiaddr]) {
     if !coord_is_configured() {
         return;
     }
     rebuild_coord_endpoints_from_listen(listen_snapshot);
-    if COORD_REGISTERED.load(Ordering::Relaxed)
-        && !coord_link_recently_ok()
-        && COORD_CONSEC_FAILS.load(Ordering::Relaxed) >= 1
-    {
-        if let Ok(ident) = crate::session_runtime::unlocked_identity_clone() {
-            let pk = ident.public_key_hex();
-            if !refresh_relay_presence_from_coord(&pk) {
-                recover_coord_presence_after_server_drop(&pk);
-            }
-        }
-    }
     if !COORD_REGISTERED.load(Ordering::Relaxed) {
+        ensure_coord_presence_polling();
+        if crate::wan_coord::local_relay_circuit_listening() {
+            schedule_check_relay_presence_once();
+        }
         if has_coord_endpoints() {
             spawn_register_presence_inner(false);
         } else {
@@ -1007,6 +1028,8 @@ pub fn coord_register_tick(listen_snapshot: &[Multiaddr]) {
         }
     } else if COORD_REG_PENDING.swap(false, Ordering::AcqRel) {
         spawn_register_presence_inner(false);
+    } else if !coord_link_recently_ok() && COORD_CONSEC_FAILS.load(Ordering::Relaxed) >= 1 {
+        schedule_check_relay_presence_once();
     }
 }
 
@@ -1097,8 +1120,12 @@ fn endpoints_for_coord_register(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
     if !coord_is_configured() {
         return tcp;
     }
+    let bootstraps = coord_relay_bootstrap_tcp_keys();
     tcp.into_iter()
         .filter(|e| is_coord_publishable_host(&e.host))
+        .filter(|e| {
+            !crate::p2p::network_transport::is_relay_bootstrap_tcp(&e.host, e.port, &bootstraps)
+        })
         .collect()
 }
 
@@ -1258,6 +1285,7 @@ fn start_heartbeat_loop(public_key_hex: String) {
                     match c.heartbeat(&public_key_hex) {
                         Ok(_) => {
                             any_ok = true;
+                            note_coord_transport_ok();
                             break;
                         }
                         Err(e) if heartbeat_err_peer_not_on_coord(&e) => {
@@ -1273,6 +1301,11 @@ fn start_heartbeat_loop(public_key_hex: String) {
                             break;
                         }
                         Err(e) => {
+                            if coord_lookup_err_means_http_reachable(&e) {
+                                note_coord_transport_ok();
+                            } else {
+                                note_coord_transport_failure();
+                            }
                             crate::flow_log::warn(
                                 "coord",
                                 format!(
@@ -1346,7 +1379,12 @@ pub fn lookup_bootstrap_multiaddrs(public_key_hex: &str) -> Result<Vec<String>, 
                     record.endpoints.len()
                 );
             }
-            Err(e) => last_err = e.to_string(),
+            Err(e) => {
+                if coord_lookup_err_means_http_reachable(&e) {
+                    note_coord_transport_ok();
+                }
+                last_err = e.to_string();
+            }
         }
     }
     Err(last_err)
@@ -1494,7 +1532,7 @@ pub fn lookup_dial_addrs_for_public_key(public_key_hex: &str) -> Result<Vec<DmDi
 }
 
 /// Coord lookup → ranked/filtered libp2p multiaddrs (relay + public TCP before RFC1918).
-/// Tries configured servers in order; stops on first success (STORY.md).
+/// Tries configured servers in order; stops on first success (TRANSPORT.md).
 pub fn lookup_dial_multiaddrs_for_public_key(
     public_key_hex: &str,
 ) -> Result<Vec<Multiaddr>, String> {
@@ -1543,5 +1581,24 @@ pub async fn lookup_dial_addrs_for_public_key_async(
     tokio::task::spawn_blocking(move || lookup_dial_addrs_for_public_key(&pk))
         .await
         .map_err(|e| format!("coord lookup join: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coord_http_degraded_false_after_recent_ok_even_unregistered() {
+        COORD_REGISTERED.store(false, Ordering::Relaxed);
+        COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
+        note_coord_transport_ok();
+        assert!(!coord_http_degraded());
+    }
+
+    #[test]
+    fn coord_lookup_404_counts_as_http_reachable() {
+        assert!(coord_lookup_err_means_http_reachable("HTTP 404 peer_not_on_server"));
+        assert!(!coord_lookup_err_means_http_reachable("error sending request for url"));
+    }
 }
 

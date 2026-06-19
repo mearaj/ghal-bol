@@ -1,4 +1,5 @@
-//! Full read/write access to `chat_transcript_v1.json` (Flutter [ChatTranscriptStore]).
+//! Unified message state (E) — single on-disk transcript for all LAN/WAN paths.
+//! Full read/write access to `chat_transcript_v1.json` (Flutter [ChatTranscriptStore] is read-only reload).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -777,4 +778,40 @@ pub fn patch_inbound_read_ack_sent_global(
     let path = resolve_transcript_path(app_namespace)?;
     let _ = patch_inbound_read_ack_sent_at_path(&path, app_namespace, message_id)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_rank_monotonic_read_wins() {
+        assert!(delivery_rank("read") > delivery_rank("delivered"));
+        assert!(delivery_rank("delivered") > delivery_rank("sent"));
+        assert!(delivery_rank("read") > delivery_rank("pending"));
+    }
+
+    #[test]
+    fn pick_better_duplicate_outgoing_keeps_read_over_delivered() {
+        let delivered = StoredChatLine {
+            local_id: "a".into(),
+            text: "hi".into(),
+            outgoing: true,
+            from: None,
+            message_id: Some("mid1".into()),
+            delivery: "delivered".into(),
+            created_at_ms: Some(100),
+            read_ack_sent: false,
+        };
+        let read = StoredChatLine {
+            delivery: "read".into(),
+            created_at_ms: Some(101),
+            ..delivered.clone()
+        };
+        let picked = pick_better_duplicate(&delivered, &read);
+        assert_eq!(picked.delivery, "read");
+        // WAN ack_received after LAN ack_read must not downgrade
+        let picked2 = pick_better_duplicate(&read, &delivered);
+        assert_eq!(picked2.delivery, "read");
+    }
 }

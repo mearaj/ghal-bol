@@ -179,6 +179,17 @@ abstract final class GhalBolP2p {
     return {"ok": true, "ui_visible": uiVisible, "read_receipts": false};
   }
 
+  /// Re-run in-room `ack_read` catch-up without re-issuing foreground room enter (Linux nudge).
+  static Future<Map<String, dynamic>> nudgeReadCatchup() async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        "p2p_nudge_read_catchup",
+        ensureDaemon: true,
+      );
+    }
+    return {"ok": true};
+  }
+
   /// **Integrators:** use [GhalBolUiSession] / [syncUiSession] only — not this RPC.
   @Deprecated("Use GhalBolUiSession or syncUiSession")
   static Future<Map<String, dynamic>> setAppAckReadEnabled(bool enabled) async {

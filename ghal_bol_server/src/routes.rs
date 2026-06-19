@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -150,7 +151,7 @@ async fn register(
         req.transport_capabilities
     };
 
-    validate_endpoints(&req.endpoints)?;
+    validate_endpoints(&req.endpoints, &state.app.presence.relay_bootstrap_tcp_snapshot())?;
     let endpoints = expand_libp2p_dns4_circuit_endpoints(req.endpoints);
 
     let store = Arc::clone(&state.app.presence);
@@ -327,7 +328,10 @@ fn is_public_routable_tcp_host(host: &str) -> bool {
         && !(ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
 }
 
-fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {
+fn validate_endpoints(
+    endpoints: &[PeerEndpoint],
+    relay_bootstraps: &HashSet<String>,
+) -> ApiResult<()> {
     if endpoints.is_empty() {
         return Err(ServerError::BadRequest("endpoints empty".into()));
     }
@@ -347,6 +351,15 @@ fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {
                     return Err(ServerError::BadRequest(
                         "coord register accepts public routable IPv4 TCP only — \
                          LAN uses mDNS; CGNAT/mobile WAN uses relay circuit on reservation"
+                            .into(),
+                    ));
+                }
+                if ep.scheme == "tcp"
+                    && relay_bootstraps.contains(&format!("{}:{}", ep.host.trim(), ep.port))
+                {
+                    return Err(ServerError::BadRequest(
+                        "coord register rejects relay bootstrap TCP — \
+                         POST only your own inbound DM listen; relay server registers /p2p-circuit"
                             .into(),
                     ));
                 }

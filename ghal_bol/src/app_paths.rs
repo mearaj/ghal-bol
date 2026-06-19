@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::storage::{KeystoreStorageError, StorageConfig, namespace_data_dir};
 
-/// `{namespace_data_dir}/ghal_bol/` — contacts, transcript, relay cache.
+/// `{namespace_data_dir}/ghal_bol/` — contacts, transcript (user-owned; no transport cache).
 pub fn ui_data_dir(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageError> {
     let mut p = namespace_data_dir(cfg)?;
     p.push("ghal_bol");

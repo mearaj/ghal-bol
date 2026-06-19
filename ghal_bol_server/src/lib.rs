@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod error;
 mod presence;
+mod relay_live;
 pub mod relay;
 mod routes;
 
@@ -15,6 +16,7 @@ pub use auth::registration_message_digest;
 pub use config::ServerConfig;
 pub use error::ServerError;
 pub use presence::{PeerEndpoint, PeerRecord, PresenceStore};
+pub use relay_live::RelayLiveRegistry;
 pub use relay::{RelayConfig, RelayInfo};
 
 use axum::Router;
@@ -56,6 +58,7 @@ impl AppState {
 
     /// Publish the relay coordinates returned by [`relay::start`].
     pub fn set_relay_info(&self, info: RelayInfo) {
+        self.presence.set_relay_bootstrap_addrs(&info.addrs);
         if let Ok(mut g) = self.relay_info.lock() {
             *g = Some(info);
         }
