@@ -341,6 +341,35 @@ impl RelayLoopCtx {
         self.live.on_reservation_end(peer_id);
     }
 
+    /// Re-touch the coord presence row for every peer with a live reservation so it never expires
+    /// while the reservation is held. The relay grants hour-long reservations but coord rows expire
+    /// after `presence_ttl` (90 s), and `ReservationReqAccepted{renewed:true}` only fires on the
+    /// hourly libp2p renewal — far too rarely to keep the row fresh (and `try_register_relay_presence`
+    /// early-returns on an unchanged circuit anyway). Without this, a relay-only (NAT'd) peer is a
+    /// coord 404 ~90 s after reserving even though it stays dialable for the full hour. Quiet by
+    /// design (no per-peer info log) — see TRANSPORT.md § "Relay presence keepalive".
+    fn refresh_live_presence(&self) {
+        let live = self.live.live_peers_with_pk();
+        if live.is_empty() {
+            return;
+        }
+        let mut refreshed = 0usize;
+        for (peer_id, pk) in live {
+            let Some(circuit_ma) = relay_circuit_multiaddr(&self.relay_info, peer_id) else {
+                continue;
+            };
+            match self.presence.upsert_relay_circuit(&pk, circuit_ma) {
+                Ok(_) => refreshed += 1,
+                Err(e) => {
+                    tracing::warn!(public_key = %pk, %peer_id, error = %e, "relay presence keepalive upsert failed")
+                }
+            }
+        }
+        if refreshed > 0 {
+            tracing::debug!(refreshed, "relay presence keepalive — re-touched live circuits");
+        }
+    }
+
     fn try_register_relay_presence(&self, peer_id: PeerId) {
         if !self.live.is_peer_live(peer_id) {
             return;
@@ -389,8 +418,20 @@ fn relay_circuit_multiaddr(relay_info: &RelayInfo, client_peer: PeerId) -> Optio
 }
 
 async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
+    // Keep coord presence rows fresh while reservations are held. Must be well under the coord
+    // `presence_ttl` (90 s default) so a relay-only peer never 404s between hourly libp2p
+    // reservation renewals — see `RelayLoopCtx::refresh_live_presence`.
+    let mut presence_keepalive = tokio::time::interval(Duration::from_secs(30));
+    presence_keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        match swarm.select_next_some().await {
+        let event = tokio::select! {
+            _ = presence_keepalive.tick() => {
+                ctx.refresh_live_presence();
+                continue;
+            }
+            event = swarm.select_next_some() => event,
+        };
+        match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "relay listening");
             }

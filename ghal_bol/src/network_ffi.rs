@@ -3,7 +3,9 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 
-use crate::p2p::network_transport::{network_snapshot_for_ui, probe_os_network_truth_ui};
+use crate::p2p::network_transport::network_snapshot_for_ui;
+#[cfg(target_os = "linux")]
+use crate::p2p::network_transport::probe_os_network_truth_ui;
 
 fn json_ok(v: serde_json::Value) -> *mut c_char {
     CString::new(v.to_string())

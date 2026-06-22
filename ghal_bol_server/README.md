@@ -2,7 +2,7 @@
 
 Production **Tier 1 coordination** server for Ghal Bol: signed peer registration, SQLite presence, endpoint lookup.
 
-It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT traversal (clients reserve a circuit, then DCUtR upgrades to a direct link). The relay carries only transient end-to-end-encrypted transport frames — it does **not** store message bodies or transcripts, and is **not** the Tier 2 peer blob relay or the Tier 3 paid backup relay (see [docs/PREMIUM_SERVICES.md](../docs/PREMIUM_SERVICES.md)).
+It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT traversal (clients reserve a circuit; coord lists `/p2p-circuit` dial addrs for WAN peers). The relay carries only transient end-to-end-encrypted transport frames — it does **not** store message bodies or transcripts, and is **not** the Tier 2 peer blob relay or the Tier 3 paid backup relay (see [docs/PREMIUM_SERVICES.md](../docs/PREMIUM_SERVICES.md)).
 
 ## Local dev vs production
 

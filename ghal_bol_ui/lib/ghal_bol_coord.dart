@@ -47,61 +47,9 @@ abstract final class GhalBolCoord {
     );
   }
 
-  static Future<Map<String, dynamic>> lookupPeer(String publicKeyHex) async {
-    final pk = publicKeyHex.trim().toLowerCase();
-    if (usesDaemon) {
-      return GhalBolDaemonClient.instance.call(
-        "coord_lookup_peer",
-        params: {"public_key_hex": pk},
-      );
-    }
-    return GhalBolFfi.coordLookupPeer(publicKeyHex: pk);
-  }
-
-  static Future<Map<String, dynamic>> registerPresenceOnce() async {
-    if (usesDaemon) {
-      await GhalBolDaemonClient.ensureDaemonRunning();
-      return GhalBolDaemonClient.instance.call("coord_register_now");
-    }
-    return GhalBolFfi.coordRegisterNow();
-  }
-
-  /// Register this device on the coord server (needs P2P listen addrs in `:p2p`).
-  static Future<Map<String, dynamic>> registerPresence({
-    int? maxAttempts,
-    Duration retryDelay = const Duration(milliseconds: 500),
-  }) async {
-    final attempts = maxAttempts ??
-        (Platform.isAndroid ? 8 : 16);
-    if (!isLookupEnabled) {
-      return {"ok": false, "error": "coord unavailable"};
-    }
-    final urls = await CoordinationUrl.effectiveBaseUrls();
-    if (urls.isEmpty) {
-      return {"ok": false, "error": "coord URL not configured"};
-    }
-    if (!await GhalBolP2p.isRunning()) {
-      return {"ok": false, "error": "p2p not running"};
-    }
-
-    for (var attempt = 0; attempt < attempts; attempt++) {
-      final r = await registerPresenceOnce();
-      if (r["ok"] == true) {
-        AppLog.instance.i("Coord", "registered presence on server");
-        return r;
-      }
-      final err = (r["error"] ?? "").toString().toLowerCase();
-      final retry = err.contains("no listen endpoints") ||
-          err.contains("not unlocked") ||
-          err.contains("p2p not running");
-      if (!retry || attempt + 1 >= attempts) {
-        AppLog.instance.w("Coord", "register failed: ${r["error"]}");
-        return r;
-      }
-      await Future<void>.delayed(retryDelay);
-    }
-    return {"ok": false, "error": "coord register timed out"};
-  }
+  // Coord lookup and presence register run entirely in `ghal_bol` (`:p2p` / daemon coord tick) —
+  // single source of truth. Flutter must not HTTP-lookup or run register retry loops; it only
+  // pushes the coord URL at unlock (`configureAfterUnlock`) and health-checks (`_probeHealth`).
 
   static Future<Map<String, dynamic>> p2pConfigFields() async {
     final urls = await CoordinationUrl.effectiveBaseUrls();

@@ -65,8 +65,8 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 | Channel | E2E mechanism | Keys |
 |---------|----------------|------|
 | **Text DM** | `ghal_bol_msg_v1` sealed inner JSON | Ephemeral ECDH + AES-GCM to recipient pubkey; signed envelope |
-| **Call signaling** (invite, SDP, ICE, …) | `ghal_bol_call_v1` | Same seal + signature on DM stream |
-| **Call media** (audio + in-call video) | FrameCryptor AES-GCM on encoded RTP + DTLS-SRTP | `call_media_key.rs`: ECDH(local secret, peer `public_key_hex`) + HKDF(`call_id`, both pubkeys) |
+| **Call signaling** (invite, video_on/off, …) | `ghal_bol_call_v1` | Same seal + signature on DM stream |
+| **Call media** (audio + in-call video) | Per-frame AES-GCM seal on libp2p substreams | `call_media_key.rs`: ECDH(local secret, peer `public_key_hex`) + HKDF(`call_id`, both pubkeys); see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md), [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) |
 
 libp2p **Noise** encrypts the transport; it is not a substitute for app-layer E2E above. New features (voice messages, attachments, group chat) must follow the same rule unless explicitly scoped otherwise in design docs.
 
@@ -590,7 +590,7 @@ The connect layer that made the original serverless libp2p build reliable: **bot
 | **Symmetric roles** | No permanent listener/caller. Either peer may accept inbound or open outbound; same stream handler on both paths. |
 | **Send = connect** | Outbound text uses: no stream → ensure libp2p connection → open one stream → write. UI never dials or owns connect policy. |
 | **Parallel transport** | LAN (mDNS) and WAN (coord + relay) stacks and per-peer dials run **concurrently** — both links **active** when connected; see TRANSPORT.md § “Parallel LAN + WAN transport”. |
-| **Single upkeep owner** | `dm_upkeep` (~1s) walks contacts: **if stream up → skip**; else missing stream → connect attempts on any available path; pending outbox drains when `chat_ready`. |
+| **Single upkeep owner** | `dm_upkeep` (~1s) walks contacts: **if stream up → skip**; else missing stream → connect attempts on any available path; pending outbox drains when `chat_ready`. **"Single owner" = one owner of the stream/connection lifecycle, not one function that issues every dial.** Each transport's **dial is event-driven by that transport's own discovery**: **LAN dials are owned by the mDNS `Discovered` handler** (never timer re-dials from the candidate cache — TRANSPORT.md § “Ephemeral LAN TCP ports”), and **WAN dials are owned by coord lookup** (in the upkeep tick / `notify_coord_lookup`-woken). The **identify** handler must **not** add a third competing `swarm.dial` when coord is configured — it only ingests addrs and signals the owners. The shared per-peer in-flight guards (`try_claim_lan_dial_slot`, `should_routed_dial`, `circuit_dial_in_flight`) are **required guardrails** (happy-eyeballs, CGNAT probe, parallel LAN+WAN), not workarounds to remove. |
 
 **PeerId** is derived from secp256k1 `public_key_hex` (already). **Discovery** is coord HTTP + relay (WAN) and mDNS (LAN) — parallel layers below the single wire mux.
 

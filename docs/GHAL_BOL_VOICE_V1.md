@@ -1,8 +1,8 @@
-# Ghal Bol calls — `ghal_bol_call_v1`
+# Ghal Bol calls — signaling (`ghal_bol_call_v1`)
 
-**Status:** Signaling implemented in Rust; media (WebRTC) in Flutter. One call UX: **voice by default**, optional **video during the call**.
+**Status:** Signaling implemented in Rust (`call_sig_v1.rs`, `call_state.rs`). **Voice and video media** run in Rust over libp2p substreams — see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) (voice) and [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) (video).
 
-Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling** on the DM stream; Flutter owns **capture/render** (WebRTC) and UI only.
+Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling and media**; Flutter is call UI, permissions, and FFI control only.
 
 ---
 
@@ -12,11 +12,10 @@ Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling
 |------|--------|
 | **One call type** | No separate “voice call” vs “video call” buttons. Tap **Call** → audio call. |
 | **Default media** | Audio only (`media: "audio"` on invite). |
-| **Video** | In-call **Video** toggle → `video_on` + WebRTC renegotiation (`sdp_offer` / `sdp_answer`). |
-| **Turn off video** | **Video off** → `video_off`; camera off, audio continues. |
+| **Video** | In-call **Video** toggle → `video_on` / `video_off` native signals; starts/stops `/ghal-bol/call-video/1.0.0`. |
 | **Signaling transport** | Same libp2p DM stream as chat (`ghal_bol_call_v1` frames). |
-| **Media transport** | WebRTC (UDP); STUN for NAT; TURN optional later. |
-| **Media encryption** | DTLS-SRTP (WebRTC default) **plus** identity-bound **FrameCryptor** AES-GCM on encoded RTP (key from Rust `derive_call_media_key`). |
+| **Media transport** | `/ghal-bol/call/1.0.0` (voice) and `/ghal-bol/call-video/1.0.0` (video) on the existing peer connection. |
+| **Media encryption** | Identity-bound AES-GCM per frame (`call_media_key.rs` + `MediaCrypto`); libp2p Noise on the wire. |
 
 ---
 
@@ -24,15 +23,13 @@ Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling
 
 | Wire name | When |
 |-----------|------|
-| `invite` | Outbound ring; payload `{ "media": "audio" }` (or `"audio_video"` if ever needed). |
-| `accept` | Callee accepts. |
+| `invite` | Outbound ring; payload `{ "media": "audio" }` (or `"audio_video"`). May include `voice_engine` / `video_engine` capability tags. |
+| `accept` | Callee accepts; may echo engine tags. |
 | `reject` | Decline. |
 | `hangup` | End call. |
-| `sdp_offer` | WebRTC SDP offer (`payload.sdp`, `payload.type`). |
-| `sdp_answer` | WebRTC SDP answer. |
-| `ice` | Trickle ICE (`payload.candidate`, …). |
-| `video_on` | Request in-call video (renegotiate). |
-| `video_off` | Disable video track; audio continues. |
+| `video_on` | Start native video substream + camera; payload may negotiate `{w,h,fps,codec}` caps. |
+| `video_off` | Stop camera + tear down video substream; voice continues. |
+| `key_request` | RX → TX: force an immediate video keyframe (after loss / late join). |
 
 All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encrypted inner JSON, secp256k1 signature (see `ghal_bol/src/call_sig_v1.rs`).
 
@@ -45,16 +42,17 @@ All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encr
 | `idle` | No call with this contact. |
 | `outgoing_ringing` | We sent `invite`. |
 | `incoming_ringing` | Peer sent `invite`. |
-| `connected` | Accepted; SDP/ICE may still be in progress. |
+| `connected` | Accepted; native media may still be starting. |
 
-`video_on` / `video_off` / SDP / ICE are only valid when a call exists for that `call_id`.
+`video_on` / `video_off` / `key_request` are only valid when a call exists for that `call_id`.
 
 ---
 
 ## Flutter API
 
 - **Outbound:** `GhalBolCall.sendSignal(...)` → native `p2p_call_signal` (FFI or daemon).
-- **Inbound:** poll `kind: call_signal` → `CallController` drives UI + WebRTC.
+- **Inbound:** poll `kind: call_signal` → `CallController` drives UI + native media FFI.
+- **Media:** `GhalBolP2p.callMediaStart/Stop/SetMicMuted`, `callVideoStart/Stop`, textures via `NativeCallVideoView`.
 - **Do not** send call signals from Dart except through `GhalBolCall` (state checks stay in Rust for outbound).
 
 ---
@@ -66,23 +64,15 @@ All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encr
 
 ---
 
-## Desktop media (Linux / Windows / macOS)
+## Media (native — not in this doc)
 
-- Flutter **WebRTC** only; Rust does not capture/play audio.
-- **Desktop:** ringtone unchanged. Callee opens mic with flutter_webrtc `optional` + `sourceId` (non-HFP), never top-level `deviceId`. Local capture before `setRemoteDescription`; defer `RTCVideoRenderer` remote bind until mic is open (`call_webrtc.dart`, `call_desktop_media.dart`).
-- **Mobile:** no `setSpeakerphoneOn` at call start; `forceHandleAudioRouting: false`. User can toggle speaker in-call.
-- SDP offer/answer includes **gathered ICE candidates** (LAN-friendly when trickle over DM is slow).
-- Voice calls still need a hidden **`RTCVideoView`** on the remote renderer for GTK audio output.
-- Remote **audio + video** tracks merge into one `MediaStream` on `onTrack` (unified-plan fires twice); the remote renderer is re-bound when a video track arrives so desktop/mobile show peer video after renegotiation.
-- UI shows **connected** only after **ICE connected** or remote audio track — not on SDP alone.
-- **Ring / ringback:** bundled WAV loops via `call_ringtone.dart` (incoming on invite, outgoing after `invite` sent); stops when media connects or call ends. Android incoming also vibrates.
-- **Desktop capture:** echo cancellation / noise suppression enabled when a non–hands-free mic is pinned; left off for system default (avoids forcing Bluetooth HFP).
+Voice pipeline, transport, FFI, and device-test steps: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
 
-**Debug:** More → **App log** → filter **Calls**. Lines use `[Call]`, `[Call/WebRTC]`, `[Call/Media]` (`AppLog.logCallFlow`, independent of journey toggles). Look for `wire_rx signal=sdp_answer`, `ice_connected`, `remote_track`, `media_e2ee_ready`, `media_e2ee_identity` (shows peer pubkey prefix), `media_e2ee_tx` / `media_e2ee_rx` with `decrypt_ok`.
+Video pipeline, textures, and call end: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
-**In-call UI:** When media keys are active, the call screen shows a green lock chip: **End-to-end encrypted · contact key** `03a1f2b3…`. If E2EE setup fails, the call still connects on DTLS-SRTP (no chip).
+**Debug:** More → **App log** → filter **Calls**. Lines use `[Call]`, `[Call/Media]`, `[Call/Video]`. Look for `call_media start`, `sent=N recv=M`, `call_video`, `media_e2ee` / identity key prefix.
 
-**Connect latency:** Key derivation runs in parallel with `getUserMedia`; E2EE failure does not block the call. Remote track encrypt/decrypt attach is non-blocking.
+**In-call UI:** Green lock chip when identity E2E is active: **End-to-end encrypted · contact key** `03a1f2b3…`. Media must not connect without a derived identity key (golden rule 7).
 
 ---
 
@@ -90,27 +80,26 @@ All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encr
 
 | Layer | What it protects |
 |-------|------------------|
-| **DM signaling** (`ghal_bol_call_v1`) | Invite, SDP, ICE — sealed to peer secp256k1 + signed. |
-| **libp2p transport** | Noise on the stream; peeker on LAN/WAN sees encrypted bytes, not JSON. |
-| **DTLS-SRTP** | Standard WebRTC media encryption between the two UDP endpoints. |
-| **FrameCryptor** (`call_media_e2ee.dart`) | Second AES-GCM layer on **audio and video** RTP before SRTP; same identity-derived key; key is **not** in SDP. |
+| **DM signaling** (`ghal_bol_call_v1`) | Invite, accept, video_on/off — sealed to peer secp256k1 + signed. |
+| **libp2p transport** | Noise on connections and substreams. |
+| **Per-frame seal** | Opus / video chunks sealed with `derive_call_media_keys_from_identity` before substream write. |
 
-**Key derivation (both peers, same result)** — uses the same **66-hex secp256k1** identity as chat (private key in keystore, public key on the contact):
+**Key derivation (both peers, same result):**
 
 ```text
-ikm = SHA256( ECDH(my_identity_secret, peer_public_key_66hex) )   // same mixing as DM seal
+ikm = SHA256( ECDH(my_identity_secret, peer_public_key_66hex) )
 pair = sort_lowercase(local_pubkey_66hex, peer_pubkey_66hex) concatenated
 media_key     = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_v1" || pair)
 ratchet_salt  = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_ratchet_v1" || pair)
 ```
 
-Rust: `ghal_bol/src/call_media_key.rs` (`derive_call_media_keys_from_identity`), FFI `ghal_bol_ffi_call_media_key_hex` (requires unlocked identity). Flutter enables FrameCryptor on each RTP sender/receiver after local/remote tracks attach.
+Video uses a distinct HKDF `info` (e.g. `ghal_bol_call_video_v1`) — see [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
-**Threat model notes:** A passive network observer still sees UDP timing/volume; a malicious **TURN/SFU** (not used in v1) could not decode frames without the media key. Compromised **local device** or OS mic path is out of scope. Rebuild native (`sync_ghal_bol_native_for_flutter.sh` / Android pack) after pulling this API.
+Rust: `ghal_bol/src/call_media_key.rs`, `call_media/crypto.rs`, FFI `ghal_bol_ffi_p2p_call_media` / `p2p_call_video`.
 
 ---
 
-## Non-goals (v1)
+## Non-goals
 
 - Group calls
 - Server-side SFU

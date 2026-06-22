@@ -15,7 +15,7 @@ Canonical index — read [DESIGN.md](DESIGN.md) before changing P2P, acks, invit
 | [../ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md) | Dev server + bore/ngrok; **§ Regression prevention** (relay TCP vs coord HTTP) |
 | [IDENTITY.md](IDENTITY.md) | Local identity: create/import, export, ownership |
 | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional paid Tier 3 relay (separate from messaging keys) |
-| [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) | Call signaling + WebRTC media (fallback) |
+| [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) | Call signaling (`ghal_bol_call_v1`) |
 | [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) | Native Rust voice engine (shipping) |
 | [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) | Native Rust video wire/engine (shipping when negotiated) |
 | [WEB_SITE.md](WEB_SITE.md) | ghalbol.com static build, `/connect/…`, Linux download |

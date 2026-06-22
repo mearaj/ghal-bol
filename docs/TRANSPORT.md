@@ -21,6 +21,106 @@ libp2p is **not** the chat protocol. It provides encrypted connections, stream m
 
 ---
 
+## The prime directive — instant connect at any roster size (canonical)
+
+> **THE goal of this app:** whenever two peers have *any* technically reachable path to each
+> other — LAN, relay circuit, or future transport — they **connect within a few seconds**, and a
+> message flows. Everything else in this document (parallel LAN+WAN, mux recovery, caching,
+> backoff, event-driven async) exists **only** to serve this directive. If any rule, throttle, or
+> backoff is ever in tension with it, **the directive wins** — fix the rule, don't slow the connect.
+
+### Scale invariant (non-negotiable)
+
+A user may have **thousands of contacts**, the vast majority **stale** — offline, never-registered,
+or returning `404` on coord lookup. **The cost of stale peers must be bounded and must NEVER delay
+a reachable peer's connect.** Stale peers are background noise; a peer with active intent is the
+foreground job and is never queued behind them.
+
+This is enforced by splitting every coordination-lookup pass (`run_dm_coord_lookup_pass` in
+`coord_lookup.rs`, used by both the ~1s upkeep tick **and** the post-handover / post-WAN-recovery
+burst) into three classes:
+
+| Class | Who | Cadence | Cap |
+|-------|-----|---------|-----|
+| **urgent** | connection just dropped (`urgent_reconnect_pks`, ~30 s window) | every pass | **uncapped** — bypasses the 404 backoff |
+| **priority** | active intent: pending outbox **or** the foreground chat | every pass | **uncapped** |
+| **background** | every other idle contact (the thousands) | LRU, oldest-looked-up first | **`COORD_BACKGROUND_LOOKUPS_PER_TICK`** per pass |
+
+Why this guarantees the directive:
+
+- **Urgent + priority are uncapped and looked up first**, so the peer you are talking to / just
+  dropped / queued mail for is dialed every ~1 s regardless of how many stale contacts exist. The
+  sequential `await` chain ahead of a live peer is bounded by the (naturally small) intent set, never
+  by roster size.
+- **Stale 404 peers never even enter the sweep** while inside their backoff window
+  (`should_skip_coord_lookup_pk`); when they are eligible they are swept **LRU** under a per-pass
+  cap, so they can neither flood coord nor starve a reachable peer late in the list.
+- **Symmetric drive** closes the gap for *idle* reachable peers: when peer B comes online it marks
+  presence-wake and looks **us** up (and we are in B's intent set if B wants to reach us), so the
+  pair resolves in seconds even if each side's background sweep would take longer to reach the
+  other on its own.
+
+### Instant-connect acceptance criteria (testable)
+
+A change to transport/discovery is correct only if **all** of these still hold:
+
+1. **Reachable ⇒ connected within a few seconds.** Two peers with any live path (same LAN, or both
+   relay-reserved on a reachable coord) reach `chat_ready` within seconds of both being online —
+   independent of how many other contacts either has.
+2. **Roster-size independence.** Connect latency for a peer with active intent is **the same** with
+   1 contact or 10 000 contacts. Adding stale contacts must not regress it.
+3. **No stale-peer flood.** Coord HTTP lookups per pass are bounded; a huge stale roster produces a
+   bounded, fair (LRU) sweep — visible in the `coord: lookup pass …` log — never a per-tick storm.
+4. **Intent beats backoff.** Opening a chat, queueing a message, or a dropped connection makes that
+   peer's next lookup/dial **immediate**, skipping any 404/throttle backoff for the urgent window.
+5. **No assumed-timer stalls.** Reconnect after LAN/WAN change is event-driven (worker → subscriber),
+   never “wait N seconds then retry” — see § “Event-driven async”.
+
+### Findability is continuous across relay-reservation renewal (no advertise-gap)
+
+A peer must **never be momentarily un-findable on coord while a valid relay path still exists**.
+This is **already guaranteed — do not add a client-side “keep advertising the old circuit across
+renewal” overlap** (it would advertise a *dead* circuit if the reservation genuinely lapses, which
+is worse than a brief gap). The guarantee comes from three server-authoritative mechanisms
+(`ghal_bol_server`):
+
+- **`merge_client_register` never drops the stored `/p2p-circuit`** — a client `POST /v1/register`
+  with a circuit-less endpoint list (e.g. during a client listener flap) does **not** strip the
+  server-authoritative relay circuit; it is re-merged from the stored record (`presence.rs`).
+- **`RelayLiveRegistry` is refcounted** — happy-eyeballs closing a spare TCP hop only decrements;
+  the live gate flips to 404 **only when the last reservation ref closes**, so hop churn never
+  flaps findability (`relay_live.rs`, test `happy_eyeballs_close_spare_hop_keeps_live_gate`).
+- **Renewal re-asserts `accepted` without touching the refcount** — `on_reservation_accepted(.,
+  renewed=true)` keeps the gate live across every renewal (test `renewed_accept_does_not_bump_refcount`).
+- **Presence keepalive re-touches the row every 30 s** — the live gate above only stops the circuit
+  being *stripped* from a **fresh** row; it does **not** stop the SQLite presence row itself from
+  expiring. The relay grants **hour-long** reservations (`reservation_duration = 3600 s`) but coord
+  rows expire after **`presence_ttl` (90 s)**, and `ReservationReqAccepted{renewed:true}` only fires
+  on the hourly libp2p renewal — so without a keepalive a relay-only (NAT'd) peer became a coord
+  **404 ~90 s after reserving** even though it stayed dialable for the full hour (the exact symptom:
+  both peers `reservation accepted` / `relay presence visible`, then every contact lookup
+  `404 peer not registered or presence expired`, self-poll 404 too). `run_relay` now ticks a 30 s
+  `refresh_live_presence` that re-`upsert_relay_circuit`s every peer in `live_peers_with_pk()`,
+  keeping the row well inside the 90 s TTL while the reservation is held (`relay.rs`,
+  `relay_live.rs` test `live_peers_with_pk_lists_only_live_known_peers`). This is the only
+  time-based guardrail here (keepalive < TTL), not an assumed-duration reconnect timer.
+
+Client side, the reservation is kept continuous (no re-issue of `listen_on` on a clean
+`ListenerClosed` within `RELAY_RENEWAL_GAP_MS`; no re-reserve while a reservation is in flight), so
+the relay’s refcount never reaches 0 during normal renewal. The circuit only leaves coord when the
+relay path is **actually gone** — exactly when it *should* leave.
+
+### What violates the directive (forbidden)
+
+- Iterating/looking-up the full roster with **unbounded sequential `await`** (old
+  `coord_lookup_dm_peers`) — a large roster blocks the swarm loop and delays live peers.
+- Letting a global wake bypass the **background cap** (re-introduces the flood on resume/handover).
+- Capping or backing off **urgent / priority** peers to “reduce coord load.”
+- Any throttle/backoff/grace-window that delays a peer with active intent because *other* peers are
+  stale.
+
+---
+
 ## Parallel LAN + WAN transport (2026-06-17 — canonical)
 
 **Policy:** LAN and WAN **always run in parallel** at the node level and per peer. They are not mutually exclusive modes.
@@ -106,7 +206,7 @@ Enabled in `ghal_bol/Cargo.toml` and wired in `chat_server.rs`:
 | **QUIC / TCP + Noise + Yamux** | Encrypted connections and multiplexing |
 | **`libp2p-stream` `/ghal-bol/msg/1.0.0`** | Framed DM channel for `ghal_bol_msg_v1` |
 | **mDNS** | LAN discovery of configured peers |
-| **Relay + DCUtR** | NAT traversal — reserve a circuit on a **Ghal Bol relay** (co-located with a configured coord server). **With coord configured, DCUtR is disabled** — stream-first uses explicit mDNS LAN + coord `/p2p-circuit` dials only (no identify hole-punch). **WAN peer discovery does not use Kademlia or public libp2p bootstrap peers** — see § “Connectivity lifecycle” |
+| **Ghal Bol relay (circuit)** | NAT traversal — reserve a circuit on a **Ghal Bol relay** (co-located with a configured coord server). **With coord configured, DCUtR is disabled** — stream-first uses explicit mDNS LAN + coord `/p2p-circuit` dials only (no identify hole-punch). **WAN peer discovery does not use Kademlia or public libp2p bootstrap peers** — see § “Connectivity lifecycle” |
 | **AutoNAT, UPnP, Identify** | Reachability and peer metadata |
 | **Ping** | **Connection keepalive** — periodic pings keep an idle DM/relay link active so it is not dropped by `idle_connection_timeout`; also detects a dead route faster (`PING_INTERVAL_SECS` 10s < idle timeout) |
 | **Gossipsub** | **Not used** — do not reintroduce for 1:1 DM |
@@ -150,7 +250,7 @@ This section encodes the **binding connectivity rules** — they take precedence
 2. **Watch the network continuously.** OS connectivity callbacks (`notify_network_change`) plus `refresh_os_network_truth` on each `network_tick` (~1s) read **default route transport** and internet validated — not `if_addrs` alone. Loss or change triggers recovery without user-visible disruption (`handle_network_path_change`, `run_wan_recovery_pass`). See § **Network truth**.
 3. **Find both addresses fast.** The node determines its **LAN** address (interface scan / mDNS) and its **globally reachable** address (public listen, AutoNAT/UPnP, or a relay `/p2p-circuit` when behind NAT/CGNAT).
 4. **Register at coord as soon as a reachable address exists, and keep it fresh.** Once a publishable global endpoint (public TCP or relay circuit) is known, register with `ghal_bol_server`. **Re-register** on endpoint change, failed register, relay reservation accepted, handover, or stale presence — **not** on every heartbeat tick when endpoints are unchanged (`should_throttle_register` in `coord_runtime.rs`; details in [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § **Client register & heartbeat policy**).
-5. **WAN must always work when both peers have internet and coord is reachable.** This is the baseline guarantee — coord lookup + relay reservation + DCUtR, never gated off by being on Wi‑Fi/LAN.
+5. **WAN must always work when both peers have internet and coord is reachable.** This is the baseline guarantee — coord lookup + relay reservation + explicit **`/p2p-circuit` dial**, never gated off by being on Wi‑Fi/LAN. **DCUtR is not used** when coord is configured (see § Stream-first).
 6. **LAN is per-peer and additive.** Use the LAN path **only** for a contact actually discovered on the local LAN (mDNS), never globally. If the LAN is lost, that peer transparently falls back to the normal WAN path with no user-visible change.
 7. **Coord down ≠ app offline, but WAN discovery pauses.** When coord is unreachable, **do not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN peer discovery (§ “Connectivity lifecycle”). **LAN (mDNS) still works** for contacts on the local network. Keep retrying **all configured coord servers** at a regular interval — never stop. **WAN requires coord + relay** when both peers have internet.
 8. **Internet/coord recovery is immediate** — when internet or coord comes back, the continuous watch detects it within seconds and resumes WAN registration/lookup across the coord list without a libp2p restart.
@@ -878,7 +978,7 @@ Phases: dial bootstrap (all families, one throttle window) → Identify → prun
 
 ---
 
-When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WAN needs a **Ghal Bol relay** that reliably grants Circuit Relay v2 reservations. `ghal_bol_server` runs its **own** relay node next to each HTTP coordinator. The HTTP API stays a lightweight presence phone book; the relay only carries brief NAT‑traversal traffic until **DCUtR** upgrades the client pair to a direct connection. **Public IPFS bootstrap peers are not used** for peer discovery or relay reservation.
+When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WAN needs a **Ghal Bol relay** that reliably grants Circuit Relay v2 reservations. `ghal_bol_server` runs its **own** relay node next to each HTTP coordinator. The HTTP API stays a lightweight presence phone book; peers discover and dial each other via **`/p2p-circuit`** multiaddrs the relay server upserts on coord when a reservation is accepted. Chat and call media ride that circuit (and parallel LAN direct when mDNS finds the peer) — **not** DCUtR hole-punch. **Public IPFS bootstrap peers are not used** for peer discovery or relay reservation.
 
 **Server (`ghal_bol_server/src/relay.rs`)**
 - Circuit Relay v2 + Identify (`/ghal-bol/1.0.0`) + Ping over **TCP + Noise + Yamux** (libp2p 0.56, protocol‑identical to the client).
@@ -1029,6 +1129,65 @@ Do not rename without a version bump:
 
 ---
 
+## Logging — see the precise flow
+
+Logs must **fully assist** a two-device debug session and must **never imply a wrong state**. Two
+rules:
+
+1. **Log the precise flow, including early returns.** When a function decides *not* to act
+   (skip / defer / return early) on a path that matters for connecting, that decision is logged —
+   silent early returns hide why a peer “won’t connect.” Examples now emitted:
+   - **`coord` `lookup pass: urgent=… priority=… bg_swept=…/… cap=… force_wake=…`** — one line per
+     coordination pass showing exactly what the scale-safe sweep did, **including how large the idle
+     roster is and that it is being swept, not ignored** (see § “The prime directive”).
+   - **`dial` `connect skip <peer> — idle …`** — peer is not urgent / has no queued mail; LAN waits
+     for mDNS `Discovered`, WAN waits for a coord wake.
+   - **`coord` `lookup skip <peer> — chat link already stable (relay + mux up)`** / **`… coord HTTP
+     throttled (404/unreachable backoff)`** — why a lookup was skipped this pass.
+   - **`stream` `stream open deferred <peer> — … waiting for stable WAN relay mux`**.
+
+2. **No spam, no wrong impression.** Per-peer connect/lookup traces are **gated on active intent**
+   (`peer_connect_trace_enabled` = foreground chat or pending outbox) and throttled (~5 s/peer), so a
+   roster of thousands of idle/stale contacts never floods the log while the peer you actually care
+   about still shows its full flow. “Dialing …” / “ok …” lines are emitted **only when a dial
+   actually happened** (guarded by the dial result), never on a no-op. Verbose Rust `debug` lines
+   reach the in-app App log only with `GHAL_BOL_VERBOSE_LOG=1`; they are always on stderr/logcat.
+
+### The full journey at `info` (visible in both logs)
+
+The complete connect → stream → message → ack journey is emitted at **`info`**, so it appears in the
+in-app App log **and** stderr/logcat **without** `GHAL_BOL_VERBOSE_LOG`. Each milestone is low-volume
+(one line per transition / per message id), so the story stays readable. Read top-to-bottom to follow
+one message between two devices:
+
+| # | Milestone | Log line (tag) | Side |
+|---|-----------|----------------|------|
+| 1 | Node up | `p2p: swarm built, opening chat stream accept` | both |
+| 2 | Relay reserved | `relay: reservation accepted on <relay>` / `relay: relay listen addr <addr>` | both |
+| 3 | Peer found on coord | `coord: coord_lookup_peer ok — dialing <peer> via relay circuit` | sender |
+| 4 | LAN peer found | `mdns: discovered <peer> at <addr>` | both |
+| 5 | Dial issued | `lan\|coord\|relay: dialing <peer> via <addr>` | dialer |
+| 6 | Link up | `swarm: dm connection established <peer> via <transport>` | both |
+| 7 | **Chat works** | `stream: chat_ready <peer> — chat stream open, can send now` | both |
+| 8 | Send queued | `outbound: enqueue send_text peer=<peer> msg_id=<id>` | sender |
+| 9 | Send on wire | `outbound: frame on wire peer=<peer> msg_id=<id>` | sender |
+| 10 | Text arrives | `stream: inbound text from <peer> id=<id> len=<n>` | receiver |
+| 11 | Delivery ack sent | `delivery_ack: ack_received sent for inbound <id> to <peer>` | receiver |
+| 12 | Read ack sent (in-room) | `read_ack: ack_read sent for inbound <id> to <peer>` | receiver |
+| 13 | Tick applied | `stream: ack_received\|ack_read from <peer> ref=<id> — our outbound delivered\|read by peer` | sender |
+| — | Link down | `swarm: dm connection closed <peer>` (or `… other path still open` at `debug`) | both |
+| — | State snapshot (~30 s) | `flow: connectivity … dm=[<peer>:conn=…,stream=…] …` | both |
+
+**Diagnosing from the log:** a stuck message shows exactly which milestone is missing — e.g. step 6
+(`connection established`) without step 7 (`chat_ready`) is the classic `conn=true` ≠ "chat works"
+case (stream never opened); step 9 (`frame on wire`) without step 13 means the ack never came back
+(check the receiver’s steps 10–12). **Never infer success from an earlier step than the one that
+proves it** (a link is not a stream; on-wire is not delivered). New milestones must keep this table
+truthful — add the line at `info`, keep it one-per-transition, and do not log a state the code has
+not actually reached.
+
+---
+
 ## Related documents
 
 | Doc | Relationship |
@@ -1047,6 +1206,11 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 
 | Date | Change |
 |------|--------|
+| 2026-06-23 | **Relay presence keepalive (WAN 404-after-90s root-cause):** the relay grants hour-long reservations (`reservation_duration = 3600 s`) but coord presence rows expire after `presence_ttl` (90 s), and the relay only wrote/refreshed a peer's row on the **initial** reservation (renewal `try_register_relay_presence` even early-returns on an unchanged circuit). So a relay-only (NAT'd) peer registered, then became a coord **404 ~90 s later** for the rest of the hour — both devices showed `reservation accepted` / `relay presence visible`, then every lookup (and self-poll) `404 peer not registered or presence expired`, and no WAN chat. Fix: `run_relay` ticks a **30 s `refresh_live_presence`** that re-`upsert_relay_circuit`s every peer in `RelayLiveRegistry::live_peers_with_pk()`, keeping the row inside the 90 s TTL while the reservation is held. **Requires redeploying `ghal_bol_server`** (`deploy_server.sh` for prod). § “Findability is continuous across relay-reservation renewal”. |
+| 2026-06-23 | **Steady-state LAN upkeep no longer rebinds the listener (loop fix):** `lan_handover_upkeep_if_needed` only runs the **full destructive kick** (fresh ephemeral TCP port + purge candidates + mDNS restart) when **no** ephemeral DM TCP listener exists (e.g. closed by a real interface handover). When a listener is already up and we are merely waiting for mDNS to discover the peer, it does a **soft nudge** (throttled mDNS query, no port rebind, no candidate purge) and lets event-driven discovery dial. Fixes the loop where the advertised mDNS port changed every ~5 s (`LAN DM rediscovery — link down, no mDNS candidate yet` → `closed stale LAN ephemeral TCP listener` → `fresh ephemeral TCP listen` → `mdns restarted`), so two same-LAN devices never converged. Full kick still owns genuine handovers (connectivity notify / relay-lost / dial-path-failed) and the deferred-kick path. § “Ephemeral LAN TCP ports”, § “Deferred full LAN kick”. |
+| 2026-06-23 | **Full journey at `info` (both logs comprehensive):** the connect→stream→message→ack milestones are all at `info`, so the App log and stderr/logcat each tell the whole story without `GHAL_BOL_VERBOSE_LOG`. Promoted the previously-`debug`/silent milestones: `stream: chat_ready <peer> — can send now` (the moment chat works), `stream: inbound text from <peer>` (message arrived), and `stream: ack_received\|ack_read from <peer> … — our outbound delivered\|read by peer` (sender-side tick transition). Added the canonical milestone table in § “Logging — see the precise flow” → “The full journey at `info`”. |
+| 2026-06-22 | **Intent beats backoff (root-cause, prime directive #4):** explicit send (`outbound.rs`), pending outbox, and the foreground chat now **bypass the 404 / `peer_coord_absent_never_connected` backoff** — a peer last seen offline is looked up at intent cadence and connects within seconds once reachable, instead of waiting out a 15–60 s backoff. Removed the layered `&& !absent_never` gates that neutered urgency in `coord_lookup_dm_peer` and the urgent loop; added `should_coord_lookup_intent_pk`; the lookup pass classifies priority **before** the backoff skip. `absent_never` now gates only **idle/background** retries. |
+| 2026-06-22 | **Prime directive + scale-safe lookup:** § “The prime directive — instant connect at any roster size”. `run_dm_coord_lookup_pass` (shared by upkeep tick + handover/recovery burst) splits lookups into urgent/priority (uncapped) vs LRU background sweep capped at `COORD_BACKGROUND_LOOKUPS_PER_TICK`, so thousands of stale/404 contacts never delay a reachable peer or flood coord. Replaced the unbounded full-roster `coord_lookup_dm_peers`. Added per-pass `coord: lookup pass …` summary + intent-gated early-return traces (`connect skip`, `lookup skip`, `stream open deferred`) — § “Logging — see the precise flow”. |
 | 2026-06-19 | **Network truth (OS default route):** `OsNetworkSnapshot` from Android `getActiveNetwork` + `NET_CAPABILITY_VALIDATED` and Linux `/proc/net/route` + `wl*` operstate; `profile=lan|mobile-data` no longer driven by lagging `if_addrs` alone; `Native/flow` logs `os=wifi|cell/validated/…`. § **Network truth**. |
 | 2026-06-19 | **Asymmetric LAN↔WAN mux recovery:** `dm_direct_conn_ids` + `close_direct_dm_connections` (keep relay); `reconcile_stale_lan_mux_for_wan` throttled; link reset reopens on relay instead of full disconnect. Fixes `reopen peer off LAN` storms and tick/outbox into void. § **Asymmetric LAN↔WAN mux recovery**. |
 | 2026-06-19 | **WAN blind peerstore dial (root cause):** `libp2p_peer_dial_pending` called `swarm.dial(peer_id)` as a probe — started multi-dials to `::1`/stale LAN/bare `/p2p/` instead of coord `/p2p-circuit`; removed; coord mode disables `try_routed_dial_impl`. § anti-regression #13. | removed `swarm.is_connected` / `dm_peer_stream_up`-only skips — additive relay while direct up via `coord_lookup_upkeep_satisfied`; removed 45s `LAN_HANDOVER_GRACE_MS` timer path (stream reopen is event-driven); `connect_dm_peer_now` always wakes coord lookup when configured. § “Event-driven async”, § “Both links active”. |

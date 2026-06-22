@@ -72,15 +72,10 @@ fn probe_os_network_truth_platform() -> OsNetworkSnapshot {
 }
 
 /// Fresh OS probe for the **Flutter UI process** (not the `:p2p` / daemon cached snapshot).
+/// Linux-only in-process FFI fallback; other platforms use the daemon `network_snapshot` RPC.
+#[cfg(target_os = "linux")]
 pub(crate) fn probe_os_network_truth_ui() -> Option<OsNetworkSnapshot> {
-    #[cfg(target_os = "linux")]
-    {
-        return Some(crate::linux_network::probe_connectivity_truth());
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    Some(crate::linux_network::probe_connectivity_truth())
 }
 
 pub(crate) fn os_default_transport_label(t: OsDefaultTransport) -> &'static str {

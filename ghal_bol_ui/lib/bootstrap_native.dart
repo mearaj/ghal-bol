@@ -9,7 +9,6 @@ import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 import "call/call_controller.dart";
 import "ghal_bol_p2p.dart";
 import "chat_hub_screen.dart";
-import "chat_screen.dart";
 import "ghal_bol_background.dart";
 import "ghal_bol_daemon.dart";
 import "ghal_bol_constants.dart";
@@ -828,38 +827,6 @@ class _IdentityScreenState extends State<IdentityScreen> {
             ),
           ],
           const SizedBox(height: 20),
-          if (widget.onUnlockedSession == null) ...[
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: (isValidPublicKeyHex(r.publicKeyHex) && GhalBolFfi.isP2pAvailable)
-                    ? () {
-                        Navigator.of(context).push<void>(
-                          MaterialPageRoute<void>(
-                            builder: (_) => ChatScreen(
-                              libp2pPeerId: r.publicKeyHex!.trim(),
-                              publicKeyHex: r.publicKeyHex,
-                              appNamespace: r.appNamespace ?? kGhalBolAppNamespace,
-                            ),
-                          ),
-                        );
-                      }
-                    : null,
-                icon: const Icon(Icons.chat_bubble_outline),
-                label: Text(
-                  "Open chat",
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              "Invitation link includes your identity; dial addresses are added when chat network is running.",
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
         ],
       ),
     );

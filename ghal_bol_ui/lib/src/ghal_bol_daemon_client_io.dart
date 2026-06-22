@@ -2,6 +2,7 @@ import "dart:async";
 import "dart:convert";
 import "dart:io";
 
+import "package:ghal_bol_ui/app_env_config.dart";
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
@@ -272,6 +273,10 @@ class GhalBolDaemonClient {
           if (Platform.environment["GHAL_BOL_DAEMON_SOCKET"] != null)
             "GHAL_BOL_DAEMON_SOCKET":
                 Platform.environment["GHAL_BOL_DAEMON_SOCKET"]!,
+          // Full libp2p flow on the terminal: the daemon runs in its own process, so
+          // its `GHAL_BOL_VERBOSE_LOG` must be set at spawn (env/.env.development).
+          // It forwards Rust `debug` lines through the log sink → App log → terminal.
+          ...?_verboseLogEnv(),
         },
       );
     }
@@ -288,6 +293,13 @@ class GhalBolDaemonClient {
       "daemon_start_timeout",
       check: "Android :p2p service; Linux ghal_bol_daemon in libexec",
     );
+  }
+
+  /// `{GHAL_BOL_VERBOSE_LOG: <val>}` when enabled in env, else null (spread no-op).
+  static Map<String, String>? _verboseLogEnv() {
+    final v = AppEnvConfig.get("GHAL_BOL_VERBOSE_LOG")?.trim() ?? "";
+    if (v.isEmpty) return null;
+    return {"GHAL_BOL_VERBOSE_LOG": v};
   }
 
   Future<void> _connect() async {

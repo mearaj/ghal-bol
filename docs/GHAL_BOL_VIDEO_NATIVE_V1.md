@@ -1,10 +1,6 @@
-# Ghal Bol video calls — native video over the P2P link (no WebRTC)
+# Ghal Bol video calls — native video over the P2P link
 
-**Status:** Canonical wire/engine spec. **V0–V1 engine + transport ship** on Linux and
-Android when both peers negotiate `video_engine: native_v1`. **Display/capture polish**
-(textures, HW codec, adaptive bitrate) is in progress — see § Implementation status
-below. WebRTC video remains the fallback for peers without `native_v1`. Native voice
-and native/WebRTC video may coexist during transition.
+**Status:** **Shipping** on Linux desktop and Android when both peers negotiate `video_engine: native_v1`. Display/capture polish (HW codec, adaptive bitrate) is in progress — see § Implementation status.
 
 **Read first:** [AGENTS.md](../AGENTS.md) (golden rules — esp. #1 Rust owns product
 logic, #7 identity E2EE), [DESIGN.md](DESIGN.md), [TRANSPORT.md](TRANSPORT.md) (libp2p
@@ -18,21 +14,18 @@ new stack.
 ## Goal & principles
 
 Smooth, WhatsApp-grade **video** where the media engine lives in **Rust** and rides
-the **direct peer connection we already establish** — no WebRTC, no ICE/SDP/DTLS, no
-STUN/TURN, no MoQ. Same identity, same crypto, same transport as native voice.
+the **direct peer connection we already establish**. Same identity, same crypto, same
+transport as native voice.
 
 | Principle | Consequence for video |
 |-----------|-----------------------|
 | **Rust owns media** (golden rule #1) | Capture→encode→seal→transport→jitter→decode happen in Rust; Flutter does camera-permission UI, the local/remote render surface, and toggle buttons via FFI. |
-| **Reuse the link** | Video frames ride the **same libp2p connection** as chat + voice (a media substream), so we inherit NAT traversal, relay fallback, DCUtR, Noise, coord discovery, urgent-reconnect, keepalive, and the **LAN-shift** work in `chat_server.rs`. |
-| **One E2E story** (golden rule #7) | Video frames are sealed with the existing identity media key (`derive_call_media_keys_from_identity`). No DTLS-SRTP, no FrameCryptor, no key on the wire. |
+| **Reuse the link** | Video frames ride the **same libp2p connection** as chat + voice (a media substream), so we inherit NAT traversal, relay `/p2p-circuit` fallback, Noise, coord discovery, urgent-reconnect, keepalive, and the **LAN-shift** work in `chat_server.rs`. |
+| **One E2E story** (golden rule #7) | Video frames are sealed with the existing identity media key (`derive_call_media_keys_from_identity`). Per-frame AES-GCM; key never on the wire. |
 | **No new servers** | Direct when possible; relay (coord/libp2p) only as fallback — identical to chat and voice. |
 | **Truthful UI** | "Video connected" only when decoded frames actually flow (mirrors voice + DESIGN.md truthful-status rule). |
 
-**Why not MoQ / WebRTC:** unchanged from [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md)
-§ "Why move off WebRTC" / "Why not MoQ". For 1:1 interactive video we want the
-existing peer link + an unreliable-friendly media path, not a re-solved ICE/SDP stack
-or a pub/sub broadcast protocol.
+**Why not MoQ:** see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § "Why not MoQ". For 1:1 interactive video we want the existing peer link + an unreliable-friendly media path, not a pub/sub broadcast protocol.
 
 ---
 
@@ -40,7 +33,7 @@ or a pub/sub broadcast protocol.
 
 | Piece | Native voice today | Native video (this doc) |
 |-------|--------------------|-------------------------|
-| **Signaling** (`invite`/`accept`/`hangup`, `call_id`, phases) | `call_sig_v1.rs`, `call_state.rs` over the DM stream | **Reuse.** Add `video_engine: native_v1` negotiation; replace `sdp_offer`/`sdp_answer`/`ice` with native `video_on`/`video_off` (already exist as kinds) + a `key_request` (keyframe) signal. |
+| **Signaling** (`invite`/`accept`/`hangup`, `call_id`, phases) | `call_sig_v1.rs`, `call_state.rs` over the DM stream | **Reuse.** Add `video_engine: native_v1` negotiation; `video_on`/`video_off` + `key_request` (keyframe) signals. |
 | **Identity media key** | `call_media_key.rs` `derive_call_media_keys_from_identity` | **Reuse**, with a distinct HKDF `info` for the video stream (key separation from audio — see § E2E). |
 | **Per-frame crypto** | `call_media/crypto.rs` `MediaCrypto` (AES-256-GCM, `dir‖counter‖ct`) | **Reuse the construction**; separate `MediaCrypto` instance/counter per media kind so audio and video never share a nonce space. |
 | **Transport** | `/ghal-bol/call/1.0.0` substream (`chat_server.rs`) | **New `/ghal-bol/call-video/1.0.0` substream** on the **same** connection (parallel to audio so a large video frame never head-of-line-blocks a 20 ms audio packet). Same two-streams-per-call (TX open / RX accept) + length-prefix framing + drop-oldest backpressure. |
@@ -49,7 +42,7 @@ or a pub/sub broadcast protocol.
 | **Jitter / sync** | `call_media/jitter.rs` (20 ms audio frames) | **New frame-aware video jitter** (keyframe/delta aware) + A/V sync using `MediaFrame.ts` (already reserved, `mod.rs`). |
 | **Capture / render** | `call_media/audio_device.rs` (cpal/Oboe) | **New camera capture** + **render-to-Flutter-texture** platform layer (see § Platform). |
 | **FFI / poll** | `p2p_call_media`, `GhalBolP2p.callMedia*`, `call_media` log stats | **Add** `p2p_call_video` + `GhalBolP2p.callVideo*`; reuse poll/stats pattern. |
-| **Call UI** | `call_screen.dart`, `call_controller.dart` | **Reuse**; the local PiP + remote view bind to a **native video texture** instead of `RTCVideoView` when `native_v1` video is active. |
+| **Call UI** | `call_screen.dart`, `call_controller.dart` | **Reuse**; local PiP + remote view bind to a **native video texture** (`NativeCallVideoView`). |
 
 ---
 
@@ -118,7 +111,7 @@ The codec layer is the part where 2026 Rust has caught up hard — there are now
 
 | Concern | Plan (proven crates, June 2026) |
 |---------|------|
-| **Codec choice** | Negotiate **best mutually-supported codec** per call: prefer **AV1** (royalty-free, best quality/bitrate — the "much better than WebRTC's default VP8" win) where HW or fast SW is available; **H.264** as the universal fallback (HW encode on essentially every phone); VP8/VP9 only for WebRTC-peer interop. The `VideoCodec` trait abstracts this so codecs slot in. |
+| **Codec choice** | Negotiate **best mutually-supported codec** per call: prefer **AV1** (royalty-free, best quality/bitrate) where HW or fast SW is available; **H.264** as the universal fallback (HW encode on essentially every phone). The `VideoCodec` trait abstracts this so codecs slot in. |
 | **HW-accelerated codec crates** | **`cros-codecs`** (Google/ChromeOS; VAAPI + V4L2 **H.264/HEVC/VP8/VP9/AV1 decode**, **H.264/VP9/AV1 encode**; ~1.1M downloads, production in crosvm — the mature Linux pick). **`yscv-video`** (2026, **pure-Rust, no FFmpeg**: H.264/HEVC/AV1 decode + HW via **VideoToolbox/VAAPI/NVDEC/MediaFoundation** + **`nokhwa` camera** in one crate — strong cross-platform pick). **`rav1e`** (AV1 encode) + **`rav1d`** (memory-safe `dav1d` AV1 decode) and **`openh264`** for SW/portable paths. |
 | **HW acceleration by platform** | **Android:** `MediaCodec` (Surface in/out) — essential for battery/thermals; reachable via `yscv-video` MediaFoundation-equivalent path is Windows-only, so on Android drive `MediaCodec` directly (JNI, like the audio Oboe path) or via `cros-codecs` V4L2 where the SoC exposes it. **iOS:** VideoToolbox (via `yscv-video` or direct). **Linux/desktop:** `cros-codecs` VAAPI (Intel/AMD) / `yscv-video` NVDEC (NVIDIA), SW `rav1e`+`rav1d`/`openh264` fallback. |
 | **Reference** | The iroh team's **`rusty-codecs`** (part of `iroh-live`) already wraps **H.264 (openh264) + AV1 (rav1e/rav1d) + Opus** with **VAAPI/V4L2/VideoToolbox HW accel and `wgpu` rendering** behind one API — a strong reference (and possible direct dependency) for the exact `VideoCodec`/render abstraction we need. |
@@ -198,7 +191,7 @@ A 1:1 link still needs basic congestion control or video will bufferbloat the au
   across the two media kinds.
 - Each chunk is sealed with `MediaCrypto` (`dir‖counter‖ciphertext`) before it hits the
   substream; the substream is also Noise-encrypted peer-to-peer (defense in depth — a
-  relay on the path never sees plaintext). No SDP, key never on the wire.
+  relay on the path never sees plaintext). Key never on the wire.
 - Keys derive in parallel with camera open; **failure to derive must fail the video
   E2E or surface it — never silently fall back to plaintext video** (golden rule #7).
   Audio and the call itself continue regardless.
@@ -207,21 +200,18 @@ A 1:1 link still needs basic congestion control or video will bufferbloat the au
 
 ## Signaling changes
 
-Reuse `call_sig_v1.rs` / `call_state.rs`. Native video **removes the WebRTC kinds** for
-native-negotiated calls and adds a small control vocabulary:
+Reuse `call_sig_v1.rs` / `call_state.rs`. Native video signaling:
 
 | Kind | Native v1 meaning |
 |------|-------------------|
 | `invite` / `accept` | Carry inner JSON `voice_engine`/`video_engine` capability tags (alongside `media`). Both sides supporting `video_engine: native_v1` ⇒ native video is available in-call. |
-| `video_on` | **Reused, native semantics:** start the native video substream + camera; payload negotiates `{w,h,fps,codec}` caps (min of both sides). **No SDP renegotiation.** |
-| `video_off` | Stop camera + tear down the video substream; audio (native or WebRTC) continues. |
+| `video_on` | Start the native video substream + camera; payload negotiates `{w,h,fps,codec}` caps (min of both sides). |
+| `video_off` | Stop camera + tear down the video substream; voice continues. |
 | `key_request` (**new**) | RX → TX: force an immediate keyframe (after loss / late join). |
-| `sdp_offer`/`sdp_answer`/`ice` | **Not used** on native-video calls (kept only for WebRTC-fallback peers). |
 
-`call_state.rs` already tracks `video_enabled` per call — extend it to record which
-**video engine** is active (so the controller knows whether to bind an `RTCVideoView`
-or a native texture). Negotiation mirrors today's `voice_engine: native_v2` flow in
-`call_controller.dart` (advertise → parse remote → decide `_willUseNativeVideo`).
+`call_state.rs` tracks `video_enabled` per call and which **video engine** is active.
+Negotiation mirrors `voice_engine: native_v2` in `call_controller.dart` (advertise →
+parse remote → decide `_willUseNativeVideo`).
 
 ---
 
@@ -264,20 +254,16 @@ tests.
 
 ---
 
-## Phased rollout (each phase shippable; WebRTC video stays until replaced)
+## Phased rollout
 
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
 | **V0** | `VideoCodec` trait + `NullVideoCodec` + packetizer/reassembler + video jitter (keyframe-aware) + `MediaCrypto` video key — **engine core, no camera/transport**, unit-tested like the voice P0 | Round-trip + reorder/loss/keyframe-recovery unit tests pass (mirrors `call_media` tests) |
-| **V1** | `/ghal-bol/call-video/1.0.0` substream in `chat_server.rs` + SW codec (VP8) + **desktop** camera (`nokhwa`) + render texture; CLI/test harness | Two Linux desktops hold a clear 2-way video call over a real libp2p link; measured rtt/fps/bitrate; audio stays native voice |
-| **V2** | Wire V1 into `call_controller`/`call_screen` via FFI on **Linux** (native texture replaces `RTCVideoView` when `native_v1`); congestion control + `key_request` | Linux↔Linux native video replaces WebRTC on desktop; quality ≥ WebRTC at equal bandwidth |
+| **V1** | `/ghal-bol/call-video/1.0.0` substream in `chat_server.rs` + SW codec (H.264) + **desktop** camera (`nokhwa`) + render texture; CLI/test harness | Two Linux desktops hold a clear 2-way video call over a real libp2p link; measured rtt/fps/bitrate; audio stays native voice |
+| **V2** | Wire V1 into `call_controller`/`call_screen` via FFI on **Linux** (native texture); congestion control + `key_request` | Linux↔Linux native video |
 | **V3** | **Android** Camera2 + `MediaCodec` HW encode/decode + SurfaceTexture render; switch-camera; route toggles | Android↔Android and Android↔Linux video solid on Wi-Fi + cellular within battery/thermal budget |
 | **V4** | **iOS** AVFoundation + VideoToolbox | iOS interop |
 | **V5** | Option B (QUIC datagrams) for video if substream HOL hurts on lossy cellular | Lower jitter / faster recovery on lossy links |
-
-Until a platform's phase lands, that platform keeps **WebRTC video** (audio may already
-be native voice). A call may run **native voice + WebRTC video** during transition, or
-**native voice + native video** once both are negotiated `native_v*`.
 
 ---
 
@@ -285,18 +271,17 @@ be native voice). A call may run **native voice + WebRTC video** during transiti
 
 - **HW codec variance** (Android `MediaCodec` across vendors; color formats, latency).
 - **Zero-copy render** to a Flutter `Texture` on each platform (avoid per-frame CPU copies/thermals).
-- **Congestion control quality** for 1:1 (GCC-lite vs something more principled) without WebRTC's tuned BWE.
-- **Battery/CPU/thermal** of camera + encode + decode + render on mobile vs the OS-accelerated WebRTC path.
+- **Congestion control quality** for 1:1 (GCC-lite vs something more principled).
+- **Battery/CPU/thermal** of camera + encode + decode + render on mobile.
 - **Substream HOL** under cellular loss (mitigation: drop-oldest, keyframe-on-request; escape hatch: Option B datagrams).
 - **Build size / NDK**: adding a video codec (+ HW codec glue) to the Android `:p2p` libs.
-- **Maintaining two media stacks** (native + WebRTC) during the multi-release transition.
 
 ## Non-goals (v1)
 
 - Group video / SFU.
 - Screen share, recording, virtual backgrounds.
 - Browser/web video (FFI is native).
-- Replacing WebRTC video on all platforms at once (phased; voice and video may differ per platform during transition).
+- Replacing video on all platforms at once (phased; iOS not started).
 - MoQ.
 
 ---
@@ -309,7 +294,7 @@ be native voice). A call may run **native voice + WebRTC video** during transiti
 | **V1 codec** | **Done (desktop).** `call_video/codec_h264.rs` — `H264Encoder`/`H264Decoder` over **OpenH264** (`openh264` 0.9, bundled source built via `cc`; realtime config: 2 Mbps / 30 fps, accurate keyframe flag via Annex-B NAL scan). I420 in/out. `VideoEngine::new_h264()`. **4 tests** incl. a **full two-engine pipeline** (encode → fragment → seal → wire → reassemble → keyframe-aware jitter → decode). Desktop-gated; Android codec (`MediaCodec` / cross-built openh264) lands in its phase so the Android build stays untouched now. |
 | **V1 transport + capture/render** | **Done (Linux desktop + Android).** `/ghal-bol/call-video/1.0.0` substream, `p2p_call_video` + `p2p_call_video_frame` FFI/daemon RPC. **Desktop:** `nokhwa` camera → I420. **Android:** Camera2 in `:p2p` (`AndroidVideoCapture.kt`) → JNI → Rust; OpenH264 cross-built via NDK (same bitstream as desktop). Flutter `NativeCallVideoView` pulls frames over daemon RPC on Android (UI process) or FFI on Linux. `CallController` negotiates `video_engine: native_v1` on **both** desktop and Android. |
 | **V2 Android HW codec** | **Optional next.** `MediaCodec` H.264 encode/decode behind the same trait for lower CPU/battery (OpenH264 SW already ships). |
-| **V2 Linux wiring** | **Done.** Native video replaces WebRTC when both peers advertise `native_v1` (Linux↔Linux, Linux↔Android, Android↔Android). |
+| **V2 Linux wiring** | **Done.** Native video when both peers advertise `native_v1` (Linux↔Linux, Linux↔Android, Android↔Android). |
 | **V3 Android / V4 iOS / V5 datagrams** | Not started. |
 
 ### Flutter video textures and call end (Linux + Android)
@@ -321,9 +306,7 @@ be native voice). A call may run **native voice + WebRTC video** during transiti
 | **End order** | Stop UI phase → `callMediaStop` / `callVideoStop` → `CallDesktopNativeCamera.stop` → `releaseCall` → optional async `hangup` — UI must not block on RPC. |
 | **Privacy** | Same as voice: UI gone → `p2p_force_end_active_call` (daemon / `:p2p`). See [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”. |
 
-**Current shipping reality:** native **voice** (`native_v2`) + **native video** (`native_v1`)
-when negotiated; otherwise WebRTC video. Voice status:
-[GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
+**Current shipping reality:** native **voice** (`native_v2`) + **native video** (`native_v1`) when both peers negotiate the tags. Voice detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
 
 ## References (June 2026)
 

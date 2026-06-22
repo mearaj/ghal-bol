@@ -1,49 +1,35 @@
-# Ghal Bol calls v2 — native media over the P2P link (no WebRTC)
+# Ghal Bol calls — native voice over the P2P link
 
-**Status:** Design / proposal. Not implemented. v1 (WebRTC media in Flutter) stays
-the shipping path until a phase below replaces it feature-by-feature.
+**Status:** **Shipping** on Linux desktop and Android when both peers negotiate `voice_engine: native_v2`. iOS not started.
 
-**Goal:** WhatsApp-smooth **voice** (then video) where the media engine lives in
-**Rust** and rides the **direct peer connection we already establish** — no
-WebRTC, no ICE/SDP/DTLS, no STUN/TURN, no MoQ. One identity, one crypto story,
-one transport.
+**Goal:** Voice where the media engine lives in **Rust** and rides the **direct peer connection we already establish** — no separate STUN/TURN/SDP stack, no MoQ. One identity, one crypto story, one transport.
 
-Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md)
-(layers + E2EE), [TRANSPORT.md](TRANSPORT.md) (libp2p stack), and the current
-call design [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (what we are replacing).
+Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (layers + E2E), [TRANSPORT.md](TRANSPORT.md) (libp2p stack), [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (signaling). Video: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
 ---
 
-## Why move off WebRTC
+## Why native over the existing link
 
 | Driver | Detail |
 |--------|--------|
-| **Golden rule #1** | "`ghal_bol` (Rust) owns all product logic." Calls are the **only** feature that violates this today — media is WebRTC in Flutter (`call_webrtc.dart`). v2 brings it home. |
-| **We already have the link** | A call needs an encrypted, NAT-traversed, bidirectional channel between two peers. libp2p already gives us this (QUIC/TCP + Noise + relay + DCUtR). WebRTC's ICE/STUN/TURN/SDP/DTLS exists to *re-solve* that problem — redundant for us. |
-| **No new servers** | STUN/TURN are extra infra. Riding the existing connection keeps calls as serverless as chat: direct when possible, relay (coord/libp2p) only as fallback. |
-| **One E2E story** | Reuse `derive_call_media_keys_from_identity` (secp256k1) we already have, instead of DTLS-SRTP + FrameCryptor double layer. |
+| **Golden rule #1** | `ghal_bol` (Rust) owns product logic — capture, codec, transport, jitter, and E2E live in Rust (`call_media/`). |
+| **We already have the link** | libp2p provides encrypted connections (TCP/QUIC + Noise + relay + coord). Calls reuse that link via `/ghal-bol/call/1.0.0`. |
+| **No new servers** | Direct when possible; coord/relay only as fallback — same as chat. |
+| **One E2E story** | `derive_call_media_keys_from_identity` (secp256k1) + per-frame AES-GCM seal. |
 
-**Why not MoQ.** Media-over-QUIC (2026) is a publish/subscribe **one-to-many
-broadcast** protocol (200–500 ms, CDN fan-out). Industry consensus rates it 👎
-for 1:1 interactive calls and "complementary to, not a replacement for" WebRTC.
-Wrong tool for two-party conversation. Not used here.
-
-**What this is NOT.** It is *not* "reimplement WebRTC." The hard media pieces are
-off-the-shelf Rust crates in 2026 (Opus, AEC3/NS/AGC ports). We assemble a
-**two-party** pipeline, which is far smaller than libwebrtc's general engine.
+**Why not MoQ.** Media-over-QUIC broadcast protocols target one-to-many fan-out, not 1:1 interactive calls. Not used here.
 
 ---
 
-## What we keep vs replace
+## Architecture pieces
 
-| Piece | Today | v2 |
-|-------|-------|----|
-| **Signaling** (invite/accept/reject/hangup, call_id, phases) | Rust `call_sig_v1.rs`, `call_state.rs`, `call_ffi.rs` over the DM stream | **Keep as-is.** Add a `media_ready` exchange; drop `sdp_offer`/`sdp_answer`/`ice`. |
-| **Media key** | `call_media_key.rs` (`derive_call_media_keys_from_identity`) | **Keep.** Becomes the *only* media crypto (no DTLS-SRTP). |
-| **Media engine** | WebRTC in Flutter | **New:** Rust capture→APM→Opus→transport→jitter→decode→playback. |
-| **Media transport** | WebRTC UDP (ICE) | **New:** the existing libp2p peer connection (see transport decision). |
-| **Flutter call code** | `call_webrtc.dart`, `call_desktop_media.dart`, `call_media_e2ee.dart` | Shrinks to UI + device pick + mute/speaker toggles via FFI; capture/codec/transport leave Dart. |
-| **Call UI / controller / ringtone** | `call_controller.dart`, `call_screen.dart`, `call_ringtone.dart` | **Keep** (thin UI shell). |
+| Piece | Implementation |
+|-------|----------------|
+| **Signaling** | `call_sig_v1.rs`, `call_state.rs`, `call_ffi.rs` over the DM stream |
+| **Media key** | `call_media_key.rs` (`derive_call_media_keys_from_identity`) |
+| **Media engine** | Rust: capture → APM → Opus → seal → transport → jitter → decode → playback |
+| **Media transport** | `/ghal-bol/call/1.0.0` on the existing libp2p peer connection |
+| **Flutter** | `call_controller.dart`, `call_screen.dart`, `call_ringtone.dart` — UI + FFI control only |
 
 ---
 
@@ -91,12 +77,12 @@ Defaults to validate, then tune: 48 kHz mono; 20 ms frames; Opus 16–40 kbps VB
 with **in-band FEC** + **DTX**; jitter buffer 8 slots (160 ms) adaptive; AEC3
 analysis fed the render (playback) stream as the echo reference.
 
-**Crates (proven 1:1-P2P-over-QUIC references, June 2026): `voicemcu`, `proscenium`, `aura`, `occupyashanti/echo`.** All four run **Opus over a direct QUIC connection** (datagrams or length-prefixed streams) with a small jitter buffer + Opus PLC — i.e. exactly this engine's shape. The Ghal Bol voice engine was built from this pattern (`audiopus` + `cpal` + `ringbuf` + in-house jitter + per-frame AES-GCM), not from WebRTC.
+**Crates (proven 1:1-P2P-over-QUIC references, June 2026): `voicemcu`, `proscenium`, `aura`, `occupyashanti/echo`.** All four run **Opus over a direct QUIC connection** (datagrams or length-prefixed streams) with a small jitter buffer + Opus PLC — i.e. exactly this engine's shape. The Ghal Bol voice engine was built from this pattern (`audiopus` + `cpal` + `ringbuf` + in-house jitter + per-frame AES-GCM).
 
 | Concern | Crate | Notes |
 |---------|-------|-------|
 | Codec | `audiopus` / `opus` (libopus) | FEC, DTX, PLC built in. **Shipped.** |
-| AEC / NS / AGC | **`sonora`** (pure-Rust AEC3 + NS + AGC2, [crates.io](https://crates.io/crates/sonora) v0.1.0, Feb 2026, MSRV 1.91) — **fallback** `tonarino/webrtc-audio-processing` (C++ bindings, v2.1.0 May 2026) | `sonora` is benchmarked at **C++ parity** (≈13 µs per 48 kHz mono frame) and is **pure Rust → no C++/NDK dep**, so it cross-compiles cleanly for the Android `:p2p` libs. This is the concrete fix for the **"AEC not yet"** gap below: feed the playout (render) stream as the echo reference into `sonora`'s AEC3, NS + AGC2 in the same pass. Prefer the OS voice-comm AEC on mobile where available; `sonora` is the desktop + fallback canceller. |
+| AEC / NS / AGC | **`sonora`** (pure-Rust AEC3 + NS + AGC2, [crates.io](https://crates.io/crates/sonora) v0.1.0, Feb 2026, MSRV 1.91) — optional C++ APM bindings fallback | `sonora` is benchmarked at **C++ parity** (≈13 µs per 48 kHz mono frame) and is **pure Rust → no C++/NDK dep**, so it cross-compiles cleanly for the Android `:p2p` libs. Prefer the OS voice-comm AEC on mobile where available; `sonora` is the desktop + fallback canceller. |
 | Desktop capture/playback | `cpal` | Linux/macOS/Windows. **Shipped.** |
 | Lock-free buffers | `ringbuf` | SPSC mic/speaker rings off the realtime thread |
 | Jitter buffer | small in-house | seq/ts reorder + PLC trigger (modeled on `voicemcu`). **Shipped.** |
@@ -114,7 +100,7 @@ over QUIC/TCP+yamux). So there are two options:
 Open a second protocol `/ghal-bol/call/1.0.0` on the **same** libp2p connection
 (mirrors how `/ghal-bol/msg/1.0.0` is opened in `chat_server.rs`).
 
-- ➕ Reuses **everything**: NAT traversal, relay fallback, DCUtR, Noise, peer auth,
+- ➕ Reuses **everything**: NAT traversal, relay `/p2p-circuit` fallback, Noise, peer auth,
   coord discovery, the urgent-reconnect/keepalive work already in `chat_server.rs`.
 - ➕ Fastest path to a working call; least new transport code.
 - ➖ Reliable+ordered → under packet loss, latency can build (HOL blocking).
@@ -134,8 +120,7 @@ from.
   frame size** + capped `quinn` MTU discovery so each datagram stays under tight
   VPN/CGNAT MTUs (e.g. Tailscale); same jitter-buffer + Opus PLC on both ends.
 - ➖ `rust-libp2p`'s QUIC does **not** expose datagrams to the app, so this is a
-  *parallel* transport: we own connection setup + some hole-punching for hard
-  NATs (libp2p's DCUtR is tied to libp2p conns). More code, more failure modes.
+  *parallel* transport: we own connection setup for hard NATs. More code, more failure modes.
   Reuse coord/relay-learned addresses for the `quinn` dial; signaling stays on the
   reliable DM stream.
 
@@ -153,7 +138,7 @@ Control/signaling stays on the reliable DM stream either way.
   a thin per-frame seal with the identity media key so a relay/path never sees
   plaintext (defense in depth, matches chat's seal-then-transport model).
 - **Option B:** datagrams are sealed with the identity media key (QUIC TLS also
-  wraps them); no SDP, key never on the wire.
+  wraps them); key never on the wire.
 - Connect-time: media keys derive in parallel with device open; failure to derive
   must **not** silently drop to plaintext — fail the call's E2E or surface it
   (no peer-facing plaintext, per golden rule #7).
@@ -195,19 +180,16 @@ new platform code and the main quality risk (echo on speakerphone, threading).
 
 ---
 
-## Phased rollout (each phase shippable, WebRTC stays until replaced)
+## Phased rollout
 
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
 | **P0** | Rust voice PoC, **desktop only**, Option A transport, fixed bitrate, no UI wiring (CLI/test harness) | Two desktops hold a clear 2-way call over a real libp2p link; measured RTT/jitter/loss |
-| **P1** | Wire P0 into `call_controller` via FFI on **Linux**; ring UX kept; in-call stats chip | Linux↔Linux production call replaces WebRTC on desktop; quality ≥ WebRTC |
+| **P1** | Wire P0 into `call_controller` via FFI on **Linux**; ring UX kept; in-call stats chip | Linux↔Linux production voice call |
 | **P2** | **Android** capture/playback + hardware AEC; speaker/route toggles | Android↔Android and Android↔Linux voice solid on Wi-Fi + cellular |
 | **P3** | **iOS** VPIO path | iOS interop |
 | **P4** | Option B (QUIC datagrams) if cellular jitter needs it | Lower jitter on lossy links |
-| **P5** | **Video** — separate design (HW codecs, congestion, keyframes). Likely keep WebRTC for video well past voice. | **Designed: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md)** (native video over the same link; not yet implemented). |
-
-Until a platform's phase lands, that platform keeps the v1 WebRTC path. Voice and
-video may run on different stacks during transition (voice native, video WebRTC).
+| **P5** | **Video** — [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) | Native video over `/ghal-bol/call-video/1.0.0` |
 
 ---
 
@@ -217,9 +199,9 @@ video may run on different stacks during transition (voice native, video WebRTC)
   drop-oldest send queue is the mitigation, Option B is the escape hatch.
 - **AEC quality** cross-platform, especially desktop speakerphone and Bluetooth.
 - **Mobile realtime audio threading** (xruns, latency) — Oboe/AudioUnit tuning.
-- **Battery/CPU** of a Rust APM on mobile vs the OS-accelerated WebRTC path.
+- **Battery/CPU** of a Rust APM on mobile vs OS-accelerated voice paths.
 - **Build size / NDK** — adding libopus + APM to the Android `:p2p` libs.
-- **Video** stays WebRTC for now; the native-video plan is [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md). Maintaining two media stacks during the transition has a cost.
+- **Video** — [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
 ## Non-goals (v2)
 
@@ -239,7 +221,7 @@ video may run on different stacks during transition (voice native, video WebRTC)
 | **P2 transport** | **Done.** `/ghal-bol/call/1.0.0` substream in `chat_server.rs`: a second `control.accept(...)` loop + per-call TX `open_stream`. **Two streams per call** (each side opens its TX, accepts its RX) to avoid glare; first frame is a `{"call_id"}` header, then length-prefixed sealed packets. Registry `SessionState::call_media` maps `call_id → {peer_id, controls, wire_in_tx}`; inbound RX is peer-verified. `OutboundCmd::CallMediaStart/Stop/SetMicMuted` (priority 0). Stopped on node shutdown. |
 | **P3 FFI / daemon** | **Done.** `p2p_runtime::p2p_call_media` (action `start`/`stop`/`set_mic_muted`), C FFI `ghal_bol_ffi_p2p_call_media`, daemon RPC `p2p_call_media`. Stats currently surfaced via `native_log` `call_media` lines (`sent=/recv=` every 3 s); a poll event is a later refinement. |
 | **P4 desktop audio** | **Done.** `cpal` capture/playback on a dedicated audio thread (cpal `Stream` is `!Send`); down-mix to mono + linear resample to/from 48 kHz; `SilenceAudioBackend` fallback for headless/Android. **AEC not yet** — use headphones to avoid echo until AEC lands. **Next:** add **`sonora`** (pure-Rust AEC3 + NS + AGC2, confirmed available June 2026) in the capture path, fed the playout stream as the echo reference; cross-compiles for Android `:p2p` (no C++ dep). OS voice-comm AEC preferred on mobile when available. |
-| **P5 Flutter** | **Done (voice).** Invite/accept negotiate `voice_engine: native_v2`; when both sides support it, `CallController` uses native media (`GhalBolP2p.callMediaStart/Stop/SetMicMuted`) with **no WebRTC/SDP/ICE**. Old peers (no tag) fall back to WebRTC. Video still uses WebRTC; video toggle is disabled during a native-voice call. E2EE chip is truthful (native voice is always identity-E2E). |
+| **P5 Flutter** | **Done (voice).** Invite/accept negotiate `voice_engine: native_v2`; `CallController` uses native media (`GhalBolP2p.callMediaStart/Stop/SetMicMuted`). E2EE chip is truthful (native voice is always identity-E2E). |
 | **P6 Android** | **Done (build + plumbing).** `cpal` reuses its Oboe (AAudio/OpenSL) backend on `target_os = "android"`, gated by `set_android_audio_ready()` — the `:p2p` JNI `initAndroidAudio` hands cpal the JavaVM + Context via `ndk_context`. libopus is cross-built static per ABI by `scripts/build_android_opus.sh` (audiopus_sys can't cross-compile it) and linked via `LIBOPUS_*` from `pack_android_workspace_jni_libs.sh`; the `.so` statically embeds opus and needs only `libc++_shared.so`/`libOpenSLES.so` (already shipped by the app). The `:p2p` service gains a `microphone` FGS type (re-promoted at call start once `RECORD_AUDIO` is granted). `CallController` advertises `native_v2` on Android behind `kAndroidNativeVoice`. **Known gaps (device-test):** cpal uses Oboe's default (media) input/route, so there is **no hardware AEC and no earpiece/speaker route control** — clean on a headset, echo on speaker. Proper fix = drive Oboe directly with `VOICE_COMMUNICATION` preset + `MODE_IN_COMMUNICATION` (bypassing cpal) or a software APM. |
 
 ### UI session and privacy (do not regress)
@@ -271,7 +253,6 @@ See [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”. Summary:
 3. Place a voice call. Use a **headset** on the Android side (no AEC yet — speaker will echo).
 4. In the App log, look for: `android audio ready (cpal/Oboe enabled)` (from `initAndroidAudio`), then on the call the same `call_media` `start … / inbound media stream / sent=N recv=M` lines as desktop. Audio should be two-way.
 5. If you hear remote audio but the peer hears nothing, check the log for `mic disabled` / a `startForeground(mic=…)` warning — the `:p2p` service did not get the microphone FGS type (grant `RECORD_AUDIO`, then the call re-promotes it; relaunch once if it was denied earlier).
-6. To force Android back onto WebRTC (e.g. to A/B against native), set `kAndroidNativeVoice = false` in `call_controller.dart` and rebuild the Dart side.
 
 **Engine ↔ platform contract (for P2/P4):** the engine is driven by three calls —
 `on_capture(pcm)->wire` (from the audio capture callback), `on_wire(bytes)` (from
@@ -281,7 +262,7 @@ every 20 ms). Audio I/O and transport are the only platform-specific pieces.
 ## References (June 2026)
 
 - **1:1 P2P-call-over-QUIC stacks (proven):** `voicemcu` (Opus over **unreliable QUIC datagrams**, `quinn` + `ringbuf` + jitter/PLC), `proscenium` (P2P 1:1 voice over a dedicated QUIC protocol, `cpal`+Opus 48 kHz mono 20 ms, length-prefixed streams), `aura`, `occupyashanti/echo`.
-- **Rust audio processing (AEC/NS/AGC):** **`sonora`** (pure-Rust AEC3 + NS + AGC2, v0.1.0 Feb 2026, ≈C++ parity) — fallback `tonarino/webrtc-audio-processing` (C++ bindings, v2.1.0 May 2026).
+- **Rust audio processing (AEC/NS/AGC):** **`sonora`** (pure-Rust AEC3 + NS + AGC2, v0.1.0 Feb 2026, ≈C++ parity) — fallback C++ AEC bindings (v2.1.0 May 2026).
 - **Codec:** Opus (FEC/DTX/PLC) via `audiopus`. **Transport shape:** QUIC unreliable datagrams (RFC 9221).
 - **Reference architecture for the broader pipeline** (camera, HW codecs, adaptive bitrate, per-track streams): the iroh team's **`iroh-live`** (`moq-media` / `rusty-codecs` / `rusty-capture`) — see [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
-- **Why not MoQ/CDN for 1:1:** webrtcHacks "WebRTC vs MoQ by Use Case"; Cloudflare MoQ. (We borrow MoQ's *per-track independent stream* idea but run it over our **own direct** connection — no relay/CDN fan-out.)
+- **Why not MoQ/CDN for 1:1:** industry writeups on MoQ vs interactive 1:1 calls; Cloudflare MoQ. (We borrow MoQ's *per-track independent stream* idea but run it over our **own direct** connection — no relay/CDN fan-out.)

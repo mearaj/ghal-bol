@@ -63,7 +63,7 @@ Link privacy policy URL: `https://ghalbol.com/privacy` (publish [PRIVACY_POLICY.
 
 ## Release notes (v1.0.1 build 8)
 
-- Native encrypted voice and video calls over direct P2P (no WebRTC)
+- Native encrypted voice and video calls over direct P2P
 - Improved LAN and WAN connectivity, Wi‑Fi handover, and coord/relay stability
 - Delivery and read receipt fixes; hub unread sync on room leave
 - Foreground service declarations for camera and microphone (Play Store explainers in `videos/`)

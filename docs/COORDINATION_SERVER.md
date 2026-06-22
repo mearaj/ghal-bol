@@ -2,11 +2,11 @@
 
 **Tier 1 only** — presence and endpoint discovery. No message bodies or transcripts.
 
-It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT traversal (transport helper; relays only transient E2E frames until DCUtR upgrades clients to a direct link — not a message store). See [TRANSPORT.md](TRANSPORT.md) § "Ghal Bol relay".
+It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT traversal (transport helper; peers dial each other via `/p2p-circuit` multiaddrs registered on coord — not a message store). See [TRANSPORT.md](TRANSPORT.md) § "Ghal Bol relay".
 
 ```text
-Peer A / B  →  register / heartbeat  →  ghal_bol_server (SQLite)  →  GET /v1/peers/{hex}  →  P2P dial
-                 └─ reserve circuit on relay ─→  GET /v1/relay  →  register /p2p-circuit  →  DCUtR direct
+Peer A / B  →  register / heartbeat  →  ghal_bol_server (SQLite)  →  GET /v1/peers/{hex}  →  dial /p2p-circuit
+                 └─ reserve circuit on relay ─→  GET /v1/relay  →  server upserts /p2p-circuit on coord
 ```
 
 ## Client (`ghal_bol`)
@@ -15,7 +15,7 @@ After unlock: configure the **coord server list** (today a single URL; the API i
 
 Set URLs in `ghal_bol_ui/env/.env.development` (debug) or `env/.env.production` (release) via `GHAL_BOL_COORD_URLS` (JSON array or comma-separated). No hardcoded coord URLs in the app binary.
 
-**WAN policy:** coord + co-located relay are **required** for internet peer discovery. When coord is unreachable, LAN (mDNS) still works; the node keeps retrying all configured servers. Do **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN peer lookup — **libp2p remains** for transport (relay, DCUtR, mDNS, streams). See [TRANSPORT.md](TRANSPORT.md) § Connectivity lifecycle.
+**WAN policy:** coord + co-located relay are **required** for internet peer discovery. WAN dials use explicit **`/p2p-circuit`** multiaddrs from `GET /v1/peers/{pk}` — **not** DCUtR hole-punch (DCUtR is disabled when coord is configured; see [TRANSPORT.md](TRANSPORT.md) § Stream-first). When coord is unreachable, LAN (mDNS) still works; the node keeps retrying all configured servers. Do **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN peer lookup — **libp2p remains** for transport (relay circuit, mDNS, streams).
 
 ### Client register & heartbeat policy (`coord_runtime.rs`)
 

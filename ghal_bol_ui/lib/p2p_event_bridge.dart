@@ -278,7 +278,12 @@ class P2pEventBridge {
     }
   }
 
-  /// After daemon restart or broken socket, re-run unlock-era `p2p_start` (same data dir).
+  /// Process supervision only — NOT reconnect policy. The shell is the only thing that can relaunch
+  /// a dead `ghal_bol_daemon` / Android `:p2p` process; Rust cannot restart its own host process.
+  /// All connectivity policy (WAN recovery, coord lookup/register, dial, LAN handover, backoff)
+  /// lives in `ghal_bol` (`chat_server` / `coord_runtime`). This only detects "node process not
+  /// running", relaunches + unlocks it, and re-signals contacts (`syncContacts`). Keep it free of
+  /// any dial/lookup/ack/transcript logic — see AGENTS.md SSOT split.
   Future<void> recoverP2pIfNeeded() async {
     if (!_networkBootstrapOk || !GhalBolP2p.isAvailable) return;
     if (_p2pRecoverInFlight != null) return _p2pRecoverInFlight;

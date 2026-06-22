@@ -1,0 +1,211 @@
+fn emit_chat_ready_if_can_send(
+    session: Arc<SessionState>,
+    peer: PeerId,
+    writers: StreamWriters,
+    events_tx: Option<std::sync::mpsc::Sender<GossipChatEvent>>,
+) {
+    if !session.is_dm_contact(peer) || !writer_open_for_peer(&writers, peer) {
+        return;
+    }
+    let first = session
+        .chat_ready_emitted
+        .write()
+        .ok()
+        .is_some_and(|mut g| g.insert(peer));
+    let has_outbox = peer_has_pending_outbox(session.as_ref(), peer);
+    if !first && !has_outbox {
+        return;
+    }
+    if first {
+        // Flow milestone at info (App-log visible): this is the moment chat actually works —
+        // connection alone (`conn=true`) is not enough, the `/ghal-bol/msg` stream must be open.
+        // Once-per-peer-per-stream (gated by `first`), so no log spam. See AGENTS.md § "conn=true
+        // ≠ chat works" and TRANSPORT.md § "Logging — see the precise flow".
+        native_log::info(
+            "stream",
+            format!("chat_ready {peer} — chat stream open, can send now (outbox_pending={has_outbox})"),
+        );
+        if let Some(tx) = events_tx.clone() {
+            let _ = tx.send(GossipChatEvent::ChatReady { peer_id: peer });
+        }
+    }
+    let session2 = Arc::clone(&session);
+    let writers2 = Arc::clone(&writers);
+    tokio::spawn(async move {
+        if let (Some(path), Some(ns)) = (&session2.transcript_path, &session2.app_namespace) {
+            transcript_sync_outbound_tick(session2.as_ref(), Path::new(path), ns.trim());
+        }
+        resync_pending_outbox(
+            session2.clone(),
+            writers2.clone(),
+            vec![peer],
+            events_tx.clone(),
+            None,
+        )
+        .await;
+        resync_outbox_burst_for_peer(
+            session2.clone(),
+            writers2.clone(),
+            peer,
+            events_tx.clone(),
+            None,
+        )
+        .await;
+        flush_pending_call_signals(
+            session2.clone(),
+            Arc::clone(&writers2),
+            vec![peer],
+            events_tx.clone(),
+        )
+        .await;
+        // Read receipts: only on room enter (`RunReadAckCatchup` / `SetForegroundPeer`), inbound
+        // text while in-room, leave drain, and ack upkeep — never on automatic stream reopen
+        // after network handover (would mark unread mail read on the sender).
+        let first_replay = session2
+            .history_replay_done
+            .write()
+            .ok()
+            .is_some_and(|mut g| g.insert(peer));
+        if first_replay {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            replay_conversation_history(session2, writers2, peer).await;
+        }
+    });
+}
+
+/// After connect, resend transcript rows still marked pending (does not flood delivered history).
+async fn replay_conversation_history(
+    session: Arc<SessionState>,
+    writers: StreamWriters,
+    peer: PeerId,
+) {
+    let (path, ns) = match (&session.transcript_path, &session.app_namespace) {
+        (Some(p), Some(n)) if !p.trim().is_empty() && !n.trim().is_empty() => {
+            (p.clone(), n.trim().to_string())
+        }
+        _ => return,
+    };
+    if !writer_open_for_peer(&writers, peer) {
+        return;
+    }
+    let dm = match session.dm_peer_for_libp2p(peer) {
+        Some(d) => d,
+        None => return,
+    };
+    let recipient_pk = match dm.public_key_hex.as_deref() {
+        Some(s) if s.len() == 66 => s,
+        _ => return,
+    };
+    let Ok(rows) = crate::dm_transcript_v1::pending_outbound_rows(Path::new(&path), &ns) else {
+        return;
+    };
+    let peer_s = peer.to_string();
+    let mut sent = 0usize;
+    for row in rows {
+        let ck = row.conversation_key.as_str();
+        if ck != peer_s && ck != recipient_pk {
+            continue;
+        }
+        if !writer_open_for_peer(&writers, peer) {
+            break;
+        }
+        let pending = PendingOutbound {
+            message_id: row.message_id.clone(),
+            peer_id: peer,
+            recipient_public_key_hex: recipient_pk.to_string(),
+            text: row.text.clone(),
+            created_at_ms: if row.created_at_ms > 0 {
+                row.created_at_ms
+            } else {
+                chrono_now_ms()
+            },
+            last_send_ms: chrono_now_ms(),
+            on_wire: false,
+        };
+        let Ok(frame) = build_pending_outbound_frame(session.as_ref(), &pending) else {
+            continue;
+        };
+        if send_frame_to_peer(peer, frame, Arc::clone(&writers), Some(session.as_ref()))
+            .await
+            .is_ok()
+        {
+            sent += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(HISTORY_REPLAY_SPACING_MS)).await;
+    }
+    if sent > 0 {
+        native_log::debug(
+            "history",
+            format!("replayed {sent} pending outbound line(s) to {peer}"),
+        );
+    }
+}
+
+fn writer_open_for_peer(writers: &StreamWriters, peer: PeerId) -> bool {
+    writers.lock().ok().is_some_and(|g| g.contains_key(&peer))
+}
+
+pub(crate) fn spawn_leave_read_ack_drain(
+    session: Arc<SessionState>,
+    writers: StreamWriters,
+    left: PeerId,
+) {
+    if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&left) {
+        seed_read_acks_for_peer_from_transcript(session.as_ref(), left);
+        native_log::info(
+            "read_ack",
+            format!(
+                "chat room leave {pk} — drain ack_read for in-room backlog (new mail: recv only)"
+            ),
+        );
+    }
+    tokio::spawn(async move {
+        read_ack_catchup_for_peer(session, writers, left, false, false).await;
+    });
+}
+
+fn is_transient_outbound_error(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("connecting to peer")
+        || e.contains("chat stream opening")
+        || e.contains("chat stream not ready")
+        || e.contains("wait until connected")
+        || e.contains("open_stream")
+        || e.contains("broken pipe")
+        || e.contains("connection reset")
+        || e.contains("stream closed")
+}
+
+fn notify_outbound_on_wire(
+    session: &SessionState,
+    message_id: &str,
+    now_ms: i64,
+    events_tx: &Option<std::sync::mpsc::Sender<GossipChatEvent>>,
+) {
+    if !session.mark_outbox_sent(message_id, now_ms) {
+        return;
+    }
+    if let Some(tx) = events_tx {
+        let _ = tx.send(GossipChatEvent::OutboundSent {
+            message_id: message_id.to_string(),
+        });
+    }
+}
+
+fn send_frame_on_open_stream(
+    peer: PeerId,
+    frame: Vec<u8>,
+    writers: &StreamWriters,
+) -> Result<(), String> {
+    let tx = {
+        let g = writers
+            .lock()
+            .map_err(|_| "writers mutex poisoned".to_string())?;
+        g.get(&peer).cloned()
+    };
+    let Some(tx) = tx else {
+        return Err("no chat stream to peer yet — wait until connected".to_string());
+    };
+    tx.send(frame).map_err(|_| "chat stream closed".to_string())
+}
+

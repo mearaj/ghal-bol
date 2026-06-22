@@ -103,7 +103,7 @@ Connection policy for a configured contact ([TRANSPORT.md](docs/TRANSPORT.md) §
 2. **Parallel on Wi‑Fi:** coord lookup + relay circuit + public TCP (WAN) **and** mDNS → direct TCP (LAN) when the contact is on the local network — **both links stay active** when connected
 3. **Mobile-data / CGNAT:** WAN (coord + relay) only when no active LAN
 4. **LAN loss:** WAN is already connected — immediate fallback without tearing down coord
-5. **libp2p Circuit Relay v2** on a **Ghal Bol relay** (co-located with coord) for NAT/CGNAT; **DCUtR** may upgrade to direct without closing relay
+5. **libp2p Circuit Relay v2** on a **Ghal Bol relay** (co-located with coord) for NAT/CGNAT — WAN peers dial **`/p2p-circuit`** from coord lookup (DCUtR off when coord is configured)
 
 Peer **discovery over WAN requires coord + relay** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. The app does **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN discovery. Multiple coord servers are supported as a list (today a single production entry).
 

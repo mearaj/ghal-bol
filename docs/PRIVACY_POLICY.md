@@ -88,9 +88,9 @@ Registration uses a **challenge–response**: you sign a server nonce with your 
 
 ## Voice and video calls
 
-Calls use **WebRTC** between peers. **Call signaling** (offers, answers, ICE candidates) is exchanged over the **same P2P messaging channel**, not through our coordination server.
+Calls use **native encrypted media** over the **same libp2p peer connection** as chat (`/ghal-bol/call/1.0.0` for voice, `/ghal-bol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **same P2P messaging channel**, not through our coordination server.
 
-For NAT discovery, the app may use a **public STUN server** operated by Google (`stun:stun.l.google.com:19302`) so peers can learn reflexive addresses. **Media streams** are intended to flow **peer-to-peer**; we do not operate a media server for calls in the core product.
+Media is intended to flow **peer-to-peer** (direct LAN or relayed via our coordination relay when NAT requires it). We do not operate a media server that decrypts call content.
 
 ---
 
@@ -128,8 +128,7 @@ You can deny permissions; related features may not work (e.g. no QR scan without
 | Service | Role | Data involved |
 |---------|------|----------------|
 | **Ghal Bol coordination server** | Presence and endpoint lookup | Public key, endpoints, heartbeats (see above) |
-| **Ghal Bol relay** (co-located with coord, when needed) | NAT traversal for encrypted P2P | Encrypted transit only; not message storage by Ghal Bol |
-| **Google STUN** (calls) | NAT address discovery for WebRTC | Standard STUN binding requests; no chat content |
+| **Ghal Bol relay** (co-located with coord, when needed) | NAT traversal for encrypted P2P (chat + calls) | Encrypted transit only; not message storage by Ghal Bol |
 | **QR scanner plugin** (`mobile_scanner`) | Decode QR on device | Processing is **on-device**; may use platform camera/ML APIs per device vendor |
 
 We do **not** integrate advertising networks or third-party analytics SDKs in the core application code paths described in our open-source tree.

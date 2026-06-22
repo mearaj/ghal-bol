@@ -9,7 +9,6 @@ import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/call/call_controller.dart";
 import "package:ghal_bol_ui/ghal_bol_p2p.dart";
 import "package:ghal_bol_ui/ghal_bol_ui_session.dart";
-import "package:ghal_bol_ui/ghal_bol_listener_foreground.dart";
 import "package:ghal_bol_ui/ghalbol_connect_invite.dart";
 import "package:ghal_bol_ui/identity_alias_store.dart";
 import "package:ghal_bol_ui/identity_display_name.dart";
@@ -132,7 +131,6 @@ class _ChatLine {
 class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _msgCtrl = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  Timer? _poll;
   final List<_ChatLine> _lines = [];
   /// Latest trust flags for [widget.activeContact] (refreshed from [ContactStore]).
   SavedContact? _roomContact;
@@ -180,12 +178,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     }
     return false;
-  }
-
-  bool _isSameRemotePerson(GhalBolConnectInvite inv) {
-    final cur = _remoteInvite;
-    if (cur == null) return false;
-    return cur.peerId.trim() == inv.peerId.trim();
   }
 
   Timer? _saveTranscriptDebounce;
@@ -618,32 +610,6 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _onActivePeerLinkLost() {
-  }
-
-  Map<String, dynamic>? _dmPeerEntryFromPublicKey(String? publicKeyHex) {
-    final pk = publicKeyHex?.trim().toLowerCase() ?? "";
-    if (!isValidPublicKeyHex(pk)) return null;
-    return {"public_key_hex": pk};
-  }
-
-  List<Map<String, dynamic>> _dmPeersConfig() {
-    final peers = <Map<String, dynamic>>[];
-    final ac = widget.activeContact;
-    if (ac != null && ac.hasPublicKey) {
-      final e = _dmPeerEntryFromPublicKey(ac.publicKeyHex);
-      if (e != null) peers.add(e);
-    }
-    if (_joinedRemote && _remoteInvite != null) {
-      final pk = _remoteInvite!.hasPublicKey
-          ? _remoteInvite!.publicKeyHex
-          : _learnedRemotePublicKeyHex;
-      final e = _dmPeerEntryFromPublicKey(pk);
-      if (e != null) peers.add(e);
-    } else if (isValidPublicKeyHex(_learnedRemotePublicKeyHex)) {
-      final e = _dmPeerEntryFromPublicKey(_learnedRemotePublicKeyHex);
-      if (e != null) peers.add(e);
-    }
-    return peers;
   }
 
   String? _hubThreadPublicKeyHex() {
@@ -1388,125 +1354,30 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (_joinedRemote && _remoteInvite != null && _remoteInvite!.hasFullKeys) {
       _stashRemotePublicKey(_remoteInvite!.publicKeyHex);
     }
-    if (widget.hubPollsEvents) {
-      _registerActiveDmPeer();
-      final pk = _recipientPublicKeyHex();
-      if (isValidPublicKeyHex(pk) &&
-          (widget.hubPeerStreamReady?.call(pk!) ??
-              P2pEventBridge.instance.isStreamReady(pk!))) {
-        setState(() {
-          _seenLibp2pConnections.add(pk!);
-          _chatError = null;
-        });
-      }
-      return;
-    }
-    await _startP2p();
-    _armPollTimer();
-  }
-
-  void _armPollTimer() {
-    if (widget.hubPollsEvents) return;
-    _poll?.cancel();
-    _poll = Timer.periodic(const Duration(milliseconds: 200), (_) => _drainEvents());
-  }
-
-  Future<void> _startP2p() async {
-    if (!GhalBolP2p.isAvailable) return;
-
-    if (_joinedRemote && _remoteInvite != null) {
-      if (!GhalBolConnectInvite.verifyInvite(_remoteInvite!)) {
-        setState(() {
-          _lines.add(_systemLine("That invite could not be verified (damaged or edited)."));
-        });
-        return;
-      }
-    }
-
-    final cfg = {
-      "bootstrap_peers": <String>[],
-      "dm_peers": _dmPeersConfig(),
-    };
-    final mustReconfigure = _joinedRemote || _dmPeersConfig().isNotEmpty;
-    if (await GhalBolP2p.isRunning() && mustReconfigure) {
-      await GhalBolP2p.stop();
-      await Future<void>.delayed(const Duration(milliseconds: 600));
-    }
-    Map<String, dynamic> r;
-    if (await GhalBolP2p.isRunning() && !mustReconfigure) {
-      r = {"ok": true};
-    } else {
-      r = await GhalBolP2p.startJson(cfg);
-    }
-    if (r["ok"] != true) {
-      final err = r["error"]?.toString() ?? "";
-      if (!_joinedRemote && err.contains("p2p already running")) {
-        // Listener was started earlier (e.g. after unlock); treat as success.
-      } else {
-        setState(() {
-          _lines.add(_systemLine("Could not start chat: $err"));
-        });
-        return;
-      }
-    }
-    await ghalBolListenerForegroundEnsureStarted();
-  }
-
-  /// Join [inv]: hub owns P2P lifecycle; standalone chat restarts the native node.
-  Future<void> applyJoinInvitation(GhalBolConnectInvite inv) async {
-    if (widget.hubPollsEvents) {
+    _registerActiveDmPeer();
+    final pk = _recipientPublicKeyHex();
+    if (isValidPublicKeyHex(pk) &&
+        (widget.hubPeerStreamReady?.call(pk!) ??
+            P2pEventBridge.instance.isStreamReady(pk!))) {
       setState(() {
-        _remoteInvite = inv;
+        _seenLibp2pConnections.add(pk!);
         _chatError = null;
-        _seenLibp2pConnections.clear();
       });
-      if (inv.hasFullKeys) {
-        _applyRemotePeerKeys(inv.publicKeyHex, peerId: inv.peerId);
-      }
-      widget.onContactJoined?.call(SavedContact.fromInvite(inv));
-      await _reloadTranscriptForConversation(force: true);
-      return;
     }
+  }
 
-    final samePerson = _isSameRemotePerson(inv);
-
-    if (samePerson && await GhalBolP2p.isRunning()) {
-      setState(() => _remoteInvite = inv);
-      if (inv.hasFullKeys) {
-        _applyRemotePeerKeys(inv.publicKeyHex, peerId: inv.peerId);
-      }
-      return;
-    }
-
-    _poll?.cancel();
-    await GhalBolP2p.stop();
-    await Future<void>.delayed(const Duration(milliseconds: 300));
-    if (!mounted) return;
+  /// Join [inv]: the hub owns the P2P lifecycle; this surface only re-points at the contact.
+  Future<void> applyJoinInvitation(GhalBolConnectInvite inv) async {
     setState(() {
       _remoteInvite = inv;
-      _seenLibp2pConnections.clear();
       _chatError = null;
+      _seenLibp2pConnections.clear();
     });
     if (inv.hasFullKeys) {
       _applyRemotePeerKeys(inv.publicKeyHex, peerId: inv.peerId);
     }
-    final joined = SavedContact.fromInvite(inv);
-    widget.onContactJoined?.call(joined);
-    await _startP2p();
-    _armPollTimer();
+    widget.onContactJoined?.call(SavedContact.fromInvite(inv));
     await _reloadTranscriptForConversation(force: true);
-  }
-
-  void _drainEvents() {
-    unawaited(_drainEventsAsync());
-  }
-
-  Future<void> _drainEventsAsync() async {
-    while (mounted) {
-      final ev = await GhalBolP2p.pollEventMap();
-      if (ev == null) break;
-      _handleEvent(ev);
-    }
   }
 
   void _handleEvent(Map<String, dynamic> ev) {
@@ -1997,20 +1868,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     widget.onHubChatDetach?.call(this);
     ContactStore.changeCount.removeListener(_onContactsStoreChanged);
     WidgetsBinding.instance.removeObserver(this);
-    if (!widget.hubPollsEvents) {
-      GhalBolUiSession.setRoom(null);
-    }
     _saveTranscriptDebounce?.cancel();
     _fullTranscriptSaveTimer?.cancel();
     _transcriptSyncDebounce?.cancel();
     _emptyTranscriptRetry?.cancel();
     unawaited(_flushDeliveryPatches());
-    // Hub/daemon mode: :p2p owns transcript writes on poll — never full-save stale UI
-    // lines on dispose (was wiping inbound rows native persisted on Android).
-    if (!widget.hubPollsEvents) {
-      unawaited(_flushTranscriptFull());
-    }
-    _poll?.cancel();
     _scrollController.dispose();
     _msgCtrl.dispose();
     super.dispose();

@@ -54,20 +54,6 @@ abstract final class GhalBolP2p {
     return GhalBolFfi.p2pIsRunning();
   }
 
-  /// Coord lookup addrs only — does not re-run full [startJson] / register storm.
-  static Future<Map<String, dynamic>> dialBootstrapPeers(
-    List<String> bootstrapPeers,
-  ) async {
-    if (usesDaemon) {
-      return GhalBolDaemonClient.instance.callState(
-        "p2p_dial_bootstrap",
-        params: {"bootstrap_peers": bootstrapPeers},
-        ensureDaemon: true,
-      );
-    }
-    return {"ok": false, "error": "dial_bootstrap requires daemon"};
-  }
-
   static Future<void> registerDmPeer(String publicKeyHex) async {
     if (usesDaemon) {
       await GhalBolDaemonClient.instance.call(

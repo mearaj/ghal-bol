@@ -229,6 +229,19 @@ class GhalBolP2pService : Service() {
 
     private fun startDaemonThreadIfNeeded() {
         if (daemonThread?.isAlive == true) return
+        // Full libp2p flow on the terminal (debug builds only): the `:p2p` process reads
+        // GHAL_BOL_VERBOSE_LOG once on the first native_log call, so set it before runDaemon.
+        // Forwards Rust `debug` lines through the log sink → App log → `flutter run` terminal.
+        // Use the debuggable flag (BuildConfig is disabled by default under AGP 8).
+        val debuggable =
+            (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (debuggable) {
+            try {
+                android.system.Os.setenv("GHAL_BOL_VERBOSE_LOG", "1", true)
+            } catch (e: Throwable) {
+                android.util.Log.w("GhalBol", "setenv GHAL_BOL_VERBOSE_LOG: ${e.message}")
+            }
+        }
         val sock = socketFile()
         if (sock.exists()) {
             try {

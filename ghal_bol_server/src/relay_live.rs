@@ -98,6 +98,22 @@ impl RelayLiveRegistry {
             .unwrap_or(0)
     }
 
+    /// Snapshot of peers with a live reservation **and** a known public key, for the periodic
+    /// presence keepalive. The relay grants hour-long reservations but coord presence rows expire
+    /// after `presence_ttl` (90 s by default), so without re-touching these rows a relay-only
+    /// (NAT'd) peer becomes a 404 on coord ~90 s after reserving even though it stays reachable for
+    /// the full hour. See `RelayLoopCtx::refresh_live_presence` and TRANSPORT.md
+    /// § "Relay presence keepalive".
+    pub fn live_peers_with_pk(&self) -> Vec<(PeerId, String)> {
+        let Ok(g) = self.inner.lock() else {
+            return Vec::new();
+        };
+        g.accepted
+            .iter()
+            .filter_map(|peer| g.peer_keys.get(peer).map(|pk| (*peer, pk.clone())))
+            .collect()
+    }
+
     pub fn pk_has_live_relay_circuit(&self, pk: &str) -> bool {
         let pk = pk.to_ascii_lowercase();
         let Ok(g) = self.inner.lock() else {
@@ -203,5 +219,24 @@ mod tests {
         reg.on_reservation_end(peer);
         assert!(!reg.is_peer_live(peer));
         assert_eq!(reg.reservation_refcount(peer), 0);
+    }
+
+    #[test]
+    fn live_peers_with_pk_lists_only_live_known_peers() {
+        let reg = RelayLiveRegistry::default();
+        let peer = sample_peer();
+        let pk = "cc".repeat(33);
+        // Reserved but pk not yet known via identify → not eligible for presence keepalive.
+        reg.on_reservation_accepted(peer, false);
+        assert!(reg.live_peers_with_pk().is_empty());
+        // identify arrives → keepalive can re-touch this peer's coord presence row.
+        reg.note_peer_pk(peer, pk.clone());
+        let live = reg.live_peers_with_pk();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, peer);
+        assert_eq!(live[0].1, pk.to_ascii_lowercase());
+        // Reservation ends → drop from keepalive set so a gone peer is not kept artificially fresh.
+        reg.on_reservation_end(peer);
+        assert!(reg.live_peers_with_pk().is_empty());
     }
 }
