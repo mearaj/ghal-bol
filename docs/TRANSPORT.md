@@ -2,7 +2,7 @@
 
 **Status:** **libp2p is the production P2P transport.** A prior plan to replace libp2p with a custom native QUIC/TCP stack was **evaluated and discarded** (May 2026). This document is the canonical reference for how peers connect today.
 
-**For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Flutter. **Start here for connectivity:** § **Connectivity lifecycle** → § **Network truth** → § **Parallel LAN + WAN** → § **Asymmetric LAN↔WAN mux recovery**. Transport reachability is **live-only** — see § “Caching policy (canonical)”.
+**For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Flutter. **Start here for connectivity:** § **Connectivity lifecycle** → § **Network truth** → § **Parallel LAN + WAN** → § **Asymmetric LAN↔WAN mux recovery** → § **Post-mortem 2026-06-24** (mandatory before changing dial/upkeep/coord lookup). Transport reachability is **live-only** — see § “Caching policy (canonical)”.
 
 ---
 
@@ -155,6 +155,15 @@ When peer **A** and peer **B** are connected over **LAN and WAN at the same time
 | **Application state** | — | — | **Single source of truth in Rust** — see [DESIGN.md](DESIGN.md) § “Unified message state (E)” |
 
 **Independence rule:** LAN health must **not** suppress WAN dials (and vice versa). Skip redundant relay **dial** only when a **relay** link is already connected **and** carries a stable DM stream — not merely because direct LAN is up. WAN recovery must **not** block LAN listen/mDNS upkeep.
+
+**`dm_peer_chat_link_stable` vs additive relay (2026-06-24 — canonical):**
+
+| Signal | Meaning | Wrong interpretation |
+|--------|---------|----------------------|
+| `dm_peer_stream_up` | Live mux writer — **upkeep noop** for this contact | “Must dial coord every tick because WAN idle” |
+| `!peer_has_relay_connection` on Wi‑Fi | Need **background** additive relay dial (`needs_additive_relay_dial`) | “Mux is unstable — force coord lookup + disconnect every tick” |
+| `dm_peer_chat_link_stable` | Stream up **and** not asymmetric stale mux (`dm_peer_needs_wan_relay_path`) | “False whenever relay hop missing” — **regression** (see § Post-mortem 2026-06-24) |
+| `coord_lookup_upkeep_satisfied` | Stable mux **and** relay link when coord configured | `swarm.is_connected` alone |
 
 **What parallel does *not* mean:** uncoordinated dial **spam** (many `swarm.dial`/s for the same peer per second) or a second transcript/outbox in Flutter. Throttles and `PeerCondition::NotDialing` prevent storms; **all** message/ack/delivery state lives in one Rust store.
 
@@ -542,6 +551,71 @@ dm peer disconnected
 | `open_stream` timeout on relay | Must not nuke relay TCP | `note_stream_open_failure`: reopen on relay if `peer_has_relay_connection` |
 | `PeerCondition::NotDialing` | Parallel dial storms | Separate LAN vs circuit app throttles; parallel **links** after connect |
 
+### Post-mortem — 2026-06-24 WAN/LAN stability regression (canonical — do not reintroduce)
+
+**Symptoms observed:** backlog outbox eventually delivered, then **new messages and acks stopped**; `conn=true,stream=true` in `Native/flow` while chat was dead; relay server `circuit ACCEPTED → closed` every ~1s; `Pending connection attempt has been aborted`; `:p2p` **panic** on Linux during WAN recovery (`Cannot drop a runtime in a context where blocking is not allowed`).
+
+**Root cause (three independent bug classes — any one breaks steady chat):**
+
+| # | Bug class | What went wrong | Doc violated |
+|---|-----------|-----------------|--------------|
+| **A** | **Dial churn cancels working handshakes** | Urgent reconnect cleared `circuit_dial_in_flight` and called `disconnect_peer_id` while libp2p was still handshaking a relay circuit; 8s throttle then blocked immediate retry | § `circuit_dial_in_flight_ms` — **do not** clear early (oneshot cancel); prime directive — urgent beats **404 backoff**, not in-flight guard |
+| **B** | **Confusing “link unstable” with “relay hop missing”** | Setting `dm_peer_chat_link_stable=false` whenever `!peer_has_relay_connection` while LAN stream was healthy → coord HTTP + dials **every upkeep tick** → mux churn | § **Both links active** — `dm_peer_stream_up` → upkeep **noop**; skip redundant relay dial only when relay **connected + stable stream**, not merely because direct LAN is up |
+| **C** | **Additive relay dial blocked after coord lookup** | `coord_lookup_dm_peer` returned early when stream was stable even though relay hop was missing — HTTP lookup succeeded but **never** issued `dial_additive_dm_addr` | § **Both links active** — WAN stack stays on on Wi‑Fi; additive relay while direct connected |
+| **D** | **Zombie mux after partial disconnect** | Relay `ConnectionClosed` logged `other path still open` but did **not** reopen stream or wake coord; writer flag stayed set on dead mux → outbox `resync N pending` forever, acks queued | § **Asymmetric LAN↔WAN mux recovery**; DESIGN.md — `:p2p` owns ack retry |
+| **E** | **LAN fail cleared WAN in-flight** | `OutgoingConnectionError` on LAN TCP called `clear_circuit_dial_in_flight` | § Parallel LAN+WAN — LAN must not cancel WAN tracking |
+| **F** | **Blocking coord HTTP on tokio swarm thread** | `try_restore_relay_presence_from_coord()` synchronously in `run_wan_recovery_pass` | § Event-driven async — blocking HTTP on background std thread only |
+
+**Canonical fix (code — treat as spec, not suggestions):**
+
+| Concern | Correct owner / function | Rule |
+|---------|--------------------------|------|
+| In-flight relay dial | `dial_dm_peer_addr` | While `circuit_dial_in_flight_blocks` — **return and wait** (log skip). Never `disconnect_peer_id` to “beat” the guard. Urgent circuit retry throttle = `CIRCUIT_COORD_DIAL_URGENT_MS` (2s), not 8s, **after** dial failure only |
+| Stable chat mux | `dm_peer_chat_link_stable` | **True** when `dm_peer_stream_up` and **not** `dm_peer_needs_wan_relay_path` (asymmetric stale mux). **False** does **not** mean “relay hop missing on otherwise healthy LAN” |
+| Additive relay on Wi‑Fi | `needs_additive_relay_dial` + `coord_lookup_dm_peer` + `coord_dial_from_lookup_addrs` + `dial_additive_dm_addr` | When connected + coord configured + `!peer_has_relay_connection`: **still** run coord lookup and `dial_additive_dm_addr` (relay addrs only when `wan_additive`). Do **not** mark mux unstable to force this |
+| Relay path closed, other path up | `swarm_events` `ConnectionClosed` (relay) | **Event-driven:** `request_dm_stream_reopen` + `notify_coord_lookup`. Asymmetric **close direct** stays in `reconcile_stale_lan_mux_for_wan` (throttled), not inline on every relay close |
+| Zombie writer / acks | `outbox_acks::run_ack_upkeep_limited` | If `send_ack_frame` fails but `writer_open_for_peer` — `request_dm_stream_reopen`. Same pattern for outbox resync send failure in `dm_dial.rs` |
+| WAN recovery HTTP | `run_wan_recovery_pass` | **Never** call blocking `reqwest::blocking` from tokio swarm loop — use `coord_register_tick` → background std threads |
+
+**How this fixes LAN (without breaking parallel WAN):**
+
+- **LAN chat while stream is up:** `dm_upkeep` **noops** for that contact (`dm_peer_stream_up`) — mDNS/LAN is not torn down, ephemeral listen port stays stable (§ Ephemeral LAN TCP ports).
+- **Background WAN on Wi‑Fi:** `coord_lookup_upkeep_satisfied` is false when relay hop missing → throttled coord lookup + **`needs_additive_relay_dial`** path adds relay **without** disconnecting LAN or reopening stream on every tick.
+- **Relay drops, LAN lingers:** stream reopen on surviving mux (event-driven); acks/outbox recover via `:p2p` retry, not Flutter.
+- **LAN-only is not enough for handover:** additive relay keeps WAN ready when peer leaves Wi‑Fi — without declaring the live LAN stream “unstable” every second.
+
+**FORBIDDEN — agents must not reintroduce:**
+
+1. `clear_circuit_dial_in_flight` + `disconnect_peer_id` on urgent while in-flight window active.
+2. `dm_peer_chat_link_stable = false` solely because `!peer_has_relay_connection` (forces upkeep/coord churn on healthy LAN).
+3. Early `return` after coord HTTP lookup when `needs_additive_relay_dial` is true.
+4. `dial_additive_dm_addr` gated on `dm_peer_chat_link_stable` for relay circuits (use `skip_redundant_coord_relay_dial` only).
+5. `clear_circuit_dial_in_flight` on LAN TCP `OutgoingConnectionError`.
+6. Blocking coord HTTP (`CoordHttpClient`, `try_restore_relay_presence_from_coord`) from libp2p tokio task / `run_wan_recovery_pass`.
+7. Treating `conn=true,stream=true` in Flutter/`Native/flow` as proof of working chat — verify wire activity, outbox drain, and `ack_received sent` in `:p2p`.
+
+**Healthy steady-state logs (grep both devices):**
+
+```text
+dm connection established … (direct)     ← LAN path (optional)
+dm connection established … (relay)    ← WAN path (additive)
+chat_ready … — can send now
+delivery_ack: ack_received sent …
+stream: ack_received from … — our outbound delivered by peer
+coord-additive: dialing … via …/p2p-circuit/…   ← occasional, throttled, while LAN stream up
+```
+
+**Broken (do not ship again):**
+
+```text
+relay circuit in-flight cleared … urgent intent beats guard
+skip relay circuit dial … throttled (<8000ms … urgent=true)
+Pending connection attempt has been aborted
+resync 46 pending message(s)          ← repeating with conn=true,stream=true
+(other path still open)               ← with no following stream reopen / coord wake
+panic: Cannot drop a runtime … blocking is not allowed
+```
+
 ---
 
 ### libp2p community lessons (relay v2 — applies directly)
@@ -750,6 +824,10 @@ See [DESIGN.md](DESIGN.md) § “Dial strategy — parallel LAN + WAN”. Do not
 | **Poll path skipped DM-down-on-LAN** | Streams down on LAN but 1s poll never kicked | `dm_down_on_lan = on_lan && needs_lan` (not only on connectivity notify) |
 | **Profile lag after mobile↔Wi‑Fi toggle** | `profile=` wrong for minutes; ticks/outbox stuck | § **Network truth** — `os=` must flip in ~1s; rebuild native if missing |
 | **Asymmetric mux loop** | `reopen peer off LAN` every 1s; relay churn; one side `(direct)` other `(relay)` | § **Asymmetric LAN↔WAN mux recovery**; `close direct … relay kept` |
+| **Urgent dial abort loop** (2026-06-24) | Relay `ACCEPTED→closed` ~1s; `Pending connection attempt has been aborted`; coord throttle blocks retry | Never clear `circuit_dial_in_flight` / `disconnect_peer_id` during handshake; urgent circuit throttle 2s after failure only — § Post-mortem 2026-06-24 |
+| **Relay-missing = unstable mux** (2026-06-24) | Healthy LAN chat then dead after backlog; endless coord HTTP/dials | Use `needs_additive_relay_dial` — do **not** set `dm_peer_chat_link_stable=false` for missing relay hop alone |
+| **Zombie mux after relay close** (2026-06-24) | `conn=true,stream=true`, repeating `resync N pending`, no acks | Relay `ConnectionClosed` → `request_dm_stream_reopen` + coord wake; ack send fail → stream reopen — § Post-mortem 2026-06-24 |
+| **Blocking coord on swarm thread** (2026-06-24) | Desktop `:p2p` panic during WAN recovery; peer 404 on coord | No `reqwest::blocking` in tokio swarm loop — § Post-mortem 2026-06-24 |
 | **Full kick on every dial fail** (earlier) | `closed stale LAN ephemeral TCP listener` every ~200ms | Failover removes addr + `notify_dm_presence_wake`; full kick only on handover / upkeep / connectivity |
 
 **Required recovery sequence after Wi‑Fi toggle** (`kick_lan_dm_rediscovery_after_handover`):
@@ -1126,6 +1204,11 @@ Do not rename without a version bump:
 19. **Soft mDNS-only Wi‑Fi switch recovery** — `restart_mdns_behaviour` without `ensure_lan_tcp_listen(handover=true)` and candidate purge; or pre-consuming `should_run_lan_recovery` then skipping full `kick_lan`. Symptom: endless `LAN upkeep — nudge mDNS`, no `mdns discovered`. See § “LAN stability — cold start and Wi‑Fi toggle”.
 20. **`if_addrs`-only network mode** — `profile=lan|mobile-data` from interface scan without `getActiveNetwork` / default route — minutes wrong after toggle. See § **Network truth**.
 21. **Asymmetric mux reset loop** — `reopen peer off LAN` every 1s + `disconnect_peer_id` on relay while `dm_direct_conn_ids` stale — ticks/outbox into void. See § **Asymmetric LAN↔WAN mux recovery**.
+22. **Urgent reconnect clears in-flight relay dial** — `clear_circuit_dial_in_flight` + `disconnect_peer_id` during relay handshake → `Pending connection attempt has been aborted`, relay `ACCEPTED→closed` loops. See § **Post-mortem 2026-06-24**.
+23. **`dm_peer_chat_link_stable=false` when relay hop missing** — forces coord lookup/dial every upkeep tick while LAN stream healthy → mux churn, chat dies after backlog drain. Use `needs_additive_relay_dial` instead. See § **Post-mortem 2026-06-24**.
+24. **Coord lookup returns after HTTP when additive relay needed** — Wi‑Fi peer stays direct-only; WAN handover dead. Must call `coord_dial_from_lookup_addrs` when `needs_additive_relay_dial`. See § **Post-mortem 2026-06-24**.
+25. **Relay `ConnectionClosed` with other path open — no recovery** — zombie `stream=true`, repeating `resync N pending`. Event-driven `request_dm_stream_reopen` + `notify_coord_lookup`. See § **Post-mortem 2026-06-24**.
+26. **Blocking coord HTTP on tokio swarm loop** — `try_restore_relay_presence_from_coord` / `reqwest::blocking` in `run_wan_recovery_pass` → `:p2p` panic, node dead. Background std thread only.
 
 ---
 
@@ -1206,6 +1289,7 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 
 | Date | Change |
 |------|--------|
+| 2026-06-24 | **WAN/LAN stability regression (canonical post-mortem):** § **Post-mortem 2026-06-24** — (A) never clear `circuit_dial_in_flight` / `disconnect_peer_id` during relay handshake for urgent peers; (B) `dm_peer_chat_link_stable` must not flip false solely for missing relay hop — use `needs_additive_relay_dial` for background additive relay on Wi‑Fi; (C) coord lookup must still dial additive relay when stream stable but relay missing; (D) relay `ConnectionClosed` with other path open → event-driven stream reopen + coord wake; (E) LAN TCP fail must not clear circuit in-flight; (F) no blocking coord HTTP on tokio swarm thread. Ack/outbox send fail → `request_dm_stream_reopen`. AI handoff items 22–26. |
 | 2026-06-23 | **Relay presence keepalive (WAN 404-after-90s root-cause):** the relay grants hour-long reservations (`reservation_duration = 3600 s`) but coord presence rows expire after `presence_ttl` (90 s), and the relay only wrote/refreshed a peer's row on the **initial** reservation (renewal `try_register_relay_presence` even early-returns on an unchanged circuit). So a relay-only (NAT'd) peer registered, then became a coord **404 ~90 s later** for the rest of the hour — both devices showed `reservation accepted` / `relay presence visible`, then every lookup (and self-poll) `404 peer not registered or presence expired`, and no WAN chat. Fix: `run_relay` ticks a **30 s `refresh_live_presence`** that re-`upsert_relay_circuit`s every peer in `RelayLiveRegistry::live_peers_with_pk()`, keeping the row inside the 90 s TTL while the reservation is held. **Requires redeploying `ghal_bol_server`** (`deploy_server.sh` for prod). § “Findability is continuous across relay-reservation renewal”. |
 | 2026-06-23 | **Steady-state LAN upkeep no longer rebinds the listener (loop fix):** `lan_handover_upkeep_if_needed` only runs the **full destructive kick** (fresh ephemeral TCP port + purge candidates + mDNS restart) when **no** ephemeral DM TCP listener exists (e.g. closed by a real interface handover). When a listener is already up and we are merely waiting for mDNS to discover the peer, it does a **soft nudge** (throttled mDNS query, no port rebind, no candidate purge) and lets event-driven discovery dial. Fixes the loop where the advertised mDNS port changed every ~5 s (`LAN DM rediscovery — link down, no mDNS candidate yet` → `closed stale LAN ephemeral TCP listener` → `fresh ephemeral TCP listen` → `mdns restarted`), so two same-LAN devices never converged. Full kick still owns genuine handovers (connectivity notify / relay-lost / dial-path-failed) and the deferred-kick path. § “Ephemeral LAN TCP ports”, § “Deferred full LAN kick”. |
 | 2026-06-23 | **Full journey at `info` (both logs comprehensive):** the connect→stream→message→ack milestones are all at `info`, so the App log and stderr/logcat each tell the whole story without `GHAL_BOL_VERBOSE_LOG`. Promoted the previously-`debug`/silent milestones: `stream: chat_ready <peer> — can send now` (the moment chat works), `stream: inbound text from <peer>` (message arrived), and `stream: ack_received\|ack_read from <peer> … — our outbound delivered\|read by peer` (sender-side tick transition). Added the canonical milestone table in § “Logging — see the precise flow” → “The full journey at `info`”. |

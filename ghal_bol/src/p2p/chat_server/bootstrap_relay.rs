@@ -1314,11 +1314,9 @@ fn run_wan_recovery_pass(
         }
     }
     let listen = coord_register_listen_snapshot(swarm, session);
-    if listen_ready_for_node(session, true, swarm)
-        && !crate::coord_runtime::coord_is_registered()
-    {
-        let _ = crate::coord_runtime::try_restore_relay_presence_from_coord();
-    }
+    // Never call blocking coord HTTP (try_restore_relay_presence_from_coord) from the tokio
+    // swarm loop — reqwest::blocking drops an internal runtime and panics. coord_register_tick
+    // schedules relay-presence poll + register on background std threads (TRANSPORT.md § event-driven).
     crate::coord_runtime::coord_register_tick(&listen);
     finish_wan_recovery_if_ready(session, swarm);
 }

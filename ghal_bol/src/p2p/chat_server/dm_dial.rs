@@ -101,6 +101,7 @@ async fn resync_pending_outbox(
             }
             Err(e) => {
                 session.mark_outbox_send_failed(&p.message_id, now);
+                session.request_dm_stream_reopen(send_peer);
                 native_log::debug(
                     "outbox",
                     format!("resync send failed msg_id={}: {e}", p.message_id),
@@ -874,7 +875,7 @@ fn dial_dm_peer_addr(
     let urgent = dm_connect_is_urgent(session, peer, now);
     let min_interval_ms = if tag.starts_with("coord") && is_relay {
         if urgent {
-            LAN_DIAL_THROTTLE_URGENT_MS
+            CIRCUIT_COORD_DIAL_URGENT_MS
         } else {
             45_000
         }
@@ -907,27 +908,18 @@ fn dial_dm_peer_addr(
     if is_relay && !urgent && skip_redundant_coord_relay_dial(swarm, session, peer, now) {
         return;
     }
+    // TRANSPORT.md § circuit_dial_in_flight_ms — never clear early or disconnect while libp2p is
+    // still handshaking; urgent reconnect uses coord lookup wake + 2s circuit retry, not oneshot cancel.
     if is_relay && session.circuit_dial_in_flight_blocks(peer, now) {
-        if urgent {
-            session.clear_circuit_dial_in_flight(peer);
-            if !swarm.is_connected(&peer) {
-                let _ = swarm.disconnect_peer_id(peer);
-            }
-            native_log::info(
-                "coord",
-                format!("relay circuit in-flight cleared for {peer}: urgent intent beats guard"),
-            );
-        } else if session.should_log_dial_skip(peer, now, 8_000) {
+        if session.should_log_dial_skip(peer, now, 8_000) {
             native_log::info(
                 "coord",
                 format!(
-                    "skip relay circuit dial {peer}: prior dial in flight (<{CIRCUIT_DIAL_IN_FLIGHT_MS}ms)"
+                    "skip relay circuit dial {peer}: prior dial in flight (<{CIRCUIT_DIAL_IN_FLIGHT_MS}ms, urgent={urgent})"
                 ),
             );
-            return;
-        } else {
-            return;
         }
+        return;
     }
     if is_relay && tag.starts_with("coord") {
         if !session.should_circuit_coord_dial(peer, now, min_interval_ms) {
@@ -1177,13 +1169,7 @@ fn dial_additive_dm_addr(
     }
     let is_relay = crate::p2p::network_transport::is_relay_circuit_multiaddr(&addr);
     if is_relay {
-        let pk_hex = session
-            .dm_peer_for_libp2p(peer)
-            .and_then(|d| d.public_key_hex.clone());
         let now = chrono_now_ms();
-        if dm_peer_chat_link_stable(swarm, session, peer, pk_hex.as_deref(), now) {
-            return;
-        }
         if skip_redundant_coord_relay_dial(swarm, session, peer, now) {
             return;
         }

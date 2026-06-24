@@ -1,6 +1,6 @@
 # AI agent guide — Ghal Bol workspace
 
-**Read this file first** in a new session. Then **`docs/DESIGN.md`** before changing P2P, acks, invites, or persistence. Transport (libp2p): **`docs/TRANSPORT.md`** — especially § **Connectivity lifecycle**, § **Network truth**, § **Asymmetric LAN↔WAN mux recovery**.
+**Read this file first** in a new session. Then **`docs/DESIGN.md`** before changing P2P, acks, invites, or persistence. Transport (libp2p): **`docs/TRANSPORT.md`** — especially § **Connectivity lifecycle**, § **Network truth**, § **Asymmetric LAN↔WAN mux recovery**, § **Post-mortem 2026-06-24** (mandatory before dial/upkeep/coord lookup changes).
 
 **Connectivity policy (agents):** `docs/TRANSPORT.md` § **Connectivity lifecycle**, § **Network truth**, § **Parallel LAN + WAN transport**. Do **not** throttle relay reservation, coord lookup, or WAN recovery ticks because of informal “don’t flood” notes — throttle **storms** only (repeated `listen_on`, redundant dials). Register when **publishable endpoints change**, not every tick.
 
@@ -12,6 +12,9 @@
 | Old “relay disk cache for boot” | Reintroduce `ghalbol_relay.json` or boot from stale bore port | **TRANSPORT.md § “Caching policy (canonical)”.** Relay/bootstrap/coord dial addrs are **live HTTP only** — no disk cache; legacy files purged on start |
 | “`if_addrs` shows Wi‑Fi / rmnet” | `profile=lan` minutes after mobile-data switch; wrong dial path | **OS default route** (`os=cell` / `os=wifi` in `Native/flow`) — TRANSPORT.md § **Network truth** |
 | “`conn=true,stream=true` means chat works” | Ticks/outbox stuck on zombie LAN mux while peer on WAN | § **Asymmetric LAN↔WAN mux recovery** — `close direct … relay kept`, not full disconnect loop |
+| “Urgent reconnect should beat all throttles” | Clear `circuit_dial_in_flight` + `disconnect_peer_id` during relay handshake | Urgent beats **404 backoff**, not **in-flight guard** — wait for handshake or expiry (TRANSPORT.md § Post-mortem 2026-06-24) |
+| “No relay hop = chat link unstable” | `dm_peer_chat_link_stable=false` every tick while LAN stream healthy → mux churn | Use **`needs_additive_relay_dial`** for background WAN; **`dm_peer_stream_up` → upkeep noop** (TRANSPORT.md § Post-mortem 2026-06-24) |
+| “Stream stable = skip all coord work” | Additive relay never dialed on Wi‑Fi; WAN handover dead | Still coord lookup + `dial_additive_dm_addr` when relay hop missing (TRANSPORT.md § Both links active) |
 
 ## Golden rules
 
@@ -186,6 +189,12 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **Port guessing / ranking for LAN** — highest-port-wins, preferred mDNS addr, probing with `nc` instead of mDNS `Discovered`/`Expired` + `Native/flow` listen_addrs. Ephemeral ports change every restart; see TRANSPORT.md § “Ephemeral LAN TCP ports”.
 - **`if_addrs`-only `profile=lan|mobile-data`** — must use OS default route (`OsNetworkSnapshot`); `rmnet` visible ≠ mobile-data default. TRANSPORT.md § **Network truth**.
 - **Full `disconnect_peer_id` when relay link exists** on mux reconcile / stream open timeout — use `close_direct_dm_connections` + reopen on relay. TRANSPORT.md § **Asymmetric LAN↔WAN mux recovery**.
+- **Urgent reconnect clears in-flight relay dial** — never `clear_circuit_dial_in_flight` + `disconnect_peer_id` during relay handshake; causes `Pending connection attempt has been aborted` and relay `ACCEPTED→closed` loops. TRANSPORT.md § **Post-mortem 2026-06-24**.
+- **`dm_peer_chat_link_stable=false` when relay hop missing** — on Wi‑Fi with healthy LAN stream this forces coord lookup/dial every upkeep tick and kills steady chat after backlog drain. Use `needs_additive_relay_dial` instead. TRANSPORT.md § **Post-mortem 2026-06-24**.
+- **Coord lookup early return when additive relay needed** — after coord HTTP when stream stable but `!peer_has_relay_connection`, must still `coord_dial_from_lookup_addrs` / `dial_additive_dm_addr`. TRANSPORT.md § **Post-mortem 2026-06-24**.
+- **Relay `ConnectionClosed` with other path open — no stream reopen** — zombie mux (`conn=true,stream=true`, repeating `resync N pending`). Event-driven `request_dm_stream_reopen` + `notify_coord_lookup` in `swarm_events`; ack/outbox send fail → same. TRANSPORT.md § **Post-mortem 2026-06-24**.
+- **Blocking coord HTTP on tokio swarm loop** — `try_restore_relay_presence_from_coord` / `reqwest::blocking` in `run_wan_recovery_pass` panics and kills `:p2p`. Background std thread only (`coord_register_tick`). TRANSPORT.md § **Post-mortem 2026-06-24**.
+- **LAN TCP fail clears circuit in-flight** — parallel LAN+WAN violation; LAN `OutgoingConnectionError` must not touch `circuit_dial_in_flight`. TRANSPORT.md § **Post-mortem 2026-06-24**.
 
 ## Debugging checklist (one message, two devices)
 
@@ -220,6 +229,9 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | Same `mdns dialing …/tcp/PORT` every ~20s for minutes; `listen_addrs` / fresh `mdns discovered` shows **different** port | **Stale mDNS candidate cache + upkeep LAN re-dial** — not a port to hardcode. Fix: event-driven LAN from mDNS `Discovered`; no timer re-dial from candidate set; parallel coord+WAN OK. TRANSPORT.md § “Ephemeral LAN TCP ports”. Full app restart after native rebuild. |
 | `profile=lan` but phone on mobile-data; desktop `dm connection … (direct)`; `outbox_pending` high | **Asymmetric mux** — stream on dead LAN path | `os=cell` on phone; `close direct DM link … relay kept`; TRANSPORT.md § **Asymmetric LAN↔WAN mux recovery** |
 | `reopen … peer off LAN` every 1s; server relay ACCEPTED/closed loop | **Mux reconcile storm** + full `disconnect_peer_id` on relay | `dm_direct_conn_ids`; throttle reconcile; keep relay on link reset — TRANSPORT.md § **Network truth** regressions table |
+| Backlog delivered then new mail/acks stop; `conn=true,stream=true` | **2026-06-24 zombie mux / dial churn** — relay path closed, stream flag stale, or upkeep declared mux unstable for missing relay | TRANSPORT.md § **Post-mortem 2026-06-24**: `relay circuit in-flight cleared … urgent`, repeating `resync N pending`, `(other path still open)` without stream reopen |
+| `Pending connection attempt has been aborted`; relay `ACCEPTED→closed` ~1s | **Urgent dial abort loop** — in-flight guard cleared during handshake | Never clear `circuit_dial_in_flight` on urgent; TRANSPORT.md § Post-mortem 2026-06-24 |
+| `:p2p` panic `Cannot drop a runtime … blocking` during WAN recovery | **Blocking coord HTTP on swarm thread** | Remove sync HTTP from tokio loop; TRANSPORT.md § Post-mortem 2026-06-24 |
 | `profile=` wrong minutes after toggle; `os=` missing in flow log | Stale native build or `if_addrs`-only profile | Rebuild native; `os=wifi|cell/validated/…` must flip ~1s — TRANSPORT.md § **Network truth** |
 | `mdns restarted after LAN handover` every ~5–12s, no `mdns discovered`, WAN stuck (`wan_recovery=true`, ngrok/coord down) | **LAN blocked by WAN recovery loop** — `relay_lost_on_lan` or early return in `lan_handover_upkeep`. Fix parallel upkeep; restart ngrok for WAN. TRANSPORT.md § “Parallel LAN + WAN transport”. |
 | Chat worked 5–10 min then died on LAN | Linux idle timeout was 300s; listen port may have changed — check `dm peer disconnected` + stale dial loop above. Desktop idle now 120s. |
@@ -254,7 +266,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `docs/GHAL_BOL_CALL_NATIVE_V2.md` | Native Rust voice engine over the P2P link (shipping) |
 | `docs/GHAL_BOL_VIDEO_NATIVE_V1.md` | Native Rust video wire/engine (shipping) |
 | `docs/COORDINATION_SERVER.md` | Run/test coord server, local dev stack, **HTTP log troubleshooting** |
-| `docs/TRANSPORT.md` | libp2p transport, **Connectivity lifecycle**, **Network truth**, **Asymmetric mux recovery**, caching policy, LAN stability, WAN/CGNAT |
+| `docs/TRANSPORT.md` | libp2p transport, **Connectivity lifecycle**, **Network truth**, **Asymmetric mux recovery**, **Post-mortem 2026-06-24**, caching policy, LAN stability, WAN/CGNAT |
 | `docs/ROADMAP.md` | Human product backlog only — not agent implementation specs |
 | `ghal_bol_server/deploy/README.md` | Dev `run_server.sh`, bore/ngrok, **§ Regression prevention** |
 | `docs/WEB_SITE.md` | Static **ghalbol.com** web build, Firebase, Linux download, `/connect/…` handoff |

@@ -149,6 +149,8 @@ until ack_received or ack_read          until written on wire
 
 Native code: `send_inbound_delivery_ack`, `send_inbound_read_ack_if_possible`, `pending_delivery_acks` / `pending_read_acks` in `chat_server.rs`. Runs in **`:p2p` / daemon** — not in the Flutter isolate.
 
+**Zombie mux recovery (2026-06-24):** If the stream writer flag is set but frames fail (`send_ack_frame` / outbox resync error while `writer_open_for_peer`), native calls **`request_dm_stream_reopen`** — not Flutter poll. Symptom: repeating `resync N pending` with `conn=true,stream=true`. Canonical: [TRANSPORT.md](TRANSPORT.md) § **Post-mortem 2026-06-24** (relay path closed, other path still open).
+
 ### Sender lifecycle
 
 | When | What should happen | Ghal Bol |
@@ -586,7 +588,7 @@ The connect layer that made the original serverless libp2p build reliable: **bot
 | Rule | Meaning |
 |------|---------|
 | **Both listen** | Each node accepts inbound libp2p connections and inbound DM streams (`/ghal-bol/msg/1.0.0`). |
-| **One stream per contact** | At most one live DM stream per contact, keyed by `public_key_hex` / derived PeerId (`dm_peer_stream_up`). While the stream writer is live, `dm_upkeep` **does nothing** for that contact — no coord lookup, no `disconnect_peer`, no identify dials. **Dual links:** when both LAN and WAN libp2p connections exist, **both stay up**; upkeep noop for the mux does **not** mean WAN is idle or should be closed. If both sides open outbound before either accept wins the writer slot, extra inbound streams are **read-only** (process DM frames; do not drain) until the mux closes. |
+| **One stream per contact** | At most one live DM stream per contact, keyed by `public_key_hex` / derived PeerId (`dm_peer_stream_up`). While the stream writer is live, `dm_upkeep` **does nothing** for that contact — no coord lookup, no `disconnect_peer`, no identify dials. **Dual links:** when both LAN and WAN libp2p connections exist, **both stay up**; upkeep noop for the mux does **not** mean WAN is idle or should be closed. Missing relay hop on Wi‑Fi → **`needs_additive_relay_dial`** (background additive relay) — **not** declaring the mux unstable every tick ([TRANSPORT.md](TRANSPORT.md) § Post-mortem 2026-06-24). If both sides open outbound before either accept wins the writer slot, extra inbound streams are **read-only** (process DM frames; do not drain) until the mux closes. |
 | **Symmetric roles** | No permanent listener/caller. Either peer may accept inbound or open outbound; same stream handler on both paths. |
 | **Send = connect** | Outbound text uses: no stream → ensure libp2p connection → open one stream → write. UI never dials or owns connect policy. |
 | **Parallel transport** | LAN (mDNS) and WAN (coord + relay) stacks and per-peer dials run **concurrently** — both links **active** when connected; see TRANSPORT.md § “Parallel LAN + WAN transport”. |
@@ -596,7 +598,7 @@ The connect layer that made the original serverless libp2p build reliable: **bot
 
 **Target latency:** when a route exists, `peer_connected` → `chat_ready` within **seconds**, as in the original build — not minutes of blocked paths.
 
-**Violations (regressions):** tearing down relay when direct LAN connects; separate LAN/WAN message stores; downgrading `read` → `delivered` on duplicate acks; Flutter dial or transcript policy; uncoordinated dial spam (many dials/s per peer). See [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”.
+**Violations (regressions):** tearing down relay when direct LAN connects; separate LAN/WAN message stores; downgrading `read` → `delivered` on duplicate acks; Flutter dial or transcript policy; uncoordinated dial spam (many dials/s per peer); **`dm_peer_chat_link_stable=false` solely because relay hop missing**; clearing **`circuit_dial_in_flight`** on urgent reconnect; blocking coord HTTP on tokio swarm loop. See [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”, § **Post-mortem 2026-06-24**.
 
 ### Unified message state (E) — single source of truth (2026-06-17)
 

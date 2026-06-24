@@ -297,6 +297,8 @@ async fn run_ack_upkeep_limited(
             session.mark_delivery_ack_sent(&item.inbound_id);
             session.dequeue_delivery_ack(&item.inbound_id);
             done += 1;
+        } else if writer_open_for_peer(&writers, item.peer_id) {
+            session.request_dm_stream_reopen(item.peer_id);
         }
     }
     // Queued `ack_read` retries run in :p2p even when the UI is backgrounded; only *new* in-room
@@ -322,6 +324,8 @@ async fn run_ack_upkeep_limited(
             {
                 session.mark_read_ack_wire_sent(&item.inbound_id);
                 done += 1;
+            } else if writer_open_for_peer(&writers, item.peer_id) {
+                session.request_dm_stream_reopen(item.peer_id);
             }
         }
     }

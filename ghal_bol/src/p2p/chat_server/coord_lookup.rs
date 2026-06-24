@@ -21,6 +21,14 @@ fn peer_has_live_mdns_lan(session: &SessionState, peer: PeerId) -> bool {
     session.peer_mdns_lan_addr(peer).is_some()
 }
 
+/// Parallel LAN+WAN: stream is up on a live path but relay hop is missing — pursue throttled
+/// additive relay dial without treating the chat mux as down (TRANSPORT.md § Both links active).
+fn needs_additive_relay_dial(session: &SessionState, peer: PeerId, connected: bool) -> bool {
+    connected
+        && crate::coord_runtime::coord_is_configured()
+        && !session.peer_has_relay_connection(peer)
+}
+
 /// Remote peer is off LAN but we need a WAN relay path (asymmetric handover).
 ///
 /// **Ordering matters (TRANSPORT.md § Parallel LAN + WAN, § Asymmetric mux recovery):**
@@ -127,7 +135,11 @@ fn coord_dial_from_lookup_addrs(
     if addrs.is_empty() {
         return;
     }
-    if dm_peer_chat_link_stable(swarm, session, target, None, now_ms) {
+    let wan_additive_now =
+        swarm.is_connected(&target) && crate::coord_runtime::coord_is_configured();
+    if dm_peer_chat_link_stable(swarm, session, target, None, now_ms)
+        && !needs_additive_relay_dial(session, target, wan_additive_now)
+    {
         return;
     }
     let mut ranked = sort_dm_dial_addrs_for_profile(session, target, addrs, true);
@@ -288,12 +300,14 @@ async fn coord_lookup_dm_peer(
                     );
                 } else {
                     let dial_now = chrono_now_ms();
-                    if dm_peer_chat_link_stable(swarm, session, target, Some(pk), dial_now) {
+                    let wan_additive_now = swarm.is_connected(&target)
+                        && crate::coord_runtime::coord_is_configured();
+                    if dm_peer_chat_link_stable(swarm, session, target, Some(pk), dial_now)
+                        && !needs_additive_relay_dial(session, target, wan_additive_now)
+                    {
                         return;
                     }
                     let urgent_now = session.is_pk_reconnect_urgent(pk, dial_now);
-                    let wan_additive_now = swarm.is_connected(&target)
-                        && crate::coord_runtime::coord_is_configured();
                     coord_dial_from_lookup_addrs(
                         swarm,
                         session,

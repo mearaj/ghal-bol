@@ -309,13 +309,28 @@ fn handle_swarm_event(
                     session.forget_peer_on_local_lan(peer_id);
                 }
                 if swarm.is_connected(&peer_id) {
-                    native_log::debug(
+                    native_log::info(
                         "swarm",
                         format!(
                             "dm connection closed {peer_id} via {} — other path still open",
                             endpoint.get_remote_address()
                         ),
                     );
+                    // TRANSPORT.md § Asymmetric mux — relay path dropped while another link lingers.
+                    // Reopen chat stream on the surviving mux; do not tear down direct here (upkeep
+                    // `reconcile_stale_lan_mux_for_wan` owns asymmetric close-direct policy).
+                    if is_relay {
+                        session.request_dm_stream_reopen(peer_id);
+                        notify_coord_lookup();
+                        if session.peer_has_pending_outbox(peer_id) {
+                            if let Some(pk) = session
+                                .dm_peer_for_libp2p(peer_id)
+                                .and_then(|d| d.public_key_hex.clone())
+                            {
+                                session.refresh_dm_reconnect_urgent(&pk);
+                            }
+                        }
+                    }
                 } else {
                     native_log::info("swarm", format!("dm connection closed {peer_id}"));
                 }
@@ -478,7 +493,7 @@ fn handle_swarm_event(
                     && (session.peer_on_local_lan(peer)
                         || session.peer_mdns_lan_addr(peer).is_some());
                 if lan_tcp_fail {
-                    session.clear_circuit_dial_in_flight(peer);
+                    // Parallel LAN+WAN: LAN failure must not clear relay circuit in-flight (TRANSPORT.md).
                     let failed = failed_dial_multiaddr_from_error(&err_s);
                     if err_s.contains("Timeout") {
                         session.clear_lan_dial_in_flight(peer);

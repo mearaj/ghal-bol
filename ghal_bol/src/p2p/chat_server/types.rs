@@ -242,6 +242,8 @@ pub(crate) const OUTBOX_RESEND_INTERVAL_MS: i64 = 1_000;
 pub(crate) const READ_ACK_CATCHUP_THROTTLE_MS: i64 = 8_000;
 /// Routed-dial throttle when outbox is waiting on this peer (must stay below circuit in-flight).
 pub(crate) const LAN_DIAL_THROTTLE_URGENT_MS: i64 = 8_000;
+/// Urgent coord relay-circuit dials — matches ~1s upkeep + 2s coord lookup cadence (TRANSPORT.md § urgent reconnect).
+pub(crate) const CIRCUIT_COORD_DIAL_URGENT_MS: i64 = 2_000;
 /// Do not replace an outbound relay-circuit dial until this window elapses (libp2p oneshot cancel).
 pub(crate) const CIRCUIT_DIAL_IN_FLIGHT_MS: i64 = 45_000;
 /// Guardrail: do not stack parallel LAN TCP dials to the same peer (mDNS event coalescing).

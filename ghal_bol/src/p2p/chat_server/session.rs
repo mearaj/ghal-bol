@@ -1804,11 +1804,23 @@ impl SessionState {
         self.clear_routed_dial_throttle(peer);
         let Some(next) = self.peer_mdns_lan_addr(peer) else {
             if self.network_profile_snapshot().has_active_lan() {
+                let now_ms = chrono_now_ms();
+                let parallel_wan = dm_connect_is_urgent(self, peer, now_ms);
                 native_log::info(
                     "mdns",
-                    format!("LAN dial failed for {peer} — waiting for fresh mDNS (coord deferred)"),
+                    format!(
+                        "LAN dial failed for {peer} — waiting for fresh mDNS{}",
+                        if parallel_wan {
+                            " (WAN coord lookup in parallel)"
+                        } else {
+                            " (coord deferred — idle peer)"
+                        }
+                    ),
                 );
                 notify_dm_presence_wake();
+                if parallel_wan {
+                    notify_coord_lookup();
+                }
                 return false;
             }
             self.mark_lan_candidates_exhausted(peer);
