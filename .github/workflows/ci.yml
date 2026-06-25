@@ -52,9 +52,10 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
-      # `pubspec.yaml` bundles env/.env.production for release; file is gitignored locally.
-      - name: Ephemeral production env for asset check
-        run: printf 'GHAL_BOL_COORD_URLS=https://coord.ghalbol.com\n' > env/.env.production
+      - name: Ephemeral env files for asset check
+        run: |
+          cp env/.env.development.example env/.env.development
+          cp env/.env.production.example env/.env.production
 
       - name: dart analyze
         run: dart analyze --fatal-warnings
