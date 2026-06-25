@@ -266,8 +266,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                     let listen = coord_register_listen_snapshot(&swarm, session.as_ref());
                     crate::coord_runtime::coord_register_tick(&listen);
                 }
-                run_dm_coord_lookup_pass(&mut swarm, session.as_ref(), now_ms, coord_lookup_wake)
-                    .await;
+                run_dm_coord_lookup_pass(&mut swarm, session.as_ref(), now_ms, coord_lookup_wake);
                 let connected_now: Vec<PeerId> = session
                     .connected_peers()
                     .into_iter()
@@ -405,8 +404,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                 if handover || (recovering_before && !recovering_after) {
                     // Force-wake burst, still bounded (TRANSPORT.md § "Instant connect at any
                     // roster size") so a huge roster can't flood coord or block the swarm loop.
-                    run_dm_coord_lookup_pass(&mut swarm, session.as_ref(), chrono_now_ms(), true)
-                        .await;
+                    run_dm_coord_lookup_pass(&mut swarm, session.as_ref(), chrono_now_ms(), true);
                     spawn_reopen_dm_chat_streams(
                         &swarm,
                         Arc::clone(&session),

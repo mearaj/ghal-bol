@@ -398,7 +398,7 @@ async fn handle_inbound_stream(
                 }
                 if a.kind == MsgKind::AckRequest {
                     // Deprecated wire kind — we never send this. Recipient drives delivery via
-                    // `ack_received` / `ack_read` only (see `docs/GOTIGIN_DM_MSG_V1.md`).
+                    // `ack_received` / `ack_read` only (see `docs/GHAL_BOL_DM_MSG_V1.md`).
                     native_log::debug(
                         "stream",
                         format!("ignore ack_request ref={} from {peer}", a.ref_id),

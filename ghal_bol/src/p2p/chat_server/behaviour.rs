@@ -15,6 +15,26 @@ pub struct ChatBehaviour {
     pub stream: stream::Behaviour,
 }
 
+/// LAN mDNS re-query cadence. libp2p's `Config::default()` queries only every **5 minutes**
+/// (and TTLs addrs for 6 minutes), so after a LAN link drops both peers sit on
+/// `no mDNS candidate yet` for minutes before re-discovering each other — LAN looks "broken"
+/// whenever WAN/relay is also down. We query every few seconds instead so a dropped LAN link is
+/// re-discovered within seconds, fully independent of WAN. The ephemeral TCP **listen port stays
+/// stable** — discovery is still event-driven from the mDNS `Discovered` handler (TRANSPORT.md
+/// § "Ephemeral LAN TCP ports", § "LAN re-discovery cadence"); we only make the query loop fast,
+/// we do **not** rebind the port or destructively restart mDNS on a tick (that caused the
+/// `mdns restarted … no mdns discovered` storm — AGENTS.md anti-patterns).
+const LAN_MDNS_QUERY_INTERVAL_SECS: u64 = 5;
+
+/// mDNS config with a fast re-query interval — see [`LAN_MDNS_QUERY_INTERVAL_SECS`]. Used for both
+/// the initial behaviour and the post-handover restart so both paths recover LAN quickly.
+fn ghal_bol_mdns_config() -> libp2p::mdns::Config {
+    libp2p::mdns::Config {
+        query_interval: Duration::from_secs(LAN_MDNS_QUERY_INTERVAL_SECS),
+        ..Default::default()
+    }
+}
+
 /// TCP-only transport when `GHAL_BOL_MINIMAL_SWARM` is set (local integration runs).
 #[cfg(all(not(target_os = "android"), not(feature = "test-minimal-swarm")))]
 fn minimal_swarm_mode() -> bool {
@@ -38,7 +58,7 @@ fn chat_behaviour(
             // (server logs: "at capacity") → phase D pk never parsed → peer 404 on coord.
             .with_push_listen_addr_updates(false);
     let mdns =
-        match libp2p::mdns::tokio::Behaviour::new(libp2p::mdns::Config::default(), local_peer_id) {
+        match libp2p::mdns::tokio::Behaviour::new(ghal_bol_mdns_config(), local_peer_id) {
             Ok(b) => {
                 native_log::info("mdns", "enabled");
                 Toggle::from(Some(b))

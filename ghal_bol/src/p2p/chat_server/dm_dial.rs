@@ -127,6 +127,7 @@ async fn resync_outbox_burst_for_peer(
     let Some(pk) = pk else {
         return;
     };
+    let now = chrono_now_ms();
     let rows: Vec<PendingOutbound> = session
         .outbox
         .read()
@@ -134,6 +135,14 @@ async fn resync_outbox_burst_for_peer(
         .map(|g| {
             g.values()
                 .filter(|p| p.recipient_public_key_hex.eq_ignore_ascii_case(&pk))
+                // Skip rows the ~1s periodic `resync_pending_outbox` just put on the wire. The
+                // burst intentionally ignores the resend interval to drain backlog instantly, but
+                // when stream-open and the 1s tick coincide (≈90ms apart, see logs) re-sending an
+                // already-in-flight row double-delivers it, so the peer replies with a **duplicate
+                // `ack_received`** for the same ref — the ack storm in TRANSPORT.md § Post-mortem
+                // 2026-06-25 (outbox double-send). Backlog rows (never sent this session →
+                // `last_send_ms` old/0) still satisfy this and drain immediately.
+                .filter(|p| now.saturating_sub(p.last_send_ms) >= OUTBOX_RESEND_INTERVAL_MS)
                 .cloned()
                 .collect()
         })
@@ -145,7 +154,6 @@ async fn resync_outbox_burst_for_peer(
         "outbox",
         format!("burst resync {} pending row(s) to {peer}", rows.len()),
     );
-    let now = chrono_now_ms();
     for p in rows {
         if !writer_open_for_peer(&writers, peer) {
             if let Some(ctrl) = control.as_ref() {

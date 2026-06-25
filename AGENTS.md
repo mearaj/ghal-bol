@@ -148,6 +148,7 @@ cd ghal_bol_ui && dart analyze && flutter test
 - Sender sending `ack_request`.
 - In-room **only** `ack_read` with **no** `ack_received` when `:p2p` may outlive the UI.
 - Read-ack **burst/upkeep storms** (128×512 bursts, retry every poll tick, emit every wire ack to UI, `stores_updated` on no-op patch) — see DESIGN.md § “Read receipts — wire volume”.
+- **Outbox burst double-send** — `resync_outbox_burst_for_peer` re-sending rows the ~1s periodic `resync_pending_outbox` just put on the wire (ignoring `OUTBOX_RESEND_INTERVAL_MS`) → peer emits **duplicate `ack_received`** per duplicate text (looks like delayed/storming acks). Burst must skip rows sent within `OUTBOX_RESEND_INTERVAL_MS`; backlog/new rows still drain instantly on stream-open. TRANSPORT.md § **Post-mortem 2026-06-25 → Follow-on fix — outbox burst double-send**.
 - Hub **double transcript merge** on `previewChangeCount` while open chat already uses `ingestP2pEvent`.
 - **Dual transcript writers** — UI `transcript_save` / FFI append racing `:p2p` poll on daemon, or Rust code opening `chat_transcript_v1.json` outside `dm_transcript_store` (append + `read_ack_sent` patch clobber → rows vanish). See DESIGN.md § “On-disk store ownership”.
 - **Empty native reload wiping chat** — `force: true` reload that clears persisted lines when `transcriptLoadMerged` returns 0 rows during same-room refresh.
@@ -185,6 +186,7 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **Timer-based async policy** — grace windows, tick-polled recovery, or tuning `N`-second constants instead of worker→subscriber events. Applies to connect/handover and any P2P path with unknown duration. See TRANSPORT.md § “Event-driven async”.
 - **Flutter network-change RPCs** — no `p2p_notify_network_change` / resume connectivity hints from Dart; Android `:p2p` registers `ConnectivityManager` callbacks; Linux uses `linux_network.rs` operstate on `network_tick`; Rust owns Wi‑Fi handover recovery.
 - **Soft mDNS-only Wi‑Fi switch recovery** — `lan_handover_upkeep` must call full `kick_lan_dm_rediscovery_after_handover` (fresh listen + force mDNS), not `restart_mdns_behaviour` alone; symptom: repeating `LAN upkeep — nudge mDNS` with zero `mdns discovered`. See TRANSPORT.md § “LAN stability — cold start and Wi‑Fi toggle”.
+- **`libp2p::mdns::Config::default()` for the chat node** — its `query_interval` is **5 minutes**, so after a LAN link drops the peer is not re-discovered for minutes (`LAN soft rediscovery — link down, no mDNS candidate yet`, `active_links=0`) — LAN looks broken whenever WAN/relay is also down. Always build mDNS via `ghal_bol_mdns_config()` (`query_interval=5s`); fast LAN re-discovery must come from the **query interval**, not from rebinding the TCP port or restarting mDNS on a tick (that is the churn storm). TRANSPORT.md § **LAN re-discovery cadence — mDNS query interval**.
 - **Recovery throttle double-consume** — do not call `should_run_lan_recovery` then only soft-restart mDNS; `kick_lan` owns the 5s throttle.
 - **Forbidden 2026-06-15 hub UI session patch** — `lastApplySucceeded` / `uiSessionLastApplyOk`, `_invalidateNativeForegroundSync`, per-frame session retry from `build()`, hub `node_ready`/`_attachHubChat`/`resume`/`call end` session reapply storms. **Reverted:** stopped P2P chat (`stream_ready_count=0`, leave-drain bursts), UI looked wiped (`conv=solo`), users lost identity indirectly. **Do not** use this to fix Linux read ticks — use Linux **`inactive`** rule + low-volume `GhalBolUiSession.nudge()` instead (DESIGN.md § “Fixed 2026-06-15”). § “FORBIDDEN — reverted 2026-06-15”.
 - **Linux desktop `inactive` → setVisible(false)** — regression; restores “resize fixes ticks” bug (`ui_session_applied read=false` with room open).
@@ -200,6 +202,7 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **Relay `ConnectionClosed` with other path open — no stream reopen** — zombie mux (`conn=true,stream=true`, repeating `resync N pending`). Event-driven `request_dm_stream_reopen` + `notify_coord_lookup` in `swarm_events`; ack/outbox send fail → same. TRANSPORT.md § **Post-mortem 2026-06-24**.
 - **Blocking coord HTTP on tokio swarm loop** — `try_restore_relay_presence_from_coord` / `reqwest::blocking` in `run_wan_recovery_pass` panics and kills `:p2p`. Background std thread only (`coord_register_tick`). TRANSPORT.md § **Post-mortem 2026-06-24**.
 - **LAN TCP fail clears circuit in-flight** — parallel LAN+WAN violation; LAN `OutgoingConnectionError` must not touch `circuit_dial_in_flight`. TRANSPORT.md § **Post-mortem 2026-06-24**.
+- **Coord lookup `.await` on the swarm loop** — `coord_lookup_dm_peer` / `run_dm_coord_lookup_pass` must **never** await coord HTTP inside the `tokio::select!` arm holding `&mut swarm` (`spawn_blocking` + awaiting its handle still starves libp2p → inbound relay `STOP` times out → `relay-circuit dial timed out`, WAN dead, LAN flaky). Use `request_coord_lookup` (off-loop `tokio::spawn`) + `apply_coord_lookup_result` / `drain_ready_coord_lookups` (sync, on-loop). TRANSPORT.md § **Post-mortem 2026-06-25 (coord lookup `.await` froze the swarm loop)**.
 
 ## Debugging checklist (one message, two devices)
 
@@ -260,6 +263,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | Incoming-call notification tap does not show UI | Daemon wrote `incoming_call_wake` but Flutter not polling — check wake poll in `p2p_event_bridge.dart` + D-Bus activate in `incoming_call_notify.rs` |
 | Relay conn drops mid-handshake (`Decode(UnexpectedEof)`), `addrs=[]`, `coord_registered=false` on **every real device** | **Relay server missing `secp256k1` libp2p feature.** Clients use secp256k1 device keys; a relay without that feature can't authenticate them in Noise and drops the link. Add `secp256k1` to `ghal_bol_server/Cargo.toml`. An ed25519-only `relay_probe` hides this — test with `PROBE_SECP256K1=1`. **Not** a Kademlia/listener bug. See TRANSPORT.md § "Ghal Bol relay" |
 | `Unexpected peer ID` on relay bootstrap dial | Stale in-memory relay state after server restart — client clears state and refetches `GET /v1/relay` (no disk cache) |
+| WAN-only dead (`coord.ghalbol.com`), LAN flaky; `coord_lookup_peer ok` then `relay-circuit dial timed out`; server `circuit ConnectionFailed`; clean `relay_probe`/`circuit_test` work | **Coord lookup `.await` froze the swarm loop** — libp2p not polled during coord HTTP RTT → inbound relay `STOP` times out. Use `request_coord_lookup` (off-loop) + `apply_coord_lookup_result` / `drain_ready_coord_lookups` (sync). Rebuild native. TRANSPORT.md § **Post-mortem 2026-06-25 (coord lookup `.await` froze the swarm loop)** |
 | `node_ready` minutes late | Startup blocked on relay — must emit after ~3s; WAN recovery on coord_tick |
 
 ## Doc index
@@ -285,3 +289,19 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 - Product: **Ghal Bol** — domain **ghalbol.com**, package **`com.ghalbol`**
 - Android namespace: `com.ghalbol`
 - Rust crate / Dart package: `ghal_bol` / `ghal_bol_ui`
+
+
+## Important Rules that should override the above ones 
+After user login for the first time then background service (ghal_bol) should
+start running. It should watch the network continuously, should know the status 
+of the internet, should be quick to figure out it's global reachable address and also it's 
+LAN address and as soon as it's global reachable address is found it should regularly
+register itself at the coord server. WAN should always work if internet is active for
+both the peers and if coord server is reachable. Now if any peer is found on LAN then only 
+for that peer LAN should be used and in case if LAN is lost then again it should repeat the
+retular process of WAN and this switch shouldn't impact user experience, he shouldn't see any
+weird behavior. Now in case if coord server is unreachable then it should use KAD and libp2p
+to figure out the destination peer reachable address but it doesn't means that trying to reach 
+coord server at regular interval should be stopped. The ultimate goal is strong, reliable and
+smooth interaction between peers. We already have the coord server and libp2p which should be
+more than enough for smooth interaction over the WAN/LAN. 

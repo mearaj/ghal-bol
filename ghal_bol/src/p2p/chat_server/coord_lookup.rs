@@ -16,6 +16,95 @@ const BOOTSTRAP_REDIAL_INTERVAL_SECS: u64 = 12;
 /// peer eventually falls back to the normal coord cadence + exponential backoff.
 const DM_RECONNECT_URGENT_WINDOW_MS: i64 = 30_000;
 
+/// A ready coord lookup result becomes stale (re-fetched) if the swarm loop has not consumed it
+/// within this window — coord presence (relay port) is live data, never trusted when old.
+const COORD_LOOKUP_RESULT_STALE_MS: i64 = 15_000;
+
+/// Outcome of a single background coord HTTP lookup, applied on the swarm loop next tick.
+enum CoordLookupOutcome {
+    Ok(Vec<Multiaddr>),
+    Err(String),
+}
+
+struct CoordLookupResult {
+    outcome: CoordLookupOutcome,
+    fetched_ms: i64,
+}
+
+/// Ready (unconsumed) background lookup results, keyed by peer public key hex.
+fn coord_lookup_results() -> &'static Mutex<HashMap<String, CoordLookupResult>> {
+    static R: OnceLock<Mutex<HashMap<String, CoordLookupResult>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Public keys with a coord HTTP lookup currently running, so we never spawn a duplicate.
+fn coord_lookup_in_flight() -> &'static Mutex<HashSet<String>> {
+    static F: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Spawn a **background** coord HTTP lookup for `pk` (fire-and-forget). The swarm event loop must
+/// never `.await` coord HTTP: doing so freezes libp2p for the whole request, so the inbound relay
+/// `STOP` substream times out and circuit forwarding fails (root cause of WAN-only chat failure —
+/// AGENTS.md golden rule 9 / prime directive). Instead we kick the lookup here and consume the
+/// result synchronously on the next pass via [`drain_ready_coord_lookups`]. Deduped per pk while a
+/// request is in flight; on completion the result is stored and the swarm loop is woken via
+/// `notify_coord_lookup()`.
+fn request_coord_lookup(pk: &str) {
+    let pk = pk.trim().to_string();
+    if pk.len() != 66 {
+        return;
+    }
+    {
+        let Ok(mut inflight) = coord_lookup_in_flight().lock() else {
+            return;
+        };
+        if !inflight.insert(pk.clone()) {
+            return; // already running for this pk
+        }
+    }
+    tokio::spawn(async move {
+        let outcome =
+            match crate::coord_runtime::lookup_dial_multiaddrs_for_public_key_async(&pk).await {
+                Ok(addrs) => CoordLookupOutcome::Ok(addrs),
+                Err(e) => CoordLookupOutcome::Err(e),
+            };
+        if let Ok(mut r) = coord_lookup_results().lock() {
+            r.insert(
+                pk.clone(),
+                CoordLookupResult {
+                    outcome,
+                    fetched_ms: chrono_now_ms(),
+                },
+            );
+        }
+        if let Ok(mut f) = coord_lookup_in_flight().lock() {
+            f.remove(&pk);
+        }
+        // Wake the swarm loop so it applies the result (dials) without waiting for the next tick.
+        notify_coord_lookup();
+    });
+}
+
+/// Drain all ready (fresh) background lookup results so the swarm loop can apply them (dial) this
+/// pass. Stale results are dropped — relay presence is live data and a stale port could break WAN.
+fn drain_ready_coord_lookups(now_ms: i64) -> Vec<(String, CoordLookupOutcome)> {
+    let mut out = Vec::new();
+    if let Ok(mut r) = coord_lookup_results().lock() {
+        let stale_cutoff = now_ms.saturating_sub(COORD_LOOKUP_RESULT_STALE_MS);
+        let pks: Vec<String> = r.keys().cloned().collect();
+        for pk in pks {
+            if let Some(res) = r.remove(&pk) {
+                if res.fetched_ms < stale_cutoff {
+                    continue; // too old — let the next pass re-request a live lookup
+                }
+                out.push((pk, res.outcome));
+            }
+        }
+    }
+    out
+}
+
 /// Live LAN reachability — mDNS candidate only (not `peers_on_local_lan` TTL stamps).
 fn peer_has_live_mdns_lan(session: &SessionState, peer: PeerId) -> bool {
     session.peer_mdns_lan_addr(peer).is_some()
@@ -326,8 +415,12 @@ fn coord_dial_from_lookup_addrs(
     }
 }
 
-async fn coord_lookup_dm_peer(
-    swarm: &mut Swarm<ChatBehaviour>,
+/// Decide whether `pk` needs a coord lookup and, if so, **request** one in the background. This is
+/// synchronous and never touches coord HTTP itself — it only inspects swarm/session state and kicks
+/// [`request_coord_lookup`]. The actual dial happens later in [`apply_coord_lookup_result`] once the
+/// background fetch lands. Keeping HTTP off the swarm loop is mandatory (AGENTS.md golden rule 9).
+fn coord_lookup_dm_peer(
+    swarm: &Swarm<ChatBehaviour>,
     session: &SessionState,
     public_key_hex: &str,
 ) {
@@ -407,94 +500,116 @@ async fn coord_lookup_dm_peer(
         );
     }
     if !skip_coord_http {
-        match crate::coord_runtime::lookup_dial_multiaddrs_for_public_key_async(pk).await {
-            Ok(addrs) => {
-                session.clear_coord_lookup_backoff(pk);
+        request_coord_lookup(pk);
+    }
+}
+
+/// Apply a completed background coord lookup: do the same bookkeeping (backoff/category) and dial
+/// decision the old inline path did, but synchronously on the swarm loop. Swarm state is re-checked
+/// here because the lookup ran across at least one tick (the peer may have connected meanwhile).
+fn apply_coord_lookup_result(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+    pk: &str,
+    outcome: CoordLookupOutcome,
+    now_ms: i64,
+) {
+    let pk = pk.trim();
+    if pk.len() != 66 {
+        return;
+    }
+    let Some(target) = peer_id_from_secp256k1_public_key_hex(pk)
+        .ok()
+        .and_then(|s| s.parse::<PeerId>().ok())
+    else {
+        return;
+    };
+    match outcome {
+        CoordLookupOutcome::Ok(addrs) => {
+            session.clear_coord_lookup_backoff(pk);
+            session.set_coord_lookup_category(
+                pk,
+                crate::p2p::connectivity_diag::CoordLookupCategory::Ok,
+            );
+            let addrs = if crate::coord_runtime::coord_is_configured()
+                && session.prefers_mobile_coord_strategy()
+            {
+                crate::p2p::network_transport::wan_coord_dial_addrs(addrs)
+            } else {
+                addrs
+            };
+            if addrs.is_empty() {
                 session.set_coord_lookup_category(
                     pk,
-                    crate::p2p::connectivity_diag::CoordLookupCategory::Ok,
+                    crate::p2p::connectivity_diag::CoordLookupCategory::NoDialableAddrs,
                 );
-                let addrs = if crate::coord_runtime::coord_is_configured()
-                    && session.prefers_mobile_coord_strategy()
-                {
-                    crate::p2p::network_transport::wan_coord_dial_addrs(addrs)
-                } else {
-                    addrs
-                };
-                if addrs.is_empty() {
-                    session.set_coord_lookup_category(
-                        pk,
-                        crate::p2p::connectivity_diag::CoordLookupCategory::NoDialableAddrs,
-                    );
-                    let (reason, action) = crate::p2p::connectivity_diag::explain_coord_lookup_failure(
-                        crate::p2p::connectivity_diag::CoordLookupCategory::NoDialableAddrs,
-                        crate::coord_runtime::coord_is_registered(),
-                    );
-                    native_log::warn(
-                        "coord",
-                        format!(
-                            "lookup {pk} — {reason} | next={action} | raw=no dialable addrs in presence record"
-                        ),
-                    );
-                } else {
-                    let dial_now = chrono_now_ms();
-                    let wan_additive_now = swarm.is_connected(&target)
-                        && crate::coord_runtime::coord_is_configured();
-                    if peer_wan_relay_connected(swarm, session, target) {
-                        if !session.dm_peer_stream_up(target) {
-                            session.request_dm_stream_reopen(target);
-                        }
-                        return;
-                    }
-                    if dm_peer_chat_link_stable(swarm, session, target, Some(pk), dial_now)
-                        && !needs_additive_relay_dial(session, target, wan_additive_now)
-                    {
-                        return;
-                    }
-                    let urgent_now = session.is_pk_reconnect_urgent(pk, dial_now);
-                    coord_dial_from_lookup_addrs(
-                        swarm,
-                        session,
-                        target,
-                        addrs,
-                        dial_now,
-                        wan_additive_now,
-                        urgent_now,
-                    );
-                }
-            }
-            Err(e) => {
-                let es = e.to_string();
-                let cat = crate::p2p::connectivity_diag::classify_coord_lookup_error(&es);
-                session.set_coord_lookup_category(pk, cat);
-                if cat == crate::p2p::connectivity_diag::CoordLookupCategory::PeerNotOnCoord {
-                    session.note_coord_lookup_not_found(pk, now_ms);
-                } else if cat == crate::p2p::connectivity_diag::CoordLookupCategory::CoordHttpUnreachable
-                {
-                    session.note_coord_lookup_http_unreachable(pk, now_ms);
-                    crate::coord_runtime::note_coord_transport_failure();
-                } else {
-                    crate::coord_runtime::note_coord_transport_failure();
-                }
                 let (reason, action) = crate::p2p::connectivity_diag::explain_coord_lookup_failure(
-                    cat,
+                    crate::p2p::connectivity_diag::CoordLookupCategory::NoDialableAddrs,
                     crate::coord_runtime::coord_is_registered(),
                 );
-                let log_line = format!(
-                    "lookup {pk} — category={} | reason={reason} | next={action} | http={es}",
-                    cat.as_str()
+                native_log::warn(
+                    "coord",
+                    format!(
+                        "lookup {pk} — {reason} | next={action} | raw=no dialable addrs in presence record"
+                    ),
                 );
-                if cat == crate::p2p::connectivity_diag::CoordLookupCategory::PeerNotOnCoord
-                    && !session.should_log_coord_lookup_info(
-                        pk,
-                        now_ms,
-                        COORD_PEER_NOT_ON_COORD_LOG_MIN_MS,
-                    )
-                {
-                    native_log::debug("coord", log_line);
-                } else {
-                    native_log::info("coord", log_line);
+                return;
+            }
+            let dial_now = chrono_now_ms();
+            let wan_additive_now =
+                swarm.is_connected(&target) && crate::coord_runtime::coord_is_configured();
+            if peer_wan_relay_connected(swarm, session, target) {
+                if !session.dm_peer_stream_up(target) {
+                    session.request_dm_stream_reopen(target);
                 }
+                return;
+            }
+            if dm_peer_chat_link_stable(swarm, session, target, Some(pk), dial_now)
+                && !needs_additive_relay_dial(session, target, wan_additive_now)
+            {
+                return;
+            }
+            let urgent_now = session.is_pk_reconnect_urgent(pk, dial_now);
+            coord_dial_from_lookup_addrs(
+                swarm,
+                session,
+                target,
+                addrs,
+                dial_now,
+                wan_additive_now,
+                urgent_now,
+            );
+        }
+        CoordLookupOutcome::Err(es) => {
+            let cat = crate::p2p::connectivity_diag::classify_coord_lookup_error(&es);
+            session.set_coord_lookup_category(pk, cat);
+            if cat == crate::p2p::connectivity_diag::CoordLookupCategory::PeerNotOnCoord {
+                session.note_coord_lookup_not_found(pk, now_ms);
+            } else if cat == crate::p2p::connectivity_diag::CoordLookupCategory::CoordHttpUnreachable
+            {
+                session.note_coord_lookup_http_unreachable(pk, now_ms);
+                crate::coord_runtime::note_coord_transport_failure();
+            } else {
+                crate::coord_runtime::note_coord_transport_failure();
+            }
+            let (reason, action) = crate::p2p::connectivity_diag::explain_coord_lookup_failure(
+                cat,
+                crate::coord_runtime::coord_is_registered(),
+            );
+            let log_line = format!(
+                "lookup {pk} — category={} | reason={reason} | next={action} | http={es}",
+                cat.as_str()
+            );
+            if cat == crate::p2p::connectivity_diag::CoordLookupCategory::PeerNotOnCoord
+                && !session.should_log_coord_lookup_info(
+                    pk,
+                    now_ms,
+                    COORD_PEER_NOT_ON_COORD_LOG_MIN_MS,
+                )
+            {
+                native_log::debug("coord", log_line);
+            } else {
+                native_log::info("coord", log_line);
             }
         }
     }
@@ -515,12 +630,20 @@ async fn coord_lookup_dm_peer(
 ///
 /// `force_wake` (used by the recovery burst) makes eligible peers look up immediately instead of
 /// waiting for their per-peer min interval; it does **not** lift the background cap.
-async fn run_dm_coord_lookup_pass(
+fn run_dm_coord_lookup_pass(
     swarm: &mut Swarm<ChatBehaviour>,
     session: &SessionState,
     now_ms: i64,
     force_wake: bool,
 ) {
+    // First, apply any background lookups that completed since the last pass. This is the dial side
+    // of the split: the HTTP fetch ran off the swarm loop (request_coord_lookup) so libp2p stayed
+    // responsive; here we consume the result and dial synchronously. Done before the bootstrap
+    // deferral below so ready relay-circuit addrs are not dropped — coord_dial_from_lookup_addrs
+    // re-checks own_bootstrap readiness per peer.
+    for (pk, outcome) in drain_ready_coord_lookups(now_ms) {
+        apply_coord_lookup_result(swarm, session, &pk, outcome, now_ms);
+    }
     // Peer relay circuits cancel each other (oneshot) while our bootstrap TCP is still down.
     if crate::coord_runtime::coord_is_configured()
         && !own_bootstrap_ready_for_peer_relay_dial(session)
@@ -549,7 +672,7 @@ async fn run_dm_coord_lookup_pass(
                 }
             }
         }
-        coord_lookup_dm_peer(swarm, session, &pk).await;
+        coord_lookup_dm_peer(swarm, session, &pk);
         lk_urgent += 1;
     }
     if crate::coord_runtime::coord_is_configured() {
@@ -582,7 +705,7 @@ async fn run_dm_coord_lookup_pass(
                         DM_COORD_LOOKUP_MIN_INTERVAL_MS,
                     )
                 {
-                    coord_lookup_dm_peer(swarm, session, &pk).await;
+                    coord_lookup_dm_peer(swarm, session, &pk);
                     lk_priority += 1;
                 }
                 continue;
@@ -603,7 +726,7 @@ async fn run_dm_coord_lookup_pass(
                 if force_wake
                     || session.should_coord_lookup_pk(pk, now_ms, DM_COORD_LOOKUP_MIN_INTERVAL_MS)
                 {
-                    coord_lookup_dm_peer(swarm, session, pk).await;
+                    coord_lookup_dm_peer(swarm, session, pk);
                     bg_swept += 1;
                 }
             }

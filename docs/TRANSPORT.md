@@ -697,6 +697,55 @@ panic: Cannot drop a runtime … blocking is not allowed
 
 ---
 
+### Post-mortem — 2026-06-25 coord lookup `.await` froze the swarm loop (WAN-only chat dead) (canonical)
+
+**Symptoms observed (flutter_linux1.log + flutter_android1.log on `https://coord.ghalbol.com`; partial/none on local `http://…:8765`):**
+
+| Evidence | Meaning |
+|----------|---------|
+| Relay server accepts reservations; clean `relay_probe` / `circuit_test` clients establish a relayed connection on the **same** cloud relay | Relay + coord server are healthy — **not** a server bug |
+| App: `coord_lookup_peer ok` then `relay-circuit dial timed out`; relay server logs `circuit ConnectionFailed` (`outbound_stop` to the destination never completed) | The **destination app** did not service the inbound relay `STOP` substream in time |
+| Worse on the high-latency cloud coord than the low-latency local coord; clean clients (no roster lookups) always worked | The block scaled with **coord HTTP round-trip time** |
+
+**Root cause:** `coord_lookup_dm_peer` / `run_dm_coord_lookup_pass` performed the coord HTTP lookup with an inline `.await` **inside the same `tokio::select!` arm that owns `&mut swarm`**. `lookup_dial_multiaddrs_for_public_key_async` used `spawn_blocking`, but the swarm loop still `.await`ed its `JoinHandle`, so for the whole HTTP round-trip (hundreds of ms on cloud, per peer, per tick) **libp2p was not polled**. During that window the relay's inbound `STOP` substream for an incoming circuit was never accepted → relay reported `ConnectionFailed` → caller saw `relay-circuit dial timed out`. WAN (every connect needs a coord lookup) broke entirely; LAN suffered because the same loop also drives mDNS/direct dials. Violates AGENTS.md **golden rule 9** (event-driven async — no blocking on the swarm loop) and is the lookup-path twin of 2026-06-24 bug **F** (which only covered `run_wan_recovery_pass`).
+
+**Canonical fix (code — `coord_lookup.rs`, `run_loop.rs`):** split the coord lookup into **request (off-loop)** and **apply (on-loop, synchronous)**:
+
+| Concern | Function / rule |
+|---------|-----------------|
+| Kick the HTTP fetch | `request_coord_lookup(pk)` — `tokio::spawn` the async lookup; deduped per pk via `coord_lookup_in_flight`; on completion store the result and `notify_coord_lookup()`. **Never** `.await`ed by the swarm loop |
+| Decide whether to look up | `coord_lookup_dm_peer` is now **synchronous** (`&Swarm`, no `&mut`) — same guards/throttle as before, ends by calling `request_coord_lookup` instead of awaiting HTTP |
+| Apply a completed lookup | `apply_coord_lookup_result` — runs the **identical** backoff/category bookkeeping + dial decision (`coord_dial_from_lookup_addrs`) the old inline path did, **synchronously**; re-checks swarm state because ≥1 tick elapsed |
+| Consume results each pass | `run_dm_coord_lookup_pass` (now sync) calls `drain_ready_coord_lookups(now_ms)` first, before the bootstrap-deferral guard, so ready relay-circuit addrs dial promptly (`coord_dial_from_lookup_addrs` re-checks own-bootstrap readiness per peer) |
+| Result freshness | `COORD_LOOKUP_RESULT_STALE_MS` (15s) — unconsumed results are dropped and re-requested; coord relay presence is live data, never trusted when stale (§ Caching policy) |
+
+The swarm loop now polls libp2p continuously; an inbound relay `STOP` is accepted within milliseconds regardless of coord RTT. Throttling/cap (`should_coord_lookup_pk`, `should_coord_lookup_intent_pk`, `COORD_BACKGROUND_LOOKUPS_PER_TICK`, LRU sweep) are unchanged — they now gate **requesting** instead of awaiting.
+
+**FORBIDDEN — agents must not reintroduce:**
+
+1. `.await`ing coord HTTP (`lookup_dial_multiaddrs_for_public_key_async`, `coord_lookup_dm_peer`, any `CoordHttpClient`) inside the `tokio::select!` arm that holds `&mut swarm`. `spawn_blocking` is **not** enough — awaiting its handle still starves the swarm.
+2. Making `coord_lookup_dm_peer` / `run_dm_coord_lookup_pass` `async` again, or dialing directly from the fetch path.
+3. Dropping `drain_ready_coord_lookups` before the bootstrap-deferral early-return (would strip ready relay dials).
+
+**Healthy logs:** `coord_lookup_peer ok — dialing … via relay circuit` followed quickly by `dm connection established … (relay)` and `chat_ready`, with **no** `relay-circuit dial timed out` and no per-tick stall on either device.
+
+#### Follow-on fix — outbox burst double-send → duplicate `ack_received` (2026-06-25)
+
+**Symptom (flutter_linux2.log on local server with relay TCP down → LAN-only):** after a peer connected and a 65-row backlog drained, the **same** five message refs logged `ack_received from … — our outbound delivered` repeatedly (every ~1.5s for several seconds), with `resync 65 pending` and `burst resync 5 pending row(s)` firing ~90ms apart. Delivery was correct (the peer de-dupes inbound text by `message_id`), but the wire/ack traffic and `stores_updated` churn looked like "lag / delayed acks".
+
+**Root cause:** on chat-stream open, **two** senders run almost simultaneously:
+
+- `resync_pending_outbox` (the ~1s `dm_upkeep` tick) — sends rows **due** for resend (`now − last_send_ms ≥ OUTBOX_RESEND_INTERVAL_MS`) and calls `mark_outbox_sent`.
+- `resync_outbox_burst_for_peer` (stream-open burst) — sent **all** rows for the peer **ignoring** the resend interval, to drain backlog instantly.
+
+When stream-open and the 1s tick coincide, the burst re-sent rows the periodic tick had just put on the wire. The peer received each text twice and replied with a **duplicate `ack_received`** per duplicate, repeated as the cycle recurred during the burst window.
+
+**Fix (`dm_dial.rs`, `resync_outbox_burst_for_peer`):** the burst now skips rows already sent within `OUTBOX_RESEND_INTERVAL_MS` (`now − last_send_ms ≥ OUTBOX_RESEND_INTERVAL_MS`, same predicate as `outbox_due_for_resend`). Backlog and freshly-enqueued rows (`last_send_ms` old or seeded to `now − interval`) still drain immediately; only rows the periodic tick *just* sent are skipped. No message can be lost — the periodic resync still owns the 1s retry cadence; the burst is only an instant-drain optimisation.
+
+**FORBIDDEN:** making `resync_outbox_burst_for_peer` re-send rows unconditionally (ignoring `last_send_ms`) — that reintroduces the double-send/duplicate-ack storm. Backlog drain speed must come from the **burst running on stream-open** (event-driven), not from ignoring the resend interval.
+
+---
+
 ### libp2p community lessons (relay v2 — applies directly)
 
 Upstream issues that match Ghal Bol behaviour. When logs disagree with an issue below, fix **code + this doc** — not ad-hoc one-off patches.
@@ -888,6 +937,19 @@ See [DESIGN.md](DESIGN.md) § “Dial strategy — parallel LAN + WAN”. Do not
 ### LAN stability — cold start and Wi‑Fi toggle (verified 2026-06-16)
 
 **Status:** Short-duration manual testing on Linux desktop + Android shows **cold-start LAN chat** and **Wi‑Fi off/on on the same subnet** both recover without breaking the link. Long soak / LAN↔WAN↔LAN cycles depend on § **Network truth** and § **Asymmetric LAN↔WAN mux recovery** (2026-06-19).
+
+#### LAN re-discovery cadence — mDNS query interval (canonical, 2026-06-25)
+
+**Symptom (flutter_linux.log + flutter_android.log, WAN/relay down so LAN-only):** two devices on the **same Wi‑Fi** discovered each other once (`mdns discovered … connected`), the direct link later dropped, and then **neither re-discovered the other for 3–5 minutes** — both logged `LAN soft rediscovery — link down, no mDNS candidate yet` every ~8s with `active_links=0`. Because WAN/relay was also down (local server bore unreachable), the app looked completely broken even though both peers were on the LAN. This is the case the prime directive forbids: **WAN/coord/relay being down must not stop LAN.**
+
+**Root cause:** `libp2p::mdns::Config::default()` polls the network only every **`query_interval` = 5 minutes** (and TTLs records for 6 minutes). The "Receiving an mdns packet resets the timer" note means steady traffic keeps it quiet, but **once a peer's record expires after a link drop, the next active query can be up to 5 minutes away.** Our event-driven LAN dial (`handle_mdns_discovered_list`) is correct, but it only fires on a `Discovered` event — and with a 5-minute query interval those events simply stop coming after a drop. The throttled soft-nudge (`restart_mdns_behaviour(force=false)`) mostly no-ops (correctly — destructively restarting mDNS every tick caused the older `mdns restarted … no mdns discovered` port-churn storm), so nothing forced a fresh query.
+
+**Fix (`behaviour.rs` `ghal_bol_mdns_config()`, used at initial creation and in `restart_mdns_behaviour`):** set `query_interval = LAN_MDNS_QUERY_INTERVAL_SECS` (5s). A dropped LAN link is now re-discovered within seconds via the normal mDNS query loop, with **no port rebind and no destructive restart** — the ephemeral TCP listen port stays stable (§ "Ephemeral LAN TCP ports") and discovery remains event-driven. mDNS multicast queries are tiny and the library resets the timer on any received packet, so steady-state traffic stays low. This makes LAN recovery fast and **fully independent of WAN/coord/relay state.**
+
+**FORBIDDEN — agents must not reintroduce:**
+
+1. `libp2p::mdns::Config::default()` (5-minute query interval) for the chat node — always build via `ghal_bol_mdns_config()` so LAN re-discovery stays in the seconds range. A 5-minute interval reads as "LAN broken when WAN is down".
+2. "Fixing" slow LAN re-discovery by rebinding the ephemeral TCP port or destructively restarting mDNS on a tick — that is the older churn storm (§ "Ephemeral LAN TCP ports", 2026-06-23 changelog). Fast re-discovery comes from the **query interval**, not from restarts.
 
 **Network mode:** See § **Network truth — OS default route** (canonical). Summary: OS default transport + validated flag drive `profile=`; `if_addrs` is secondary; `Native/flow` logs `os=wifi|cell/validated/…`.
 
@@ -1372,6 +1434,8 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 
 | Date | Change |
 |------|--------|
+| 2026-06-25 | **LAN re-discovery cadence — mDNS query interval:** § **“LAN re-discovery cadence — mDNS query interval”**. `libp2p::mdns::Config::default()` polls only every **5 minutes**, so after a LAN link dropped (with WAN/relay also down) neither same-Wi‑Fi peer re-discovered the other for minutes (`LAN soft rediscovery — link down, no mDNS candidate yet`, `active_links=0`). Fix: `ghal_bol_mdns_config()` sets `query_interval = 5s` at both the initial behaviour and `restart_mdns_behaviour`; LAN now recovers in seconds, port stays stable, independent of WAN. |
+| 2026-06-25 | **Coord lookup `.await` froze the swarm loop → WAN-only chat dead (canonical post-mortem):** § **Post-mortem 2026-06-25 (coord lookup `.await` froze the swarm loop)** — the per-peer coord HTTP lookup was `.await`ed inside the `tokio::select!` arm holding `&mut swarm`, so libp2p was not polled for the whole HTTP RTT and inbound relay `STOP` substreams timed out (`relay-circuit dial timed out`, server `circuit ConnectionFailed`). Fix: split into off-loop `request_coord_lookup` (`tokio::spawn`, deduped via `coord_lookup_in_flight`) + sync on-loop `apply_coord_lookup_result` / `drain_ready_coord_lookups`; `coord_lookup_dm_peer` / `run_dm_coord_lookup_pass` are now synchronous. Follow-on: `resync_outbox_burst_for_peer` now skips rows sent within `OUTBOX_RESEND_INTERVAL_MS` (was double-sending with the 1s periodic resync → duplicate `ack_received`). |
 | 2026-06-25 | **One-way WAN after LAN→mobile handover (canonical post-mortem):** § **Post-mortem 2026-06-25** — Wi‑Fi side kept zombie LAN mux (`conn=true,stream=true`) while phone on relay; coord lookup skipped for foreground peer. Fix: `peer_wan_asymmetric_mux_likely` / `peer_needs_wan_mux_reopen` / `peer_lan_handover_outbound_stuck`; `clear_peer_stale_lan_cache`; `coord_lookup_upkeep_satisfied` + `dm_peer_chat_link_stable` false during handover; `InboundCircuitEstablished` stream reopen; do not defer stream when relay up. § **Known symptom — bursty delivery** — multi-second batch delivery during recovery is expected trade-off (5s reconcile throttle + burst resync), not Flutter/`NetworkHelper`. AI handoff items 27–30. |
 | 2026-06-24 | **WAN/LAN stability regression (canonical post-mortem):** § **Post-mortem 2026-06-24** — (A) never clear `circuit_dial_in_flight` / `disconnect_peer_id` during relay handshake for urgent peers; (B) `dm_peer_chat_link_stable` must not flip false solely for missing relay hop — use `needs_additive_relay_dial` for background additive relay on Wi‑Fi; (C) coord lookup must still dial additive relay when stream stable but relay missing; (D) relay `ConnectionClosed` with other path open → event-driven stream reopen + coord wake; (E) LAN TCP fail must not clear circuit in-flight; (F) no blocking coord HTTP on tokio swarm thread. Ack/outbox send fail → `request_dm_stream_reopen`. AI handoff items 22–26. |
 | 2026-06-23 | **Relay presence keepalive (WAN 404-after-90s root-cause):** the relay grants hour-long reservations (`reservation_duration = 3600 s`) but coord presence rows expire after `presence_ttl` (90 s), and the relay only wrote/refreshed a peer's row on the **initial** reservation (renewal `try_register_relay_presence` even early-returns on an unchanged circuit). So a relay-only (NAT'd) peer registered, then became a coord **404 ~90 s later** for the rest of the hour — both devices showed `reservation accepted` / `relay presence visible`, then every lookup (and self-poll) `404 peer not registered or presence expired`, and no WAN chat. Fix: `run_relay` ticks a **30 s `refresh_live_presence`** that re-`upsert_relay_circuit`s every peer in `RelayLiveRegistry::live_peers_with_pk()`, keeping the row inside the 90 s TTL while the reservation is held. **Requires redeploying `ghal_bol_server`** (`deploy_server.sh` for prod). § “Findability is continuous across relay-reservation renewal”. |

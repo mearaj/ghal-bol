@@ -2,7 +2,7 @@
 //!
 //! Gossipsub was removed; 1:1 chat uses signed **`ghal_bol_msg_v1`** frames on libp2p streams.
 //!
-//! ## Messaging model (`docs/GOTIGIN_DM_MSG_V1.md`)
+//! ## Messaging model (`docs/GHAL_BOL_DM_MSG_V1.md`)
 //!
 //! - **Receiver:** off-room → `ack_received` only for new mail; in-room → `ack_received` then `ack_read`.
 //!   Do not clear the read-ack queue on leave (retry in-room backlog).

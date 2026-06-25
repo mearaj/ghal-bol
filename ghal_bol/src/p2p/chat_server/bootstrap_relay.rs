@@ -1773,7 +1773,7 @@ fn restart_mdns_behaviour(swarm: &mut Swarm<ChatBehaviour>, session: &SessionSta
         return;
     }
     let local_peer_id = *swarm.local_peer_id();
-    match libp2p::mdns::tokio::Behaviour::new(libp2p::mdns::Config::default(), local_peer_id) {
+    match libp2p::mdns::tokio::Behaviour::new(ghal_bol_mdns_config(), local_peer_id) {
         Ok(b) => {
             swarm.behaviour_mut().mdns = libp2p::swarm::behaviour::toggle::Toggle::from(Some(b));
             native_log::info("mdns", "restarted after LAN handover");
