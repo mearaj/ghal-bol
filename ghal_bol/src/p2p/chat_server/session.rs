@@ -622,6 +622,17 @@ impl SessionState {
         }
     }
 
+    /// After LAN→WAN handover — drop mDNS candidates + on-LAN TTL that block asymmetric mux recovery.
+    fn clear_peer_stale_lan_cache(&self, peer: PeerId) {
+        self.forget_peer_on_local_lan(peer);
+        if let Ok(mut m) = self.peer_mdns_lan_candidate_addrs.write() {
+            m.remove(&peer);
+        }
+        if let Ok(mut e) = self.lan_candidates_exhausted.write() {
+            e.remove(&peer);
+        }
+    }
+
     fn lan_listen_rediscovery_requested(&self, peer: PeerId) -> bool {
         self.lan_listen_rediscovery_peers
             .read()
@@ -886,6 +897,20 @@ impl SessionState {
         true
     }
 
+    fn should_log_read_ack_seed_skip(&self, peer: PeerId, now_ms: i64) -> bool {
+        const MIN_MS: i64 = 5_000;
+        static M: OnceLock<RwLock<HashMap<PeerId, i64>>> = OnceLock::new();
+        let Ok(mut m) = M.get_or_init(|| RwLock::new(HashMap::new())).write() else {
+            return true;
+        };
+        let last = m.get(&peer).copied().unwrap_or(0);
+        if now_ms.saturating_sub(last) < MIN_MS {
+            return false;
+        }
+        m.insert(peer, now_ms);
+        true
+    }
+
     fn diag_ctx(&self) -> String {
         let profile = self.network_profile_snapshot().mode_label().to_string();
         let coord_cfg = crate::coord_runtime::coord_is_configured();
@@ -975,7 +1000,17 @@ impl SessionState {
             .and_then(|m| m.get(&peer).copied())
             .is_some_and(|t| now_ms.saturating_sub(t) < FRESH_LINK_MS);
         if err_lc.contains("timed out") {
-            if had_ready || fresh_link || self.peer_has_relay_connection(peer) {
+            let stale_direct = peer_has_stale_direct_lan_conn(self, peer);
+            if stale_direct {
+                self.request_dm_link_reset(peer);
+                if let Some(pk) = self
+                    .dm_peer_for_libp2p(peer)
+                    .and_then(|d| d.public_key_hex.clone())
+                {
+                    self.mark_dm_reconnect_urgent(&pk);
+                }
+                notify_coord_lookup();
+            } else if had_ready || fresh_link || self.peer_has_relay_connection(peer) {
                 self.request_dm_stream_reopen(peer);
             } else {
                 self.request_dm_link_reset(peer);
@@ -1315,6 +1350,16 @@ impl SessionState {
         }
     }
 
+    /// Recent inbound/outbound DM frames on the live chat mux (not idle outbox alone).
+    fn dm_mux_recently_active(&self, peer: PeerId, now_ms: i64) -> bool {
+        const ACTIVE_MS: i64 = 15_000;
+        self.dm_wire_activity_ms
+            .read()
+            .ok()
+            .and_then(|m| m.get(&peer).copied())
+            .is_some_and(|t| now_ms.saturating_sub(t) < ACTIVE_MS)
+    }
+
     /// Last confirmed **inbound** DM frame (acks, text, call signals from peer).
     fn note_dm_inbound_activity(&self, peer: PeerId) {
         self.note_dm_wire_activity(peer);
@@ -1417,8 +1462,15 @@ impl SessionState {
         let Ok(m) = self.dm_circuit_dial_in_flight_ms.read() else {
             return false;
         };
+        let limit_ms = if self.is_peer_reconnect_urgent(peer, now_ms)
+            || self.peer_has_pending_wire_work(peer)
+        {
+            CIRCUIT_DIAL_IN_FLIGHT_URGENT_MS
+        } else {
+            CIRCUIT_DIAL_IN_FLIGHT_MS
+        };
         m.get(&peer)
-            .is_some_and(|start| now_ms.saturating_sub(*start) < CIRCUIT_DIAL_IN_FLIGHT_MS)
+            .is_some_and(|start| now_ms.saturating_sub(*start) < limit_ms)
     }
 
     /// Drop stale in-flight circuit dials so a hung hop does not block retries forever.
@@ -1429,12 +1481,19 @@ impl SessionState {
         };
         let mut expired = Vec::new();
         m.retain(|peer, start| {
-            let keep = now_ms.saturating_sub(*start) < CIRCUIT_DIAL_IN_FLIGHT_MS;
+            let limit_ms = if self.is_peer_reconnect_urgent(*peer, now_ms)
+                || self.peer_has_pending_wire_work(*peer)
+            {
+                CIRCUIT_DIAL_IN_FLIGHT_URGENT_MS
+            } else {
+                CIRCUIT_DIAL_IN_FLIGHT_MS
+            };
+            let keep = now_ms.saturating_sub(*start) < limit_ms;
             if !keep {
                 native_log::warn(
                     "dial",
                     format!(
-                        "relay-circuit dial to {peer} timed out ({CIRCUIT_DIAL_IN_FLIGHT_MS}ms) — retry allowed"
+                        "relay-circuit dial to {peer} timed out ({limit_ms}ms) — retry allowed"
                     ),
                 );
                 expired.push(*peer);
@@ -2006,7 +2065,6 @@ impl SessionState {
             g.insert(peer);
         }
         self.clear_stream_open_backoff(peer);
-        self.note_dm_wire_activity(peer);
     }
 
     fn note_disconnected(&self, peer: &PeerId) {
@@ -2243,6 +2301,62 @@ impl SessionState {
         self.pending_read_acks.read().map(|q| q.len()).unwrap_or(0)
     }
 
+    fn has_pending_read_acks_for(&self, peer: PeerId) -> bool {
+        self.pending_read_acks
+            .read()
+            .ok()
+            .is_some_and(|q| q.iter().any(|p| p.peer_id == peer))
+    }
+
+    fn has_pending_delivery_acks_for(&self, peer: PeerId) -> bool {
+        self.pending_delivery_acks
+            .read()
+            .ok()
+            .is_some_and(|q| q.iter().any(|p| p.peer_id == peer))
+    }
+
+    /// Outbox or delivery acks stuck — WAN mux/coord must not treat the link as stable.
+    fn peer_has_pending_outbound_blockers(&self, peer: PeerId) -> bool {
+        self.peer_has_pending_outbox(peer) || self.has_pending_delivery_acks_for(peer)
+    }
+
+    /// Any wire work — urgent reconnect / intent gating (includes read ack backlog).
+    fn peer_has_pending_wire_work(&self, peer: PeerId) -> bool {
+        self.peer_has_pending_outbound_blockers(peer) || self.has_pending_read_acks_for(peer)
+    }
+
+    /// Room enter / leave seed from transcript: disk `read_ack_sent: false` is authoritative.
+    fn enqueue_read_ack_backlog(
+        &self,
+        peer_id: PeerId,
+        inbound_id: &str,
+        recipient_signing: &str,
+    ) -> bool {
+        let id = inbound_id.trim().to_string();
+        if id.is_empty() {
+            return false;
+        }
+        if let Ok(mut s) = self.read_ack_confirmed.write() {
+            s.remove(&id);
+        }
+        let Ok(mut q) = self.pending_read_acks.write() else {
+            return false;
+        };
+        if q.iter().any(|p| p.inbound_id == id) {
+            return false;
+        }
+        if q.len() >= MAX_PENDING_READ_ACKS {
+            q.pop_front();
+        }
+        q.push_back(PendingReadAck {
+            peer_id,
+            inbound_id: id,
+            recipient_public_key_hex: recipient_signing.trim().to_string(),
+            last_send_ms: 0,
+        });
+        true
+    }
+
     fn pending_delivery_ack_len(&self) -> usize {
         self.pending_delivery_acks
             .read()
@@ -2462,6 +2576,16 @@ impl SessionState {
             .read()
             .ok()
             .is_some_and(|s| s.contains(id))
+    }
+
+    fn clear_delivery_ack_sent(&self, inbound_id: &str) {
+        let id = inbound_id.trim();
+        if id.is_empty() {
+            return;
+        }
+        if let Ok(mut s) = self.delivery_ack_sent.write() {
+            s.remove(id);
+        }
     }
 
     fn mark_delivery_ack_sent(&self, inbound_id: &str) {

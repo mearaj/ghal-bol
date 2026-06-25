@@ -21,12 +21,47 @@ fn peer_has_live_mdns_lan(session: &SessionState, peer: PeerId) -> bool {
     session.peer_mdns_lan_addr(peer).is_some()
 }
 
+fn peer_has_lingering_direct(session: &SessionState, peer: PeerId) -> bool {
+    session.peer_has_direct_connection(peer)
+        || session
+            .dm_direct_conn_ids
+            .read()
+            .ok()
+            .is_some_and(|m| m.get(&peer).is_some_and(|s| !s.is_empty()))
+}
+
+/// LAN soft/full kick is active and outbound (text/delivery acks) is not draining — peer likely on WAN.
+fn peer_lan_handover_outbound_stuck(session: &SessionState, peer: PeerId) -> bool {
+    session.lan_listen_rediscovery_requested(peer)
+        && session.peer_has_pending_outbound_blockers(peer)
+}
+
+/// Zombie chat mux: `stream=true` but writer path dead after remote left LAN (flutter_linux.log 07:23+).
+fn peer_needs_wan_mux_reopen(session: &SessionState, peer: PeerId) -> bool {
+    peer_lan_handover_outbound_stuck(session, peer) && session.dm_peer_stream_up(peer)
+}
+
+/// Wi‑Fi side asymmetric LAN↔WAN — stale mDNS/TTL + stuck outbound while remote peer is on cell.
+fn peer_wan_asymmetric_mux_likely(session: &SessionState, peer: PeerId) -> bool {
+    peer_lan_handover_outbound_stuck(session, peer)
+        && (peer_has_lingering_direct(session, peer) || session.dm_peer_stream_up(peer))
+}
+
 /// Parallel LAN+WAN: stream is up on a live path but relay hop is missing — pursue throttled
 /// additive relay dial without treating the chat mux as down (TRANSPORT.md § Both links active).
 fn needs_additive_relay_dial(session: &SessionState, peer: PeerId, connected: bool) -> bool {
     connected
         && crate::coord_runtime::coord_is_configured()
         && !session.peer_has_relay_connection(peer)
+}
+
+/// libp2p-connected on an existing relay hop — one circuit per peer; stream reopen, not re-dial.
+fn peer_wan_relay_connected(
+    swarm: &Swarm<ChatBehaviour>,
+    session: &SessionState,
+    peer: PeerId,
+) -> bool {
+    swarm.is_connected(&peer) && session.peer_has_relay_connection(peer)
 }
 
 /// Remote peer is off LAN but we need a WAN relay path (asymmetric handover).
@@ -40,26 +75,43 @@ fn dm_peer_needs_wan_relay_path(session: &SessionState, peer: PeerId) -> bool {
     if !crate::coord_runtime::coord_is_configured() {
         return false;
     }
+    if peer_wan_asymmetric_mux_likely(session, peer) {
+        return true;
+    }
+    let has_relay = session.peer_has_relay_connection(peer);
+    let has_stale_direct = peer_has_stale_direct_lan_conn(session, peer);
+    if has_relay && has_stale_direct {
+        return true;
+    }
     // Peer is reachable on our LAN right now → parallel LAN+WAN is intended; not a stale mux.
     if peer_has_live_mdns_lan(session, peer) {
         return false;
-    }
-    let has_relay = session.peer_has_relay_connection(peer);
-    let has_direct = peer_has_stale_direct_lan_conn(session, peer);
-    // No live mDNS but a direct LAN mux lingers next to relay — asymmetric handover: the peer
-    // went to WAN/mobile-data; recover the relay mux for acks/outbox (close direct, keep relay).
-    if has_relay && has_direct {
-        return true;
     }
     !has_relay
 }
 
 fn peer_has_stale_direct_lan_conn(session: &SessionState, peer: PeerId) -> bool {
-    session
-        .dm_direct_conn_ids
-        .read()
-        .ok()
-        .is_some_and(|m| m.get(&peer).is_some_and(|s| !s.is_empty()))
+    if !peer_has_lingering_direct(session, peer) {
+        return false;
+    }
+    // mDNS cache or on-LAN TTL can lie after remote Wi‑Fi→mobile handover — trust stuck outbound.
+    if peer_has_live_mdns_lan(session, peer) {
+        return peer_lan_handover_outbound_stuck(session, peer);
+    }
+    // Fresh private-IP direct connect — parallel relay+direct on Wi‑Fi until outbound proves otherwise.
+    if session.peer_on_local_lan(peer) {
+        return peer_lan_handover_outbound_stuck(session, peer);
+    }
+    true
+}
+
+/// Relay already established but a stale direct LAN mux lingers — recover on the existing relay
+/// (close direct + stream reopen), not by opening another circuit (TRANSPORT.md § Asymmetric mux).
+fn asymmetric_relay_recover_on_existing_link(session: &SessionState, peer: PeerId) -> bool {
+    if peer_wan_asymmetric_mux_likely(session, peer) {
+        return true;
+    }
+    session.peer_has_relay_connection(peer) && peer_has_stale_direct_lan_conn(session, peer)
 }
 
 /// Do not open a chat stream on a dead direct LAN mux while WAN relay recovery is pending.
@@ -67,10 +119,13 @@ fn should_defer_stream_open_for_wan_mux(session: &SessionState, peer: PeerId) ->
     if !dm_peer_needs_wan_relay_path(session, peer) {
         return false;
     }
-    if peer_has_stale_direct_lan_conn(session, peer) {
-        return true;
+    // Relay link already up — open/attach stream on it; reconcile closes stale direct in parallel.
+    // Deferring here while relay+stale-direct both exist deadlocked outbox after LAN→WAN (2026-06-25).
+    if session.peer_has_relay_connection(peer) {
+        return false;
     }
-    !session.peer_has_relay_connection(peer)
+    // No relay yet — do not attach stream to a stale direct mux while coord dials WAN.
+    true
 }
 
 /// Connected DM with an open chat stream — discovery/coord/identify noop (protonet-as-reference).
@@ -82,13 +137,24 @@ fn dm_peer_chat_link_stable(
     now_ms: i64,
 ) -> bool {
     if session.dm_peer_stream_up(peer) {
-        // Stale LAN-only mux while peer is on mobile-data — must coord-dial relay (ticks/acks).
+        if session.peer_has_relay_connection(peer) {
+            if peer_wan_asymmetric_mux_likely(session, peer) || peer_needs_wan_mux_reopen(session, peer) {
+                return false;
+            }
+            return true;
+        }
         if dm_peer_needs_wan_relay_path(session, peer) {
             return false;
         }
         return true;
     }
     if !swarm.is_connected(&peer) {
+        return false;
+    }
+    // LAN→WAN handover (TRANSPORT.md § Asymmetric mux): libp2p stays connected on a dead
+    // direct LAN mux while the peer is on mobile-data. Must not treat this as stable — that
+    // skips coord lookup and leaves chat broken until mDNS Expired (minutes).
+    if !peer_has_live_mdns_lan(session, peer) && session.peer_has_direct_connection(peer) {
         return false;
     }
     if session.dm_link_needs_recovery(peer, now_ms) {
@@ -99,11 +165,7 @@ fn dm_peer_chat_link_stable(
             return false;
         }
     }
-    session
-        .chat_ready_emitted
-        .read()
-        .ok()
-        .is_some_and(|g| g.contains(&peer))
+    false
 }
 
 /// dm_upkeep coord loop — skip when stable mux **and** relay link exist (parallel LAN+WAN).
@@ -114,13 +176,40 @@ fn coord_lookup_upkeep_satisfied(
     pk: &str,
     now_ms: i64,
 ) -> bool {
-    if !dm_peer_chat_link_stable(swarm, session, peer, Some(pk), now_ms) {
+    // Foreground / intent peer during LAN handover — must coord-lookup even if conn=true (07:23 logs).
+    if session.lan_listen_rediscovery_requested(peer)
+        && (session.is_foreground_peer(peer)
+            || session.has_pending_outbox_for_pk(pk)
+            || session.peer_has_pending_outbound_blockers(peer))
+    {
         return false;
     }
-    if crate::coord_runtime::coord_is_configured() && !session.peer_has_relay_connection(peer) {
+    if peer_wan_asymmetric_mux_likely(session, peer) {
         return false;
     }
-    true
+    if dm_peer_chat_link_stable(swarm, session, peer, Some(pk), now_ms) {
+        if crate::coord_runtime::coord_is_configured() && !session.peer_has_relay_connection(peer) {
+            return false;
+        }
+        return true;
+    }
+    // Relay hop up but chat mux down — intent peers must enter the lookup/reopen path.
+    // (Returning true here skipped recovery while outbox resync ran into a dead mux.)
+    if peer_wan_relay_connected(swarm, session, peer) {
+        if peer_has_stale_direct_lan_conn(session, peer) {
+            return false;
+        }
+        if !session.dm_peer_stream_up(peer)
+            && (session.peer_has_pending_outbox(peer)
+                || session.is_foreground_peer(peer)
+                || session.is_peer_reconnect_urgent(peer, now_ms)
+                || session.has_pending_read_acks_for(peer))
+        {
+            return false;
+        }
+        return true;
+    }
+    false
 }
 
 fn coord_dial_from_lookup_addrs(
@@ -134,6 +223,34 @@ fn coord_dial_from_lookup_addrs(
 ) {
     if addrs.is_empty() {
         return;
+    }
+    // One relay circuit per contact — attach/reopen stream on the existing hop (TRANSPORT.md § one mux).
+    if peer_wan_relay_connected(swarm, session, target) {
+        if !session.dm_peer_stream_up(target) {
+            session.request_dm_stream_reopen(target);
+        }
+        return;
+    }
+    let needs_relay_dial = addrs
+        .iter()
+        .any(crate::p2p::network_transport::is_relay_circuit_multiaddr);
+    if needs_relay_dial && !own_bootstrap_ready_for_peer_relay_dial(session) {
+        if session.should_log_dial_skip(target, now_ms, 8_000) {
+            native_log::info(
+                "coord",
+                format!(
+                    "skip peer relay dial {target}: own bootstrap TCP not up — finish relay reservation first"
+                ),
+            );
+        }
+        return;
+    }
+    // LAN→WAN: close dead direct mux before coord relay dial (desktop Wi‑Fi while peer on cell).
+    if !peer_has_live_mdns_lan(session, target)
+        && swarm.is_connected(&target)
+        && session.peer_has_direct_connection(target)
+    {
+        apply_peer_left_local_lan(swarm, session, target);
     }
     let wan_additive_now =
         swarm.is_connected(&target) && crate::coord_runtime::coord_is_configured();
@@ -226,6 +343,27 @@ async fn coord_lookup_dm_peer(
         return;
     };
     let connected = swarm.is_connected(&target);
+    if session.circuit_dial_in_flight_blocks(target, now_ms) {
+        if peer_connect_trace_enabled(session, target)
+            && session.should_log_dial_skip(target, now_ms, 5_000)
+        {
+            native_log::debug(
+                "coord",
+                format!("lookup skip {target} — relay circuit dial in flight"),
+            );
+        }
+        return;
+    }
+    if peer_wan_relay_connected(swarm, session, target)
+        && !peer_has_stale_direct_lan_conn(session, target)
+    {
+        if !session.dm_peer_stream_up(target)
+            && session.peer_has_pending_wire_work(target)
+        {
+            notify_stream_reopen();
+        }
+        return;
+    }
     // Stable chat mux on an existing link — skip coord churn unless WAN relay is not up yet.
     if dm_peer_chat_link_stable(swarm, session, target, Some(pk), now_ms) {
         let needs_relay = crate::coord_runtime::coord_is_configured()
@@ -302,6 +440,12 @@ async fn coord_lookup_dm_peer(
                     let dial_now = chrono_now_ms();
                     let wan_additive_now = swarm.is_connected(&target)
                         && crate::coord_runtime::coord_is_configured();
+                    if peer_wan_relay_connected(swarm, session, target) {
+                        if !session.dm_peer_stream_up(target) {
+                            session.request_dm_stream_reopen(target);
+                        }
+                        return;
+                    }
                     if dm_peer_chat_link_stable(swarm, session, target, Some(pk), dial_now)
                         && !needs_additive_relay_dial(session, target, wan_additive_now)
                     {
@@ -377,6 +521,19 @@ async fn run_dm_coord_lookup_pass(
     now_ms: i64,
     force_wake: bool,
 ) {
+    // Peer relay circuits cancel each other (oneshot) while our bootstrap TCP is still down.
+    if crate::coord_runtime::coord_is_configured()
+        && !own_bootstrap_ready_for_peer_relay_dial(session)
+        && !relay_circuit_listening(swarm)
+    {
+        if session.should_log_dial_skip(bootstrap_defer_log_peer(), now_ms, 8_000) {
+            native_log::info(
+                "coord",
+                "lookup pass deferred — own bootstrap TCP not up (WAN path first)",
+            );
+        }
+        return;
+    }
     let mut lk_urgent = 0usize;
     let mut lk_priority = 0usize;
     let mut bg_eligible = 0usize;

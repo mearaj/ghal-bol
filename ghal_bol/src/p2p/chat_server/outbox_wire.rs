@@ -25,6 +25,13 @@ fn emit_chat_ready_if_can_send(
             "stream",
             format!("chat_ready {peer} — chat stream open, can send now (outbox_pending={has_outbox})"),
         );
+        if let Some(pk) = session
+            .dm_peer_for_libp2p(peer)
+            .and_then(|d| d.public_key_hex.clone())
+            .filter(|pk| pk.len() == 66)
+        {
+            session.clear_dm_reconnect_urgent(&pk);
+        }
         if let Some(tx) = events_tx.clone() {
             let _ = tx.send(GossipChatEvent::ChatReady { peer_id: peer });
         }
@@ -58,6 +65,13 @@ fn emit_chat_ready_if_can_send(
             events_tx.clone(),
         )
         .await;
+        // Drain in-room read-ack backlog once the mux is live. Do not seed transcript here —
+        // handover must not mark unread mail read; only rows already queued at room enter/leave.
+        if session2.has_pending_read_acks_for(peer)
+            && may_wire_read_ack_upkeep(session2.as_ref(), peer)
+        {
+            run_ack_upkeep_burst(session2.clone(), writers2.clone(), peer).await;
+        }
         // Read receipts: only on room enter (`RunReadAckCatchup` / `SetForegroundPeer`), inbound
         // text while in-room, leave drain, and ack upkeep — never on automatic stream reopen
         // after network handover (would mark unread mail read on the sender).
@@ -145,29 +159,46 @@ fn writer_open_for_peer(writers: &StreamWriters, peer: PeerId) -> bool {
     writers.lock().ok().is_some_and(|g| g.contains_key(&peer))
 }
 
+/// Drop the mux writer and schedule reopen — must clear both the flag and the writers map.
+pub(crate) fn invalidate_dm_chat_stream(
+    session: &SessionState,
+    writers: &StreamWriters,
+    peer: PeerId,
+) {
+    if let Ok(mut g) = writers.lock() {
+        g.remove(&peer);
+    }
+    session.set_dm_stream_writer(peer, false);
+    session.clear_chat_ready_emitted(peer);
+    if let Ok(mut g) = session.stream_open_inflight.write() {
+        g.remove(&peer);
+    }
+    notify_stream_reopen();
+}
+
 pub(crate) fn spawn_leave_read_ack_drain(
     session: Arc<SessionState>,
     writers: StreamWriters,
     left: PeerId,
+    control: stream::Control,
 ) {
-    if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&left) {
-        seed_read_acks_for_peer_from_transcript(session.as_ref(), left);
-        native_log::info(
-            "read_ack",
-            format!(
-                "chat room leave {pk} — drain ack_read for in-room backlog (new mail: recv only)"
-            ),
-        );
-    }
+    seed_read_acks_for_peer_from_transcript(session.as_ref(), left);
+    let pk_label = secp256k1_public_key_hex_from_peer_id(&left).unwrap_or_else(|| left.to_string());
+    native_log::info(
+        "read_ack",
+        format!(
+            "chat room leave {pk_label} — drain ack_read for in-room backlog (new mail: recv only)"
+        ),
+    );
     tokio::spawn(async move {
-        read_ack_catchup_for_peer(session, writers, left, false, false).await;
+        read_ack_catchup_for_peer(session, writers, left, true, false, Some(control)).await;
     });
 }
 
 fn is_transient_outbound_error(err: &str) -> bool {
     let e = err.to_lowercase();
     e.contains("connecting to peer")
-        || e.contains("chat stream opening")
+        || e.contains("writer wait timed out")
         || e.contains("chat stream not ready")
         || e.contains("wait until connected")
         || e.contains("open_stream")
@@ -197,6 +228,15 @@ fn send_frame_on_open_stream(
     frame: Vec<u8>,
     writers: &StreamWriters,
 ) -> Result<(), String> {
+    queue_frame_on_open_stream(peer, frame, writers, None)
+}
+
+fn queue_frame_on_open_stream(
+    peer: PeerId,
+    frame: Vec<u8>,
+    writers: &StreamWriters,
+    written: Option<tokio::sync::oneshot::Sender<bool>>,
+) -> Result<(), String> {
     let tx = {
         let g = writers
             .lock()
@@ -206,6 +246,10 @@ fn send_frame_on_open_stream(
     let Some(tx) = tx else {
         return Err("no chat stream to peer yet — wait until connected".to_string());
     };
-    tx.send(frame).map_err(|_| "chat stream closed".to_string())
+    tx.send(StreamWireItem::Frame {
+        bytes: frame,
+        written,
+    })
+    .map_err(|_| "chat stream closed".to_string())
 }
 

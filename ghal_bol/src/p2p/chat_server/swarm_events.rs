@@ -322,7 +322,9 @@ fn handle_swarm_event(
                     if is_relay {
                         session.request_dm_stream_reopen(peer_id);
                         notify_coord_lookup();
-                        if session.peer_has_pending_outbox(peer_id) {
+                        if session.peer_has_pending_wire_work(peer_id)
+                            || session.is_foreground_peer(peer_id)
+                        {
                             if let Some(pk) = session
                                 .dm_peer_for_libp2p(peer_id)
                                 .and_then(|d| d.public_key_hex.clone())
@@ -614,6 +616,14 @@ fn handle_swarm_event(
                 );
                 if session.is_dm_contact(src_peer_id) {
                     session.note_relay_circuit_pending_peer(src_peer_id);
+                    // Remote peer re-dialed on relay after leaving LAN — kick WAN mux recovery on
+                    // the Wi‑Fi side (asymmetric inbound-only duplicate mux, 07:23 logs).
+                    if peer_wan_asymmetric_mux_likely(session, src_peer_id)
+                        || peer_needs_wan_mux_reopen(session, src_peer_id)
+                    {
+                        session.request_dm_stream_reopen(src_peer_id);
+                        notify_coord_lookup();
+                    }
                 }
             }
             libp2p::relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {

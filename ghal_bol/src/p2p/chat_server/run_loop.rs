@@ -240,8 +240,8 @@ pub async fn run_gossip_chat_node_with_std_io(
                     }
                 }
                 session.expire_stale_lan_dials(now_ms);
-                reconcile_all_stale_lan_mux_for_wan(&mut swarm, session.as_ref());
-                apply_pending_dm_link_resets(&mut swarm, session.as_ref());
+                reconcile_all_stale_lan_mux_for_wan(&mut swarm, session.as_ref(), &writers);
+                apply_pending_dm_link_resets(&mut swarm, session.as_ref(), &writers);
                 let coord_lookup_wake = take_coord_lookup_notify();
                 if take_dm_presence_wake_notify() && session.should_run_presence_wake(now_ms) {
                     native_log::info(

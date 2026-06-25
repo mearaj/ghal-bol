@@ -436,6 +436,23 @@ fn relay_circuit_listening(swarm: &Swarm<ChatBehaviour>) -> bool {
         .any(crate::p2p::network_transport::is_coord_ipv4_relay_listen)
 }
 
+/// Outbound peer relay dials need our bootstrap TCP HOP up — otherwise circuits cancel each other.
+fn own_bootstrap_ready_for_peer_relay_dial(session: &SessionState) -> bool {
+    session
+        .any_bootstrap_connected
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Throttle key for global "defer coord lookup until bootstrap up" logs (not a dial target).
+fn bootstrap_defer_log_peer() -> PeerId {
+    static PEER: std::sync::OnceLock<PeerId> = std::sync::OnceLock::new();
+    *PEER.get_or_init(|| {
+        use std::str::FromStr;
+        PeerId::from_str("12D3KooWEywitWCf3SYpaHbLSmP2CMyRUAQH7qF8JmUp6q6B7Ekk")
+            .expect("bootstrap defer log peer")
+    })
+}
+
 /// Relays eligible for circuit reservation (connected bootstrap HOP, not already circuit-listening).
 fn eligible_relays_for_reservation(
     swarm: &Swarm<ChatBehaviour>,

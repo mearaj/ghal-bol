@@ -293,7 +293,13 @@ async fn process_outbound_cmd(
     }
     if let OutboundCmd::RunReadAckCatchup { peer_id } = &cmd {
         let peer = *peer_id;
+        // Always seed from transcript first — throttle only the burst drain (hub nudge / resume).
+        seed_read_acks_for_peer_from_transcript(session.as_ref(), peer);
         if !may_send_in_room_read_ack(session.as_ref(), peer) {
+            native_log::debug(
+                "read_ack",
+                format!("catch-up {peer} deferred — read gate off; transcript backlog seeded"),
+            );
             return Ok(());
         }
         if read_ack_catchup_throttled(peer, chrono_now_ms()) {
@@ -303,14 +309,11 @@ async fn process_outbound_cmd(
             "read_ack",
             format!("read gate opened — catch-up ack_read for foreground {peer}"),
         );
-        seed_read_acks_for_peer_from_transcript(session.as_ref(), peer);
         let session2 = Arc::clone(&session);
         let writers2 = Arc::clone(&writers);
+        let control2 = control.clone();
         tokio::spawn(async move {
-            if !may_send_in_room_read_ack(session2.as_ref(), peer) {
-                return;
-            }
-            read_ack_catchup_for_peer(session2, writers2, peer, true, true).await;
+            read_ack_catchup_for_peer(session2, writers2, peer, true, false, Some(control2)).await;
         });
         return Ok(());
     }
@@ -343,7 +346,12 @@ async fn process_outbound_cmd(
                 Some(new) => *new != left,
             };
             if leaving {
-                spawn_leave_read_ack_drain(Arc::clone(&session), Arc::clone(&writers), left);
+                spawn_leave_read_ack_drain(
+                    Arc::clone(&session),
+                    Arc::clone(&writers),
+                    left,
+                    control.clone(),
+                );
             }
         }
         if peer_id.is_none() {
@@ -379,13 +387,15 @@ async fn process_outbound_cmd(
         }
         let session2 = Arc::clone(&session);
         let writers2 = Arc::clone(&writers);
+        let control2 = control.clone();
         tokio::spawn(async move {
-            if session2.current_foreground_peer() != Some(peer)
-                || !may_send_in_room_read_ack(session2.as_ref(), peer)
-            {
+            if session2.current_foreground_peer() != Some(peer) {
                 return;
             }
-            read_ack_catchup_for_peer(session2, writers2, peer, true, true).await;
+            if !may_send_in_room_read_ack(session2.as_ref(), peer) {
+                return;
+            }
+            read_ack_catchup_for_peer(session2, writers2, peer, true, false, Some(control2)).await;
         });
         return Ok(());
     }
@@ -637,7 +647,7 @@ async fn process_outbound_cmd(
     )
     .await;
     if !writer_open_for_peer(&writers, peer) {
-        let err = "chat stream opening — try send again shortly".to_string();
+        let err = format!("open_stream writer wait timed out for {peer}");
         native_log::info("stream", format!("{err} (peer={peer})"));
         if let Some(done) = done {
             let _ = done.send(Err(err.clone()));

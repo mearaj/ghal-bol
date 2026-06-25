@@ -43,11 +43,8 @@ async fn send_frame_to_peer(
     writers: StreamWriters,
     session: Option<&SessionState>,
 ) -> Result<(), String> {
-    send_frame_on_open_stream(peer, frame, &writers)?;
-    if let Some(s) = session {
-        s.note_dm_wire_activity(peer);
-    }
-    Ok(())
+    let _ = session;
+    send_frame_on_open_stream(peer, frame, &writers)
 }
 
 fn stream_read_is_terminal(err: &str) -> bool {
@@ -73,7 +70,7 @@ async fn handle_inbound_stream(
         return;
     }
     let (mut reader, writer) = stream.split();
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::unbounded_channel::<StreamWireItem>();
 
     let owns_writer = {
         let mut owns = false;
@@ -108,8 +105,16 @@ async fn handle_inbound_stream(
         let session_w = Arc::clone(&session);
         Some(tokio::spawn(async move {
             let mut rx = rx;
-            while let Some(frame) = rx.recv().await {
-                if write_frame(&mut writer, &frame).await.is_err() {
+            while let Some(item) = rx.recv().await {
+                let StreamWireItem::Frame { bytes, written } = item;
+                let ok = write_frame(&mut writer, &bytes).await.is_ok();
+                if ok {
+                    session_w.note_dm_wire_activity(peer);
+                }
+                if let Some(done) = written {
+                    let _ = done.send(ok);
+                }
+                if !ok {
                     break;
                 }
             }
@@ -349,6 +354,7 @@ async fn handle_inbound_stream(
                         });
                     }
                 } else {
+                    session.clear_delivery_ack_sent(&t.id);
                     native_log::debug(
                         "stream",
                         format!("duplicate text id={} from {peer} — ack retry only", t.id),

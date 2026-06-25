@@ -180,7 +180,7 @@ pub fn explain_outgoing_dial_error(err: &str) -> (&'static str, &'static str) {
         return (
             "relay circuit denied — ResourceLimitExceeded on coord relay",
             "Server relay rate limiters or circuit pool full — redeploy ghal_bol_server with \
-             cleared circuit_src_rate_limiters; client backs off 90s.",
+             cleared circuit_src_rate_limiters; client backs off (15s urgent / 90s idle).",
         );
     }
     if e.contains("p2p-circuit") {

@@ -743,6 +743,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
         final pk = contactKeyFromEvent(ev);
         if (_openRoomMatchesPeerKey(pk)) {
           _scheduleReadGateNudge(reason: "inbound_text");
+          if (ev["stores_updated"] == true) {
+            setState(() {});
+          }
         }
       }
     }

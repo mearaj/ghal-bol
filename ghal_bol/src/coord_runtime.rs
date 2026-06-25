@@ -378,6 +378,8 @@ fn peer_record_has_relay_circuit(record: &crate::coord::CoordPeerRecord) -> bool
 /// During LAN↔WAN handover coord HTTP may flap while the relay server still has our circuit.
 /// Blocking HTTP — call only from a std thread (heartbeat, relay-presence poll, spawn_blocking).
 /// Do **not** call from the libp2p tokio task (reqwest::blocking runtime drop panics).
+/// Blocking HTTP — call only from a std thread (heartbeat, relay-presence poll, spawn_blocking).
+/// Do **not** call from the libp2p tokio task (reqwest::blocking runtime drop panics).
 pub fn try_restore_relay_presence_from_coord() -> bool {
     let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
         return false;

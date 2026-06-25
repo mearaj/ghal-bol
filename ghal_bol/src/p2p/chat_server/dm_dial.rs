@@ -64,11 +64,11 @@ async fn resync_pending_outbox(
         };
         if !writer_open_for_peer(&writers, send_peer) {
             if let Some(ctrl) = control.as_ref() {
-                open_outbound_stream_if_needed(
+                ensure_dm_chat_stream(
                     send_peer,
-                    ctrl.clone(),
-                    Arc::clone(&writers),
                     Arc::clone(&session),
+                    Arc::clone(&writers),
+                    ctrl.clone(),
                     events_tx.clone(),
                 )
                 .await;
@@ -101,7 +101,7 @@ async fn resync_pending_outbox(
             }
             Err(e) => {
                 session.mark_outbox_send_failed(&p.message_id, now);
-                session.request_dm_stream_reopen(send_peer);
+                invalidate_dm_chat_stream(session.as_ref(), &writers, send_peer);
                 native_log::debug(
                     "outbox",
                     format!("resync send failed msg_id={}: {e}", p.message_id),
@@ -149,11 +149,11 @@ async fn resync_outbox_burst_for_peer(
     for p in rows {
         if !writer_open_for_peer(&writers, peer) {
             if let Some(ctrl) = control.as_ref() {
-                open_outbound_stream_if_needed(
+                ensure_dm_chat_stream(
                     peer,
-                    ctrl.clone(),
-                    Arc::clone(&writers),
                     Arc::clone(&session),
+                    Arc::clone(&writers),
+                    ctrl.clone(),
                     events_tx.clone(),
                 )
                 .await;
@@ -176,6 +176,7 @@ async fn resync_outbox_burst_for_peer(
             }
             Err(e) => {
                 session.mark_outbox_send_failed(&p.message_id, now);
+                invalidate_dm_chat_stream(session.as_ref(), &writers, peer);
                 native_log::warn(
                     "outbox",
                     format!("burst send failed msg_id={}: {e}", p.message_id),
@@ -215,15 +216,19 @@ fn spawn_reopen_dm_chat_streams(
         let events_tx2 = events_tx.clone();
         let control2 = control.clone();
         tokio::spawn(async move {
-            open_outbound_stream_if_needed(pid, control2, writers2, session2, events_tx2).await;
+            ensure_dm_chat_stream(pid, session2, writers2, control2, events_tx2).await;
         });
     }
 }
 
 /// Drop a stale LAN-only mux when the peer needs a relay circuit (asymmetric LAN↔WAN handover).
-fn reconcile_all_stale_lan_mux_for_wan(swarm: &mut Swarm<ChatBehaviour>, session: &SessionState) {
+fn reconcile_all_stale_lan_mux_for_wan(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+    writers: &StreamWriters,
+) {
     for peer in session.dm_peer_ids() {
-        reconcile_stale_lan_mux_for_wan(swarm, session, peer);
+        reconcile_stale_lan_mux_for_wan(swarm, session, writers, peer);
     }
 }
 
@@ -250,29 +255,59 @@ fn wan_mux_reconcile_throttled(peer: PeerId, now_ms: i64) -> bool {
 fn reconcile_stale_lan_mux_for_wan(
     swarm: &mut Swarm<ChatBehaviour>,
     session: &SessionState,
+    writers: &StreamWriters,
     peer: PeerId,
 ) {
-    if !dm_peer_needs_wan_relay_path(session, peer) {
+    let asymmetric = peer_wan_asymmetric_mux_likely(session, peer);
+    if !dm_peer_needs_wan_relay_path(session, peer) && !asymmetric {
         return;
     }
-    if !swarm.is_connected(&peer) {
+    if !swarm.is_connected(&peer) && !session.dm_peer_stream_up(peer) {
         return;
     }
-    if !session.dm_peer_stream_up(peer) && !peer_has_stale_direct_lan_conn(session, peer) {
+    let stale_direct = peer_has_stale_direct_lan_conn(session, peer);
+    let mux_reopen = peer_needs_wan_mux_reopen(session, peer);
+    if !stale_direct && !mux_reopen {
         return;
     }
     let now_ms = chrono_now_ms();
     if wan_mux_reconcile_throttled(peer, now_ms) {
         return;
     }
-    native_log::info(
-        "stream",
-        format!("reopen {peer} — peer off LAN; recover WAN mux for acks/outbox"),
-    );
-    session.request_dm_stream_reopen(peer);
-    if peer_has_stale_direct_lan_conn(session, peer) {
+    // Bidirectional mux with a live writer — do not tear down mid-flight. Inbound-only
+    // activity on a read-only duplicate stream must not block asymmetric LAN↔WAN recovery.
+    if writer_open_for_peer(writers, peer)
+        && session.dm_mux_recently_active(peer, now_ms)
+        && !session.peer_has_pending_outbound_blockers(peer)
+    {
+        return;
+    }
+    session.clear_peer_stale_lan_cache(peer);
+
+    if stale_direct && session.peer_has_relay_connection(peer) {
+        native_log::info(
+            "stream",
+            format!("close stale direct {peer} — chat stream up, relay kept"),
+        );
+        close_direct_dm_connections(swarm, session, peer);
+        if !mux_reopen {
+            session.request_dm_stream_reopen(peer);
+            notify_coord_lookup();
+            return;
+        }
+    }
+
+    if mux_reopen || (stale_direct && !session.peer_has_relay_connection(peer)) {
+        native_log::info(
+            "stream",
+            format!("reopen {peer} — peer off LAN; recover WAN mux for acks/outbox"),
+        );
+        invalidate_dm_chat_stream(session, writers, peer);
         if session.peer_has_relay_connection(peer) {
-            close_direct_dm_connections(swarm, session, peer);
+            if stale_direct {
+                close_direct_dm_connections(swarm, session, peer);
+            }
+            session.request_dm_stream_reopen(peer);
         } else {
             session.request_dm_link_reset(peer);
             if let Some(pk) = session
@@ -295,12 +330,18 @@ fn upkeep_dm_peers(
     events_tx: Option<std::sync::mpsc::Sender<GossipChatEvent>>,
 ) {
     let mut peers: Vec<PeerId> = session.dm_peer_ids();
-    peers.sort_by_key(|p| (!session.peer_has_pending_outbox(*p), *p));
+    peers.sort_by_key(|p| (!session.peer_has_pending_wire_work(*p), *p));
     for peer in peers {
         if session.dm_peer_stream_up(peer) {
+            if asymmetric_relay_recover_on_existing_link(session.as_ref(), peer) {
+                reconcile_stale_lan_mux_for_wan(swarm, session.as_ref(), &writers, peer);
+            }
             continue;
         }
         if swarm.is_connected(&peer) {
+            if asymmetric_relay_recover_on_existing_link(session.as_ref(), peer) {
+                reconcile_stale_lan_mux_for_wan(swarm, session.as_ref(), &writers, peer);
+            }
             if should_defer_stream_open_for_wan_mux(session.as_ref(), peer) {
                 if peer_connect_trace_enabled(session.as_ref(), peer)
                     && session.should_log_dial_skip(peer, chrono_now_ms(), 5_000)
@@ -321,8 +362,7 @@ fn upkeep_dm_peers(
                 let events_tx2 = events_tx.clone();
                 let control2 = control.clone();
                 tokio::spawn(async move {
-                    open_outbound_stream_if_needed(peer, control2, writers2, session2, events_tx2)
-                        .await;
+                    ensure_dm_chat_stream(peer, session2, writers2, control2, events_tx2).await;
                 });
             }
             continue;
@@ -360,6 +400,9 @@ fn peer_has_pending_outbox(session: &SessionState, peer: PeerId) -> bool {
 
 fn dm_connect_is_urgent(session: &SessionState, peer: PeerId, now_ms: i64) -> bool {
     if session.is_peer_reconnect_urgent(peer, now_ms) {
+        return true;
+    }
+    if session.peer_has_pending_wire_work(peer) {
         return true;
     }
     if session.network_profile_snapshot().has_active_lan() && session.peer_has_pending_outbox(peer) {
@@ -590,14 +633,17 @@ fn connect_dm_peer_now(swarm: &mut Swarm<ChatBehaviour>, session: &SessionState,
 }
 
 /// Tear down one-sided libp2p links where `open_stream` timed out (peer never mux-ready).
-fn apply_pending_dm_link_resets(swarm: &mut Swarm<ChatBehaviour>, session: &SessionState) {
+fn apply_pending_dm_link_resets(
+    swarm: &mut Swarm<ChatBehaviour>,
+    session: &SessionState,
+    writers: &StreamWriters,
+) {
     for peer in session.take_pending_dm_link_resets() {
         if !swarm.is_connected(&peer) {
             continue;
         }
         session.clear_lan_dial_in_flight(peer);
-        session.set_dm_stream_writer(peer, false);
-        session.clear_chat_ready_emitted(peer);
+        invalidate_dm_chat_stream(session, writers, peer);
         if session.peer_has_relay_connection(peer) {
             if peer_has_stale_direct_lan_conn(session, peer) {
                 native_log::info(

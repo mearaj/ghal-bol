@@ -149,7 +149,7 @@ until ack_received or ack_read          until written on wire
 
 Native code: `send_inbound_delivery_ack`, `send_inbound_read_ack_if_possible`, `pending_delivery_acks` / `pending_read_acks` in `chat_server.rs`. Runs in **`:p2p` / daemon** — not in the Flutter isolate.
 
-**Zombie mux recovery (2026-06-24):** If the stream writer flag is set but frames fail (`send_ack_frame` / outbox resync error while `writer_open_for_peer`), native calls **`request_dm_stream_reopen`** — not Flutter poll. Symptom: repeating `resync N pending` with `conn=true,stream=true`. Canonical: [TRANSPORT.md](TRANSPORT.md) § **Post-mortem 2026-06-24** (relay path closed, other path still open).
+**Zombie mux recovery (2026-06-24, extended 2026-06-25):** If the stream writer flag is set but frames fail (`send_ack_frame` / outbox resync error while `writer_open_for_peer`), native calls **`request_dm_stream_reopen`** — not Flutter poll. Symptom: repeating `resync N pending` with `conn=true,stream=true`. **2026-06-25:** after LAN→mobile handover, Wi‑Fi side may keep zombie **direct** mux while phone is on relay — inbound works, outbound never gets `ack_received`; fix is asymmetric mux detection + coord lookup for foreground peer ([TRANSPORT.md](TRANSPORT.md) § **Post-mortem 2026-06-25**). **Known follow-on:** once mux recovers, pending outbox and acks may **burst** in one drain (`burst resync N pending row(s)`) — multi-second stalls between bursts during handover are transport-level, not a Dart poll bug; do not route through `NetworkHelper`.
 
 ### Sender lifecycle
 
@@ -598,7 +598,7 @@ The connect layer that made the original serverless libp2p build reliable: **bot
 
 **Target latency:** when a route exists, `peer_connected` → `chat_ready` within **seconds**, as in the original build — not minutes of blocked paths.
 
-**Violations (regressions):** tearing down relay when direct LAN connects; separate LAN/WAN message stores; downgrading `read` → `delivered` on duplicate acks; Flutter dial or transcript policy; uncoordinated dial spam (many dials/s per peer); **`dm_peer_chat_link_stable=false` solely because relay hop missing**; clearing **`circuit_dial_in_flight`** on urgent reconnect; blocking coord HTTP on tokio swarm loop. See [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”, § **Post-mortem 2026-06-24**.
+**Violations (regressions):** tearing down relay when direct LAN connects; separate LAN/WAN message stores; downgrading `read` → `delivered` on duplicate acks; Flutter dial or transcript policy; uncoordinated dial spam (many dials/s per peer); **`dm_peer_chat_link_stable=false` solely because relay hop missing**; clearing **`circuit_dial_in_flight`** on urgent reconnect; blocking coord HTTP on tokio swarm loop; **skipping coord lookup for foreground/outbox peer during LAN handover** ([TRANSPORT.md](TRANSPORT.md) § **Post-mortem 2026-06-25**). See [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”, § **Post-mortem 2026-06-24**, § **Post-mortem 2026-06-25**.
 
 ### Unified message state (E) — single source of truth (2026-06-17)
 
@@ -714,7 +714,7 @@ Rules:
 When two contacts are both online the link must stay **steady** and recover instantly from blips — never an idle drop or a backoff-delayed reconnect that the user perceives as lag. Native (`chat_server.rs`) enforces this; see [TRANSPORT.md](TRANSPORT.md) § “Steady connection”:
 
 - **Keepalive ping** keeps an idle DM/relay connection alive (ping interval **15s** < `idle_connection_timeout` 45s/300s), so the next message reuses the live link instead of paying a reconnect.
-- **Urgent reconnect** after `dm connection closed`: the peer’s key is urgent for ~30s — coord lookup **skips** the `peer_not_on_server` backoff and the 1s upkeep tick retries immediately (`mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent`), cleared on reconnect.
+- **Urgent reconnect** after `dm connection closed`: the peer’s key is urgent for ~30s — coord lookup **skips** the `peer_not_on_server` backoff and the 1s upkeep tick retries immediately (`mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent`), cleared on **`chat_ready`** (live mux — not bare libp2p `ConnectionEstablished`; `conn=true` alone is not reconnect per TRANSPORT.md § Post-mortem 2026-06-24).
 - **Reserve on all configured coord relays in parallel, throttled per relay** (`try_relay_reservations` / `try_relay_reservation`, per-relay `RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or WAN peer discovery ([TRANSPORT.md](TRANSPORT.md) § Connectivity lifecycle).
 - **CGNAT/mobile:** throttle bootstrap relay dials (`issue_bootstrap_dials`); probe-style `listen_on` at startup and when bootstrap TCP is not up yet — § “CGNAT / mobile-data relay reservation” in TRANSPORT.md. **Both peers** must `reservation accepted` + coord register for **bidirectional** coord visibility; one-sided success still means no chat. **Outbound** dial to a peer’s relay circuit after coord lookup does **not** wait for own reservation — see TRANSPORT.md § “Outbound peer relay dials vs own reservation”.
 

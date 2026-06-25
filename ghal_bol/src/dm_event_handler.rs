@@ -11,8 +11,7 @@ use crate::contacts_v1::{
     merge_discovered_peer_id, record_inbound_preview, upsert_contact,
 };
 use crate::dm_transcript_store::{
-    StoredChatLine, append_if_new, load_merged, patch_inbound_read_ack_sent_for_thread,
-    patch_outgoing_delivery,
+    StoredChatLine, append_if_new, load_merged, patch_outgoing_delivery,
 };
 use crate::flow_log::{self, short_hex};
 use crate::public_key_util::same_contact_pk;
@@ -558,25 +557,8 @@ fn apply_inbound_ack(ns: &str, ev: &Value, msg_kind: &str) -> bool {
                 }
             }
         }
-        if has_inbound {
-            match patch_inbound_read_ack_sent_for_thread(ns, &conv, ref_id) {
-                Ok(true) => {
-                    flow_log::info(
-                        "DM/store",
-                        format!("patch inbound read_ack_sent ref={ref_id} conv={conv}"),
-                    );
-                    return true;
-                }
-                Ok(false) => return false,
-                Err(e) => {
-                    flow_log::warn(
-                        "DM/store",
-                        format!("patch inbound read_ack_sent failed ref={ref_id}: {e}"),
-                    );
-                    return false;
-                }
-            }
-        }
+        // Inbound read-receipt confirm is owned by the wire path (`mark_read_ack_confirmed`
+        // after `has_pending_read_ack`). Poll replay must not set `read_ack_sent` alone.
     }
     flow_log::warn(
         "DM/store",

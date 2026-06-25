@@ -77,52 +77,63 @@ fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId)
     let Some(ns) = ns else {
         return;
     };
-    let path_buf = session
-        .transcript_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(Path::new)
-        .map(|p| p.to_path_buf())
-        .or_else(|| crate::dm_transcript_store::resolve_transcript_path(ns).ok());
-    let Some(path_buf) = path_buf else {
-        return;
-    };
     let Some(dm) = session.dm_peer_for_libp2p(peer) else {
         return;
     };
     let Some(signing) = dm.public_key_hex.as_deref() else {
         return;
     };
+    let wire_peer = peer.to_string();
     let lookup_keys = crate::dm_event_handler::inbound_transcript_lookup_keys(
         ns,
         signing,
         signing,
-        &peer.to_string(),
+        &wire_peer,
     );
-    let key_set: std::collections::HashSet<String> = lookup_keys.into_iter().collect();
-    let Ok(rows) =
-        crate::dm_transcript_v1::pending_inbound_read_ack_rows(path_buf.as_path(), ns)
+    let Ok(rows) = crate::dm_transcript_store::load_merged(ns, &lookup_keys, Some(&wire_peer))
     else {
         return;
     };
     let mut seeded = 0usize;
+    let mut eligible = 0usize;
     for row in rows {
-        if !key_set.contains(row.conversation_key.as_str()) {
+        if row.outgoing || row.read_ack_sent {
             continue;
         }
-        if session.is_read_ack_confirmed(&row.message_id) {
+        let Some(message_id) = row
+            .message_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             continue;
+        };
+        eligible += 1;
+        if session.enqueue_read_ack_backlog(peer, message_id, signing) {
+            seeded += 1;
         }
-        session.enqueue_read_ack(peer, &row.message_id, signing);
-        seeded += 1;
     }
     if seeded > 0 {
         native_log::info(
             "read_ack",
             format!("seeded {seeded} pending read ack(s) for {peer} from transcript"),
         );
+    } else if eligible > 0 && session.should_log_read_ack_seed_skip(peer, chrono_now_ms()) {
+        native_log::debug(
+            "read_ack",
+            format!(
+                "catch-up {peer}: {eligible} transcript row(s) without read_ack_sent already queued"
+            ),
+        );
     }
+}
+
+/// In-room read acks require the read gate; leave backlog (non-foreground peer) does not.
+fn may_wire_read_ack_upkeep(session: &SessionState, peer: PeerId) -> bool {
+    if !session.is_foreground_peer(peer) {
+        return true;
+    }
+    may_send_in_room_read_ack(session, peer)
 }
 
 /// Delivery ack for inbound text — sent even when the user is outside the chat room.
@@ -220,6 +231,8 @@ async fn send_ack_frame(
     let Ok(frame) = envelope_to_frame_bytes(&env) else {
         return false;
     };
+    // Queue on the live mux writer (same as outbound text). Confirmed-write was starving
+    // ack_read under LAN duplicate-mux + outbox burst load.
     send_frame_to_peer(peer, frame, Arc::clone(writers), Some(session))
         .await
         .is_ok()
@@ -233,6 +246,17 @@ async fn run_ack_upkeep(
 ) {
     if connected_peers.is_empty() {
         return;
+    }
+    for peer in connected_peers {
+        if session.has_pending_read_acks_for(*peer) && !session.is_foreground_peer(*peer) {
+            // Leave backlog: refresh queue from transcript (`read_ack_sent: false` only).
+            seed_read_acks_for_peer_from_transcript(session.as_ref(), *peer);
+        } else if session.is_foreground_peer(*peer)
+            && may_send_in_room_read_ack(session.as_ref(), *peer)
+        {
+            // In-room catch-up while read gate is open (enter / nudge / resume).
+            seed_read_acks_for_peer_from_transcript(session.as_ref(), *peer);
+        }
     }
     run_ack_upkeep_limited(
         session,
@@ -312,6 +336,9 @@ async fn run_ack_upkeep_limited(
             if !connected.contains(&item.peer_id) || !writer_open_for_peer(&writers, item.peer_id) {
                 continue;
             }
+            if !may_wire_read_ack_upkeep(session.as_ref(), item.peer_id) {
+                continue;
+            }
             if send_ack_frame(
                 item.peer_id,
                 &item.recipient_public_key_hex,
@@ -333,21 +360,32 @@ async fn run_ack_upkeep_limited(
 }
 
 /// Burst-send queued `ack_read`. When [seed_transcript] is true (enter room), seed transcript
-/// then drain. When false (leave room), drain only — caller seeds transcript synchronously first.
+/// then drain. When false (leave room / post-seed), drain only — caller seeds synchronously first.
 async fn read_ack_catchup_for_peer(
     session: Arc<SessionState>,
     writers: StreamWriters,
     peer: PeerId,
     wait_for_writer: bool,
     seed_transcript: bool,
+    control: Option<stream::Control>,
 ) {
-    if seed_transcript && !may_send_in_room_read_ack(session.as_ref(), peer) {
-        return;
-    }
     if seed_transcript {
         seed_read_acks_for_peer_from_transcript(session.as_ref(), peer);
     }
-    if wait_for_writer {
+    if wait_for_writer
+        && session.libp2p_peer_connected(peer)
+        && !writer_open_for_peer(&writers, peer)
+    {
+        if let Some(ctrl) = control {
+            ensure_dm_chat_stream(
+                peer,
+                Arc::clone(&session),
+                Arc::clone(&writers),
+                ctrl,
+                None,
+            )
+            .await;
+        }
         for _ in 0..80 {
             if writer_open_for_peer(&writers, peer) {
                 break;
@@ -356,7 +394,14 @@ async fn read_ack_catchup_for_peer(
         }
     }
     if writer_open_for_peer(&writers, peer) {
-        run_ack_upkeep_burst(session, writers, peer).await;
+        if may_wire_read_ack_upkeep(session.as_ref(), peer) {
+            run_ack_upkeep_burst(session, writers, peer).await;
+        }
+    } else if session.has_pending_read_acks_for(peer) {
+        native_log::debug(
+            "read_ack",
+            format!("catch-up {peer}: queued ack_read waiting for chat stream"),
+        );
     }
 }
 

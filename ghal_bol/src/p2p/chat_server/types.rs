@@ -1,4 +1,13 @@
-pub(crate) type StreamWriters = Arc<Mutex<HashMap<PeerId, mpsc::UnboundedSender<Vec<u8>>>>>;
+/// Outbound DM frame; optional oneshot fires `true` only after bytes hit the libp2p stream.
+pub(crate) enum StreamWireItem {
+    Frame {
+        bytes: Vec<u8>,
+        written: Option<tokio::sync::oneshot::Sender<bool>>,
+    },
+}
+
+pub(crate) type StreamWriters =
+    Arc<Mutex<HashMap<PeerId, mpsc::UnboundedSender<StreamWireItem>>>>;
 
 pub const DEFAULT_GOSSIP_TOPIC: &str = "ghal-bol-chat";
 
@@ -246,6 +255,8 @@ pub(crate) const LAN_DIAL_THROTTLE_URGENT_MS: i64 = 8_000;
 pub(crate) const CIRCUIT_COORD_DIAL_URGENT_MS: i64 = 2_000;
 /// Do not replace an outbound relay-circuit dial until this window elapses (libp2p oneshot cancel).
 pub(crate) const CIRCUIT_DIAL_IN_FLIGHT_MS: i64 = 45_000;
+/// Urgent/outbox peers — shorter guard so a hung relay hop does not block WAN for 45s after churn.
+pub(crate) const CIRCUIT_DIAL_IN_FLIGHT_URGENT_MS: i64 = 12_000;
 /// Guardrail: do not stack parallel LAN TCP dials to the same peer (mDNS event coalescing).
 pub(crate) const LAN_DIAL_IN_FLIGHT_MS: i64 = 45_000;
 /// libp2p may not mark a peer "dialing" for a few ms after `swarm.dial(Ok)` — hold LAN in-flight briefly.

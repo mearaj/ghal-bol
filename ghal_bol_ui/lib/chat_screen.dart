@@ -291,8 +291,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (mk == "text" ||
           isRecipientOutboundAckKind(mk) ||
           mk == kSenderConfirmedReadReceipt) {
-        if (ev["stores_updated"] == true && _pollEventMatchesOpenThread(ev)) {
-          _scheduleTranscriptSync();
+        if (_pollEventMatchesOpenThread(ev)) {
+          _scheduleTranscriptSync(
+            force: mk == "text" || isRecipientOutboundAckKind(mk),
+          );
         }
         return;
       }
@@ -310,7 +312,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (ev["stores_updated"] == true &&
         ev["kind"]?.toString() == "dm_message" &&
         isRecipientOutboundAckKind(ev["msg_kind"]?.toString() ?? "")) {
-      _scheduleTranscriptSync();
+      _scheduleTranscriptSync(force: true);
     }
   }
 
@@ -782,9 +784,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           cacheUnderConversationKey: key,
         );
         if (!mounted) return;
+        final persistedCount = _lines.where((l) => l._persisted && !l.system).length;
         if (!force &&
             view.revision > 0 &&
             view.revision <= _paintedTranscriptRevision &&
+            view.lines.length <= persistedCount &&
             _lines.any((l) => !l.system)) {
           return;
         }

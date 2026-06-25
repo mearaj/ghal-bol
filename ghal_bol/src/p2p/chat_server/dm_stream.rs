@@ -74,19 +74,7 @@ async fn ensure_dm_stream_for_send(
     writers: StreamWriters,
     events_tx: Option<std::sync::mpsc::Sender<GossipChatEvent>>,
 ) {
-    if writer_open_for_peer(&writers, peer) {
-        return;
-    }
-    if !session.try_begin_stream_open(peer) {
-        return;
-    }
-    let open_err = ensure_chat_stream(peer, control, writers, Arc::clone(&session), events_tx)
-        .await
-        .err();
-    session.end_stream_open(peer);
-    if let Some(e) = open_err {
-        session.note_stream_open_failure(peer, &e);
-    }
+    ensure_dm_chat_stream(peer, session, writers, control, events_tx).await;
 }
 
 /// Open `/ghal-bol/msg/1.0.0` if missing (persistent stream).
@@ -208,6 +196,27 @@ async fn open_outbound_stream_if_needed(
     session.end_stream_open(peer);
 }
 
+/// Canonical stream-first path (TRANSPORT.md § Stream-first symmetric connect).
+/// Either peer may open outbound; inbound uses the same handler. No dialer/listener roles.
+async fn ensure_dm_chat_stream(
+    peer: PeerId,
+    session: Arc<SessionState>,
+    writers: StreamWriters,
+    control: stream::Control,
+    events_tx: Option<std::sync::mpsc::Sender<GossipChatEvent>>,
+) {
+    if writer_open_for_peer(&writers, peer) {
+        return;
+    }
+    if !session.libp2p_peer_connected(peer) {
+        return;
+    }
+    if should_defer_stream_open_for_wan_mux(session.as_ref(), peer) {
+        return;
+    }
+    open_outbound_stream_if_needed(peer, control, writers, session, events_tx).await;
+}
+
 async fn on_dm_peer_connected(
     session: Arc<SessionState>,
     control: stream::Control,
@@ -225,8 +234,14 @@ async fn on_dm_peer_connected(
     {
         session.try_emit_peer_identified(connected, pk, &events_tx);
     }
-    open_outbound_stream_if_needed(connected, control, writers, Arc::clone(&session), events_tx)
-        .await;
+    ensure_dm_chat_stream(
+        connected,
+        Arc::clone(&session),
+        writers,
+        control,
+        events_tx,
+    )
+    .await;
 }
 
 /// Native voice-call media substream. One per direction per call: each side
