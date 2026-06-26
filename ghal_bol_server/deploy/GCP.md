@@ -1,14 +1,12 @@
 # Production — `coord.ghalbol.com`
 
-**One-time:** copy `ghal_bol_server/.env.production.example` → `ghal_bol_server/.env.production`, fill in GCP settings and bandwidth limits.
-
-**Deploy** (from repo root):
+Edit the config block at the top of `deploy/deploy_server.sh` (GCP target + bandwidth limits), then from repo root:
 
 ```bash
 ./ghal_bol_server/deploy/deploy_server.sh
 ```
 
-`deploy_server.sh` reads `.env.production` and renders systemd units with:
+`deploy_server.sh` renders systemd units with:
 
 | Variable | Role |
 |----------|------|

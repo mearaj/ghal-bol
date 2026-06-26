@@ -120,7 +120,7 @@ Full detail: [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README
 | `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` | `0` (unlimited per circuit; set e.g. `2147483648` for 2 GiB cap) |
 | `GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER` | `16` |
 
-Production VM egress cap (Linux **tc**): `GHAL_BOL_RELAY_EGRESS_MBIT` in `.env.production` → rendered into [relay-egress-cap.service](../ghal_bol_server/deploy/relay-egress-cap.service) by `deploy_server.sh`. See [GCP.md](../ghal_bol_server/deploy/GCP.md).
+Production VM egress cap (Linux **tc**): `GHAL_BOL_RELAY_EGRESS_MBIT` in `deploy_server.sh` → rendered into [relay-egress-cap.service](../ghal_bol_server/deploy/relay-egress-cap.service). See [GCP.md](../ghal_bol_server/deploy/GCP.md).
 
 ## `coord_client`
 

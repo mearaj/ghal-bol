@@ -15,11 +15,11 @@ Two setups — do not mix them:
 
 ## Local dev (laptop)
 
-Copy `ghal_bol_server/.env.development.example` → `ghal_bol_server/.env.development`, then:
-
 ```bash
 ./ghal_bol_server/deploy/run_server.sh
 ```
+
+Edit the config block at the top of `run_server.sh` for listen address, bore, etc.
 
 **App** — default `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` is `https://coord.ghalbol.com`. Only point the app at your local server when you are explicitly testing `ghal_bol_server` changes.
 
@@ -69,7 +69,7 @@ See [TRANSPORT.md](../../docs/TRANSPORT.md) § “WAN prerequisites” and [COOR
 
 ## Production (Google Cloud — `coord.ghalbol.com`)
 
-Copy `ghal_bol_server/.env.production.example` → `.env.production` (GCP + bandwidth limits), then:
+Edit the config block at the top of `deploy_server.sh` (GCP target + bandwidth limits), then:
 
 ```bash
 ./ghal_bol_server/deploy/deploy_server.sh

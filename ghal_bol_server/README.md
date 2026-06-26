@@ -17,12 +17,12 @@ Full walkthrough: **[deploy/README.md](deploy/README.md)**.
 
 ## Run (local dev)
 
-Copy `ghal_bol_server/.env.development.example` → `ghal_bol_server/.env.development`, then:
-
 ```bash
 cargo install bore-cli    # once
 ./ghal_bol_server/deploy/run_server.sh
 ```
+
+Edit the config block at the top of `deploy/run_server.sh` to change listen address, bore, etc.
 
 Set `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` (default: `https://coord.ghalbol.com`). Verify relay when running a local server:
 

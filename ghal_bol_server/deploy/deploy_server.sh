@@ -1,33 +1,32 @@
 #!/usr/bin/env bash
 # Deploy ghal_bol_server to the production GCP VM.
 #
-# Config: ghal_bol_server/.env.production (copy from .env.production.example once)
-#
 #   ./ghal_bol_server/deploy/deploy_server.sh
 #
-# Optional: SKIP_VERIFY=1
+# Edit the config block below. Optional: SKIP_VERIFY=1
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER_DIR="$(cd "${DEPLOY_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${DEPLOY_DIR}/../.." && pwd)"
-# shellcheck source=load_env.sh
-source "${DEPLOY_DIR}/load_env.sh"
-load_server_env "${SERVER_DIR}" ".env.production"
+
+# --- deploy config (edit here) ---
+GCP_PROJECT=ghalbolcoord
+GCP_ZONE=us-central1-a
+GCP_INSTANCE=instance-20260531-113442
+GCP_USER=mearajbhagad
+COORD_URL=https://coord.ghalbol.com
+RELAY_HOST=coord.ghalbol.com
+RELAY_PORT=4002
+GHAL_BOL_SERVER_LISTEN=127.0.0.1:8765
+GHAL_BOL_RELAY_LISTEN=0.0.0.0:4002
+GHAL_BOL_RELAY_PUBLIC_HOST=coord.ghalbol.com
+GHAL_BOL_RELAY_EGRESS_MBIT=10
+GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES=2147483648
+GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER=16
+# --- end deploy config ---
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/build/ghal_bol_server-target}"
 BIN="${CARGO_TARGET_DIR}/release/ghal_bol_server"
-
-# Defaults — override in ghal_bol_server/.env.production
-COORD_URL="${COORD_URL:-https://coord.ghalbol.com}"
-RELAY_HOST="${RELAY_HOST:-coord.ghalbol.com}"
-RELAY_PORT="${RELAY_PORT:-4002}"
-GHAL_BOL_SERVER_LISTEN="${GHAL_BOL_SERVER_LISTEN:-127.0.0.1:8765}"
-GHAL_BOL_RELAY_LISTEN="${GHAL_BOL_RELAY_LISTEN:-0.0.0.0:4002}"
-GHAL_BOL_RELAY_PUBLIC_HOST="${GHAL_BOL_RELAY_PUBLIC_HOST:-${RELAY_HOST}}"
-GHAL_BOL_RELAY_EGRESS_MBIT="${GHAL_BOL_RELAY_EGRESS_MBIT:-10}"
-GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES="${GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES:-2147483648}"
-GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER="${GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER:-16}"
 
 render_deploy_unit() {
   local src="$1" dst="$2"
@@ -45,12 +44,12 @@ cd "${WORKSPACE_ROOT}"
 
 for var in GCP_PROJECT GCP_ZONE GCP_INSTANCE GCP_USER; do
   if [[ -z "${!var:-}" ]]; then
-    echo "error: ${var} is empty in .env.production" >&2
+    echo "error: ${var} is empty — edit deploy config in deploy_server.sh" >&2
     exit 1
   fi
   case "${!var}" in
     your-*|REPLACE_*|your-gcp-project-id|your-vm-instance-name|your-linux-username-on-vm)
-      echo "error: ${var} still has placeholder value in .env.production" >&2
+      echo "error: ${var} still has placeholder value — edit deploy config in deploy_server.sh" >&2
       exit 1
       ;;
   esac
