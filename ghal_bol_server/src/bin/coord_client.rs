@@ -4,7 +4,7 @@
 //! cargo build -p ghal_bol_server --release
 //! ./target/release/coord_client http://127.0.0.1:8765 health
 //! ./target/release/coord_client http://127.0.0.1:8765 demo-two-peers
-//! ./target/release/coord_client -k https://YOUR.ngrok-free.dev demo-two-peers
+//! ./target/release/coord_client -k https://coord.ghalbol.com demo-two-peers
 //! ```
 
 use ghal_bol_server::registration_message_digest;
@@ -89,11 +89,11 @@ const USAGE: &str = r#"Usage:
   coord_client [-k] <base_url> list
   coord_client [-k] <base_url> heartbeat <public_key_hex>
 
-  -k  skip TLS certificate verify (ngrok / self-signed)
+  -k  skip TLS certificate verify (self-signed)
 
 Examples:
   coord_client http://127.0.0.1:8765 health
-  coord_client -k https://YOUR.ngrok-free.dev demo-two-peers
+  coord_client -k https://coord.ghalbol.com demo-two-peers
 "#;
 
 fn build_client(insecure_tls: bool) -> Result<reqwest::Client, reqwest::Error> {

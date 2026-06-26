@@ -15,8 +15,9 @@ use serde_json::Value;
 use crate::call_sig_v1::CallSigKind;
 use crate::call_state;
 use crate::dm_event_handler::{
-    apply_p2p_event_json, clear_p2p_handler_context, set_foreground_peer, set_p2p_handler_context,
+    apply_p2p_event_json, clear_p2p_handler_context, active_app_namespace, set_p2p_handler_context,
 };
+use crate::contacts_v1::clear_unread;
 use crate::msg_v1::MsgKind;
 use crate::p2p::{
     DEFAULT_GOSSIP_TOPIC, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, native_log,
@@ -1525,8 +1526,17 @@ pub fn p2p_set_foreground_peer(public_key_hex: Option<&str>) -> Value {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    set_foreground_peer(pk.clone());
+    let prev = live_foreground_peer_for_catchup();
     sync_foreground_peer_now(pk.clone());
+    if let Some(ref new_pk) = pk {
+        let changed = prev.as_deref().map(str::to_ascii_lowercase)
+            != Some(new_pk.to_ascii_lowercase());
+        if changed {
+            if let Some(ns) = active_app_namespace() {
+                let _ = clear_unread(&ns, new_pk);
+            }
+        }
+    }
     let peer_id = pk.as_ref().and_then(|hex| {
         peer_id_from_secp256k1_public_key_hex(hex)
             .ok()

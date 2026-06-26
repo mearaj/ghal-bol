@@ -1,0 +1,16 @@
+# nginx logs for coord.ghalbol.com — rotate so /var/log does not grow without bound.
+# Install: sudo cp nginx-logrotate-ghalbol /etc/logrotate.d/ghalbol-coord
+
+/var/log/nginx/coord.access.log
+/var/log/nginx/coord.error.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        [ -s /run/nginx.pid ] && kill -USR1 "$(cat /run/nginx.pid)" 2>/dev/null || true
+    endscript
+}

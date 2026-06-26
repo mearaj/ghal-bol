@@ -174,7 +174,7 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **Fixing call restore / notification without force-end** — changes to `call_active`, `CallController.syncActiveCallFromNative`, or incoming-call notify must not skip UI-session teardown (regression checklist in DESIGN.md).
 - **Releasing call video textures on `NativeCallVideoView.dispose`** — use `CallVideoTexturePool.releaseCall` on hangup only; dispose-time release caused Linux SIGSEGV during video (DESIGN.md § “Call UI lifecycle”, GHAL_BOL_VIDEO_NATIVE_V1.md).
 - **Promoting delivery/read ticks in Flutter without native transcript patch** — ticks are recipient-authority only (DESIGN.md § “Truthful status”).
-- **Blocking LAN upkeep during WAN recovery** — `lan_handover_upkeep_if_needed` must run **in parallel** with WAN relay reserve (no early return). `relay_lost_on_lan` must not re-kick full handover every 5s while `wan_recovery_active` (symptom: endless `mdns restarted after LAN handover`, zero `mdns discovered`, coord/ngrok down). TRANSPORT.md § “Parallel LAN + WAN transport”.
+- **Blocking LAN upkeep during WAN recovery** — `lan_handover_upkeep_if_needed` must run **in parallel** with WAN relay reserve (no early return). `relay_lost_on_lan` must not re-kick full handover every 5s while `wan_recovery_active` (symptom: endless `mdns restarted after LAN handover`, zero `mdns discovered`, coord down). TRANSPORT.md § “Parallel LAN + WAN transport”.
 - **Closing relay links when direct LAN connects** — parallel transport keeps **both links active**; tearing down relay on LAN upgrade breaks WAN handover. See TRANSPORT.md § “Parallel LAN + WAN transport”, § “Both links active”.
 - **dm_upkeep skipping coord lookup when connected** — must still additive-dial relay while direct up; use `coord_lookup_upkeep_satisfied` (stable mux + relay), not `swarm.is_connected` alone. TRANSPORT.md § “Both links active”.
 - **Separate LAN/WAN message or ack stores** — all state in Rust `dm_transcript_store` / outbox; monotonic delivery merge (`read` ⊃ `delivered`). See DESIGN.md § “Unified message state (E)”.
@@ -243,7 +243,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `Pending connection attempt has been aborted`; relay `ACCEPTED→closed` ~1s | **Urgent dial abort loop** — in-flight guard cleared during handshake | Never clear `circuit_dial_in_flight` on urgent; TRANSPORT.md § Post-mortem 2026-06-24 |
 | `:p2p` panic `Cannot drop a runtime … blocking` during WAN recovery | **Blocking coord HTTP on swarm thread** | Remove sync HTTP from tokio loop; TRANSPORT.md § Post-mortem 2026-06-24 |
 | `profile=` wrong minutes after toggle; `os=` missing in flow log | Stale native build or `if_addrs`-only profile | Rebuild native; `os=wifi|cell/validated/…` must flip ~1s — TRANSPORT.md § **Network truth** |
-| `mdns restarted after LAN handover` every ~5–12s, no `mdns discovered`, WAN stuck (`wan_recovery=true`, ngrok/coord down) | **LAN blocked by WAN recovery loop** — `relay_lost_on_lan` or early return in `lan_handover_upkeep`. Fix parallel upkeep; restart ngrok for WAN. TRANSPORT.md § “Parallel LAN + WAN transport”. |
+| `mdns restarted after LAN handover` every ~5–12s, no `mdns discovered`, WAN stuck (`wan_recovery=true`, coord down) | **LAN blocked by WAN recovery loop** — `relay_lost_on_lan` or early return in `lan_handover_upkeep`. Fix parallel upkeep; fix coord/relay on VM. TRANSPORT.md § “Parallel LAN + WAN transport”. |
 | Chat worked 5–10 min then died on LAN | Linux idle timeout was 300s; listen port may have changed — check `dm peer disconnected` + stale dial loop above. Desktop idle now 120s. |
 | WAN chat dead minutes, coord health OK | `forcing bootstrap redial` loop? `wan_recovery=true` + `relay_listen=false` + `bootstrap_ok=true`? Fix `run_wan_recovery_pass` — never disconnect coord relay for relay; rebuild native. TRANSPORT.md § WAN recovery. **Note:** `bootstrap_*` logs = coord relay, not IPFS peers. |
 | Coord lookup 404 for peer | Peer not on coord yet — both need `reservation accepted` + `coord registered`; **not** proof coord HTTP is down. If **all** lookups 404 and server shows no `peer registered`, relay TCP is dead (dev: bore stopped / wrong port). **Asymmetric:** Wi‑Fi side registered, phone 404 → phone never got relay circuit — TRANSPORT.md § “CGNAT / mobile-data relay reservation” |
@@ -279,7 +279,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `docs/COORDINATION_SERVER.md` | Run/test coord server, local dev stack, **HTTP log troubleshooting** |
 | `docs/TRANSPORT.md` | libp2p transport, **Connectivity lifecycle**, **Network truth**, **Asymmetric mux recovery**, **Post-mortem 2026-06-24**, **Post-mortem 2026-06-25**, caching policy, LAN stability, WAN/CGNAT |
 | `docs/ROADMAP.md` | Human product backlog only — not agent implementation specs |
-| `ghal_bol_server/deploy/README.md` | Dev `run_server.sh`, bore/ngrok, **§ Regression prevention** |
+| `ghal_bol_server/deploy/README.md` | Dev `run_server.sh`, bore; **§ Regression prevention** |
 | `docs/WEB_SITE.md` | Static **ghalbol.com** web build, Firebase, Linux download, `/connect/…` handoff |
 | `README.md` | Product vision + repo map |
 | `ghal_bol_ui/README.md` | Flutter shell scope (native vs `bootstrap_web`) |

@@ -18,7 +18,7 @@ Type=simple
 WorkingDirectory=@WORKSPACE@
 ExecStart=@WORKSPACE@/target/release/ghal_bol_server
 Environment=GHAL_BOL_SERVER_LISTEN=127.0.0.1:8765
-Environment=GHAL_BOL_SERVER_DB=%h/.local/share/com.ghalbol/ghalbol_server
+Environment=GHAL_BOL_SERVER_DB=%h/.local/share/com.ghalbol.coord/ghalbol_server
 Environment=RUST_LOG=info
 Restart=on-failure
 RestartSec=5

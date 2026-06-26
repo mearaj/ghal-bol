@@ -2,7 +2,7 @@
 # Server-focused smoke: unit/e2e tests, then optional live API against COORD_URL.
 #
 #   COORD_URL=http://127.0.0.1:8765 ./ghal_bol_server/deploy/smoke_coord.sh
-#   COORD_URL=https://YOUR.ngrok-free.dev ./ghal_bol_server/deploy/smoke_coord.sh
+#   COORD_URL=http://127.0.0.1:8765 ./ghal_bol_server/deploy/smoke_coord.sh
 #   LIVE_ONLY=1 COORD_URL=... COORD_INSECURE_TLS=1 ./ghal_bol_server/deploy/smoke_coord.sh  # skip cargo test
 set -euo pipefail
 

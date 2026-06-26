@@ -368,11 +368,6 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     }
     final pk = _nativeForegroundPublicKey();
     if (pk == null) return;
-    if (_layoutSyncedRoomOpen == true &&
-        _lastSyncedForegroundPk != null &&
-        publicKeysEqual(_lastSyncedForegroundPk!, pk)) {
-      return;
-    }
     AppLog.instance.flow(
       "Hub",
       "room open → sync ui session pk=${pk.length > 16 ? "${pk.substring(0, 8)}…" : pk}",

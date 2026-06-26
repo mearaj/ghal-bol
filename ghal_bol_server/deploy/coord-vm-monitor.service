@@ -1,0 +1,10 @@
+# Hourly capacity snapshot — installed by deploy_server.sh
+[Unit]
+Description=Ghal Bol coord VM capacity snapshot
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=REPLACE_VM_USER
+Group=REPLACE_VM_USER
+ExecStart=/home/REPLACE_VM_USER/coord-vm-stats.sh

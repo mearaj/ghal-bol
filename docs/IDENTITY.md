@@ -37,9 +37,9 @@ Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v
 | Path | Owner | Contents |
 |------|-------|----------|
 | `~/.local/share/com.ghalbol.debug/` | Debug **app** (`flutter run`) | Keystore, contacts, transcript for debug builds |
-| `~/.local/share/com.ghalbol/` | Release **app** *or* local **coord server** | Release app data when running release builds; **also** `ghalbol_server/` (coord DB, relay key) when you run `./ghal_bol_server/deploy/run_server.sh` — the server always uses namespace `com.ghalbol` (`ghal_bol_server/src/config.rs`), independent of whether the desktop app is debug or release |
+| `~/.local/share/com.ghalbol.coord/ghalbol_server/` | Local **coord server** (`run_server.sh`) | `coord.db`, `relay_ed25519.key` |
 
-The debug app does **not** write identity or chat stores to `com.ghalbol/` unless you run a release build. Seeing both directories on a dev machine is normal: server under `com.ghalbol/ghalbol_server/`, debug app under `com.ghalbol.debug/`. There is no automatic migration between debug and release namespaces — re-pair or import identity when switching builds.
+The debug app does **not** write identity or chat stores to `com.ghalbol/` unless you run a release build. There is no automatic migration between debug and release namespaces — re-pair or import identity when switching builds.
 
 **Android path fix (2026-06):** `ui_data_dir()` uses `namespace_data_dir()` so keystore and `ghal_bol/` contacts/transcript share the same namespace root (debug: `app_flutter/com.ghalbol.debug/ghal_bol/`).
 

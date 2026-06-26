@@ -38,15 +38,14 @@ Implementation: `should_throttle_register`, `spawn_register_presence_inner`, `co
 
 ## Run server
 
-**Local dev** — `run_server.sh` starts the binary + **bore** for WAN relay; expose coord HTTP with ngrok separately:
+**Local dev** — `run_server.sh` starts the binary + **bore** for WAN relay:
 
 ```bash
-./ghal_bol_server/deploy/run_server.sh          # terminal 1
-ngrok http 8765                                 # terminal 2
+./ghal_bol_server/deploy/run_server.sh
 curl -s http://127.0.0.1:8765/v1/relay | jq     # relay must show enabled + addrs
 ```
 
-**Production** — Google Cloud VM at `coord.ghalbol.com`: systemd + nginx, **no bore**, public TCP `:4002` for relay. See [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md).
+**Production** — `./ghal_bol_server/deploy/deploy_server.sh`. See [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md).
 
 ## Production (`coord.ghalbol.com`)
 
@@ -63,21 +62,6 @@ Smoke against production:
 ```bash
 COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 ```
-
-## ngrok (dev / staging)
-
-ngrok carries **HTTP coord only**. WAN relay uses **bore** (started by `run_server.sh`), not ngrok `tcp` on the free plan.
-
-```bash
-ngrok http 8765
-```
-
-Point `GHAL_BOL_COORD_URLS` at the ngrok `https://…` URL. See **Local dev stack** below and [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md).
-
-```bash
-COORD_URL=https://YOUR.ngrok-free.dev ./ghal_bol_server/deploy/smoke_coord.sh
-```
-
 ## HTTP API (v1)
 
 | Method | Path |
@@ -113,12 +97,12 @@ Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256
 
 ### Dev session checklist
 
-1. Terminal 1: `./ghal_bol_server/deploy/run_server.sh` — keep running  
-2. Terminal 2: `ngrok http 8765`  
-3. `curl -s http://127.0.0.1:8765/v1/relay | jq` — enabled + addrs  
-4. `nc -zv <relay-ip> <relay-port>` — must connect  
-5. App `GHAL_BOL_COORD_URLS` = ngrok **https** URL  
-6. Rebuild native + restart apps after **every** server restart (bore port change)
+1. `./ghal_bol_server/deploy/run_server.sh` — keep running  
+2. `curl -s http://127.0.0.1:8765/v1/relay | jq` — enabled + addrs  
+3. `nc -zv <relay-ip> <relay-port>` — must connect  
+4. Rebuild native + restart apps after **every** server restart (bore port change)
+
+When testing app traffic against your local server (not production), set `GHAL_BOL_COORD_URLS` to a reachable `http://…:8765` URL and restart the app.
 
 Full detail: [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md) § “Regression prevention”, [TRANSPORT.md](TRANSPORT.md) § “WAN prerequisites”.
 
@@ -127,12 +111,16 @@ Full detail: [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README
 | Variable | Default |
 |----------|---------|
 | `GHAL_BOL_SERVER_LISTEN` | `127.0.0.1:8765` (binary); `run_server.sh` uses `0.0.0.0:8765`. Dual-stack: the server also binds the counterpart-family wildcard (`[::]:<port>`, IPv6 `V6ONLY`) on the same port so coord HTTP is reachable over both IPv4 and IPv6; a missing stack logs a warning and continues single-stack |
-| `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol/ghalbol_server/coord.db` |
+| `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` |
 | `GHAL_BOL_SERVER_PRESENCE_TTL_SECS` | `90` |
 | `GHAL_BOL_RELAY_ENABLE` | `1` (set `0` to disable the relay node) |
 | `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (raw TCP — **open this port** directly; it is not proxied by the HTTP/TLS nginx front). Dual-stack: the relay also listens on the counterpart-family wildcard (`[::]:<port>`) so it accepts both IPv4 and IPv6 clients |
 | `GHAL_BOL_RELAY_PUBLIC_HOST` | unset → advertises **both** `/dns6/<host>/tcp/<port>` and `/dns4/<host>/tcp/<port>` (IPv6 first; e.g. `coord.ghalbol.com`) so clients can reserve over either family. Native IPv6 needs an `AAAA` record; IPv4-only/NAT64 clients map the host themselves |
 | `GHAL_BOL_RELAY_PUBLIC_ADDRS` | unset → comma-separated dialable multiaddrs (overrides `_PUBLIC_HOST`) |
+| `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` | `0` (unlimited per circuit; set e.g. `2147483648` for 2 GiB cap) |
+| `GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER` | `16` |
+
+Production VM egress cap (Linux **tc**): `GHAL_BOL_RELAY_EGRESS_MBIT` in `.env.production` → rendered into [relay-egress-cap.service](../ghal_bol_server/deploy/relay-egress-cap.service) by `deploy_server.sh`. See [GCP.md](../ghal_bol_server/deploy/GCP.md).
 
 ## `coord_client`
 
@@ -141,7 +129,7 @@ cargo build -p ghal_bol_server --release
 ./target/release/coord_client http://127.0.0.1:8765 demo-two-peers
 ```
 
-`-k` = skip TLS verify (ngrok / self-signed).
+`-k` = skip TLS verify (self-signed / dev HTTPS).
 
 ## Local dev stack
 
@@ -152,7 +140,7 @@ One `ghal_bol_server` on your desktop for Linux + Android builds.
 COORD_URL=http://127.0.0.1:8765 ./ghal_bol_server/deploy/smoke_coord.sh
 ```
 
-Set `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` (e.g. `["http://127.0.0.1:8765"]` on desktop, `["http://10.0.2.2:8765"]` on emulator). From the phone: `curl http://<desktop-lan-ip>:8765/health` must succeed.
+Set `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` (default: `https://coord.ghalbol.com`). Rebuild after changes.
 
 **Rebuild native after Rust changes** (quit app first):
 

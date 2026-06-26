@@ -53,7 +53,7 @@ impl CoordHttpClient {
         Ok(Self { http, base })
     }
 
-    /// One immediate retry on transport errors (mobile/ngrok TLS flake).
+    /// One immediate retry on transport errors (mobile TLS flake).
     fn send_with_transport_retry(
         &self,
         build: impl Fn(&reqwest::blocking::Client) -> reqwest::blocking::RequestBuilder,
@@ -68,18 +68,11 @@ impl CoordHttpClient {
         }
     }
 
-    /// ngrok free tier returns an HTML interstitial unless this header is set.
     fn with_headers(
         &self,
         builder: reqwest::blocking::RequestBuilder,
     ) -> reqwest::blocking::RequestBuilder {
-        if self.base.contains("ngrok") {
-            builder
-                .header("ngrok-skip-browser-warning", "1")
-                .header("Accept", "application/json")
-        } else {
-            builder
-        }
+        builder.header("Accept", "application/json")
     }
 
     pub fn health(&self) -> Result<bool, String> {
@@ -163,12 +156,9 @@ impl CoordHttpClient {
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();
             let lower = body.to_ascii_lowercase();
-            if lower.contains("<!doctype html")
-                || lower.contains("err_ngrok")
-                || lower.contains("ngrok gateway error")
-            {
+            if lower.contains("<!doctype html") {
                 return Err(format!(
-                    "coord HTTP transport failure {} (non-JSON body — ngrok offline or proxy error)",
+                    "coord HTTP transport failure {} (non-JSON body — coord unreachable or proxy error)",
                     status
                 ));
             }

@@ -10,11 +10,13 @@
 .env
 .env.local
 .env.*.local
-gcp.env.local
 # Flutter release coord config — local only; never commit
 ghal_bol_ui/env/.env.production
 # Dev coord config — frequently toggled between local/cloud coord URLs; do not commit churn
 ghal_bol_ui/env/.env.development
+# ghal_bol_server local dev + GCP deploy (run_server.sh / deploy_server.sh)
+ghal_bol_server/.env.development
+ghal_bol_server/.env.production
 
 # Optional local keystores — not wired into default debug Gradle; ignore if unused
 ghal_bol_ui/keystore/

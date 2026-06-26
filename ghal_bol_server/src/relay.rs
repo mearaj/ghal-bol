@@ -109,16 +109,27 @@ struct RelayBehaviour {
 /// coord upkeep), so those default limiters surface as `relay circuit DENIED …
 /// ResourceLimitExceeded` and WAN chat never completes. Lift caps for a chat relay and **clear**
 /// the default rate limiters — abuse is bounded by `max_circuits*` pool sizes instead.
+///
+/// Env (optional bandwidth caps):
+/// - `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` — max bytes relayed per circuit (0 = unlimited)
+/// - `GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER` — concurrent circuits per peer (default 16)
 fn relay_config() -> relay::Config {
+    let max_circuit_bytes = std::env::var("GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let max_circuits_per_peer = std::env::var("GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(16);
     relay::Config {
         max_reservations: 4096,
         max_reservations_per_peer: 16,
         reservation_duration: Duration::from_secs(60 * 60),
         reservation_rate_limiters: vec![],
         max_circuits: 4096,
-        max_circuits_per_peer: 16,
-        // 0 disables the byte cap entirely (see libp2p CopyFuture: enforced only when > 0).
-        max_circuit_bytes: 0,
+        max_circuits_per_peer,
+        max_circuit_bytes,
         max_circuit_duration: Duration::from_secs(24 * 60 * 60),
         circuit_src_rate_limiters: vec![],
     }

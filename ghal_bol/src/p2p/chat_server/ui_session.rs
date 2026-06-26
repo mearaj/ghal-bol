@@ -3,7 +3,8 @@ use super::notify::drop_pending_call_invite;
 use super::notify::notify_dm_presence_wake;
 use super::{GossipChatEvent, OutboundCmd, READ_ACK_CATCHUP_THROTTLE_MS, SessionState};
 use crate::dm_transport::ContactPk;
-/// UI foreground peer — updated synchronously from FFI before the outbox cmd is processed.
+/// UI foreground peer — single source of truth for in-room read receipts and unread skip.
+/// Updated synchronously from `p2p_sync_ui_session` via `sync_foreground_peer_now`.
 static LIVE_FOREGROUND_PEER: OnceLock<RwLock<Option<ContactPk>>> = OnceLock::new();
 static LAST_ROOM_PEER: OnceLock<RwLock<Option<ContactPk>>> = OnceLock::new();
 /// Match Flutter `CallController._maxLiveInviteAgeMs` — stale invites must not ring or notify.
@@ -76,6 +77,19 @@ pub(crate) fn live_foreground_peer() -> Option<ContactPk> {
         .and_then(|g| g.clone())
 }
 
+pub fn live_foreground_peer_pk() -> Option<ContactPk> {
+    live_foreground_peer()
+}
+
+pub(crate) fn is_live_foreground_peer(peer: PeerId) -> bool {
+    live_foreground_peer().is_some_and(|pk| {
+        peer_id_from_secp256k1_public_key_hex(&pk)
+            .ok()
+            .and_then(|s| s.parse::<PeerId>().ok())
+            .is_some_and(|p| p == peer)
+    })
+}
+
 pub(crate) fn emit_call_media(
     tx: &Option<std::sync::mpsc::Sender<GossipChatEvent>>,
     call_id: &str,
@@ -138,9 +152,10 @@ fn app_ack_read_enabled_mx() -> &'static AtomicBool {
 }
 
 /// Single gate for **new** in-room read receipts (inbound text, enter-room catch-up).
+/// DESIGN.md / GHAL_BOL_DM_MSG_V1.md: `live_foreground_peer` + read gate + visible.
 /// Leave backlog retries use `pending_read_acks` upkeep and are not gated on UI visibility.
-pub(crate) fn may_send_in_room_read_ack(session: &SessionState, peer: PeerId) -> bool {
-    app_ui_visible() && app_ack_read_enabled() && session.is_foreground_peer(peer)
+pub(crate) fn may_send_in_room_read_ack(_session: &SessionState, peer: PeerId) -> bool {
+    app_ui_visible() && app_ack_read_enabled() && is_live_foreground_peer(peer)
 }
 
 /// Called from FFI when the app backgrounds or UI is torn down.

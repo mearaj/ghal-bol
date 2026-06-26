@@ -2,15 +2,15 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Same Linux data root as `ghal_bol` / `ghal_bol_ui` (`com.ghalbol`).
-pub const DATA_NAMESPACE: &str = "com.ghalbol";
+/// Coord server data root — separate from the Flutter app (`com.ghalbol`).
+pub const DATA_NAMESPACE: &str = "com.ghalbol.coord";
 
 /// Subdirectory under the app data root for coordination server files.
 pub const SERVER_DATA_DIR: &str = "ghalbol_server";
 
 const DB_FILE_NAME: &str = "coord.db";
 
-/// `~/.local/share/com.ghalbol/ghalbol_server/coord.db` on Linux.
+/// `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` on Linux.
 pub fn default_database_path() -> PathBuf {
     let mut base = directories::ProjectDirs::from_path(PathBuf::from(DATA_NAMESPACE))
         .map(|d| d.data_local_dir().to_path_buf())

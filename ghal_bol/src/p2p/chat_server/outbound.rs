@@ -339,6 +339,7 @@ async fn process_outbound_cmd(
                     .and_then(|s| s.parse().ok())
             })
         });
+        let same_room_reenter = matches!((peer_id, previous), (Some(n), Some(p)) if *n == p);
         session.set_foreground_peer(*peer_id);
         if let Some(left) = previous {
             let leaving = match peer_id {
@@ -378,9 +379,19 @@ async fn process_outbound_cmd(
             );
             return Ok(());
         }
+        if same_room_reenter && read_ack_catchup_throttled(peer, chrono_now_ms()) {
+            native_log::debug(
+                "read_ack",
+                format!("chat room reassert {peer} — seeded backlog, catch-up throttled"),
+            );
+            return Ok(());
+        }
         native_log::info(
             "read_ack",
-            format!("chat room enter {peer} — ack_read for in-room backlog only"),
+            format!(
+                "chat room enter {peer} — ack_read for in-room backlog only{}",
+                if same_room_reenter { " (reassert)" } else { "" }
+            ),
         );
         if let (Some(path), Some(ns)) = (&session.transcript_path, &session.app_namespace) {
             transcript_sync_outbound_tick(session.as_ref(), Path::new(path), ns.trim());

@@ -27,7 +27,7 @@ pub(crate) use notify::{
 };
 pub(crate) use ui_session::{
     app_ack_read_enabled, app_ui_visible, emit_call_media, foreground_peer_cmd_gen_latest,
-    last_room_peer_mx, live_foreground_peer, may_send_in_room_read_ack,
+    is_live_foreground_peer, last_room_peer_mx, live_foreground_peer, may_send_in_room_read_ack,
     on_local_call_signal_sent, platform_incoming_call_dismiss, platform_incoming_call_show,
     read_ack_catchup_throttled,
 };
@@ -53,5 +53,6 @@ pub use notify::{
 };
 pub use ui_session::{
     bump_foreground_peer_cmd_gen, last_room_peer, live_foreground_peer_for_catchup,
-    queue_read_ack_catchup, set_app_ack_read_enabled, set_app_ui_visible, sync_foreground_peer_now,
+    live_foreground_peer_pk, queue_read_ack_catchup, set_app_ack_read_enabled, set_app_ui_visible,
+    sync_foreground_peer_now,
 };

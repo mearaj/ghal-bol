@@ -43,7 +43,7 @@ static COORD_CONSEC_FAILS: AtomicU64 = AtomicU64::new(0);
 static RELAY_PRESENCE_CHECK_PENDING: AtomicBool = AtomicBool::new(false);
 static RELAY_PRESENCE_POLL_LAST_END_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Fast poll after reservation (ngrok flap ~seconds); slow poll until mirror or circuit down.
+/// Fast poll after reservation (coord HTTP flap ~seconds); slow poll until mirror or circuit down.
 const RELAY_PRESENCE_POLL_FAST_MS: u64 = 500;
 const RELAY_PRESENCE_POLL_FAST_ATTEMPTS: u32 = 12;
 const RELAY_PRESENCE_POLL_SLOW_MS: u64 = 2_000;
@@ -94,7 +94,7 @@ pub fn sync_coord_lookup_peer_not_found(public_key_hex: &str, step_ms: u64, now_
     }
 }
 
-/// Min gap between full challenge+register cycles when already registered (reduces ngrok 401 storms).
+/// Min gap between full challenge+register cycles when already registered (reduces coord HTTP 401 storms).
 const MIN_REGISTER_INTERVAL_MS: u64 = 10_000;
 /// Retry sooner when never successfully registered.
 const MIN_REGISTER_RETRY_MS: u64 = 2_000;
@@ -594,12 +594,12 @@ pub fn coord_link_recently_ok() -> bool {
 
 /// Coord URL is set but coord HTTP transport has not succeeded recently — LAN/mDNS still works.
 /// Self not yet on coord (`awaiting_coord_mirror`) is **not** transport degradation when HTTP
-/// recently returned 200/404 (TRANSPORT.md § WAN phases — ngrok flap recovery).
+/// recently returned 200/404 (TRANSPORT.md § WAN phases — coord HTTP flap recovery).
 pub fn coord_http_degraded() -> bool {
     if !coord_is_configured() {
         return false;
     }
-    // One transient mobile/ngrok flake must not flip WAN to degraded for minutes.
+    // One transient mobile/coord HTTP flake must not flip WAN to degraded for minutes.
     if COORD_CONSEC_FAILS.load(Ordering::Relaxed) >= 2 {
         return true;
     }
@@ -1249,7 +1249,7 @@ fn try_register_presence() -> Result<(), String> {
 fn start_heartbeat_loop(public_key_hex: String) {
     let g = coord_globals();
     // Never join the previous heartbeat on the libp2p/swarm thread — that blocked mDNS and LAN
-    // dials for tens of seconds while ngrok HTTP finished.
+    // dials for tens of seconds while coord HTTP finished.
     g.heartbeat_stop.store(true, Ordering::Relaxed);
     if let Ok(mut j) = g.heartbeat_join.lock() {
         let _ = j.take();

@@ -130,7 +130,7 @@ fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId)
 
 /// In-room read acks require the read gate; leave backlog (non-foreground peer) does not.
 fn may_wire_read_ack_upkeep(session: &SessionState, peer: PeerId) -> bool {
-    if !session.is_foreground_peer(peer) {
+    if !is_live_foreground_peer(peer) {
         return true;
     }
     may_send_in_room_read_ack(session, peer)
@@ -248,10 +248,10 @@ async fn run_ack_upkeep(
         return;
     }
     for peer in connected_peers {
-        if session.has_pending_read_acks_for(*peer) && !session.is_foreground_peer(*peer) {
+        if session.has_pending_read_acks_for(*peer) && !is_live_foreground_peer(*peer) {
             // Leave backlog: refresh queue from transcript (`read_ack_sent: false` only).
             seed_read_acks_for_peer_from_transcript(session.as_ref(), *peer);
-        } else if session.is_foreground_peer(*peer)
+        } else if is_live_foreground_peer(*peer)
             && may_send_in_room_read_ack(session.as_ref(), *peer)
         {
             // In-room catch-up while read gate is open (enter / nudge / resume).

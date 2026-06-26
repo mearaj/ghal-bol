@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::app_paths::{chat_transcript_v1_path, contacts_v1_path, storage_config_for_namespace};
 use crate::c_ffi::ffi_unlocked_identity_clone;
 use crate::contacts_v1::{
-    SavedContact, clear_unread, find_by_peer_id, find_by_public_key, is_valid_public_key_hex,
+    SavedContact, find_by_peer_id, find_by_public_key, is_valid_public_key_hex,
     merge_discovered_peer_id, record_inbound_preview, upsert_contact,
 };
 use crate::dm_transcript_store::{
@@ -19,7 +19,6 @@ use crate::storage::base_data_dir;
 
 struct HandlerState {
     app_namespace: String,
-    foreground_public_key_hex: Option<String>,
 }
 
 fn state_mx() -> &'static Mutex<Option<HandlerState>> {
@@ -31,7 +30,6 @@ pub fn set_p2p_handler_context(app_namespace: &str) {
     if let Ok(mut g) = state_mx().lock() {
         *g = Some(HandlerState {
             app_namespace: app_namespace.trim().to_string(),
-            foreground_public_key_hex: None,
         });
         let ns = app_namespace.trim();
         flow_log::info(
@@ -66,39 +64,6 @@ pub fn active_app_namespace() -> Option<String> {
         .lock()
         .ok()
         .and_then(|g| g.as_ref().map(|s| s.app_namespace.clone()))
-}
-
-pub fn set_foreground_peer(public_key_hex: Option<String>) {
-    let Ok(mut g) = state_mx().lock() else {
-        return;
-    };
-    let Some(st) = g.as_mut() else {
-        return;
-    };
-    let prev = st.foreground_public_key_hex.clone();
-    let new_pk = public_key_hex
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty() && is_valid_public_key_hex(s));
-    if let Some(old) = prev.as_deref() {
-        if new_pk.as_deref() != Some(old) {
-            // Leaving or switching rooms — in-room seen mail must not linger as hub unread.
-            let _ = clear_unread(&st.app_namespace, old);
-        }
-    }
-    st.foreground_public_key_hex = new_pk;
-    flow_log::info(
-        "DM/store",
-        format!(
-            "foreground pk={}",
-            st.foreground_public_key_hex
-                .as_ref()
-                .map(|s| short_hex(s))
-                .unwrap_or_else(|| "(none)".to_string())
-        ),
-    );
-    if let Some(pk) = st.foreground_public_key_hex.as_deref() {
-        let _ = clear_unread(&st.app_namespace, pk);
-    }
 }
 
 fn public_key_hex_from_event(ev: &Value) -> String {
@@ -206,7 +171,6 @@ pub fn apply_p2p_event_json(ev: &Value) -> bool {
         return false;
     };
     let ns = st.app_namespace.clone();
-    let fg = st.foreground_public_key_hex.clone();
     drop(g);
 
     match kind {
@@ -231,7 +195,7 @@ pub fn apply_p2p_event_json(ev: &Value) -> bool {
         "dm_message" => {
             let msg_kind = ev.get("msg_kind").and_then(|v| v.as_str()).unwrap_or("");
             if msg_kind == "text" {
-                return apply_inbound_text(&ns, fg.as_deref(), ev);
+                return apply_inbound_text(&ns, ev);
             }
             if msg_kind == "ack_received" || msg_kind == "ack_read" {
                 return apply_inbound_ack(&ns, ev, msg_kind);
@@ -307,7 +271,7 @@ fn contact_is_blocked(ns: &str, sender_pk: &str, from_key: &str) -> bool {
     false
 }
 
-fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool {
+fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
     let my_pk = ffi_unlocked_identity_clone()
         .ok()
         .map(|id| id.public_key_hex())
@@ -343,8 +307,8 @@ fn apply_inbound_text(ns: &str, foreground_pk: Option<&str>, ev: &Value) -> bool
     }
 
     let mut skip_unread = false;
-    if let Some(fg) = foreground_pk {
-        if same_contact_pk(fg, &from_key) || same_contact_pk(fg, &sender_pk) {
+    if let Some(live) = crate::p2p::live_foreground_peer_pk() {
+        if same_contact_pk(&live, &from_key) || same_contact_pk(&live, &sender_pk) {
             skip_unread = true;
         }
     }

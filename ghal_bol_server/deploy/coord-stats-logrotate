@@ -1,0 +1,13 @@
+# Ops stats written by coord-vm-stats.sh (hourly timer).
+# Install: edit REPLACE_VM_USER below, then:
+#   sudo cp coord-stats-logrotate /etc/logrotate.d/ghalbol-coord-stats
+
+/home/REPLACE_VM_USER/.local/share/com.ghalbol.coord/ghalbol_server/ops/stats.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

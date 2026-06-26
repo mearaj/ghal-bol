@@ -36,7 +36,7 @@ pub fn notify_network_change() {
 }
 
 /// Re-fetch `/v1/relay` and re-dial the co-located relay (e.g. `p2p_start` `already_running`
-/// while bore/ngrok relay came up after the swarm started).
+/// while bore relay came up after the swarm started).
 pub fn notify_relay_refresh() {
     RELAY_REFRESH_NOTIFY.store(true, Ordering::SeqCst);
 }

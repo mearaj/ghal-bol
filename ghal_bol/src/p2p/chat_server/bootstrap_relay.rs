@@ -1718,7 +1718,7 @@ fn try_recover_lan_after_wifi_available(
     let needs_lan = session.any_dm_peer_needs_lan_rediscovery();
     let dm_down_on_lan = on_lan && needs_lan;
     // Parallel LAN+WAN: missing relay circuit must not re-kick LAN while WAN recovery is stuck
-    // (dev coord/ngrok down would purge mDNS every 5s — TRANSPORT.md § Hybrid coord presence).
+    // (dev coord HTTP unreachable would purge mDNS every 5s — TRANSPORT.md § Hybrid coord presence).
     let relay_lost_on_lan = on_lan
         && !relay_circuit_listening(swarm)
         && needs_lan

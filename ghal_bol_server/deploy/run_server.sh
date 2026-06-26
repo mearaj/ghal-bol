@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Run ghal_bol_server from the workspace (no global install paths).
+# Local dev — run ghal_bol_server on this machine (Arch).
 #
-# WAN relay (chat/voice/video across NAT): by default starts bore.pub → local relay port 4002
-# and advertises the tunnel at GET /v1/relay. ngrok free TCP cannot carry libp2p Noise; use
-# ngrok http for coord only (GHAL_BOL_COORD_URLS in the app).
+# Config: ghal_bol_server/.env.development (copy from .env.development.example once)
 #
-# Opt out: GHAL_BOL_RELAY_BORE=0, or set GHAL_BOL_RELAY_PUBLIC_ADDRS / GHAL_BOL_RELAY_PUBLIC_HOST
-# (production VM / paid ngrok TCP).
+#   ./ghal_bol_server/deploy/run_server.sh
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_DIR="$(cd "${DEPLOY_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${DEPLOY_DIR}/../.." && pwd)"
+# shellcheck source=load_env.sh
+source "${DEPLOY_DIR}/load_env.sh"
+load_server_env "${SERVER_DIR}" ".env.development"
+
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/build/ghal_bol_server-target}"
 BIN="${CARGO_TARGET_DIR}/release/ghal_bol_server"
 
@@ -38,9 +40,9 @@ fi
 
 # Phones on Wi‑Fi need a routable bind (override with 127.0.0.1:8765 for loopback-only).
 export GHAL_BOL_SERVER_LISTEN="${GHAL_BOL_SERVER_LISTEN:-0.0.0.0:8765}"
-# Same default as the binary: ~/.local/share/com.ghalbol/ghalbol_server/coord.db
+# Same default as the binary: ~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db
 # Override only if you need a different dir:
-# export GHAL_BOL_SERVER_DB="${HOME}/.local/share/com.ghalbol/ghalbol_server"
+# export GHAL_BOL_SERVER_DB="${HOME}/.local/share/com.ghalbol.coord/ghalbol_server"
 
 BORE_PID=""
 BORE_LOG=""

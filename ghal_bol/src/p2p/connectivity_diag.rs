@@ -35,7 +35,6 @@ pub fn classify_coord_lookup_error(err: &str) -> CoordLookupCategory {
     }
     if e.contains("lookup json parse")
         || e.contains("<!doctype html")
-        || e.contains("ngrok")
         || e.contains("error sending request")
         || e.contains("connection refused")
         || e.contains("connection reset")

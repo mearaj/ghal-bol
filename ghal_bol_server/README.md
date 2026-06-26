@@ -8,31 +8,23 @@ It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT travers
 
 | | **Local dev** (your laptop) | **Production** (Google Cloud VM) |
 |---|---------------------------|----------------------------------|
-| **Coord HTTP** | ngrok `http` → `127.0.0.1:8765` | nginx TLS → `https://coord.ghalbol.com` |
-| **WAN relay** | **bore** (auto in `run_server.sh`) | **No bore** — public DNS + TCP `4002` |
-| **How to start** | `./ghal_bol_server/deploy/run_server.sh` | systemd `ghal-bol-server` (see [deploy/README.md](deploy/README.md)) |
-| **App env** | `GHAL_BOL_COORD_URLS=https://….ngrok-free.dev` | `GHAL_BOL_COORD_URLS=https://coord.ghalbol.com` |
-
-Production has run on `coord.ghalbol.com` since the first deploy: `GHAL_BOL_RELAY_PUBLIC_HOST=coord.ghalbol.com`, firewall TCP `4002`, no bore. **Bore is dev-only** — it tunnels your local relay when ngrok carries HTTP only. The GCP VM does not need bore and has not been changed for it.
+| **Coord HTTP** | `run_server.sh` → `0.0.0.0:8765` | `https://coord.ghalbol.com` (nginx → loopback) |
+| **WAN relay** | **bore** (auto in `run_server.sh`) | Public DNS + TCP `4002` — **no bore** |
+| **How to start** | `./ghal_bol_server/deploy/run_server.sh` | `deploy_server.sh` from laptop → VM systemd |
+| **App env** | `GHAL_BOL_COORD_URLS=https://coord.ghalbol.com` (default) | same |
 
 Full walkthrough: **[deploy/README.md](deploy/README.md)**.
 
 ## Run (local dev)
 
-Recommended — builds, starts bore for WAN relay, runs the server:
+Copy `ghal_bol_server/.env.development.example` → `ghal_bol_server/.env.development`, then:
 
 ```bash
 cargo install bore-cli    # once
 ./ghal_bol_server/deploy/run_server.sh
 ```
 
-In another terminal, expose coord HTTP:
-
-```bash
-ngrok http 8765
-```
-
-Set `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` to the ngrok **https** URL. Verify relay:
+Set `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` (default: `https://coord.ghalbol.com`). Verify relay when running a local server:
 
 ```bash
 curl -s http://127.0.0.1:8765/v1/relay | jq   # enabled:true, /ip4/…/tcp/… addrs
@@ -49,9 +41,9 @@ Defaults:
 | Setting | Default |
 |---------|---------|
 | Listen | `127.0.0.1:8765` (`run_server.sh` uses `0.0.0.0:8765`) |
-| SQLite | `~/.local/share/com.ghalbol/ghalbol_server/coord.db` |
+| SQLite | `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` |
 
-Same data root as the Flutter app and `ghal_bol` (`com.ghalbol`).
+Same data root namespace as the coord server only (`com.ghalbol.coord` — not the Flutter app `com.ghalbol`).
 
 `GHAL_BOL_SERVER_DB` may be a **file** (`…/coord.db`) or **directory** (`…/ghalbol_server`).
 
@@ -71,8 +63,6 @@ Manual CLI: `cargo build -p ghal_bol_server --release` then `./target/release/co
 ```bash
 cargo test -p ghal_bol_server --test e2e_production
 ```
-
-Spawns the compiled `ghal_bol_server` binary, binds an ephemeral port, uses `reqwest` over HTTP.
 
 **Fast handler checks (in-process, no TCP):**
 
@@ -123,19 +113,21 @@ SHA-256 digest → secp256k1 ECDSA (DER).
 | Variable | Default |
 |----------|---------|
 | `GHAL_BOL_SERVER_LISTEN` | `127.0.0.1:8765` |
-| `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol/ghalbol_server/coord.db` |
+| `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` |
 | `GHAL_BOL_SERVER_CHALLENGE_TTL_SECS` | `120` |
 | `GHAL_BOL_SERVER_PRESENCE_TTL_SECS` | `90` |
 | `GHAL_BOL_SERVER_PURGE_INTERVAL_SECS` | `30` |
 | `GHAL_BOL_RELAY_ENABLE` | `1` (relay node on; `0` disables) |
 | `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (raw TCP — open this port; not behind the HTTP/TLS proxy) |
-| `GHAL_BOL_RELAY_PUBLIC_HOST` | unset locally; **production:** `coord.ghalbol.com` → `/dns4/coord.ghalbol.com/tcp/4002` |
+| `GHAL_BOL_RELAY_PUBLIC_HOST` | unset locally; **production:** `coord.ghalbol.com` |
 | `GHAL_BOL_RELAY_PUBLIC_ADDRS` | unset on production; **local dev:** set automatically by bore in `run_server.sh` |
 | `GHAL_BOL_RELAY_BORE` | local only: default on via `run_server.sh`; set `0` to skip bore |
+| `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` | `0` (unlimited per circuit) |
+| `GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER` | `16` |
 
 ## Deploy
 
-[deploy/README.md](deploy/README.md) — **local** (`run_server.sh` + ngrok + bore) and **production** (GCP + nginx + systemd, no bore).
+Deploy: `./ghal_bol_server/deploy/deploy_server.sh`. See [deploy/README.md](deploy/README.md).
 
 ## Checklist
 
