@@ -12,16 +12,19 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, Swarm, identify, identity, ping, relay};
+use tokio::sync::mpsc;
 
 use crate::agent_pk::parse_pk_from_agent_version;
 use crate::presence::PresenceStore;
 use crate::relay_live::RelayLiveRegistry;
+use crate::relay_nat::{self, MappedPort};
+use crate::AppState;
 
 /// Relay coordinates advertised to clients via `GET /v1/relay`.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -37,24 +40,50 @@ pub struct RelayConfig {
     /// Raw TCP listen socket (publicly reachable port on the relay host).
     pub listen: SocketAddr,
     /// Dialable base multiaddrs advertised to clients (without `/p2p/<id>`), e.g.
-    /// `/dns4/coord.ghalbol.com/tcp/4002`.
+    /// `/dns4/coord.ghalbol.com/tcp/4002`. Empty when dynamic — filled after UPnP bind.
     pub public_addrs: Vec<String>,
+    /// DNS hostname for `/dns4|6/<host>/tcp/<port>` when `public_addrs` is not set explicitly.
+    pub public_host: Option<String>,
+    /// Bind ephemeral local port + optional UPnP (home NAT). Port `0` in `listen` implies this.
+    pub dynamic_listen: bool,
+    /// Request UPnP/NAT-PMP external port mapping (default on when `dynamic_listen`).
+    pub upnp: bool,
     /// Persisted ed25519 identity so the relay PeerId is stable across restarts.
     pub key_path: PathBuf,
 }
 
+fn env_truthy(key: &str) -> Option<bool> {
+    std::env::var(key).ok().map(|s| {
+        let t = s.trim().to_ascii_lowercase();
+        t == "1" || t == "true" || t == "yes" || t == "on"
+    })
+}
+
+fn env_falsy(key: &str) -> Option<bool> {
+    std::env::var(key).ok().map(|s| {
+        let t = s.trim().to_ascii_lowercase();
+        t == "0" || t == "false" || t == "no" || t == "off"
+    })
+}
+
+/// Build `/dns6` + `/dns4` relay bootstrap addrs for a hostname and TCP port.
+pub fn build_dns_public_addrs(host: &str, port: u16) -> Vec<String> {
+    vec![
+        format!("/dns6/{host}/tcp/{port}"),
+        format!("/dns4/{host}/tcp/{port}"),
+    ]
+}
+
 impl RelayConfig {
     /// Defaults: enabled, TCP `0.0.0.0:4002`, identity under the server data dir.
-    /// Env: `GHAL_BOL_RELAY_ENABLE` (0/1), `GHAL_BOL_RELAY_LISTEN` (`ip:port`),
+    /// Env: `GHAL_BOL_RELAY_ENABLE` (0/1), `GHAL_BOL_RELAY_LISTEN` (`ip:port`, port `0` = ephemeral),
+    /// `GHAL_BOL_RELAY_DYNAMIC` (1 = ephemeral + UPnP for home NAT),
+    /// `GHAL_BOL_RELAY_UPNP` (0 to skip router mapping),
     /// `GHAL_BOL_RELAY_PUBLIC_HOST` (→ `/dns4/<host>/tcp/<port>`),
     /// `GHAL_BOL_RELAY_PUBLIC_ADDRS` (comma-separated multiaddrs, overrides host).
     pub fn from_env(data_dir: &Path) -> Self {
-        let enabled = std::env::var("GHAL_BOL_RELAY_ENABLE")
-            .ok()
-            .map(|s| {
-                let t = s.trim().to_ascii_lowercase();
-                !(t == "0" || t == "false" || t == "no" || t == "off")
-            })
+        let enabled = env_falsy("GHAL_BOL_RELAY_ENABLE")
+            .map(|f| !f)
             .unwrap_or(true);
 
         let listen: SocketAddr = std::env::var("GHAL_BOL_RELAY_LISTEN")
@@ -71,17 +100,23 @@ impl RelayConfig {
                     .collect()
             })
             .unwrap_or_default();
-        if public_addrs.is_empty() {
-            if let Ok(host) = std::env::var("GHAL_BOL_RELAY_PUBLIC_HOST") {
-                let host = host.trim();
-                if !host.is_empty() {
-                    // Advertise both IP families, IPv6 first (preferred when reachable). A
-                    // dual-stack resolver returns the host's AAAA + A; a DNS64/IPv6-only carrier
-                    // synthesizes an IPv6 mapping for the A record. Clients keep whichever family
-                    // routes on their network (see `network_transport::resolve_relay_bootnodes`).
-                    public_addrs.push(format!("/dns6/{host}/tcp/{}", listen.port()));
-                    public_addrs.push(format!("/dns4/{host}/tcp/{}", listen.port()));
-                }
+
+        let public_host = std::env::var("GHAL_BOL_RELAY_PUBLIC_HOST")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let dynamic_listen =
+            env_truthy("GHAL_BOL_RELAY_DYNAMIC").unwrap_or(false) || listen.port() == 0;
+
+        let upnp = env_falsy("GHAL_BOL_RELAY_UPNP")
+            .map(|f| !f)
+            .unwrap_or(dynamic_listen);
+
+        // Static installs know the WAN port up front; dynamic defers until UPnP returns.
+        if public_addrs.is_empty() && !dynamic_listen {
+            if let Some(ref host) = public_host {
+                public_addrs = build_dns_public_addrs(host, listen.port());
             }
         }
 
@@ -89,6 +124,9 @@ impl RelayConfig {
             enabled,
             listen,
             public_addrs,
+            public_host,
+            dynamic_listen,
+            upnp,
             key_path: data_dir.join("relay_ed25519.key"),
         }
     }
@@ -190,6 +228,89 @@ fn counterpart_listen_addr(primary: SocketAddr) -> Option<SocketAddr> {
     }
 }
 
+/// Build advertised relay multiaddrs from config + optional UPnP mapping.
+fn finalize_public_addrs(
+    cfg: &RelayConfig,
+    listen: SocketAddr,
+    mapping: Option<&MappedPort>,
+) -> Vec<String> {
+    if !cfg.public_addrs.is_empty() {
+        return cfg.public_addrs.clone();
+    }
+    let advertise_port = mapping
+        .map(|m| m.external_port)
+        .unwrap_or_else(|| listen.port());
+    // Dynamic + no UPnP yet: do not publish the local ephemeral port as WAN-reachable.
+    if cfg.dynamic_listen && mapping.is_none() {
+        return Vec::new();
+    }
+    let mut addrs = cfg
+        .public_host
+        .as_ref()
+        .map(|host| build_dns_public_addrs(host, advertise_port))
+        .unwrap_or_default();
+    if let Some(mapping) = mapping {
+        if let Some(ip_ma) = mapping.external_multiaddr() {
+            if !addrs.iter().any(|a| a == &ip_ma) {
+                addrs.push(ip_ma);
+            }
+        }
+    }
+    addrs
+}
+
+fn spawn_upnp_background(
+    listen: SocketAddr,
+    cfg: RelayConfig,
+    peer_id: String,
+    app_state: Option<Arc<AppState>>,
+    addr_tx: mpsc::Sender<Vec<String>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            match relay_nat::map_relay_port_with_retries(listen, 3).await {
+                Ok(mapping) => {
+                    tracing::info!(
+                        external_port = mapping.external_port,
+                        external = %mapping.external_ip,
+                        "relay UPnP mapped on background retry"
+                    );
+                    let addrs = finalize_public_addrs(&cfg, listen, Some(&mapping));
+                    if addrs.is_empty() {
+                        continue;
+                    }
+                    let _ = addr_tx.send(addrs.clone()).await;
+                    let info = RelayInfo {
+                        peer_id: peer_id.clone(),
+                        addrs,
+                    };
+                    if let Some(ref state) = app_state {
+                        state.set_relay_info(info);
+                    }
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "relay UPnP background retry — router not responding yet");
+                }
+            }
+        }
+    });
+}
+
+fn register_external_addrs(swarm: &mut Swarm<RelayBehaviour>, addrs: &[String]) {
+    for addr in addrs {
+        match addr.parse::<Multiaddr>() {
+            Ok(ma) => {
+                swarm.add_external_address(ma.clone());
+                tracing::info!(%ma, "relay external address registered (reservations advertise this)");
+            }
+            Err(e) => {
+                tracing::warn!(addr = %addr, error = %e, "invalid relay public addr — skipping");
+            }
+        }
+    }
+}
 fn build_swarm(
     keypair: identity::Keypair,
 ) -> Result<Swarm<RelayBehaviour>, Box<dyn std::error::Error + Send + Sync>> {
@@ -224,14 +345,52 @@ fn build_swarm(
 /// Start the relay node (spawns its swarm loop on the current Tokio runtime) and return
 /// the coordinates to advertise. Returns `Ok(None)` when disabled. Must be called from
 /// within a Tokio runtime (the binary's `#[tokio::main]`).
-pub fn start(
+pub async fn start(
     cfg: RelayConfig,
     presence: Arc<PresenceStore>,
+    app_state: Option<Arc<AppState>>,
 ) -> Result<Option<RelayInfo>, Box<dyn std::error::Error + Send + Sync>> {
     if !cfg.enabled {
         tracing::info!("relay disabled (GHAL_BOL_RELAY_ENABLE=0)");
         return Ok(None);
     }
+
+    let mut listen = cfg.listen;
+    if cfg.dynamic_listen && listen.port() == 0 {
+        listen = relay_nat::reserve_ephemeral_tcp_port(listen).await?;
+        tracing::info!(%listen, "relay dynamic — ephemeral local TCP port");
+    }
+
+    let mut upnp_mapping: Option<MappedPort> = None;
+    let mut upnp_pending = false;
+
+    if cfg.upnp && cfg.dynamic_listen {
+        match relay_nat::map_relay_port(listen).await {
+            Ok(mapping) => {
+                tracing::info!(
+                    local = %listen,
+                    external = %mapping.external_ip,
+                    external_port = mapping.external_port,
+                    upnp_internal = %mapping.local_addr,
+                    "relay UPnP/NAT-PMP mapped — advertising external port"
+                );
+                upnp_mapping = Some(mapping);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "relay UPnP mapping failed on startup — retrying in background (WAN relay pending)"
+                );
+                upnp_pending = true;
+            }
+        }
+    }
+
+    let public_addrs = finalize_public_addrs(&cfg, listen, upnp_mapping.as_ref());
+    let advertise_port = upnp_mapping
+        .as_ref()
+        .map(|m| m.external_port)
+        .unwrap_or(listen.port());
 
     let keypair = load_or_create_keypair(&cfg.key_path)?;
     let peer_id = keypair.public().to_peer_id();
@@ -240,9 +399,9 @@ pub fn start(
     // Listen on the configured address and additionally on the counterpart IP family (same port,
     // same scope), so the relay accepts both IPv4 and IPv6 client connections (dual-stack; IPv6
     // preferred when both work). The default `0.0.0.0:4002` covers IPv4; `[::]:<port>` covers IPv6.
-    let primary_listen = tcp_listen_multiaddr(cfg.listen);
+    let primary_listen = tcp_listen_multiaddr(listen);
     swarm.listen_on(primary_listen.clone())?;
-    if let Some(counterpart) = counterpart_listen_addr(cfg.listen) {
+    if let Some(counterpart) = counterpart_listen_addr(listen) {
         let counterpart_listen = tcp_listen_multiaddr(counterpart);
         if let Err(e) = swarm.listen_on(counterpart_listen.clone()) {
             tracing::warn!(
@@ -253,43 +412,44 @@ pub fn start(
         }
     }
 
-    if cfg.public_addrs.is_empty() {
+    if public_addrs.is_empty() && !upnp_pending {
         tracing::warn!(
             "relay has no public address advertised — set GHAL_BOL_RELAY_PUBLIC_HOST (or \
              GHAL_BOL_RELAY_PUBLIC_ADDRS) so clients can reserve a circuit"
         );
+    } else if upnp_pending {
+        tracing::info!(
+            "relay WAN addrs pending — UPnP background retry (GET /v1/relay updates when mapped)"
+        );
     }
 
-    // Register the publicly reachable address(es) as *external* addresses of this node.
-    //
-    // This is required for reservations to work: libp2p's `relay::Behaviour` fills a reservation
-    // reply with the relay's *external addresses* (confirmed via `ExternalAddrConfirmed`), NOT its
-    // raw `listen_on` addresses. We listen on `0.0.0.0:<port>`, which only expands to local/private
-    // interface addresses (127.0.0.1, 192.168.x, docker 172.x, …) and is never added to the
-    // external-address set. Behind a tunnel (bore) the kernel cannot observe the public address at
-    // all. Without this call the reservation reply carries zero addresses and every client rejects
-    // it with `Reservation(Protocol(NoAddressesInReservation))` — the relay then never grants a
-    // circuit, so coord registration (which gates on a `/p2p-circuit` endpoint) and WAN DM stall.
-    for addr in &cfg.public_addrs {
-        match addr.parse::<Multiaddr>() {
-            Ok(ma) => {
-                swarm.add_external_address(ma.clone());
-                tracing::info!(%ma, "relay external address registered (reservations advertise this)");
-            }
-            Err(e) => {
-                tracing::warn!(addr = %addr, error = %e, "invalid relay public addr — skipping");
-            }
-        }
-    }
+    register_external_addrs(&mut swarm, &public_addrs);
 
     let info = RelayInfo {
         peer_id: peer_id.to_string(),
-        addrs: cfg.public_addrs.clone(),
+        addrs: public_addrs,
     };
+
+    let mut addr_rx: Option<mpsc::Receiver<Vec<String>>> = None;
+    if upnp_pending {
+        let (tx, rx) = mpsc::channel(4);
+        addr_rx = Some(rx);
+        spawn_upnp_background(
+            listen,
+            cfg.clone(),
+            info.peer_id.clone(),
+            app_state,
+            tx,
+        );
+    }
 
     tracing::info!(
         peer_id = %info.peer_id,
-        listen = %cfg.listen,
+        listen = %listen,
+        dynamic = cfg.dynamic_listen,
+        upnp = upnp_mapping.is_some(),
+        upnp_pending,
+        advertise_port,
         advertised = ?info.addrs,
         "relay v2 node started"
     );
@@ -297,20 +457,29 @@ pub fn start(
     let live = presence.relay_live().clone();
     let ctx = Arc::new(RelayLoopCtx {
         presence,
-        relay_info: info.clone(),
+        relay_info: Arc::new(Mutex::new(info.clone())),
         live,
     });
-    tokio::spawn(run_relay(swarm, ctx));
+    tokio::spawn(run_relay(swarm, ctx, addr_rx));
     Ok(Some(info))
 }
 
 struct RelayLoopCtx {
     presence: Arc<PresenceStore>,
-    relay_info: RelayInfo,
+    relay_info: Arc<Mutex<RelayInfo>>,
     live: RelayLiveRegistry,
 }
 
 impl RelayLoopCtx {
+    fn relay_info_snapshot(&self) -> RelayInfo {
+        self.relay_info
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| RelayInfo {
+                peer_id: String::new(),
+                addrs: Vec::new(),
+            })
+    }
     fn pk_for_peer(&self, peer_id: PeerId) -> Option<String> {
         self.live.pk_for_peer(peer_id)
     }
@@ -366,7 +535,9 @@ impl RelayLoopCtx {
         }
         let mut refreshed = 0usize;
         for (peer_id, pk) in live {
-            let Some(circuit_ma) = relay_circuit_multiaddr(&self.relay_info, peer_id) else {
+            let Some(circuit_ma) =
+                relay_circuit_multiaddr(&self.relay_info_snapshot(), peer_id)
+            else {
                 continue;
             };
             match self.presence.upsert_relay_circuit(&pk, circuit_ma) {
@@ -389,7 +560,7 @@ impl RelayLoopCtx {
             tracing::debug!(%peer_id, "relay reservation accepted — awaiting identify pk");
             return;
         };
-        let Some(circuit_ma) = relay_circuit_multiaddr(&self.relay_info, peer_id) else {
+        let Some(circuit_ma) = relay_circuit_multiaddr(&self.relay_info_snapshot(), peer_id) else {
             tracing::warn!(%peer_id, "relay circuit multiaddr build failed");
             return;
         };
@@ -428,7 +599,11 @@ fn relay_circuit_multiaddr(relay_info: &RelayInfo, client_peer: PeerId) -> Optio
     ))
 }
 
-async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
+async fn run_relay(
+    mut swarm: Swarm<RelayBehaviour>,
+    ctx: Arc<RelayLoopCtx>,
+    mut addr_rx: Option<mpsc::Receiver<Vec<String>>>,
+) {
     // Keep coord presence rows fresh while reservations are held. Must be well under the coord
     // `presence_ttl` (90 s default) so a relay-only peer never 404s between hourly libp2p
     // reservation renewals — see `RelayLoopCtx::refresh_live_presence`.
@@ -438,6 +613,22 @@ async fn run_relay(mut swarm: Swarm<RelayBehaviour>, ctx: Arc<RelayLoopCtx>) {
         let event = tokio::select! {
             _ = presence_keepalive.tick() => {
                 ctx.refresh_live_presence();
+                continue;
+            }
+            addrs = async {
+                match addr_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if addr_rx.is_some() => {
+                if let Some(addrs) = addrs {
+                    register_external_addrs(&mut swarm, &addrs);
+                    if let Ok(mut g) = ctx.relay_info.lock() {
+                        g.addrs = addrs;
+                    }
+                } else {
+                    addr_rx = None;
+                }
                 continue;
             }
             event = swarm.select_next_some() => event,

@@ -37,7 +37,7 @@ Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v
 | Path | Owner | Contents |
 |------|-------|----------|
 | `~/.local/share/com.ghalbol.debug/` | Debug **app** (`flutter run`) | Keystore, contacts, transcript for debug builds |
-| `~/.local/share/com.ghalbol.coord/ghalbol_server/` | Local **coord server** (`run_server.sh`) | `coord.db`, `relay_ed25519.key` |
+| `~/.local/share/com.ghalbol.coord/ghalbol_server/` | **Coord server** (home or GCP) | `coord.db`, `relay_ed25519.key` |
 
 The debug app does **not** write identity or chat stores to `com.ghalbol/` unless you run a release build. There is no automatic migration between debug and release namespaces — re-pair or import identity when switching builds.
 

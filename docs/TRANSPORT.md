@@ -801,10 +801,10 @@ Coord publishes `tcp`, `quic`, and `libp2p` multiaddrs; `coord_runtime.rs` and `
 
 WAN chat between two internet-connected peers requires **both** channels below. Coord HTTP alone is **not** enough.
 
-| Channel | Dev (`run_server.sh`) | Prod (`coord.ghalbol.com`) |
-|---------|----------------------|----------------------------|
-| **Coord HTTP** | `http://127.0.0.1:8765` (local server smoke only) | nginx `:443` → `:8765` |
-| **Relay TCP** | **bore** → local `:4002` (new remote port **each run**) | public `:4002` on VM (fixed) |
+| Channel | Home / smoke (`coord1` or loopback) | GCP (`coord.ghalbol.com`) |
+|---------|--------------------------------------|----------------------------|
+| **Coord HTTP** | nginx `:8443` → `:8765` or `http://127.0.0.1:8765` smoke | nginx `:443` → `:8765` |
+| **Relay TCP** | public `:4002` on host (fixed DNS) | public `:4002` on VM (fixed) |
 
 Checklist before blaming the client:
 
@@ -819,12 +819,12 @@ Checklist before blaming the client:
 
 | What you see | Meaning | Fix |
 |--------------|---------|-----|
-| `GET /v1/relay` 200, `GET /v1/peers/…` **404 only**, no `peer registered` | Peers never registered — relay circuit or register path failed | Fix relay TCP (bore/firewall); see deploy README |
-| `GET /v1/peers/…` 404 after server restart | Stale presence TTL expired; peer not re-registered yet | Restart apps after server+bore so they re-reserve and register |
-| `GET /v1/relay` 200 but client `Connection refused` on relay addr | HTTP advertises a **dead** tunnel (bore stopped) | Run `./ghal_bol_server/deploy/run_server.sh`; client refetches live `GET /v1/relay` on next coord tick (no disk cache) |
+| `GET /v1/relay` 200, `GET /v1/peers/…` **404 only**, no `peer registered` | Peers never registered — relay circuit or register path failed | Fix relay TCP (firewall/port forward); see deploy README |
+| `GET /v1/peers/…` 404 after server restart | Stale presence TTL expired; peer not re-registered yet | Restart apps so they re-reserve and register |
+| `GET /v1/relay` 200 but client `Connection refused` on relay addr | HTTP advertises relay but TCP `:4002` unreachable | Fix firewall/port forward; client refetches live `GET /v1/relay` on next coord tick (no disk cache) |
 | One side `reservation accepted`, other side 404 on coord lookup | **Asymmetric CGNAT bug** — phone never registered; Wi‑Fi side looks healthy | Check **phone** log for dial storm + missing `reservation accepted`; see § “CGNAT / mobile-data relay reservation” |
 | Phone log: many `coord relay dial` per second, no `bootstrap connection` | Bootstrap **dial storm** — do not add more dials; restore throttle + CGNAT probe path | `issue_bootstrap_dials`, `try_ghalbol_probe_style_circuit_listen` in `retry_stalled_relay_reservations` |
-| `relay has no public address advertised` at server start | bore did not run or `GHAL_BOL_RELAY_PUBLIC_*` unset | Use `run_server.sh` (default bore on); read script’s bore-skip reason on stderr |
+| `relay has no public address advertised` at server start | `GHAL_BOL_RELAY_PUBLIC_HOST` unset or relay disabled | Set public host; restart coord server |
 
 See [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md) § “Regression prevention”.
 

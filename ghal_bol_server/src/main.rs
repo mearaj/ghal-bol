@@ -37,7 +37,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match relay::start(
         RelayConfig::from_env(&relay_data_dir),
         Arc::clone(&state.presence),
-    ) {
+        Some(Arc::clone(&state)),
+    )
+    .await
+    {
         Ok(Some(info)) => state.set_relay_info(info),
         Ok(None) => {}
         Err(e) => tracing::warn!(error = %e, "relay node failed to start — continuing HTTP only"),

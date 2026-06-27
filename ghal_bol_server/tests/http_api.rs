@@ -32,13 +32,32 @@ async fn json_body(resp: axum::response::Response) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn health_ok() {
-    let app = test_app();
+async fn health_ok_when_relay_advertised() {
+    let config = ServerConfig::default();
+    let state = Arc::new(AppState::open_in_memory(config).expect("in-memory db"));
+    state.set_relay_info(RelayInfo {
+        peer_id: "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X".to_string(),
+        addrs: vec!["/dns4/coord.ghalbol.com/tcp/4002".to_string()],
+    });
+    let app = router(state);
     let resp = json_request(&app, "GET", "/health").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let v = json_body(resp).await;
     assert_eq!(v["ok"], true);
     assert_eq!(v["database"], true);
+    assert_eq!(v["relay"]["running"], true);
+    assert_eq!(v["relay"]["wan_ready"], true);
+}
+
+#[tokio::test]
+async fn health_not_wan_ready_without_relay() {
+    let app = test_app();
+    let resp = json_request(&app, "GET", "/health").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = json_body(resp).await;
+    assert_eq!(v["database"], true);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["relay"]["wan_ready"], false);
 }
 
 #[tokio::test]

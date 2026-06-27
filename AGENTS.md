@@ -249,9 +249,9 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | Coord lookup 404 for peer | Peer not on coord yet — both need `reservation accepted` + `coord registered`; **not** proof coord HTTP is down. If **all** lookups 404 and server shows no `peer registered`, relay TCP is dead (dev: bore stopped / wrong port). **Asymmetric:** Wi‑Fi side registered, phone 404 → phone never got relay circuit — TRANSPORT.md § “CGNAT / mobile-data relay reservation” |
 | Phone: many `coord relay dial`/s, no `bootstrap connection`, `CGNAT listen addr only` | Bootstrap **dial storm** or missing CGNAT probe reservation — rebuild native; see TRANSPORT.md § “CGNAT / mobile-data relay reservation” |
 | `coord_lookup_peer ok` then `skip relay dial … self relay circuit not ready yet` (no `peer_connected` for ~40s) | **Regression:** peer relay dial gated on own reservation — remove gate; peer dials use `should_routed_dial` only. TRANSPORT.md § “Outbound peer relay dials vs own reservation” |
-| Endless `GET /v1/peers/…` 404 on coord server, `GET /v1/relay` 200 | Relay TCP unreachable while HTTP OK (dev: bore stopped) | `nc -zv` on `/v1/relay` addr; restart `run_server.sh`; apps refetch live `GET /v1/relay` on next coord tick |
-| `waiting for relay/public listen endpoint before coord register` | No relay circuit — cannot register WAN endpoint | Fix bore/firewall; `coord_registered=false` until `reservation accepted` |
-| `relay has no public address advertised` / `advertised=[]` on server | bore did not run at server start | `run_server.sh` must print `Starting bore:`; check bore-skip reason on stderr |
+| Endless `GET /v1/peers/…` 404 on coord server, `GET /v1/relay` 200 | Relay TCP unreachable while HTTP OK | `nc -zv` on relay host `:4002`; restart coord server; apps refetch live `GET /v1/relay` on next coord tick |
+| `waiting for relay/public listen endpoint before coord register` | No relay circuit — cannot register WAN endpoint | Fix relay/firewall; `coord_registered=false` until `reservation accepted` |
+| `relay has no public address advertised` / `advertised=[]` on server | `GHAL_BOL_RELAY_PUBLIC_HOST` unset or relay disabled | Set public host; restart coord server |
 | Slow reconnect after idle | `dm peer disconnected` then 404 backoff + stale CGNAT `Timeout` dials? TRANSPORT.md § Idle chat reconnect — urgent reconnect must not apply 404 backoff; no blind `try_routed_dial` for WAN coord peers |
 | Relay reservation never `accepted` | Is the **Ghal Bol relay** (coord-colocated, `GET /v1/relay`) reachable? Check `ghalbol relay … preferred for reservation` at startup + `relay v2 node started` in coord logs. Reserve on **all** configured coord relays (`try_relay_reservations`), per-relay throttled. Do **not** expect public IPFS bootstraps to substitute. See TRANSPORT.md § "Ghal Bol relay" |
 | Call still active after Linux X / Ctrl+C / UI kill | UI gone but `:p2p`/daemon still up — must **`force_end_active_call`** on last UI socket EOF. Log: `force_end_active_call reason=ui_session_ended`. Also check Flutter `window_closed_by_user` / `call_screen_dismissed_*`. DESIGN.md § “Call UI lifecycle and privacy” |
@@ -279,7 +279,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `docs/COORDINATION_SERVER.md` | Run/test coord server, local dev stack, **HTTP log troubleshooting** |
 | `docs/TRANSPORT.md` | libp2p transport, **Connectivity lifecycle**, **Network truth**, **Asymmetric mux recovery**, **Post-mortem 2026-06-24**, **Post-mortem 2026-06-25**, caching policy, LAN stability, WAN/CGNAT |
 | `docs/ROADMAP.md` | Human product backlog only — not agent implementation specs |
-| `ghal_bol_server/deploy/README.md` | Dev `run_server.sh`, bore; **§ Regression prevention** |
+| `ghal_bol_server/deploy/README.md` | Home `coord1`, GCP deploy, smoke; **§ Regression prevention** |
 | `docs/WEB_SITE.md` | Static **ghalbol.com** web build, Firebase, Linux download, `/connect/…` handoff |
 | `README.md` | Product vision + repo map |
 | `ghal_bol_ui/README.md` | Flutter shell scope (native vs `bootstrap_web`) |

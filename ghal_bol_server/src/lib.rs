@@ -10,6 +10,7 @@ mod endpoint_expand;
 mod error;
 mod presence;
 mod relay_live;
+mod relay_nat;
 pub mod relay;
 mod routes;
 

@@ -24,7 +24,7 @@ sha2 = "0.11"
 thiserror = "2"
 rusqlite = { version = "0.39", features = ["bundled"] }
 directories = "6"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
 socket2 = "0.5"
 tower-http = { version = "0.6", features = ["trace", "limit"] }
 tracing = "0.1"
@@ -51,6 +51,7 @@ libp2p = { version = "0.56", features = [
     "secp256k1",
     "ed25519",
 ] }
+igd-next = { version = "0.17.1", features = ["aio_tokio"] }
 
 [dev-dependencies]
 tempfile = "3"

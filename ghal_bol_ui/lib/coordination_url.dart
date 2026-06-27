@@ -85,25 +85,25 @@ abstract final class CoordinationUrl {
     return [];
   }
 
-  static Future<bool> effectiveInsecureTls() async {
-    const fromDefine = String.fromEnvironment(_tlsDefineKey, defaultValue: "");
-    if (fromDefine == "1" || fromDefine.toLowerCase() == "true") return true;
-    final shell = Platform.environment[_tlsDefineKey]?.trim() ?? "";
-    if (shell == "1" || shell.toLowerCase() == "true") return true;
-    final file = AppEnvConfig.get(_tlsDefineKey);
-    if (file == "1" || file?.toLowerCase() == "true") return true;
-    final prefs = GhalBolFfi.coordSettingsGet(appNamespace: kGhalBolAppNamespace);
-    return prefs?["insecure_tls"] == true;
-  }
-
   static bool get isConfigured => defaultBaseUrls.isNotEmpty;
+
+  /// `true` only when explicitly set via `--dart-define`, shell env, or bundled `env/.env.*`.
+  /// Does not read persisted native prefs — stale `insecure_tls` from self-signed dev must not
+  /// stick after switching to Let's Encrypt (coord1 home).
+  static Future<bool> effectiveInsecureTls() async {
+    return defaultInsecureTls;
+  }
 
   static bool get defaultInsecureTls {
     const fromEnv = String.fromEnvironment(_tlsDefineKey, defaultValue: "");
     if (fromEnv == "1" || fromEnv.toLowerCase() == "true") return true;
+    if (fromEnv == "0" || fromEnv.toLowerCase() == "false") return false;
     final shell = Platform.environment[_tlsDefineKey]?.trim() ?? "";
     if (shell == "1" || shell.toLowerCase() == "true") return true;
+    if (shell == "0" || shell.toLowerCase() == "false") return false;
     final file = AppEnvConfig.get(_tlsDefineKey);
-    return file == "1" || file?.toLowerCase() == "true";
+    if (file == "1" || file?.toLowerCase() == "true") return true;
+    if (file == "0" || file?.toLowerCase() == "false") return false;
+    return false;
   }
 }

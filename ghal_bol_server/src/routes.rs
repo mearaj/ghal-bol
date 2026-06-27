@@ -62,10 +62,21 @@ async fn get_relay(State(state): State<Arc<RouteState>>) -> Json<RelayResponse> 
 }
 
 #[derive(Serialize)]
+struct HealthRelayStatus {
+    /// libp2p relay task started and coordinates are published.
+    running: bool,
+    /// Non-empty `GET /v1/relay` addrs — required for WAN chat.
+    wan_ready: bool,
+    advertised_addrs: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct HealthResponse {
+    /// `database` + relay `wan_ready`. Do not treat HTTP 200 alone as “chat works”.
     ok: bool,
     service: &'static str,
     database: bool,
+    relay: HealthRelayStatus,
 }
 
 async fn health(State(state): State<Arc<RouteState>>) -> Json<HealthResponse> {
@@ -75,10 +86,24 @@ async fn health(State(state): State<Arc<RouteState>>) -> Json<HealthResponse> {
         .ok()
         .and_then(|r| r.ok())
         .is_some();
+    let relay_info = state.app.relay_info.lock().ok().and_then(|g| g.clone());
+    let relay = match relay_info {
+        Some(info) => HealthRelayStatus {
+            running: true,
+            wan_ready: !info.addrs.is_empty(),
+            advertised_addrs: info.addrs,
+        },
+        None => HealthRelayStatus {
+            running: false,
+            wan_ready: false,
+            advertised_addrs: Vec::new(),
+        },
+    };
     Json(HealthResponse {
-        ok: database,
+        ok: database && relay.wan_ready,
         service: "ghal_bol_server",
         database,
+        relay,
     })
 }
 

@@ -14,6 +14,9 @@
 ghal_bol_ui/env/.env.production
 # Dev coord config — frequently toggled between local/cloud coord URLs; do not commit churn
 ghal_bol_ui/env/.env.development
+ghal_bol_server/deploy/*.service.rendered
+ghal_bol_server/deploy/godaddy-ddns-coord1.credentials
+ghal_bol_server/deploy/.godaddy-ddns-coord1.last_ip
 
 # Optional local keystores
 ghal_bol_ui/keystore/

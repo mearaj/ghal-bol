@@ -38,14 +38,16 @@ Implementation: `should_throttle_register`, `spawn_register_presence_inner`, `co
 
 ## Run server
 
-**Local dev** — `run_server.sh` starts the binary + **bore** for WAN relay:
+**Home** — GoDaddy DDNS + `install_coord1_home.sh` + nginx `:443`. See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
+
+**GCP** — `./ghal_bol_server/deploy/deploy_server.sh`.
+
+**Loopback smoke:**
 
 ```bash
-./ghal_bol_server/deploy/run_server.sh
-curl -s http://127.0.0.1:8765/v1/relay | jq     # relay must show enabled + addrs
+cargo run -p ghal_bol_server
+curl -s http://127.0.0.1:8765/v1/relay | jq
 ```
-
-**Production** — `./ghal_bol_server/deploy/deploy_server.sh`. See [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md).
 
 ## Production (`coord.ghalbol.com`)
 
@@ -62,6 +64,16 @@ Smoke against production:
 ```bash
 COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 ```
+
+## Home (`coord1.ghalbol.com`)
+
+Same nginx pattern as GCP. **GoDaddy DDNS** (`godaddy-ddns.sh`) updates the A record when your public IP changes. Relay: `coord1.ghalbol.com:4002`.
+
+```bash
+GHAL_BOL_COORD_URLS=["https://coord1.ghalbol.com"]
+```
+
+See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
 ## HTTP API (v1)
 
 | Method | Path |
@@ -78,7 +90,7 @@ Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256
 
 **Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: **`tcp` / `quic` with globally routable IPv4** (the peer’s own inbound DM listen). **Rejected (400):** `/p2p-circuit`, RFC1918 LAN, CGNAT-only, relay bootstrap host:port from `GET /v1/relay`. The co-located relay **upserts** `/p2p-circuit` when the client’s reservation is accepted (identify `agent_version` `ghal_bol/<ver>;pk=<device_pubkey_hex>`). When the reservation ends, the server removes **only** the circuit row — public-TCP rows from `POST` stay. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
 
-`GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` or empty `addrs` when no public relay is configured (dev: bore not running).
+`GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` or empty `addrs` when `GHAL_BOL_RELAY_PUBLIC_HOST` / `GHAL_BOL_RELAY_PUBLIC_ADDRS` are unset or relay is disabled.
 
 **Server log (healthy WAN):** `relay reservation ACCEPTED` → `coord presence registered from relay reservation` → optional `peer registered` when client POSTs LAN/public tcp.
 
@@ -88,19 +100,18 @@ Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256
 
 | Pattern | Likely cause | Action |
 |---------|--------------|--------|
-| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | `nc -zv` on `/v1/relay` addr; restart `run_server.sh`; restart apps |
-| `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but bore skipped or relay disabled | See deploy README bore-skip reasons |
+| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | `nc -zv` on `/v1/relay` addr; restart coord server; restart apps |
+| `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but relay disabled or no public host configured | Set `GHAL_BOL_RELAY_PUBLIC_HOST`; check deploy README |
 | `peer registered` in **server** logs but lookup 404 | TTL expired (~90s) or wrong coord URL in app | Heartbeat/register failing; check app `coord_registered` |
 | `peer registered` but client `peer_on_coord_no_dial_addrs` | Row has relay bootstrap `tcp` or LAN-only — no `/p2p-circuit` | Phone lost reservation; client must not POST relay IP:port; wait for `reservation ACCEPTED` + server circuit upsert |
 | `relay circuit DENIED` … `NoReservation` | Destination peer has no active relay reservation | Remote `:p2p` dropped reservation (background/LAN handover); remote must re-reserve |
-| Works after second `run_server.sh` start | First start had no bore | Always confirm `Starting bore:` line appears |
 
-### Dev session checklist
+### Session checklist
 
-1. `./ghal_bol_server/deploy/run_server.sh` — keep running  
+1. Coord server running (`ghal-bol-server-coord1` or GCP systemd)  
 2. `curl -s http://127.0.0.1:8765/v1/relay | jq` — enabled + addrs  
-3. `nc -zv <relay-ip> <relay-port>` — must connect  
-4. Rebuild native + restart apps after **every** server restart (bore port change)
+3. `nc -zv <relay-host> 4002` — must connect from WAN  
+4. Rebuild native + restart apps after server identity or relay config change
 
 When testing app traffic against your local server (not production), set `GHAL_BOL_COORD_URLS` to a reachable `http://…:8765` URL and restart the app.
 
@@ -110,7 +121,7 @@ Full detail: [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README
 
 | Variable | Default |
 |----------|---------|
-| `GHAL_BOL_SERVER_LISTEN` | `127.0.0.1:8765` (binary); `run_server.sh` uses `0.0.0.0:8765`. Dual-stack: the server also binds the counterpart-family wildcard (`[::]:<port>`, IPv6 `V6ONLY`) on the same port so coord HTTP is reachable over both IPv4 and IPv6; a missing stack logs a warning and continues single-stack |
+| `GHAL_BOL_SERVER_LISTEN` | `127.0.0.1:8765`. Dual-stack: the server also binds the counterpart-family wildcard (`[::]:<port>`, IPv6 `V6ONLY`) on the same port so coord HTTP is reachable over both IPv4 and IPv6; a missing stack logs a warning and continues single-stack |
 | `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` |
 | `GHAL_BOL_SERVER_PRESENCE_TTL_SECS` | `90` |
 | `GHAL_BOL_RELAY_ENABLE` | `1` (set `0` to disable the relay node) |
@@ -131,12 +142,10 @@ cargo build -p ghal_bol_server --release
 
 `-k` = skip TLS verify (self-signed / dev HTTPS).
 
-## Local dev stack
-
-One `ghal_bol_server` on your desktop for Linux + Android builds.
+## Local smoke
 
 ```bash
-./ghal_bol_server/deploy/run_server.sh          # listens 0.0.0.0:8765
+cargo run -p ghal_bol_server
 COORD_URL=http://127.0.0.1:8765 ./ghal_bol_server/deploy/smoke_coord.sh
 ```
 
