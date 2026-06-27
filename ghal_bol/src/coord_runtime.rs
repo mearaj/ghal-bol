@@ -496,11 +496,11 @@ pub fn coord_invalidate_presence_on_network_change() {
 /// Blocking HTTP — call from a blocking context (e.g. `spawn_blocking`). A few quick retries
 /// absorb a transient coord hiccup at startup. Live HTTP only — no on-disk relay cache
 /// (TRANSPORT.md § “Caching policy (canonical)”).
-fn fetch_ghalbol_relay_for_base(base: &str) -> Option<(String, Vec<String>)> {
+fn fetch_ghalbol_relay_for_base(base: &str, remap: bool) -> Option<(String, Vec<String>)> {
     let base_norm = base.trim().trim_end_matches('/');
     let client = client_for(base).ok()?;
     for attempt in 0..3 {
-        match client.get_relay() {
+        match client.get_relay_remap(remap) {
             Ok((peer, addrs)) if !peer.is_empty() && !addrs.is_empty() => {
                 return Some((peer, addrs));
             }
@@ -527,7 +527,9 @@ fn fetch_ghalbol_relay_for_base(base: &str) -> Option<(String, Vec<String>)> {
 }
 
 /// Fetch `/v1/relay` from **every** configured coord server (one relay per host).
-pub fn fetch_all_ghalbol_relays() -> Vec<(String, Vec<String>)> {
+///
+/// Pass `remap=true` only after bootstrap TCP failure on a home UPnP coord relay.
+pub fn fetch_all_ghalbol_relays(remap: bool) -> Vec<(String, Vec<String>)> {
     let urls = coord_base_urls();
     if urls.is_empty() {
         return Vec::new();
@@ -535,7 +537,7 @@ pub fn fetch_all_ghalbol_relays() -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     let mut seen_peer = HashSet::new();
     for base in urls.iter() {
-        if let Some((peer, addrs)) = fetch_ghalbol_relay_for_base(base) {
+        if let Some((peer, addrs)) = fetch_ghalbol_relay_for_base(base, remap) {
             coord_note_relay_bootstrap_addrs(&addrs);
             if seen_peer.insert(peer.clone()) {
                 out.push((peer, addrs));

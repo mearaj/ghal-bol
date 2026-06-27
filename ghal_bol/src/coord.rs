@@ -150,7 +150,16 @@ impl CoordHttpClient {
     /// Fetch the coordinator's co-located Circuit Relay v2 coordinates.
     /// Returns `(peer_id, base_addrs)`; empty when the server runs no relay.
     pub fn get_relay(&self) -> Result<(String, Vec<String>), String> {
-        let url = format!("{}/v1/relay", self.base);
+        self.get_relay_remap(false)
+    }
+
+    /// Like [`get_relay`]; when `remap` is true, home UPnP coord servers renew the WAN port mapping.
+    pub fn get_relay_remap(&self, remap: bool) -> Result<(String, Vec<String>), String> {
+        let url = if remap {
+            format!("{}/v1/relay?remap=1", self.base)
+        } else {
+            format!("{}/v1/relay", self.base)
+        };
         let resp = self.send_with_transport_retry(|http| self.with_headers(http.get(&url)))?;
         let status = resp.status();
         if !status.is_success() {

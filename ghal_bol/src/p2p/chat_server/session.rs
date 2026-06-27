@@ -111,6 +111,14 @@ pub(crate) struct SessionState {
     dm_no_writer_since_ms: RwLock<HashMap<PeerId, i64>>,
     /// Peers with an open `/ghal-bol/msg/1.0.0` writer (protonet `chatStreams` — upkeep noop while set).
     dm_stream_has_writer: RwLock<HashSet<PeerId>>,
+    /// Monotonic per-peer writer generation. Multiple inbound stream handlers can exist for one
+    /// contact (symmetric connect race, parallel LAN+WAN). When a newer mux installs the writer
+    /// (adopt / reopen), the **older** handler's teardown must not clear the live writer — it
+    /// compares its generation and skips cleanup if a newer one took over. Prevents the
+    /// adopt-then-stale-LAN-close race that silently killed the relay writer (one-way acks).
+    dm_writer_generation: RwLock<HashMap<PeerId, u64>>,
+    /// Source of monotonic writer generations (`claim_dm_writer_generation`).
+    dm_writer_gen_counter: std::sync::atomic::AtomicU64,
     /// Periodic relay reservation refresh even when a circuit is already listening.
     relay_keepalive_last_ms: RwLock<i64>,
     /// Back off relay-circuit dials after `ResourceLimitExceeded` from the coord relay.
@@ -290,6 +298,8 @@ impl SessionState {
             dm_wire_activity_ms: RwLock::new(HashMap::new()),
             dm_no_writer_since_ms: RwLock::new(HashMap::new()),
             dm_stream_has_writer: RwLock::new(HashSet::new()),
+            dm_writer_generation: RwLock::new(HashMap::new()),
+            dm_writer_gen_counter: std::sync::atomic::AtomicU64::new(1),
             relay_keepalive_last_ms: RwLock::new(0),
             relay_circuit_dial_backoff_until: RwLock::new(HashMap::new()),
             dm_circuit_dial_in_flight_ms: RwLock::new(HashMap::new()),
@@ -1386,6 +1396,70 @@ impl SessionState {
             .is_some_and(|s| s.contains(&peer))
     }
 
+    /// Claim a fresh writer generation for `peer` (called when a stream installs the mux writer).
+    /// Any handler holding an older generation will skip its teardown (see frames.rs).
+    fn claim_dm_writer_generation(&self, peer: PeerId) -> u64 {
+        let generation = self
+            .dm_writer_gen_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut m) = self.dm_writer_generation.write() {
+            m.insert(peer, generation);
+        }
+        generation
+    }
+
+    /// True only while `generation` is still the live writer generation for `peer`; clears the
+    /// record when it matches so a stale handler tears down once and never clobbers a newer mux.
+    fn release_dm_writer_generation_if_current(&self, peer: PeerId, generation: u64) -> bool {
+        let Ok(mut m) = self.dm_writer_generation.write() else {
+            return true;
+        };
+        if m.get(&peer).copied() == Some(generation) {
+            m.remove(&peer);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Evidence the currently-owned writer is **not** draining outbound work: a pending delivery
+    /// ack we could not send, or an outbound text queued longer than `min_ms` and still unacked.
+    /// Used to decide whether a live duplicate inbound stream should take over the writer.
+    ///
+    /// Transcript-restored ghost rows (never on wire this session) must **not** count — they have
+    /// ancient `created_at_ms` and falsely trip reconcile every upkeep tick (flutter_linux.log
+    /// 2026-06-28: `close stale direct` every ~5s while relay inbound still delivered).
+    fn peer_outbound_stuck_for(&self, peer: PeerId, now_ms: i64, min_ms: i64) -> bool {
+        if self.has_pending_delivery_acks_older_than(peer, now_ms, min_ms) {
+            return true;
+        }
+        let Some(pk) = self
+            .dm_peer_for_libp2p(peer)
+            .and_then(|d| d.public_key_hex.clone())
+        else {
+            return false;
+        };
+        let pk = pk.trim().to_lowercase();
+        self.outbox.read().ok().is_some_and(|g| {
+            g.values().any(|p| {
+                if !p.recipient_public_key_hex.trim().eq_ignore_ascii_case(&pk) {
+                    return false;
+                }
+                // On wire, no delivery ack yet — sustained stuck.
+                if p.on_wire {
+                    return now_ms.saturating_sub(p.last_send_ms) >= min_ms;
+                }
+                // Never attempted on wire this session (transcript ghost at bootstrap).
+                if p.last_send_ms == 0 {
+                    return false;
+                }
+                // Send path retrying without reaching wire — only fresh user intent.
+                let fresh_intent = now_ms.saturating_sub(p.created_at_ms) < min_ms.saturating_mul(4);
+                fresh_intent && now_ms.saturating_sub(p.last_send_ms) >= min_ms
+            })
+        })
+    }
+
     /// Protonet-style: open chat stream = healthy. Upkeep/coord/identify must not touch this peer.
     fn dm_peer_stream_up(&self, peer: PeerId) -> bool {
         self.dm_has_stream_writer(peer)
@@ -2037,6 +2111,31 @@ impl SessionState {
         })
     }
 
+    /// Should a pending-outbox contact be looked up in the **uncapped priority** coord tier?
+    ///
+    /// Active intent (a freshly-sent message, foreground chat) always qualifies — the send path
+    /// arms the urgent window (`mark_dm_reconnect_urgent`), so "intent beats backoff" (TRANSPORT.md
+    /// § prime directive #4) still holds. But a contact that coord reports `PeerNotOnCoord` (offline
+    /// / never registered) whose only claim is an **old transcript-restored** pending row — with no
+    /// recent user action — must **not** sit in the uncapped priority tier every tick: at thousands
+    /// of stale contacts that is the 404 storm that starves reachable peers. Such ghosts fall
+    /// through to the bounded LRU **background** sweep instead (TRANSPORT.md § scale invariant).
+    fn pending_outbox_eligible_for_wire(&self, pk_hex: &str, now_ms: i64) -> bool {
+        let pk = pk_hex.trim();
+        if pk.len() != 66 {
+            return false;
+        }
+        if !self.has_pending_outbox_for_pk(pk) {
+            return false;
+        }
+        if self.coord_lookup_category_for_pk(pk)
+            == Some(crate::p2p::connectivity_diag::CoordLookupCategory::PeerNotOnCoord)
+        {
+            return self.is_pk_reconnect_urgent(pk, now_ms);
+        }
+        true
+    }
+
     fn remember_inbound_id(&self, message_id: &str, now_ms: i64) -> bool {
         let id = message_id.trim();
         if id.is_empty() {
@@ -2315,6 +2414,15 @@ impl SessionState {
             .is_some_and(|q| q.iter().any(|p| p.peer_id == peer))
     }
 
+    /// A delivery ack queued for `peer` at least `min_ms` ago and still unsent — sustained
+    /// evidence the writer is not draining, unlike a frame that is merely in flight right now.
+    fn has_pending_delivery_acks_older_than(&self, peer: PeerId, now_ms: i64, min_ms: i64) -> bool {
+        self.pending_delivery_acks.read().ok().is_some_and(|q| {
+            q.iter()
+                .any(|p| p.peer_id == peer && now_ms.saturating_sub(p.queued_at_ms) >= min_ms)
+        })
+    }
+
     /// Outbox or delivery acks stuck — WAN mux/coord must not treat the link as stable.
     fn peer_has_pending_outbound_blockers(&self, peer: PeerId) -> bool {
         self.peer_has_pending_outbox(peer) || self.has_pending_delivery_acks_for(peer)
@@ -2554,6 +2662,7 @@ impl SessionState {
             peer_id,
             inbound_id: id,
             recipient_public_key_hex: recipient_signing.trim().to_string(),
+            queued_at_ms: chrono_now_ms(),
         });
     }
 

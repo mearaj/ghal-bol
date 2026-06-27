@@ -34,7 +34,9 @@ pub async fn run_gossip_chat_node_with_std_io(
     }
     if coord_only {
         // Fetch co-located relay(s) from every configured coord server.
-        let all_relays = tokio::task::spawn_blocking(crate::coord_runtime::fetch_all_ghalbol_relays)
+        let all_relays = tokio::task::spawn_blocking(|| {
+            crate::coord_runtime::fetch_all_ghalbol_relays(false)
+        })
         .await
         .ok()
         .unwrap_or_default();

@@ -660,6 +660,8 @@ async fn process_outbound_cmd(
     if !writer_open_for_peer(&writers, peer) {
         let err = format!("open_stream writer wait timed out for {peer}");
         native_log::info("stream", format!("{err} (peer={peer})"));
+        session.request_dm_stream_reopen(peer);
+        notify_coord_lookup();
         if let Some(done) = done {
             let _ = done.send(Err(err.clone()));
         }
@@ -773,7 +775,7 @@ fn merge_outbound_row_into_outbox(
         } else {
             now
         },
-        last_send_ms: now,
+        last_send_ms: 0,
         on_wire: false,
     });
     true

@@ -119,10 +119,24 @@ fn peer_has_lingering_direct(session: &SessionState, peer: PeerId) -> bool {
             .is_some_and(|m| m.get(&peer).is_some_and(|s| !s.is_empty()))
 }
 
-/// LAN soft/full kick is active and outbound (text/delivery acks) is not draining — peer likely on WAN.
+/// Sustained-stuck threshold before a lingering direct LAN mux is judged dead and torn down for
+/// relay. Must exceed normal ack RTT on a healthy LAN: a working direct link drains text/delivery
+/// acks in well under a second, so a frame that is merely *in flight* must never trip this. Only a
+/// peer that has truly left Wi‑Fi (writer bound to a dead mux) leaves work unacked this long.
+///
+/// Regression guard (flutter_linux.log 2026-06-28): the old test was "any pending outbound blocker",
+/// so normal back-and-forth chat looked "stuck" on every ~1s upkeep tick → 76× `close stale direct`
+/// tore down a *working* LAN mux mid-chat and forced the timing-out relay → multi-second stalls then
+/// burst drain ("bulk then stop then bulk"). Time-gating keeps a live LAN link and still recovers a
+/// genuinely dead one (TRANSPORT.md § Asymmetric LAN↔WAN mux recovery).
+const LAN_HANDOVER_STUCK_MS: i64 = 4_000;
+
+/// LAN soft/full kick is active and outbound (text/delivery acks) has been stuck long enough to
+/// prove the lingering direct mux is dead — peer has left LAN for WAN. Transient in-flight frames
+/// during healthy chat do **not** qualify (see `LAN_HANDOVER_STUCK_MS`).
 fn peer_lan_handover_outbound_stuck(session: &SessionState, peer: PeerId) -> bool {
     session.lan_listen_rediscovery_requested(peer)
-        && session.peer_has_pending_outbound_blockers(peer)
+        && session.peer_outbound_stuck_for(peer, chrono_now_ms(), LAN_HANDOVER_STUCK_MS)
 }
 
 /// Zombie chat mux: `stream=true` but writer path dead after remote left LAN (flutter_linux.log 07:23+).
@@ -695,7 +709,7 @@ fn run_dm_coord_lookup_pass(
             // backoff check, and bypasses it (`should_coord_lookup_intent_pk`): a peer the user is
             // trying to reach must connect within seconds even if it was last seen offline — see
             // TRANSPORT.md § prime directive, acceptance criterion #4 "Intent beats backoff".
-            let is_priority = session.has_pending_outbox_for_pk(&pk)
+            let is_priority = session.pending_outbox_eligible_for_wire(&pk, now_ms)
                 || fg.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(&pk));
             if is_priority {
                 if force_wake

@@ -308,6 +308,7 @@ fn spawn_upnp_startup_worker(
     peer_id: String,
     app_state: Option<Arc<AppState>>,
     addr_tx: mpsc::Sender<Vec<String>>,
+    current_mapping: std::sync::Arc<std::sync::Mutex<Option<MappedPort>>>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -319,6 +320,9 @@ fn spawn_upnp_startup_worker(
                         external = %mapping.external_ip,
                         "relay UPnP mapped on background retry"
                     );
+                    if let Ok(mut g) = current_mapping.lock() {
+                        *g = Some(mapping.clone());
+                    }
                     publish_upnp_addrs(
                         listen,
                         &cfg,
@@ -347,6 +351,7 @@ fn spawn_upnp_remap_worker(
     app_state: Option<Arc<AppState>>,
     addr_tx: mpsc::Sender<Vec<String>>,
     mut remap_rx: mpsc::Receiver<()>,
+    current_mapping: std::sync::Arc<std::sync::Mutex<Option<MappedPort>>>,
 ) {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST_REMAP_MS: AtomicI64 = AtomicI64::new(0);
@@ -359,13 +364,31 @@ fn spawn_upnp_remap_worker(
                 continue;
             }
             LAST_REMAP_MS.store(now, Ordering::Relaxed);
-            match relay_nat::map_relay_port_with_retries(listen, 3).await {
+            let previous_port = current_mapping
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|m| m.external_port));
+            match relay_nat::renew_or_map_relay_port(listen, previous_port).await {
                 Ok(mapping) => {
                     tracing::info!(
                         external_port = mapping.external_port,
                         external = %mapping.external_ip,
-                        "relay UPnP remapped after client refetch signal"
+                        renewed = previous_port == Some(mapping.external_port),
+                        previous_port = ?previous_port,
+                        "relay UPnP remapped after client bootstrap-failure signal"
                     );
+                    if let (Some(old), new) = (previous_port, mapping.external_port) {
+                        if old != new {
+                            tracing::warn!(
+                                old,
+                                new,
+                                "relay UPnP external port changed — GET /v1/relay updated"
+                            );
+                        }
+                    }
+                    if let Ok(mut g) = current_mapping.lock() {
+                        *g = Some(mapping.clone());
+                    }
                     publish_upnp_addrs(
                         listen,
                         &cfg,
@@ -380,6 +403,9 @@ fn spawn_upnp_remap_worker(
                         error = %e,
                         "relay UPnP remap failed — clearing advertised addrs until router responds"
                     );
+                    if let Ok(mut g) = current_mapping.lock() {
+                        *g = None;
+                    }
                     clear_upnp_advertised(&peer_id, app_state.as_ref(), &addr_tx);
                 }
             }
@@ -524,6 +550,7 @@ pub async fn start(
         let (addr_tx, rx) = mpsc::channel(4);
         addr_rx = Some(rx);
         let (remap_tx, remap_rx) = mpsc::channel(8);
+        let current_mapping = std::sync::Arc::new(std::sync::Mutex::new(upnp_mapping.clone()));
         if let Some(ref st) = app_state {
             st.set_upnp_remap_tx(remap_tx);
         }
@@ -534,6 +561,7 @@ pub async fn start(
                 info.peer_id.clone(),
                 app_state.clone(),
                 addr_tx.clone(),
+                std::sync::Arc::clone(&current_mapping),
             );
         }
         spawn_upnp_remap_worker(
@@ -543,6 +571,7 @@ pub async fn start(
             app_state,
             addr_tx,
             remap_rx,
+            current_mapping,
         );
     }
 

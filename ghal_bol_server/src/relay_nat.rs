@@ -5,7 +5,7 @@
 //! clients never hardcode 4002 on home installs.
 //!
 //! Remap policy (TRANSPORT.md § Event-driven async): startup worker retries until first map;
-//! runtime remap only on client `/v1/relay` refetch after bootstrap failure (storm-throttled),
+//! runtime remap only on client `GET /v1/relay?remap=1` after bootstrap failure (storm-throttled),
 //! not on a periodic timer.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -72,11 +72,66 @@ fn search_options_for_lan(local_ip: Ipv4Addr) -> SearchOptions {
 pub async fn map_relay_port(
     local_listen: SocketAddr,
 ) -> Result<MappedPort, Box<dyn std::error::Error + Send + Sync>> {
+    renew_or_map_relay_port(local_listen, None).await
+}
+
+/// Renew an existing WAN port mapping when possible; otherwise allocate a new external port.
+///
+/// Remap after bootstrap failure should prefer the current port so idle clients are not
+/// stranded on a stale `/v1/relay` advertisement.
+pub async fn renew_or_map_relay_port(
+    local_listen: SocketAddr,
+    prefer_external_port: Option<u16>,
+) -> Result<MappedPort, Box<dyn std::error::Error + Send + Sync>> {
     let local_ip = guess_local_ipv4()?;
     let local_addr = SocketAddr::new(IpAddr::V4(local_ip), local_listen.port());
 
     let gateway = search_gateway(search_options_for_lan(local_ip)).await?;
     tracing::info!(gateway = %gateway, %local_addr, "relay UPnP — gateway found");
+
+    if let Some(ext_port) = prefer_external_port {
+        match gateway
+            .add_port(
+                PortMappingProtocol::TCP,
+                ext_port,
+                local_addr,
+                0,
+                "ghal_bol relay",
+            )
+            .await
+        {
+            Ok(()) => {
+                let external_ip = gateway.get_external_ip().await?;
+                tracing::info!(
+                    external_port = ext_port,
+                    %external_ip,
+                    "relay UPnP — renewed existing external port"
+                );
+                return Ok(MappedPort {
+                    local_addr,
+                    external_ip,
+                    external_port: ext_port,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    external_port = ext_port,
+                    error = %e,
+                    "relay UPnP renew failed — removing stale mapping before new port"
+                );
+                if let Err(rm) = gateway
+                    .remove_port(PortMappingProtocol::TCP, ext_port)
+                    .await
+                {
+                    tracing::debug!(
+                        external_port = ext_port,
+                        error = %rm,
+                        "relay UPnP remove stale mapping (best-effort)"
+                    );
+                }
+            }
+        }
+    }
 
     // Lease 0 = indefinite (same as typical P2P clients).
     let external = gateway

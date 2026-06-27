@@ -76,7 +76,7 @@ impl AppState {
         }
     }
 
-    /// Clients refetch `/v1/relay` after bootstrap TCP failure — triggers throttled UPnP remap.
+    /// Clients refetch `/v1/relay?remap=1` after bootstrap TCP failure — triggers throttled UPnP renew.
     pub fn request_upnp_remap(&self) {
         if let Ok(g) = self.upnp_remap_tx.lock() {
             if let Some(tx) = g.as_ref() {

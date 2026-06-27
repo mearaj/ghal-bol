@@ -2,7 +2,7 @@ use crate::AppState;
 use crate::auth::{ChallengeStore, verify_registration_signature};
 use crate::error::{ApiResult, ServerError};
 use crate::presence::{PeerEndpoint, PeerRecord};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hex::FromHex;
@@ -44,10 +44,22 @@ struct RelayResponse {
     addrs: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct RelayQuery {
+    /// When true, client bootstrap TCP failed — request throttled UPnP remap (event-driven).
+    #[serde(default)]
+    remap: bool,
+}
+
 /// Advertise the co-located relay so clients can reserve a circuit and register it in presence.
-async fn get_relay(State(state): State<Arc<RouteState>>) -> Json<RelayResponse> {
-    // Home UPnP: client refetch after bootstrap timeout is the B→A signal to remap (TRANSPORT.md § Event-driven async).
-    state.app.request_upnp_remap();
+async fn get_relay(
+    State(state): State<Arc<RouteState>>,
+    Query(query): Query<RelayQuery>,
+) -> Json<RelayResponse> {
+    // Home UPnP: only `?remap=1` after bootstrap failure — not every relay poll (would rotate ports).
+    if query.remap {
+        state.app.request_upnp_remap();
+    }
     let info = state.app.relay_info.lock().ok().and_then(|g| g.clone());
     match info {
         Some(i) if !i.addrs.is_empty() => Json(RelayResponse {

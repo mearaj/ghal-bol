@@ -521,6 +521,9 @@ After a toggle, **`os=` should flip within ~1s** (callback) or on the next tick 
 | `dm_peer_needs_wan_relay_path` | Need WAN mux recovery: `peer_wan_asymmetric_mux_likely`, **or** relay+stale-direct, **or** off-LAN without relay. **False** when live mDNS says peer is on our LAN (parallel LAN+WAN is intentional) |
 | `dm_peer_chat_link_stable` false | Upkeep may coord-dial / reopen even if `swarm.is_connected` |
 | `coord_lookup_upkeep_satisfied` false | Foreground/outbox peer during LAN rediscovery, or asymmetric mux — **must not skip coord lookup** |
+| `peer_outbound_stuck_for(peer, min_ms)` | Pending delivery ack we couldn't send, **or** outbound text queued ≥ `min_ms` and still unacked — owned writer is not draining |
+| `duplicate_mux_should_take_over` | A live duplicate inbound stream should adopt the writer (retransmit, asymmetric, or `peer_outbound_stuck_for` ≥ 3s) |
+| `dm_writer_generation` | Monotonic per-peer writer epoch; stale handlers skip teardown via `finalize_dm_writer_if_current` |
 
 **Stale direct rule (`peer_has_stale_direct_lan_conn`):** fresh private-IP direct on Wi‑Fi is **not** stale unless outbound is stuck. After remote leaves LAN, lingering mDNS cache or `peers_on_local_lan` TTL is stale when **`peer_lan_handover_outbound_stuck`** — do not wait for mDNS `Expired` (minutes).
 
@@ -533,6 +536,9 @@ On each `dm_upkeep` tick (~1s), **in order:**
 3. `upkeep_dm_peers` — coord/LAN dial; `should_defer_stream_open_for_wan_mux` blocks opening stream on stale direct **before** relay exists; **does not defer** when relay is already up (that deadlocked outbox in 2026-06-25 logs)
 4. `run_dm_coord_lookup_pass` — foreground/outbox peer during `lan_listen_rediscovery_requested` or `peer_wan_asymmetric_mux_likely` is **never** skipped by `coord_lookup_upkeep_satisfied`
 5. **`InboundCircuitEstablished`** (relay client, DM contact) — if asymmetric/mux reopen needed → `request_dm_stream_reopen` + `notify_coord_lookup` (mobile peer re-dialed on relay while Wi‑Fi side still held dead LAN mux)
+6. **Duplicate-mux writer adoption** (`frames.rs`, in the inbound read loop) — the reopen in steps 1/4/5 cannot replace a writer that still *looks* alive (`ensure_dm_chat_stream` returns early when `writer_open_for_peer`). So when the peer's frames arrive on a **second** live stream (relay) while our writer sits on the dead direct mux, the duplicate handler **takes over the writer slot** itself: `duplicate_mux_should_take_over` (retransmitted inbound text = peer never got our ack, **or** `peer_wan_asymmetric_mux_likely` / `peer_needs_wan_mux_reopen`, **or** `peer_outbound_stuck_for` ≥ `DUPLICATE_MUX_TAKEOVER_STUCK_MS` = 3s) → `adopt_duplicate_mux_as_writer`. Conservative by design: in healthy parallel LAN+WAN the peer rarely writes on our duplicate and outbound is not stuck, so it does **not** churn a working link.
+
+**Writer generation (race guard — required, do not remove):** multiple `handle_inbound_stream` tasks can exist per contact (symmetric connect, parallel LAN+WAN, adopt). Each writer install **claims a monotonic generation** (`claim_dm_writer_generation`); a handler clears the writer slot on exit **only** via `finalize_dm_writer_if_current` (`release_dm_writer_generation_if_current`). Without this, the evicted/stale handler's later close (e.g. LAN idle timeout up to 120s after adopt moved the writer to relay) would `remove(&peer)` the **live** writer and silently kill return acks again. Adopt evicts the old writer with `invalidate_dm_chat_stream` (drops its mpsc tx → its write task ends) then installs a fresh generation — the old task's `finalize` is then a no-op.
 
 **Healthy logs after phone leaves Wi‑Fi:**
 
@@ -541,6 +547,7 @@ reopen … peer off LAN; recover WAN mux for acks/outbox   ← at most ~once per
 close stale direct … — chat stream up, relay kept
 coord: lookup pass … urgent=1 …   ← foreground/outbox peer looked up during handover
 relay-client: inbound circuit from <peer>   ← may trigger stream reopen on Wi‑Fi side
+inbound on duplicate mux from <peer> — adopt live writer (stale mux replaced)   ← writer moved to the live relay stream
 chat_ready … — can send now
 burst resync N pending row(s) to <peer>   ← backlog drains after mux moves to relay
 stream: ack_received from <peer> … — our outbound delivered by peer
@@ -694,6 +701,42 @@ panic: Cannot drop a runtime … blocking is not allowed
 4. Full `disconnect_peer_id` when relay exists — use `close_direct_dm_connections` + stream reopen only.
 5. Closing fresh LAN direct within seconds of connect unless `peer_lan_handover_outbound_stuck` (2026-06-24 LAN regression).
 6. Moving connect/mux policy to Flutter **`NetworkHelper`** — display-only; Rust owns `network_tick` + coord + mux reconcile.
+
+---
+
+### Post-mortem — 2026-06-28 writer clobber + ghost-outbox storm (canonical)
+
+**Two follow-ons to the 2026-06-25 asymmetric fix, observed after a LAN→mobile handover where return acks stopped permanently and the desktop hammered coord for offline contacts.**
+
+**Symptom A — one-way acks even after relay reconnect.** Phone delivered text on the **relay** mux; desktop logged `ack_received sent` but the phone never received it; `outbox_pending` stuck, `resync N pending` every ~1s.
+
+| Root cause | Fix |
+|------------|-----|
+| The reopen paths (reconcile / `InboundCircuitEstablished` / ack-send-fail) call `ensure_dm_chat_stream`, which **returns early when a writer already exists** — so it could not replace a writer sitting on a **dead direct mux** while the peer's frames arrived on a live **duplicate** relay stream. Acks were written into the void. | **Duplicate-mux writer adoption** — the duplicate inbound handler takes over the writer slot when there is real evidence the owned writer is dead: `duplicate_mux_should_take_over` (retransmitted inbound, `peer_wan_asymmetric_mux_likely`/`peer_needs_wan_mux_reopen`, or `peer_outbound_stuck_for` ≥ 3s) → `adopt_duplicate_mux_as_writer`. |
+| **Writer-clobber race:** with two stream handlers per peer, the stale handler's exit cleanup did an unconditional `writers.remove(&peer)` + `set_dm_stream_writer(false)`. After adopt/reopen moved the writer to the live stream, the **old** handler's later close (LAN idle timeout, up to 120s) deleted the **live** writer → acks died again, intermittently. | **Writer generation epoch** — every writer install `claim_dm_writer_generation`; teardown only via `finalize_dm_writer_if_current` (`release_dm_writer_generation_if_current`). Stale handlers no-op. |
+
+**Symptom B — coord 404 storm + misleading `resync N pending`.** Desktop restored ~60 transcript-pending rows to offline/`PeerNotOnCoord` contacts; every ~1s upkeep tick classified them all as **uncapped priority** coord lookups and logged `resync 60 pending`, starving the one reachable peer.
+
+| Root cause | Fix |
+|------------|-----|
+| Priority tier used raw `has_pending_outbox_for_pk` — a stale transcript ghost counted as active intent forever. | `pending_outbox_eligible_for_wire`: a `PeerNotOnCoord` contact whose only claim is an old pending row (urgent window expired, not foreground) drops to the **bounded LRU background** sweep. **Intent still beats backoff:** the send path arms `mark_dm_reconnect_urgent`, so a freshly-sent message is uncapped-priority for its 30s window; foreground is always priority. |
+| `resync_pending_outbox` iterated + logged the whole outbox even though the wire send no-ops for disconnected peers. | Resync now filters to rows whose recipient is **currently connected** (`outbox_target_peer().is_some()`) — connectivity, not coord policy; a connected peer drains regardless of stale 404 category. |
+
+**Symptom C — "bulk then stop then bulk" mid-chat, working LAN link torn down (flutter_linux.log 2026-06-28).** Two peers on the **same home subnet**, but the phone's Android reports `os=cell/validated/wifi_down` (Wi‑Fi has no internet → cellular is the validated default route) while its Wi‑Fi L2 is **still on the LAN** — mDNS announces it at `192.168.1.41`, direct TCP connects and delivers, acks return in < 1 s. The relay/circuit path to that phone **times out** (`relay circuit dial failed … Timeout`). Yet the desktop tore down the *working* LAN direct and forced the *broken* relay — **76× `close stale direct` / 16× `chat_ready` reopen** in one session. Each reopen stalled ~1–3 s on `open_stream writer wait timed out`; outbound queued, then drained in a burst at `chat_ready` with a burst of `ack_received` — exactly "bulk, then stop for long, then bulk".
+
+| Root cause | Fix |
+|------------|-----|
+| `peer_lan_handover_outbound_stuck` judged outbound "stuck" from **instantaneous** `peer_has_pending_outbound_blockers` — *any* outbox row or queued delivery ack. During normal back-and-forth chat there is almost always a frame momentarily in flight, so on every ~1s `dm_upkeep` tick a healthy, actively-draining LAN mux looked "stuck → peer left LAN" → `peer_has_stale_direct_lan_conn` true → `reconcile_stale_lan_mux_for_wan` closed the direct link and chased the timing-out relay. | **Time-gate "stuck."** `peer_lan_handover_outbound_stuck` now requires `peer_outbound_stuck_for(peer, LAN_HANDOVER_STUCK_MS = 4s)`: an outbox text **or** delivery ack unsent for ≥ 4 s. A live LAN link drains far faster, so it is never reconciled mid-chat; a genuinely dead mux (real Wi‑Fi→mobile handover) still leaves work unacked past 4 s and recovers on relay as before. `PendingDeliveryAck` gained `queued_at_ms` so the delivery-ack branch is time-gated too (was instantaneous). The `reconcile_stale_lan_mux_for_wan` skip-teardown guard uses the same `peer_outbound_stuck_for(WAN_MUX_RECONCILE_STUCK_MS = 4s)` instead of `!peer_has_pending_outbound_blockers`. |
+
+This does **not** revert the 2026-06-25 asymmetric fix: a truly dead direct mux (peer on cell, inbound only via relay) still trips `peer_outbound_stuck_for` once outbound ages past 4 s, so `close direct … relay kept` + stream reopen still recover one-way WAN. The change only stops tearing down a mux that is *currently delivering*.
+
+**FORBIDDEN — agents must not reintroduce:**
+
+1. Unconditional `writers.remove(&peer)` / `set_dm_stream_writer(false)` in a stream handler's exit — always go through `finalize_dm_writer_if_current` (generation guard).
+2. Adopting the duplicate writer **unconditionally** on any inbound frame — gate on `duplicate_mux_should_take_over` or you churn healthy parallel LAN+WAN links.
+3. Classifying a stale-transcript-pending `PeerNotOnCoord` contact as **uncapped priority** coord lookup — that is the 404 storm that violates the prime directive at scale.
+4. Filtering `resync_pending_outbox` by **coord category** instead of connectivity — a connected peer marked 404 by a stale category must still drain.
+5. Judging a lingering direct LAN mux "stale" from **instantaneous** pending outbound (`peer_has_pending_outbound_blockers`) — use the sustained, time-gated `peer_outbound_stuck_for` (`LAN_HANDOVER_STUCK_MS`). Instantaneous pending = normal active chat, and tearing down the live LAN mux on every tick produces the "bulk then stop" bursts (Symptom C). A peer on cell whose Wi‑Fi L2 still serves the LAN (`os=cell` but mDNS + direct TCP healthy) must keep using the working LAN path.
 
 ---
 
@@ -1354,6 +1397,10 @@ Do not rename without a version bump:
 28. **Trusting mDNS/TTL when outbound stuck** — `peer_has_stale_direct_lan_conn` must return true when `peer_lan_handover_outbound_stuck` even if mDNS candidate lingers. See § **Post-mortem 2026-06-25**.
 29. **“Bursty delivery = broken chat”** — multi-second stalls then `burst resync` / all pending acks at once during LAN↔WAN handover is the **known trade-off** of throttled mux reconcile + burst drain; do **not** revert asymmetric fix or add Flutter `NetworkHelper` gating. See § **Known symptom — bursty delivery**.
 30. **Defer stream open when relay already up** — `should_defer_stream_open_for_wan_mux` must not block attach on relay while stale direct still connected. See § **Post-mortem 2026-06-25**.
+31. **Unconditional writer teardown in a stream handler** — a handler's exit must clear the writer only through `finalize_dm_writer_if_current` (generation guard), or a stale LAN handler closing minutes later deletes the live relay writer (one-way acks return). See § **Post-mortem 2026-06-28**.
+32. **Adopting the duplicate mux on every inbound frame** — gate on `duplicate_mux_should_take_over`; unconditional adoption churns healthy parallel LAN+WAN links. See § **Post-mortem 2026-06-28**.
+33. **Uncapped priority coord lookups for stale-transcript 404 ghosts** — a `PeerNotOnCoord` contact with only an old pending row (not urgent, not foreground) belongs in the bounded LRU background sweep (`pending_outbox_eligible_for_wire`), not the priority tier; and `resync_pending_outbox` filters by **connectivity**, not coord category. Intent still beats backoff via `mark_dm_reconnect_urgent` on send. See § **Post-mortem 2026-06-28**.
+34. **Instantaneous "outbound stuck" tearing down a live LAN mux** — `peer_lan_handover_outbound_stuck` / the `reconcile_stale_lan_mux_for_wan` skip-guard must use the sustained `peer_outbound_stuck_for` (≥ `LAN_HANDOVER_STUCK_MS` 4s), never instantaneous `peer_has_pending_outbound_blockers`. A peer reporting `os=cell` whose Wi‑Fi L2 still serves the LAN (mDNS + direct TCP healthy, acks < 1s) must keep the working LAN path; tearing it down per tick is the "bulk then stop then bulk" burst. See § **Post-mortem 2026-06-28 → Symptom C**.
 
 ---
 
@@ -1435,6 +1482,7 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 | Date | Change |
 |------|--------|
 | 2026-06-25 | **LAN re-discovery cadence — mDNS query interval:** § **“LAN re-discovery cadence — mDNS query interval”**. `libp2p::mdns::Config::default()` polls only every **5 minutes**, so after a LAN link dropped (with WAN/relay also down) neither same-Wi‑Fi peer re-discovered the other for minutes (`LAN soft rediscovery — link down, no mDNS candidate yet`, `active_links=0`). Fix: `ghal_bol_mdns_config()` sets `query_interval = 5s` at both the initial behaviour and `restart_mdns_behaviour`; LAN now recovers in seconds, port stays stable, independent of WAN. |
+| 2026-06-28 | **Writer clobber + ghost-outbox storm (canonical post-mortem):** § **Post-mortem 2026-06-28**. (1) Return acks died after LAN→mobile handover because reopen can't replace a writer on a dead direct mux while the peer writes on a live duplicate relay stream — fix: `adopt_duplicate_mux_as_writer` gated by `duplicate_mux_should_take_over` (retransmit / `peer_wan_asymmetric_mux_likely` / `peer_outbound_stuck_for` ≥ 3s). (2) A stale stream handler's exit cleanup deleted the **live** writer installed by adopt/reopen — fix: per-peer **writer generation** (`claim_dm_writer_generation` / `finalize_dm_writer_if_current`). (3) ~60 transcript-pending rows to `PeerNotOnCoord` ghosts flooded the **uncapped priority** coord tier every tick — fix: `pending_outbox_eligible_for_wire` drops non-urgent/non-foreground 404 ghosts to the bounded LRU background sweep (intent still beats backoff via `mark_dm_reconnect_urgent` on send); `resync_pending_outbox` filters to connected recipients. |
 | 2026-06-25 | **Coord lookup `.await` froze the swarm loop → WAN-only chat dead (canonical post-mortem):** § **Post-mortem 2026-06-25 (coord lookup `.await` froze the swarm loop)** — the per-peer coord HTTP lookup was `.await`ed inside the `tokio::select!` arm holding `&mut swarm`, so libp2p was not polled for the whole HTTP RTT and inbound relay `STOP` substreams timed out (`relay-circuit dial timed out`, server `circuit ConnectionFailed`). Fix: split into off-loop `request_coord_lookup` (`tokio::spawn`, deduped via `coord_lookup_in_flight`) + sync on-loop `apply_coord_lookup_result` / `drain_ready_coord_lookups`; `coord_lookup_dm_peer` / `run_dm_coord_lookup_pass` are now synchronous. Follow-on: `resync_outbox_burst_for_peer` now skips rows sent within `OUTBOX_RESEND_INTERVAL_MS` (was double-sending with the 1s periodic resync → duplicate `ack_received`). |
 | 2026-06-25 | **One-way WAN after LAN→mobile handover (canonical post-mortem):** § **Post-mortem 2026-06-25** — Wi‑Fi side kept zombie LAN mux (`conn=true,stream=true`) while phone on relay; coord lookup skipped for foreground peer. Fix: `peer_wan_asymmetric_mux_likely` / `peer_needs_wan_mux_reopen` / `peer_lan_handover_outbound_stuck`; `clear_peer_stale_lan_cache`; `coord_lookup_upkeep_satisfied` + `dm_peer_chat_link_stable` false during handover; `InboundCircuitEstablished` stream reopen; do not defer stream when relay up. § **Known symptom — bursty delivery** — multi-second batch delivery during recovery is expected trade-off (5s reconcile throttle + burst resync), not Flutter/`NetworkHelper`. AI handoff items 27–30. |
 | 2026-06-24 | **WAN/LAN stability regression (canonical post-mortem):** § **Post-mortem 2026-06-24** — (A) never clear `circuit_dial_in_flight` / `disconnect_peer_id` during relay handshake for urgent peers; (B) `dm_peer_chat_link_stable` must not flip false solely for missing relay hop — use `needs_additive_relay_dial` for background additive relay on Wi‑Fi; (C) coord lookup must still dial additive relay when stream stable but relay missing; (D) relay `ConnectionClosed` with other path open → event-driven stream reopen + coord wake; (E) LAN TCP fail must not clear circuit in-flight; (F) no blocking coord HTTP on tokio swarm thread. Ack/outbox send fail → `request_dm_stream_reopen`. AI handoff items 22–26. |

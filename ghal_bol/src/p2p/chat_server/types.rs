@@ -282,6 +282,9 @@ pub(crate) struct PendingDeliveryAck {
     peer_id: PeerId,
     inbound_id: String,
     recipient_public_key_hex: String,
+    /// When this ack was first queued — used to tell a transient in-flight ack (healthy mux)
+    /// from a sustained-stuck ack (dead direct mux after LAN→WAN handover).
+    queued_at_ms: i64,
 }
 
 #[derive(Clone)]

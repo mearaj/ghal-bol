@@ -265,10 +265,9 @@ fn handle_swarm_event(
                 if bootstrap_relay_conn_count(session, peer_id) == 0 {
                     session.clear_bootstrap_relay_session(peer_id);
                     if ghalbol_relay_peer(session) == Some(peer_id) {
-                        // HOP TCP lost → reservation is invalid until the hop reconnects and
-                        // re-reserves. Redial now and run recovery unconditionally; the bootstrap
-                        // reconnect event re-issues `listen_on` (no 120s "reservation may persist"
-                        // grace — AGENTS.md golden rule 9). Storm-guarded by reserve throttles.
+                        // HOP TCP lost → reservation invalid until hop reconnects. Redial cached
+                        // addrs for fast recovery when port unchanged; notify_relay_refresh fetches
+                        // live GET /v1/relay?remap=1 on coord_tick when UPnP port may have changed.
                         let _ = redial_ghalbol_bootstrap_from_cache(
                             swarm,
                             session,

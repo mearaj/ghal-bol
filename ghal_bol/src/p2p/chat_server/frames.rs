@@ -57,6 +57,132 @@ fn stream_read_is_terminal(err: &str) -> bool {
         || e.contains("closed by remote")
 }
 
+/// A live duplicate inbound stream takes over the writer only after outbound has been stuck this
+/// long (or on stronger evidence: retransmit / documented asymmetric handover). Long enough to not
+/// churn a healthy writer mid-send, short enough to recover one-way acks within a few ticks.
+const DUPLICATE_MUX_TAKEOVER_STUCK_MS: i64 = 3_000;
+
+/// Clear the writer slot for `peer` **only** if `generation` is still the live writer generation.
+/// A stale stream handler (older generation) whose mux was replaced by adopt/reopen must not remove
+/// the live writer or flip the stream flag — that race silently killed the relay writer and broke
+/// return acks (TRANSPORT.md § Asymmetric LAN↔WAN mux recovery → writer generation).
+fn finalize_dm_writer_if_current(
+    session: &SessionState,
+    writers: &StreamWriters,
+    peer: PeerId,
+    generation: u64,
+) {
+    if !session.release_dm_writer_generation_if_current(peer, generation) {
+        return;
+    }
+    if let Ok(mut g) = writers.lock() {
+        g.remove(&peer);
+    }
+    session.set_dm_stream_writer(peer, false);
+    session.clear_chat_ready_emitted(peer);
+    notify_stream_reopen();
+}
+
+fn spawn_dm_stream_write_task(
+    peer: PeerId,
+    mut writer: futures::io::WriteHalf<libp2p::Stream>,
+    rx: mpsc::UnboundedReceiver<StreamWireItem>,
+    generation: u64,
+    writers: StreamWriters,
+    session: Arc<SessionState>,
+) -> tokio::task::JoinHandle<()> {
+    let writers_w = Arc::clone(&writers);
+    let session_w = Arc::clone(&session);
+    tokio::spawn(async move {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            let StreamWireItem::Frame { bytes, written } = item;
+            let ok = write_frame(&mut writer, &bytes).await.is_ok();
+            if ok {
+                session_w.note_dm_wire_activity(peer);
+            }
+            if let Some(done) = written {
+                let _ = done.send(ok);
+            }
+            if !ok {
+                break;
+            }
+        }
+        finalize_dm_writer_if_current(&session_w, &writers_w, peer, generation);
+    })
+}
+
+/// Decide whether a **live duplicate** inbound stream should take over the writer slot.
+///
+/// Conservative on purpose: in healthy parallel LAN+WAN both links stay up and the peer rarely
+/// writes on our duplicate, so this almost never fires there. It only takes over when there is
+/// real evidence the currently-owned writer is dead — a retransmitted inbound (peer never got our
+/// ack), the documented asymmetric LAN↔WAN handover, or outbound stuck past one resend window.
+fn duplicate_mux_should_take_over(
+    session: &SessionState,
+    peer: PeerId,
+    now_ms: i64,
+    strong: bool,
+) -> bool {
+    if strong {
+        return true;
+    }
+    if peer_wan_asymmetric_mux_likely(session, peer) || peer_needs_wan_mux_reopen(session, peer) {
+        return true;
+    }
+    session.peer_outbound_stuck_for(peer, now_ms, DUPLICATE_MUX_TAKEOVER_STUCK_MS)
+}
+
+/// Inbound arrived on a secondary mux while another stream holds the writer — adopt this path so
+/// acks/outbox use the live relay (asymmetric LAN↔WAN; TRANSPORT.md § Asymmetric mux recovery).
+/// Installs a fresh writer generation so the evicted handler can never tear this writer down.
+fn adopt_duplicate_mux_as_writer(
+    peer: PeerId,
+    spare_writer: &mut Option<futures::io::WriteHalf<libp2p::Stream>>,
+    write_task: &mut Option<tokio::task::JoinHandle<()>>,
+    owns_writer: &mut bool,
+    my_gen: &mut u64,
+    session: Arc<SessionState>,
+    writers: StreamWriters,
+    events_tx: Option<std::sync::mpsc::Sender<GossipChatEvent>>,
+) {
+    if *owns_writer {
+        return;
+    }
+    let Some(writer) = spare_writer.take() else {
+        return;
+    };
+    native_log::info(
+        "stream",
+        format!("inbound on duplicate mux from {peer} — adopt live writer (stale mux replaced)"),
+    );
+    // Evict the stale writer (drops its mpsc tx → its write task ends; generation guard stops that
+    // task from clearing the slot we are about to install).
+    invalidate_dm_chat_stream(session.as_ref(), &writers, peer);
+    let generation = session.claim_dm_writer_generation(peer);
+    let (tx, rx) = mpsc::unbounded_channel::<StreamWireItem>();
+    if let Ok(mut g) = writers.lock() {
+        g.insert(peer, tx);
+    }
+    session.set_dm_stream_writer(peer, true);
+    *write_task = Some(spawn_dm_stream_write_task(
+        peer,
+        writer,
+        rx,
+        generation,
+        Arc::clone(&writers),
+        Arc::clone(&session),
+    ));
+    *owns_writer = true;
+    *my_gen = generation;
+    emit_chat_ready_if_can_send(
+        Arc::clone(&session),
+        peer,
+        Arc::clone(&writers),
+        events_tx,
+    );
+}
+
 /// One long-lived `/ghal-bol/msg/1.0.0` per libp2p peer (read/write until reset).
 async fn handle_inbound_stream(
     peer: PeerId,
@@ -70,23 +196,27 @@ async fn handle_inbound_stream(
         return;
     }
     let (mut reader, writer) = stream.split();
-    let (tx, rx) = mpsc::unbounded_channel::<StreamWireItem>();
+    let mut spare_writer: Option<futures::io::WriteHalf<libp2p::Stream>> = None;
+    // Writer generation owned by this handler. 0 = none (duplicate / read-only); set when this
+    // handler installs or adopts the writer. Stale handlers compare this on teardown.
+    let mut my_gen: u64 = 0;
 
-    let owns_writer = {
+    let mut owns_writer = {
         let mut owns = false;
-        if let Ok(mut g) = writers.lock() {
-            if !g.contains_key(&peer) {
-                g.insert(peer, tx);
-                owns = true;
-            }
+        if let Ok(g) = writers.lock() {
+            owns = !g.contains_key(&peer);
         }
         owns
     };
-    if owns_writer {
+    let mut write_task = if owns_writer {
+        let (tx, rx) = mpsc::unbounded_channel::<StreamWireItem>();
+        let generation = session.claim_dm_writer_generation(peer);
+        my_gen = generation;
+        if let Ok(mut g) = writers.lock() {
+            g.insert(peer, tx);
+        }
         session.set_dm_stream_writer(peer, true);
         session.note_dm_inbound_activity(peer);
-    }
-    let write_task = if owns_writer {
         emit_chat_ready_if_can_send(
             Arc::clone(&session),
             peer,
@@ -100,33 +230,16 @@ async fn handle_inbound_stream(
         {
             session.try_emit_peer_identified(peer, pk, &events_tx);
         }
-        let mut writer = writer;
-        let writers_w = Arc::clone(&writers);
-        let session_w = Arc::clone(&session);
-        Some(tokio::spawn(async move {
-            let mut rx = rx;
-            while let Some(item) = rx.recv().await {
-                let StreamWireItem::Frame { bytes, written } = item;
-                let ok = write_frame(&mut writer, &bytes).await.is_ok();
-                if ok {
-                    session_w.note_dm_wire_activity(peer);
-                }
-                if let Some(done) = written {
-                    let _ = done.send(ok);
-                }
-                if !ok {
-                    break;
-                }
-            }
-            if let Ok(mut g) = writers_w.lock() {
-                g.remove(&peer);
-            }
-            session_w.set_dm_stream_writer(peer, false);
-            session_w.clear_chat_ready_emitted(peer);
-            notify_stream_reopen();
-        }))
+        Some(spawn_dm_stream_write_task(
+            peer,
+            writer,
+            rx,
+            generation,
+            Arc::clone(&writers),
+            Arc::clone(&session),
+        ))
     } else {
-        drop(writer);
+        spare_writer = Some(writer);
         None
     };
 
@@ -360,6 +473,27 @@ async fn handle_inbound_stream(
                         format!("duplicate text id={} from {peer} — ack retry only", t.id),
                     );
                 }
+                // A retransmitted inbound text (peer resending because it never got our ack) is
+                // strong proof our owned writer is dead — take over so the ack actually reaches it.
+                if !owns_writer
+                    && duplicate_mux_should_take_over(
+                        session.as_ref(),
+                        peer,
+                        chrono_now_ms(),
+                        !is_new,
+                    )
+                {
+                    adopt_duplicate_mux_as_writer(
+                        peer,
+                        &mut spare_writer,
+                        &mut write_task,
+                        &mut owns_writer,
+                        &mut my_gen,
+                        Arc::clone(&session),
+                        Arc::clone(&writers),
+                        events_tx.clone(),
+                    );
+                }
                 // `:p2p` background must always send `ack_received` (UI may be dead; foreground
                 // peer can be stale). In-room `ack_read` only after transcript persist succeeded.
                 send_inbound_delivery_ack(
@@ -395,6 +529,26 @@ async fn handle_inbound_stream(
                         format!("drop ack from {peer}: signing key mismatch"),
                     );
                     continue;
+                }
+                // Peer acked us on this stream — if our owned writer is stuck, move to this one.
+                if !owns_writer
+                    && duplicate_mux_should_take_over(
+                        session.as_ref(),
+                        peer,
+                        chrono_now_ms(),
+                        false,
+                    )
+                {
+                    adopt_duplicate_mux_as_writer(
+                        peer,
+                        &mut spare_writer,
+                        &mut write_task,
+                        &mut owns_writer,
+                        &mut my_gen,
+                        Arc::clone(&session),
+                        Arc::clone(&writers),
+                        events_tx.clone(),
+                    );
                 }
                 if a.kind == MsgKind::AckRequest {
                     // Deprecated wire kind — we never send this. Recipient drives delivery via
@@ -460,13 +614,10 @@ async fn handle_inbound_stream(
     }
 
     if owns_writer {
-        if let Ok(mut g) = writers.lock() {
-            g.remove(&peer);
-        }
-        session.set_dm_stream_writer(peer, false);
-        session.clear_chat_ready_emitted(peer);
-        notify_stream_reopen();
-        if let Some(task) = write_task {
+        // Only tear down if this handler's generation is still the live writer — a newer mux
+        // (adopt / reopen) may have taken over, and clearing here would kill the working writer.
+        finalize_dm_writer_if_current(session.as_ref(), &writers, peer, my_gen);
+        if let Some(task) = write_task.take() {
             let _ = task.await;
         }
     }

@@ -1525,7 +1525,7 @@ async fn maybe_refresh_ghalbol_relay(
         }
     }
     let all_relays =
-        tokio::task::spawn_blocking(crate::coord_runtime::fetch_all_ghalbol_relays)
+        tokio::task::spawn_blocking(move || crate::coord_runtime::fetch_all_ghalbol_relays(force))
             .await
             .ok()
             .unwrap_or_default();

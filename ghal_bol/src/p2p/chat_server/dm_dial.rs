@@ -54,8 +54,17 @@ async fn resync_pending_outbox(
 ) {
     refresh_outbox_peer_ids(session.as_ref());
     let now = chrono_now_ms();
-    let due = session.outbox_due_for_resend(now);
-    if !due.is_empty() && !connected_peers.is_empty() {
+    // Only rows whose recipient is actually connected right now can go on the wire. Filtering here
+    // (instead of iterating the whole outbox) stops the misleading "resync N pending" storm and
+    // wasted frame builds for the thousands of offline/ghost contacts whose rows never send — the
+    // real wire send already no-ops for them. This is connectivity, not coord policy: a peer that
+    // is connected still drains regardless of any stale 404 coord category.
+    let due: Vec<_> = session
+        .outbox_due_for_resend(now)
+        .into_iter()
+        .filter(|p| outbox_target_peer(session.as_ref(), p, &connected_peers).is_some())
+        .collect();
+    if !due.is_empty() {
         native_log::debug("outbox", format!("resync {} pending message(s)", due.len()));
     }
     for p in due {
@@ -259,6 +268,11 @@ fn wan_mux_reconcile_throttled(peer: PeerId, now_ms: i64) -> bool {
     false
 }
 
+/// Outbound must be stuck this long before a recently-active, writer-open mux is reconciled —
+/// matches `coord_lookup::LAN_HANDOVER_STUCK_MS`. Healthy chat drains far faster, so this guards
+/// against tearing down a live LAN mux mid-chat (flutter_linux.log 2026-06-28 bursty-WAN churn).
+const WAN_MUX_RECONCILE_STUCK_MS: i64 = 4_000;
+
 /// Drop a stale LAN-only mux when the peer needs a relay circuit (asymmetric LAN↔WAN handover).
 fn reconcile_stale_lan_mux_for_wan(
     swarm: &mut Swarm<ChatBehaviour>,
@@ -284,9 +298,11 @@ fn reconcile_stale_lan_mux_for_wan(
     }
     // Bidirectional mux with a live writer — do not tear down mid-flight. Inbound-only
     // activity on a read-only duplicate stream must not block asymmetric LAN↔WAN recovery.
+    // "Stuck" is sustained (LAN_HANDOVER_STUCK_MS), not a frame momentarily in flight: a healthy
+    // LAN mux that is actively draining outbound must survive (flutter_linux.log 2026-06-28 churn).
     if writer_open_for_peer(writers, peer)
         && session.dm_mux_recently_active(peer, now_ms)
-        && !session.peer_has_pending_outbound_blockers(peer)
+        && !session.peer_outbound_stuck_for(peer, now_ms, WAN_MUX_RECONCILE_STUCK_MS)
     {
         return;
     }
