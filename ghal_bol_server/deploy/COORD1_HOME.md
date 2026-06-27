@@ -59,6 +59,10 @@ Self-signed fallback only if no LE: `COORD1_SELF_SIGNED=1 ./ghal_bol_server/depl
 ./ghal_bol_server/deploy/verify_coord1.sh
 ```
 
+Parses the relay port from `GET /v1/relay` (UPnP — changes after restart). **Do not hardcode 4002** for coord1.
+
+If clients show `bootstrap_dial_error … Timeout` while `/v1/relay` lists a port: the UPnP mapping is stale (router reboot, mapping dropped). Restart `ghal-bol-server-coord1` or wait for UPnP keepalive (~2 min). Server clears `/v1/relay` addrs when remap fails so health is not falsely `wan_ready`.
+
 App (Let's Encrypt — no insecure flag):
 
 ```bash

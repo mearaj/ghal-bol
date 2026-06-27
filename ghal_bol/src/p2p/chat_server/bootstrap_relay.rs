@@ -1848,7 +1848,15 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
         session.peer_mdns_lan_addr(*p).is_none() || stale_lan_candidate
     });
     if needs_mdns_nudge {
-        if session.any_dm_circuit_dial_in_flight(now_ms) {
+        // Defer full LAN kick only while a WAN circuit dial may still succeed. When bootstrap
+        // relay TCP is down / WAN recovery is stuck, parallel LAN must proceed (TRANSPORT.md §
+        // Parallel LAN + WAN — coord/relay down must not stop LAN).
+        let wan_handshake_may_succeed = session
+            .any_bootstrap_connected
+            .load(Ordering::Relaxed)
+            && (!session.wan_recovery_active.load(Ordering::Relaxed)
+                || relay_circuit_listening(swarm));
+        if session.any_dm_circuit_dial_in_flight(now_ms) && wan_handshake_may_succeed {
             if swarm_has_ephemeral_dm_tcp_listen(swarm) {
                 // Full kick closes/rebinds ephemeral TCP — defer until circuit dial finishes so we
                 // do not destabilize an in-flight WAN handshake (TRANSPORT.md § Deferred full LAN kick).
@@ -1875,16 +1883,26 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
                 }
             }
         } else if swarm_has_ephemeral_dm_tcp_listen(swarm) {
-            // A valid ephemeral LAN listener is already open — we are simply waiting for mDNS to
-            // discover the peer on a steady network. Re-running the FULL kick here (fresh TCP port
-            // + purge candidates + mDNS restart) every recovery tick changes our advertised mDNS
-            // port and wipes discovered addrs, so discovery can never converge and no LAN link
-            // ever forms (AGENTS.md § "mdns restarted … every ~5–12s, no mdns discovered";
-            // TRANSPORT.md § "Ephemeral LAN TCP ports"). Discovery is event-driven: keep the port
-            // stable and only nudge the mDNS query (throttled). The full destructive kick stays for
-            // genuine handover triggers (connectivity notify / relay-lost / dial-path-failed) and
-            // for the no-listener branch below.
-            if session.should_restart_mdns(now_ms) {
+            // WAN stuck + stale LAN candidate after handover: soft nudge alone never clears the
+            // wrong port — run full kick once (TRANSPORT.md § LAN stability — stale mDNS candidate).
+            let wan_stuck_on_lan = session.wan_recovery_active.load(Ordering::Relaxed)
+                && !relay_circuit_listening(swarm)
+                && !session
+                    .any_bootstrap_connected
+                    .load(Ordering::Relaxed);
+            let stale_lan = handover_reason.contains("stale mDNS");
+            if wan_stuck_on_lan && stale_lan {
+                kick_lan_dm_rediscovery_after_handover(swarm, session, handover_reason, false);
+            } else if session.should_restart_mdns(now_ms) {
+                // A valid ephemeral LAN listener is already open — we are simply waiting for mDNS to
+                // discover the peer on a steady network. Re-running the FULL kick here (fresh TCP port
+                // + purge candidates + mDNS restart) every recovery tick changes our advertised mDNS
+                // port and wipes discovered addrs, so discovery can never converge and no LAN link
+                // ever forms (AGENTS.md § "mdns restarted … every ~5–12s, no mdns discovered";
+                // TRANSPORT.md § "Ephemeral LAN TCP ports"). Discovery is event-driven: keep the port
+                // stable and only nudge the mDNS query (throttled). The full destructive kick stays for
+                // genuine handover triggers (connectivity notify / relay-lost / dial-path-failed) and
+                // for the no-listener branch below.
                 soft_lan_rediscovery_nudge(swarm, session, handover_reason);
             } else {
                 notify_stream_reopen();

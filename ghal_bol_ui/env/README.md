@@ -9,9 +9,7 @@
 
 ```bash
 cp env/.env.development.example env/.env.development   # first time / reset
-# edit env/.env.development
-# Linux desktop debug: live file is read on each start (no rebuild needed).
-# Android / release: rebuild after env changes (bundled asset).
+# edit env/.env.development, then rebuild (not hot reload)
 ```
 
 CI copies the `.example` files before `dart analyze`. No other magic.

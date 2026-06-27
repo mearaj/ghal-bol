@@ -630,7 +630,23 @@ pub fn set_coord_base_url(url: &str, insecure_tls: bool) {
     set_coord_base_urls(&[url.to_string()], insecure_tls);
 }
 
+/// HTTPS coord URLs always use verified TLS in Rust — stale `insecure_tls` prefs from self-signed
+/// dev must not stick after switching to Let's Encrypt (AGENTS.md: product logic in `ghal_bol`).
+fn resolve_coord_insecure_tls(urls: &[String], requested: bool) -> bool {
+    if urls.is_empty() {
+        return false;
+    }
+    if urls
+        .iter()
+        .all(|u| u.trim().to_ascii_lowercase().starts_with("https://"))
+    {
+        return false;
+    }
+    requested
+}
+
 pub fn set_coord_base_urls(urls: &[String], insecure_tls: bool) {
+    let insecure_tls = resolve_coord_insecure_tls(urls, insecure_tls);
     let urls: Vec<String> = urls
         .iter()
         .filter_map(|u| normalize_coord_url(u))
@@ -1468,6 +1484,7 @@ pub fn coord_set_base_urls_json(urls: &[String], insecure_tls: bool) -> serde_js
     if urls.is_empty() {
         return serde_json::json!({ "ok": false, "error": "url empty" });
     }
+    let insecure_tls = resolve_coord_insecure_tls(urls, insecure_tls);
     set_coord_base_urls(urls, insecure_tls);
     let cfg = coord_prefs_storage_config();
     let joined = urls.join(",");
@@ -1603,6 +1620,16 @@ mod tests {
     fn coord_lookup_404_counts_as_http_reachable() {
         assert!(coord_lookup_err_means_http_reachable("HTTP 404 peer_not_on_server"));
         assert!(!coord_lookup_err_means_http_reachable("error sending request for url"));
+    }
+
+    #[test]
+    fn https_coord_urls_force_secure_tls() {
+        let https = vec!["https://coord.ghalbol.com".to_string()];
+        assert!(!resolve_coord_insecure_tls(&https, true));
+        assert!(!resolve_coord_insecure_tls(&https, false));
+        let http_dev = vec!["http://127.0.0.1:8765".to_string()];
+        assert!(resolve_coord_insecure_tls(&http_dev, true));
+        assert!(!resolve_coord_insecure_tls(&http_dev, false));
     }
 }
 

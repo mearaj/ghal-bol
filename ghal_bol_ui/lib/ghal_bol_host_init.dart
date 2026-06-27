@@ -1,6 +1,5 @@
 import "dart:io";
 
-import "package:ghal_bol_ui/coordination_url.dart";
 import "package:ghal_bol_ui/app_env_config.dart";
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/embedder_storage.dart";
@@ -10,10 +9,6 @@ import "package:ghal_bol_ui/network_helper.dart";
 /// Host bootstrap before [runApp]: env, native library, embedder storage alignment.
 Future<void> ghalBolHostInitBeforeRunApp() async {
   await AppEnvConfig.load();
-  final coordUrls = CoordinationUrl.defaultBaseUrls;
-  if (coordUrls.isNotEmpty) {
-    AppLog.instance.i("Env", "coord URLs resolved at startup: $coordUrls");
-  }
   GhalBolFfi.tryInitLibrary();
   await ghalBolAlignNativeStorage();
   if (!GhalBolFfi.isLibraryLoaded) {

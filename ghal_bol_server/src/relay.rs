@@ -259,23 +259,32 @@ fn finalize_public_addrs(
     addrs
 }
 
-fn spawn_upnp_background(
+fn spawn_upnp_maintainer(
     listen: SocketAddr,
     cfg: RelayConfig,
     peer_id: String,
     app_state: Option<Arc<AppState>>,
     addr_tx: mpsc::Sender<Vec<String>>,
+    initial_pending: bool,
 ) {
     tokio::spawn(async move {
+        let retry_every = Duration::from_secs(20);
+        let keepalive_every = Duration::from_secs(120);
+        let mut mapped = !initial_pending;
+        let mut interval = if initial_pending {
+            tokio::time::interval(retry_every)
+        } else {
+            let mut i = tokio::time::interval(keepalive_every);
+            // First keepalive after one interval — startup mapping is already published.
+            i.tick().await;
+            i
+        };
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            match relay_nat::map_relay_port_with_retries(listen, 3).await {
+            interval.tick().await;
+            let attempts = if mapped { 1 } else { 3 };
+            match relay_nat::map_relay_port_with_retries(listen, attempts).await {
                 Ok(mapping) => {
-                    tracing::info!(
-                        external_port = mapping.external_port,
-                        external = %mapping.external_ip,
-                        "relay UPnP mapped on background retry"
-                    );
                     let addrs = finalize_public_addrs(&cfg, listen, Some(&mapping));
                     if addrs.is_empty() {
                         continue;
@@ -288,10 +297,42 @@ fn spawn_upnp_background(
                     if let Some(ref state) = app_state {
                         state.set_relay_info(info);
                     }
-                    break;
+                    if !mapped {
+                        tracing::info!(
+                            external_port = mapping.external_port,
+                            external = %mapping.external_ip,
+                            "relay UPnP mapped on background retry"
+                        );
+                        mapped = true;
+                        interval = tokio::time::interval(keepalive_every);
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    } else {
+                        tracing::debug!(
+                            external_port = mapping.external_port,
+                            external = %mapping.external_ip,
+                            "relay UPnP keepalive — mapping refreshed"
+                        );
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "relay UPnP background retry — router not responding yet");
+                    if mapped {
+                        tracing::warn!(
+                            error = %e,
+                            "relay UPnP keepalive — remap failed; clearing advertised addrs until router responds"
+                        );
+                        mapped = false;
+                        let _ = addr_tx.send(Vec::new()).await;
+                        if let Some(ref state) = app_state {
+                            state.set_relay_info(RelayInfo {
+                                peer_id: peer_id.clone(),
+                                addrs: Vec::new(),
+                            });
+                        }
+                        interval = tokio::time::interval(retry_every);
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    } else {
+                        tracing::warn!(error = %e, "relay UPnP background retry — router not responding yet");
+                    }
                 }
             }
         }
@@ -431,15 +472,16 @@ pub async fn start(
     };
 
     let mut addr_rx: Option<mpsc::Receiver<Vec<String>>> = None;
-    if upnp_pending {
+    if cfg.upnp && cfg.dynamic_listen {
         let (tx, rx) = mpsc::channel(4);
         addr_rx = Some(rx);
-        spawn_upnp_background(
+        spawn_upnp_maintainer(
             listen,
             cfg.clone(),
             info.peer_id.clone(),
             app_state,
             tx,
+            upnp_pending,
         );
     }
 

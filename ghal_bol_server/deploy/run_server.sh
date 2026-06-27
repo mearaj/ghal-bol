@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 # Local dev — run ghal_bol_server on this machine (Arch).
 #
-#   ./ghal_bol_server/deploy/run_server.sh
+# Config: ghal_bol_server/.env.development (copy from .env.development.example once)
 #
-# Edit the config block below. Shell env vars override these defaults.
+#   ./ghal_bol_server/deploy/run_server.sh
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_DIR="$(cd "${DEPLOY_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${DEPLOY_DIR}/../.." && pwd)"
-
-# --- local dev config (edit here) ---
-export GHAL_BOL_SERVER_LISTEN="${GHAL_BOL_SERVER_LISTEN:-0.0.0.0:8765}"
-export GHAL_BOL_RELAY_BORE="${GHAL_BOL_RELAY_BORE:-1}"
-RELAY_LOCAL_PORT="${RELAY_LOCAL_PORT:-4002}"
-BORE_HOST="${BORE_HOST:-bore.pub}"
-# export GHAL_BOL_SERVER_DB="${HOME}/.local/share/com.ghalbol.coord/ghalbol_server"
-# --- end local dev config ---
+# shellcheck source=load_env.sh
+source "${DEPLOY_DIR}/load_env.sh"
+load_server_env "${SERVER_DIR}" ".env.development"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/build/ghal_bol_server-target}"
 BIN="${CARGO_TARGET_DIR}/release/ghal_bol_server"
@@ -43,8 +39,10 @@ if [[ ! -x "${BIN}" ]]; then
 fi
 
 # Phones on Wi‑Fi need a routable bind (override with 127.0.0.1:8765 for loopback-only).
-# GHAL_BOL_SERVER_LISTEN set in config block above.
+export GHAL_BOL_SERVER_LISTEN="${GHAL_BOL_SERVER_LISTEN:-0.0.0.0:8765}"
 # Same default as the binary: ~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db
+# Override only if you need a different dir:
+# export GHAL_BOL_SERVER_DB="${HOME}/.local/share/com.ghalbol.coord/ghalbol_server"
 
 BORE_PID=""
 BORE_LOG=""

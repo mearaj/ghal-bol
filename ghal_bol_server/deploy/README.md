@@ -2,12 +2,12 @@
 
 | | **Home** (`coord1.ghalbol.com`) | **GCP** (`coord.ghalbol.com`) | **Local dev** |
 |---|----------------------------------|--------------------------------|---------------|
-| **Coord HTTP** | nginx `:443` → `127.0.0.1:8765` | nginx `:443` → `127.0.0.1:8765` | `run_server.sh` |
+| **Coord HTTP** | nginx `:8443` → `127.0.0.1:8765` | nginx `:443` → `127.0.0.1:8765` | `run_server.sh` |
 | **DDNS** | GoDaddy API (`godaddy-ddns.sh`) | static | — |
-| **WAN relay** | `coord1.ghalbol.com:4002` | `coord.ghalbol.com:4002` | bore or `PUBLIC_HOST` |
+| **WAN relay** | **UPnP dynamic** — port from `GET /v1/relay` | fixed `:4002` | bore or `PUBLIC_HOST` |
 | **Install** | `install_coord1_home.sh` | `deploy_server.sh` | `run_server.sh` |
 
-> Relay is raw libp2p TCP — not HTTP. Forward **443** and **4002** on the home router.
+> Relay is raw libp2p TCP — not HTTP. Home coord1: **no manual relay port-forward** (UPnP). Forward **443/8443** for coord HTTPS only. GCP/dev: open relay **4002** (or bore port).
 
 Full home steps: **[COORD1_HOME.md](COORD1_HOME.md)**.
 

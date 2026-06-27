@@ -76,10 +76,7 @@ abstract final class GhalBolCoord {
       );
       return;
     }
-    final r = await setBaseUrls(
-      baseUrls: urls,
-      insecureTls: await CoordinationUrl.effectiveInsecureTls(),
-    );
+    final r = await setBaseUrls(baseUrls: urls);
     if (r["ok"] != true) {
       AppLog.instance.w("Coord", "set_base_url failed: ${r["error"]}");
     }
