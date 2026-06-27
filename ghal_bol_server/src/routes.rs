@@ -46,6 +46,8 @@ struct RelayResponse {
 
 /// Advertise the co-located relay so clients can reserve a circuit and register it in presence.
 async fn get_relay(State(state): State<Arc<RouteState>>) -> Json<RelayResponse> {
+    // Home UPnP: client refetch after bootstrap timeout is the B→A signal to remap (TRANSPORT.md § Event-driven async).
+    state.app.request_upnp_remap();
     let info = state.app.relay_info.lock().ok().and_then(|g| g.clone());
     match info {
         Some(i) if !i.addrs.is_empty() => Json(RelayResponse {

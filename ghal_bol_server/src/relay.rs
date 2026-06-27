@@ -259,80 +259,128 @@ fn finalize_public_addrs(
     addrs
 }
 
-fn spawn_upnp_maintainer(
+fn unix_ms_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn publish_upnp_addrs(
+    listen: SocketAddr,
+    cfg: &RelayConfig,
+    peer_id: &str,
+    app_state: Option<&Arc<AppState>>,
+    addr_tx: &mpsc::Sender<Vec<String>>,
+    mapping: Option<&MappedPort>,
+) {
+    let addrs = finalize_public_addrs(cfg, listen, mapping);
+    if addrs.is_empty() {
+        return;
+    }
+    let _ = addr_tx.try_send(addrs.clone());
+    if let Some(state) = app_state {
+        state.set_relay_info(RelayInfo {
+            peer_id: peer_id.to_string(),
+            addrs,
+        });
+    }
+}
+
+fn clear_upnp_advertised(
+    peer_id: &str,
+    app_state: Option<&Arc<AppState>>,
+    addr_tx: &mpsc::Sender<Vec<String>>,
+) {
+    let _ = addr_tx.try_send(Vec::new());
+    if let Some(state) = app_state {
+        state.set_relay_info(RelayInfo {
+            peer_id: peer_id.to_string(),
+            addrs: Vec::new(),
+        });
+    }
+}
+
+/// Startup worker: UPnP unknown duration — retry until mapped (TRANSPORT.md § Event-driven async).
+fn spawn_upnp_startup_worker(
     listen: SocketAddr,
     cfg: RelayConfig,
     peer_id: String,
     app_state: Option<Arc<AppState>>,
     addr_tx: mpsc::Sender<Vec<String>>,
-    initial_pending: bool,
 ) {
     tokio::spawn(async move {
-        let retry_every = Duration::from_secs(20);
-        let keepalive_every = Duration::from_secs(120);
-        let mut mapped = !initial_pending;
-        let mut interval = if initial_pending {
-            tokio::time::interval(retry_every)
-        } else {
-            let mut i = tokio::time::interval(keepalive_every);
-            // First keepalive after one interval — startup mapping is already published.
-            i.tick().await;
-            i
-        };
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
-            let attempts = if mapped { 1 } else { 3 };
-            match relay_nat::map_relay_port_with_retries(listen, attempts).await {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            match relay_nat::map_relay_port_with_retries(listen, 3).await {
                 Ok(mapping) => {
-                    let addrs = finalize_public_addrs(&cfg, listen, Some(&mapping));
-                    if addrs.is_empty() {
-                        continue;
-                    }
-                    let _ = addr_tx.send(addrs.clone()).await;
-                    let info = RelayInfo {
-                        peer_id: peer_id.clone(),
-                        addrs,
-                    };
-                    if let Some(ref state) = app_state {
-                        state.set_relay_info(info);
-                    }
-                    if !mapped {
-                        tracing::info!(
-                            external_port = mapping.external_port,
-                            external = %mapping.external_ip,
-                            "relay UPnP mapped on background retry"
-                        );
-                        mapped = true;
-                        interval = tokio::time::interval(keepalive_every);
-                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    } else {
-                        tracing::debug!(
-                            external_port = mapping.external_port,
-                            external = %mapping.external_ip,
-                            "relay UPnP keepalive — mapping refreshed"
-                        );
-                    }
+                    tracing::info!(
+                        external_port = mapping.external_port,
+                        external = %mapping.external_ip,
+                        "relay UPnP mapped on background retry"
+                    );
+                    publish_upnp_addrs(
+                        listen,
+                        &cfg,
+                        &peer_id,
+                        app_state.as_ref(),
+                        &addr_tx,
+                        Some(&mapping),
+                    );
+                    break;
                 }
                 Err(e) => {
-                    if mapped {
-                        tracing::warn!(
-                            error = %e,
-                            "relay UPnP keepalive — remap failed; clearing advertised addrs until router responds"
-                        );
-                        mapped = false;
-                        let _ = addr_tx.send(Vec::new()).await;
-                        if let Some(ref state) = app_state {
-                            state.set_relay_info(RelayInfo {
-                                peer_id: peer_id.clone(),
-                                addrs: Vec::new(),
-                            });
-                        }
-                        interval = tokio::time::interval(retry_every);
-                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    } else {
-                        tracing::warn!(error = %e, "relay UPnP background retry — router not responding yet");
-                    }
+                    tracing::warn!(error = %e, "relay UPnP background retry — router not responding yet");
+                }
+            }
+        }
+    });
+}
+
+/// Storm-throttled remap on client `/v1/relay` refetch — not a periodic poll.
+const UPNP_REMAP_STORM_MS: i64 = 10_000;
+
+fn spawn_upnp_remap_worker(
+    listen: SocketAddr,
+    cfg: RelayConfig,
+    peer_id: String,
+    app_state: Option<Arc<AppState>>,
+    addr_tx: mpsc::Sender<Vec<String>>,
+    mut remap_rx: mpsc::Receiver<()>,
+) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST_REMAP_MS: AtomicI64 = AtomicI64::new(0);
+
+    tokio::spawn(async move {
+        while remap_rx.recv().await.is_some() {
+            let now = unix_ms_now();
+            let last = LAST_REMAP_MS.load(Ordering::Relaxed);
+            if last > 0 && now.saturating_sub(last) < UPNP_REMAP_STORM_MS {
+                continue;
+            }
+            LAST_REMAP_MS.store(now, Ordering::Relaxed);
+            match relay_nat::map_relay_port_with_retries(listen, 3).await {
+                Ok(mapping) => {
+                    tracing::info!(
+                        external_port = mapping.external_port,
+                        external = %mapping.external_ip,
+                        "relay UPnP remapped after client refetch signal"
+                    );
+                    publish_upnp_addrs(
+                        listen,
+                        &cfg,
+                        &peer_id,
+                        app_state.as_ref(),
+                        &addr_tx,
+                        Some(&mapping),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "relay UPnP remap failed — clearing advertised addrs until router responds"
+                    );
+                    clear_upnp_advertised(&peer_id, app_state.as_ref(), &addr_tx);
                 }
             }
         }
@@ -473,15 +521,28 @@ pub async fn start(
 
     let mut addr_rx: Option<mpsc::Receiver<Vec<String>>> = None;
     if cfg.upnp && cfg.dynamic_listen {
-        let (tx, rx) = mpsc::channel(4);
+        let (addr_tx, rx) = mpsc::channel(4);
         addr_rx = Some(rx);
-        spawn_upnp_maintainer(
+        let (remap_tx, remap_rx) = mpsc::channel(8);
+        if let Some(ref st) = app_state {
+            st.set_upnp_remap_tx(remap_tx);
+        }
+        if upnp_pending {
+            spawn_upnp_startup_worker(
+                listen,
+                cfg.clone(),
+                info.peer_id.clone(),
+                app_state.clone(),
+                addr_tx.clone(),
+            );
+        }
+        spawn_upnp_remap_worker(
             listen,
             cfg.clone(),
             info.peer_id.clone(),
             app_state,
-            tx,
-            upnp_pending,
+            addr_tx,
+            remap_rx,
         );
     }
 

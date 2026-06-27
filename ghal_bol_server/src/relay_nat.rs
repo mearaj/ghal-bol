@@ -3,6 +3,10 @@
 //! When `GHAL_BOL_RELAY_DYNAMIC=1`, the relay binds an ephemeral local TCP port and asks the
 //! router to forward a WAN port to it. `GET /v1/relay` advertises the **external** port so
 //! clients never hardcode 4002 on home installs.
+//!
+//! Remap policy (TRANSPORT.md § Event-driven async): startup worker retries until first map;
+//! runtime remap only on client `/v1/relay` refetch after bootstrap failure (storm-throttled),
+//! not on a periodic timer.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;

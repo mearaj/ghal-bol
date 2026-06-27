@@ -35,6 +35,8 @@ pub struct AppState {
     pub presence: Arc<PresenceStore>,
     /// Relay coordinates advertised at `GET /v1/relay` (set once the relay node starts).
     pub relay_info: Mutex<Option<RelayInfo>>,
+    /// Home UPnP dynamic relay — remap on client `/v1/relay` refetch (event-driven, not periodic poll).
+    upnp_remap_tx: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
 }
 
 impl AppState {
@@ -45,6 +47,7 @@ impl AppState {
             config,
             presence: Arc::new(presence),
             relay_info: Mutex::new(None),
+            upnp_remap_tx: Mutex::new(None),
         })
     }
 
@@ -55,6 +58,7 @@ impl AppState {
             config,
             presence: Arc::new(presence),
             relay_info: Mutex::new(None),
+            upnp_remap_tx: Mutex::new(None),
         })
     }
 
@@ -63,6 +67,21 @@ impl AppState {
         self.presence.set_relay_bootstrap_addrs(&info.addrs);
         if let Ok(mut g) = self.relay_info.lock() {
             *g = Some(info);
+        }
+    }
+
+    pub(crate) fn set_upnp_remap_tx(&self, tx: tokio::sync::mpsc::Sender<()>) {
+        if let Ok(mut g) = self.upnp_remap_tx.lock() {
+            *g = Some(tx);
+        }
+    }
+
+    /// Clients refetch `/v1/relay` after bootstrap TCP failure — triggers throttled UPnP remap.
+    pub fn request_upnp_remap(&self) {
+        if let Ok(g) = self.upnp_remap_tx.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.try_send(());
+            }
         }
     }
 }

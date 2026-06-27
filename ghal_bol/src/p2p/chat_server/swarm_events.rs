@@ -444,9 +444,7 @@ fn handle_swarm_event(
                         }
                     }
                 }
-                if is_ghalbol_relay
-                    && (err_s.contains("Connection refused")
-                        || err_s.contains("connection refused"))
+                if is_ghalbol_relay && relay_bootstrap_tcp_unreachable(&err_s)
                 {
                     let relay_addr = session
                         .bootstrap_relay_addr
@@ -455,6 +453,12 @@ fn handle_swarm_event(
                         .and_then(|m| m.get(&peer).cloned())
                         .map(|a| a.to_string())
                         .unwrap_or_else(|| peer.to_string());
+                    if let Ok(mut m) = session.bootstrap_relay_addr.write() {
+                        m.remove(&peer);
+                    }
+                    if let Ok(mut m) = session.bootstrap_dial_last_ms.write() {
+                        m.remove(&peer);
+                    }
                     crate::coord_runtime::invalidate_cached_ghalbol_relay(
                         session
                             .transcript_path
@@ -465,10 +469,8 @@ fn handle_swarm_event(
                     native_log::warn(
                         "relay",
                         format!(
-                            "Ghal Bol relay TCP unreachable at {relay_addr} — WAN is down until \
-                             the relay port is reachable (dev: restart ./ghal_bol_server/deploy/run_server.sh \
-                             so bore picks a fresh port; prod: check coord.ghalbol.com:4002). \
-                             Cleared stale relay cache; will refetch GET /v1/relay."
+                            "coord relay bootstrap TCP unreachable at {relay_addr} ({error}) — \
+                             refetching GET /v1/relay and redialing"
                         ),
                     );
                 } else if session.should_log_bootstrap_dial_err(peer, chrono_now_ms()) {

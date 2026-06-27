@@ -1457,6 +1457,34 @@ fn merge_relay_nodes_into_coord_relays(
     }
 }
 
+/// Drop stale coord-relay dial addrs (e.g. UPnP port changed) before merging fresh `/v1/relay` rows.
+fn replace_ghalbol_relay_nodes_in_coord_relays(
+    coord_relays: &mut Vec<(PeerId, Multiaddr)>,
+    relay_peer: PeerId,
+    nodes: &[(PeerId, Multiaddr)],
+) {
+    coord_relays.retain(|(p, _)| *p != relay_peer);
+    for (peer, ma) in nodes {
+        if *peer != relay_peer {
+            continue;
+        }
+        native_log::info(
+            "relay",
+            format!("ghalbol relay {peer}: resolved dial addr {ma} (refresh)"),
+        );
+        coord_relays.push((*peer, ma.clone()));
+    }
+}
+
+/// Coord relay bootstrap TCP is dead — refetch `/v1/relay` (home UPnP port may have changed).
+fn relay_bootstrap_tcp_unreachable(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("connection refused")
+        || e.contains("timeout")
+        || e.contains("timed out")
+        || e.contains("connection reset")
+}
+
 /// Re-fetch `/v1/relay`, merge dial addrs, and dial + reserve on the co-located relay.
 async fn maybe_refresh_ghalbol_relay(
     swarm: &mut Swarm<ChatBehaviour>,
@@ -1535,7 +1563,11 @@ async fn maybe_refresh_ghalbol_relay(
                 nodes.len()
             ),
         );
-        merge_relay_nodes_into_coord_relays(coord_relays, &nodes);
+        if force {
+            replace_ghalbol_relay_nodes_in_coord_relays(coord_relays, relay_peer, &nodes);
+        } else {
+            merge_relay_nodes_into_coord_relays(coord_relays, &nodes);
+        }
         merge_relay_nodes_into_coord_relays(&mut merged_nodes, &nodes);
     }
     if let Some((peer_str, addrs)) = all_relays.first() {
