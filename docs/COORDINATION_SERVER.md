@@ -67,7 +67,7 @@ COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 
 ## Home (`coord1.ghalbol.com`)
 
-Same nginx pattern as GCP for **coord HTTP**. **GoDaddy DDNS** (`godaddy-ddns.sh`) updates the A record when your public IP changes.
+Same nginx pattern as GCP for **coord HTTP**. **GoDaddy DDNS** runs **in-process** inside `ghal_bol_server` (`GHAL_BOL_DDNS_CREDENTIALS`, poll on start + every 5 min). One-shot manual update: `godaddy-ddns.sh`.
 
 **Relay (home only):** **UPnP dynamic** — no manual router port-forward for relay. `install_coord1_home.sh` sets `GHAL_BOL_RELAY_DYNAMIC=1`, `GHAL_BOL_RELAY_LISTEN=0.0.0.0:0`, `GHAL_BOL_RELAY_UPNP=1`. The server maps an ephemeral local port via UPnP; `GET /v1/relay` advertises the **external** WAN port (e.g. `/dns4/coord1.ghalbol.com/tcp/46333`). Clients refetch live — never hardcode a relay port for coord1.
 
@@ -87,7 +87,7 @@ See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
 | GET | `/v1/peers/{public_key_hex}` |
 | GET | `/v1/peers` |
 | GET | `/v1/relay` |
-| GET | `/v1/relay?remap=true` | Home UPnP coord only: renew WAN port mapping before returning addrs (bool query — **`true`/`false`**, not `1`/`0`) |
+| GET | `/v1/relay?remap=true` | Home UPnP coord only: after client bootstrap TCP failure — remove stale WAN port, map fresh, verify on router, then return addrs (bool query — **`true`/`false`**, not `1`/`0`; storm-throttled) |
 
 Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256k1 ECDSA DER).
 
@@ -103,7 +103,7 @@ Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256
 
 | Pattern | Likely cause | Action |
 |---------|--------------|--------|
-| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | `verify_coord1.sh` (home) or `nc -zv` on `/v1/relay` addr (GCP `:4002`); restart coord server; restart apps |
+| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | Home: check server UPnP logs (`mapped and verified`, port change on remap); client should refetch with `remap=true` after bootstrap timeout. GCP: `nc -zv` on `/v1/relay` addr (`:4002`) |
 | `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but relay disabled, UPnP pending/failed, or mapping cleared after stale UPnP | Home: check `journalctl --user -u ghal-bol-server-coord1` for UPnP lines; GCP: set `GHAL_BOL_RELAY_PUBLIC_HOST` |
 | `peer registered` in **server** logs but lookup 404 | TTL expired (~90s) or wrong coord URL in app | Heartbeat/register failing; check app `coord_registered` |
 | `peer registered` but client `peer_on_coord_no_dial_addrs` | Row has relay bootstrap `tcp` or LAN-only — no `/p2p-circuit` | Phone lost reservation; client must not POST relay IP:port; wait for `reservation ACCEPTED` + server circuit upsert |

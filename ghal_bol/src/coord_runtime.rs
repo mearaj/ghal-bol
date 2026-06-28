@@ -49,6 +49,16 @@ const RELAY_PRESENCE_POLL_FAST_ATTEMPTS: u32 = 12;
 const RELAY_PRESENCE_POLL_SLOW_MS: u64 = 2_000;
 const RELAY_PRESENCE_POLL_SLOW_ATTEMPTS: u32 = 30;
 const RELAY_PRESENCE_RESCHEDULE_MIN_MS: u64 = 5_000;
+/// When already registered, relay self-poll is guardrail-only — do not spawn every coord_tick.
+const RELAY_PRESENCE_RESCHEDULE_REGISTERED_MS: u64 = 30_000;
+/// Cap recover_coord / degraded-tick relay polls during coord HTTP flap (TRANSPORT.md § storm throttle).
+const COORD_RECOVERY_MIN_MS: u64 = 15_000;
+/// Throttle repeated heartbeat-failure warnings when many threads overlap during recovery.
+const COORD_HEARTBEAT_FAIL_LOG_MIN_MS: u64 = 30_000;
+
+static COORD_RECOVERY_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static COORD_HEARTBEAT_FAIL_LOG_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_PRESENCE_VISIBLE_LOG_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Backoff repeated coord peer lookups from the daemon/UI RPC path.
 /// Key: peer public_key_hex.
@@ -292,6 +302,32 @@ pub fn coord_note_relay_circuit_ready() {
     schedule_coord_presence_after_relay();
 }
 
+fn relay_presence_reschedule_min_ms() -> u64 {
+    if COORD_REGISTERED.load(Ordering::Relaxed) {
+        RELAY_PRESENCE_RESCHEDULE_REGISTERED_MS
+    } else {
+        RELAY_PRESENCE_RESCHEDULE_MIN_MS
+    }
+}
+
+fn coord_recovery_throttled(now: u64) -> bool {
+    let last = COORD_RECOVERY_LAST_MS.load(Ordering::Relaxed);
+    last > 0 && now.saturating_sub(last) < COORD_RECOVERY_MIN_MS
+}
+
+fn note_coord_recovery_attempt(now: u64) {
+    COORD_RECOVERY_LAST_MS.store(now, Ordering::Relaxed);
+}
+
+fn should_log_coord_heartbeat_fail(now: u64) -> bool {
+    let last = COORD_HEARTBEAT_FAIL_LOG_LAST_MS.load(Ordering::Relaxed);
+    if last > 0 && now.saturating_sub(last) < COORD_HEARTBEAT_FAIL_LOG_MIN_MS {
+        return false;
+    }
+    COORD_HEARTBEAT_FAIL_LOG_LAST_MS.store(now, Ordering::Relaxed);
+    true
+}
+
 fn schedule_check_relay_presence_once() {
     #[cfg(test)]
     {
@@ -308,10 +344,7 @@ fn schedule_check_relay_presence_once_impl() {
     }
     let now = unix_ms_now();
     let last_end = RELAY_PRESENCE_POLL_LAST_END_MS.load(Ordering::Relaxed);
-    if now.saturating_sub(last_end) < RELAY_PRESENCE_RESCHEDULE_MIN_MS
-        && !COORD_REGISTERED.load(Ordering::Relaxed)
-        && last_end > 0
-    {
+    if last_end > 0 && now.saturating_sub(last_end) < relay_presence_reschedule_min_ms() {
         return;
     }
     if RELAY_PRESENCE_CHECK_PENDING
@@ -339,7 +372,7 @@ fn schedule_check_relay_presence_once_impl() {
                 {
                     crate::p2p::notify_relay_refresh();
                     if has_public_coord_register_endpoints() {
-                        spawn_register_presence_inner(true);
+                        spawn_register_presence_inner(false);
                     }
                 }
                 false
@@ -430,14 +463,25 @@ fn refresh_relay_presence_from_coord(pk: &str) -> bool {
         // HTTP up but no circuit row — re-publish; do not flip coord_registered=false on a
         // transient coord purge while our local relay reservation may still be live.
         if has_public_coord_register_endpoints() {
-            spawn_register_presence_inner(true);
+            spawn_register_presence_inner(false);
         } else {
-            schedule_check_relay_presence_once();
+            let now = unix_ms_now();
+            if !coord_recovery_throttled(now) {
+                note_coord_recovery_attempt(now);
+                schedule_check_relay_presence_once();
+            }
         }
         return false;
     }
     if !any_visible {
         return false;
+    }
+    // Idempotent: visible on coord while already registered — refresh transport ok only.
+    if COORD_REGISTERED.load(Ordering::Relaxed) {
+        if any_http_ok {
+            note_coord_transport_ok();
+        }
+        return true;
     }
     if let Ok(mut r) = coord_globals().registered_on.lock() {
         *r = registered;
@@ -445,13 +489,18 @@ fn refresh_relay_presence_from_coord(pk: &str) -> bool {
     COORD_REGISTERED.store(true, Ordering::Relaxed);
     COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
     COORD_LAST_OK_MS.store(unix_ms_now(), Ordering::Relaxed);
-    crate::flow_log::info(
-        "coord",
-        format!(
-            "relay presence visible on coord for {} — circuit registered by relay server",
-            &pk[..8.min(pk.len())]
-        ),
-    );
+    let now = unix_ms_now();
+    let last_log = RELAY_PRESENCE_VISIBLE_LOG_LAST_MS.load(Ordering::Relaxed);
+    if last_log == 0 || now.saturating_sub(last_log) >= RELAY_PRESENCE_RESCHEDULE_REGISTERED_MS {
+        RELAY_PRESENCE_VISIBLE_LOG_LAST_MS.store(now, Ordering::Relaxed);
+        crate::flow_log::info(
+            "coord",
+            format!(
+                "relay presence visible on coord for {} — circuit registered by relay server",
+                &pk[..8.min(pk.len())]
+            ),
+        );
+    }
     start_heartbeat_loop(pk.to_string());
     crate::p2p::notify_dm_presence_wake();
     true
@@ -462,11 +511,16 @@ fn heartbeat_err_peer_not_on_coord(err: &str) -> bool {
 }
 
 fn recover_coord_presence_after_server_drop(pk: &str) {
+    let now = unix_ms_now();
+    if coord_recovery_throttled(now) {
+        return;
+    }
+    note_coord_recovery_attempt(now);
     if refresh_relay_presence_from_coord(pk) {
         return;
     }
     if has_public_coord_register_endpoints() {
-        spawn_register_presence_inner(true);
+        spawn_register_presence_inner(false);
     } else {
         schedule_check_relay_presence_once();
     }
@@ -1051,7 +1105,11 @@ pub fn coord_register_tick(listen_snapshot: &[Multiaddr]) {
     } else if COORD_REG_PENDING.swap(false, Ordering::AcqRel) {
         spawn_register_presence_inner(false);
     } else if !coord_link_recently_ok() && COORD_CONSEC_FAILS.load(Ordering::Relaxed) >= 1 {
-        schedule_check_relay_presence_once();
+        let now = unix_ms_now();
+        if !coord_recovery_throttled(now) {
+            note_coord_recovery_attempt(now);
+            schedule_check_relay_presence_once();
+        }
     }
 }
 
@@ -1265,13 +1323,12 @@ fn try_register_presence() -> Result<(), String> {
 }
 
 fn start_heartbeat_loop(public_key_hex: String) {
-    let g = coord_globals();
-    // Never join the previous heartbeat on the libp2p/swarm thread — that blocked mDNS and LAN
-    // dials for tens of seconds while coord HTTP finished.
-    g.heartbeat_stop.store(true, Ordering::Relaxed);
-    if let Ok(mut j) = g.heartbeat_join.lock() {
-        let _ = j.take();
+    // One heartbeat thread only. Restarting without joining spawned duplicates that never saw
+    // `heartbeat_stop` — that flooded coord HTTP and starved the poll bridge (2026-06-28).
+    if coord_heartbeat_running() {
+        return;
     }
+    let g = coord_globals();
     g.heartbeat_stop.store(false, Ordering::Relaxed);
     COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
     let stop = &g.heartbeat_stop;
@@ -1328,13 +1385,16 @@ fn start_heartbeat_loop(public_key_hex: String) {
                             } else {
                                 note_coord_transport_failure();
                             }
-                            crate::flow_log::warn(
-                                "coord",
-                                format!(
-                                    "heartbeat failed on {base} for {}: {e}",
-                                    &public_key_hex[..8.min(public_key_hex.len())]
-                                ),
-                            );
+                            let now = unix_ms_now();
+                            if should_log_coord_heartbeat_fail(now) {
+                                crate::flow_log::warn(
+                                    "coord",
+                                    format!(
+                                        "heartbeat failed on {base} for {}: {e}",
+                                        &public_key_hex[..8.min(public_key_hex.len())]
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
@@ -1632,6 +1692,30 @@ mod tests {
         let http_dev = vec!["http://127.0.0.1:8765".to_string()];
         assert!(resolve_coord_insecure_tls(&http_dev, true));
         assert!(!resolve_coord_insecure_tls(&http_dev, false));
+    }
+
+    #[test]
+    fn coord_recovery_throttle_blocks_rapid_retries() {
+        COORD_RECOVERY_LAST_MS.store(0, Ordering::Relaxed);
+        let t0 = 1_000_000u64;
+        assert!(!coord_recovery_throttled(t0));
+        note_coord_recovery_attempt(t0);
+        assert!(coord_recovery_throttled(t0 + 1_000));
+        assert!(!coord_recovery_throttled(t0 + COORD_RECOVERY_MIN_MS));
+    }
+
+    #[test]
+    fn relay_presence_reschedule_stricter_when_registered() {
+        COORD_REGISTERED.store(true, Ordering::Relaxed);
+        assert_eq!(
+            relay_presence_reschedule_min_ms(),
+            RELAY_PRESENCE_RESCHEDULE_REGISTERED_MS
+        );
+        COORD_REGISTERED.store(false, Ordering::Relaxed);
+        assert_eq!(
+            relay_presence_reschedule_min_ms(),
+            RELAY_PRESENCE_RESCHEDULE_MIN_MS
+        );
     }
 }
 

@@ -267,7 +267,7 @@ fn handle_swarm_event(
                     if ghalbol_relay_peer(session) == Some(peer_id) {
                         // HOP TCP lost → reservation invalid until hop reconnects. Redial cached
                         // addrs for fast recovery when port unchanged; notify_relay_refresh fetches
-                        // live GET /v1/relay?remap=1 on coord_tick when UPnP port may have changed.
+                        // live GET /v1/relay?remap=true on coord_tick when UPnP port may have changed.
                         let _ = redial_ghalbol_bootstrap_from_cache(
                             swarm,
                             session,
@@ -621,6 +621,7 @@ fn handle_swarm_event(
                     // the Wi‑Fi side (asymmetric inbound-only duplicate mux, 07:23 logs).
                     if peer_wan_asymmetric_mux_likely(session, src_peer_id)
                         || peer_needs_wan_mux_reopen(session, src_peer_id)
+                        || peer_needs_zombie_mux_reopen(session, src_peer_id)
                     {
                         session.request_dm_stream_reopen(src_peer_id);
                         notify_coord_lookup();

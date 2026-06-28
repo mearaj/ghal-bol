@@ -130,6 +130,9 @@ fn duplicate_mux_should_take_over(
     if peer_wan_asymmetric_mux_likely(session, peer) || peer_needs_wan_mux_reopen(session, peer) {
         return true;
     }
+    if peer_needs_zombie_mux_reopen(session, peer) {
+        return true;
+    }
     session.peer_outbound_stuck_for(peer, now_ms, DUPLICATE_MUX_TAKEOVER_STUCK_MS)
 }
 

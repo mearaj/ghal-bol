@@ -5,15 +5,22 @@
 //! clients never hardcode 4002 on home installs.
 //!
 //! Remap policy (TRANSPORT.md § Event-driven async): startup worker retries until first map;
-//! runtime remap only on client `GET /v1/relay?remap=1` after bootstrap failure (storm-throttled),
+//! runtime remap only on client `GET /v1/relay?remap=true` after bootstrap failure (storm-throttled),
 //! not on a periodic timer.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use igd_next::aio::Gateway;
 use igd_next::aio::tokio::search_gateway;
+use igd_next::GetGenericPortMappingEntryError;
 use igd_next::PortMappingProtocol;
 use igd_next::SearchOptions;
+
+type UpnpGateway = Gateway<igd_next::aio::tokio::Tokio>;
+
+const MAX_PORT_TABLE_SCAN: u32 = 128;
+const MAP_VERIFY_ATTEMPTS: u32 = 3;
 
 /// Result of a successful router port mapping.
 #[derive(Clone, Debug)]
@@ -82,82 +89,172 @@ fn search_options_for_lan(local_ip: Ipv4Addr) -> SearchOptions {
 pub async fn map_relay_port(
     local_listen: SocketAddr,
 ) -> Result<MappedPort, Box<dyn std::error::Error + Send + Sync>> {
-    renew_or_map_relay_port(local_listen, None).await
+    let local_ip = guess_local_ipv4()?;
+    let local_addr = SocketAddr::new(IpAddr::V4(local_ip), local_listen.port());
+    let gateway = search_gateway(search_options_for_lan(local_ip)).await?;
+    tracing::info!(gateway = %gateway, %local_addr, "relay UPnP — gateway found");
+    allocate_verified_port(&gateway, local_addr, None).await
 }
 
-/// Renew an existing WAN port mapping when possible; otherwise allocate a new external port.
+/// Remap after a client bootstrap TCP failure on the currently advertised WAN port.
 ///
-/// Remap after bootstrap failure should prefer the current port so idle clients are not
-/// stranded on a stale `/v1/relay` advertisement.
-pub async fn renew_or_map_relay_port(
+/// The failing port is **proven stale** — remove it and allocate a fresh external port.
+/// Never "renew" the same external port on this signal (routers often ACK renew while
+/// the forward rule is still dead).
+pub async fn remap_after_client_bootstrap_failure(
     local_listen: SocketAddr,
-    prefer_external_port: Option<u16>,
+    stale_external_port: Option<u16>,
 ) -> Result<MappedPort, Box<dyn std::error::Error + Send + Sync>> {
     let local_ip = guess_local_ipv4()?;
     let local_addr = SocketAddr::new(IpAddr::V4(local_ip), local_listen.port());
-
     let gateway = search_gateway(search_options_for_lan(local_ip)).await?;
     tracing::info!(gateway = %gateway, %local_addr, "relay UPnP — gateway found");
+    if let Some(ext) = stale_external_port {
+        if let Err(e) = gateway.remove_port(PortMappingProtocol::TCP, ext).await {
+            tracing::debug!(
+                external_port = ext,
+                error = %e,
+                "relay UPnP remove stale external port (best-effort)"
+            );
+        } else {
+            tracing::info!(
+                external_port = ext,
+                "relay UPnP removed stale external port after client bootstrap failure"
+            );
+        }
+    }
+    allocate_verified_port(&gateway, local_addr, stale_external_port).await
+}
 
-    if let Some(ext_port) = prefer_external_port {
+async fn allocate_verified_port(
+    gateway: &UpnpGateway,
+    local_addr: SocketAddr,
+    exclude_external_port: Option<u16>,
+) -> Result<MappedPort, Box<dyn std::error::Error + Send + Sync>> {
+    let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+    for attempt in 1..=MAP_VERIFY_ATTEMPTS {
         match gateway
-            .add_port(
+            .get_any_address(
                 PortMappingProtocol::TCP,
-                ext_port,
                 local_addr,
                 0,
                 "ghal_bol relay",
             )
             .await
         {
-            Ok(()) => {
-                let external_ip = gateway.get_external_ip().await?;
-                tracing::info!(
-                    external_port = ext_port,
-                    %external_ip,
-                    "relay UPnP — renewed existing external port"
-                );
-                return Ok(MappedPort {
+            Ok(external) => {
+                let mapping = MappedPort {
                     local_addr,
-                    external_ip,
-                    external_port: ext_port,
-                });
+                    external_ip: external.ip(),
+                    external_port: external.port(),
+                };
+                if exclude_external_port == Some(mapping.external_port) {
+                    let _ = gateway
+                        .remove_port(PortMappingProtocol::TCP, mapping.external_port)
+                        .await;
+                    last_err = Some("router reused stale external port".into());
+                    continue;
+                }
+                match verify_mapping_on_gateway(gateway, &mapping).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            external_port = mapping.external_port,
+                            external = %mapping.external_ip,
+                            %local_addr,
+                            attempt,
+                            "relay UPnP mapped and verified"
+                        );
+                        return Ok(mapping);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            external_port = mapping.external_port,
+                            error = %e,
+                            attempt,
+                            "relay UPnP mapping verify failed — removing and retrying"
+                        );
+                        let _ = gateway
+                            .remove_port(PortMappingProtocol::TCP, mapping.external_port)
+                            .await;
+                        last_err = Some(e.into());
+                    }
+                }
             }
             Err(e) => {
-                tracing::warn!(
-                    external_port = ext_port,
-                    error = %e,
-                    "relay UPnP renew failed — removing stale mapping before new port"
-                );
-                if let Err(rm) = gateway
-                    .remove_port(PortMappingProtocol::TCP, ext_port)
-                    .await
-                {
-                    tracing::debug!(
-                        external_port = ext_port,
-                        error = %rm,
-                        "relay UPnP remove stale mapping (best-effort)"
-                    );
-                }
+                tracing::warn!(attempt, error = %e, "relay UPnP get_any_address failed");
+                last_err = Some(format!("{e}").into());
             }
         }
     }
+    Err(last_err.unwrap_or_else(|| "UPnP map failed".into()))
+}
 
-    // Lease 0 = indefinite (same as typical P2P clients).
-    let external = gateway
-        .get_any_address(
-            PortMappingProtocol::TCP,
-            local_addr,
-            0,
-            "ghal_bol relay",
-        )
-        .await?;
+/// Read the router port table and confirm the external port forwards to our listen socket.
+async fn verify_mapping_on_gateway(
+    gateway: &UpnpGateway,
+    expected: &MappedPort,
+) -> Result<(), String> {
+    let local_ip = match expected.local_addr.ip() {
+        IpAddr::V4(v4) => v4,
+        _ => return Err("UPnP verify requires IPv4 local address".into()),
+    };
 
-    Ok(MappedPort {
-        local_addr,
-        external_ip: external.ip(),
-        external_port: external.port(),
-    })
+    for index in 0..MAX_PORT_TABLE_SCAN {
+        match gateway.get_generic_port_mapping_entry(index).await {
+            Ok(entry) => {
+                if entry.protocol != PortMappingProtocol::TCP
+                    || entry.external_port != expected.external_port
+                {
+                    continue;
+                }
+                if !entry.enabled {
+                    return Err(format!(
+                        "UPnP ext {} disabled on router",
+                        expected.external_port
+                    ));
+                }
+                let client_v4 = entry
+                    .internal_client
+                    .parse::<Ipv4Addr>()
+                    .map_err(|_| format!("invalid internal_client {}", entry.internal_client))?;
+                if client_v4 != local_ip {
+                    return Err(format!(
+                        "UPnP ext {} forwards to {client_v4}, expected {local_ip}",
+                        expected.external_port
+                    ));
+                }
+                if entry.internal_port != expected.local_addr.port() {
+                    return Err(format!(
+                        "UPnP ext {} internal port {} != listen {}",
+                        expected.external_port,
+                        entry.internal_port,
+                        expected.local_addr.port()
+                    ));
+                }
+                return Ok(());
+            }
+            Err(GetGenericPortMappingEntryError::SpecifiedArrayIndexInvalid) => {
+                // Router exposes no port table — trust add_port success.
+                tracing::debug!(
+                    external_port = expected.external_port,
+                    "relay UPnP verify skipped — router has no port table API"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::debug!(
+                    index,
+                    error = %e,
+                    "relay UPnP port table scan stopped"
+                );
+                break;
+            }
+        }
+    }
+    Err(format!(
+        "UPnP ext {} not found in router port table",
+        expected.external_port
+    ))
 }
 
 /// Retry UPnP until the router responds (home routers can be slow right after boot).

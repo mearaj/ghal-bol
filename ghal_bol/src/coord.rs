@@ -153,7 +153,7 @@ impl CoordHttpClient {
         self.get_relay_remap(false)
     }
 
-    /// Like [`get_relay`]; when `remap` is true, home UPnP coord servers renew the WAN port mapping.
+    /// Like [`get_relay`]; when `remap` is true, home UPnP coord servers remove the stale WAN port and map fresh.
     pub fn get_relay_remap(&self, remap: bool) -> Result<(String, Vec<String>), String> {
         let url = if remap {
             format!("{}/v1/relay?remap=true", self.base)

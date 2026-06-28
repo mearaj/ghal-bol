@@ -67,7 +67,7 @@ Self-signed fallback only if no LE: `COORD1_SELF_SIGNED=1 ./ghal_bol_server/depl
 
 Parses the relay port from `GET /v1/relay` (UPnP — changes after restart). **Do not hardcode 4002** for coord1.
 
-**Automatic recovery (no app-user action):** clients react to bootstrap TCP failure → refetch `GET /v1/relay?remap=1` → server renews UPnP (event-driven, storm-throttled). Normal relay polls use `GET /v1/relay` without remap so the WAN port stays stable. Clients replace stale dial addrs on forced refetch. No periodic UPnP poll — see `docs/TRANSPORT.md` § Event-driven async.
+**Automatic recovery (no app-user action):** clients react to bootstrap TCP failure → refetch `GET /v1/relay?remap=true` → server removes the stale WAN port and maps a fresh one (event-driven, storm-throttled). Normal relay polls use `GET /v1/relay` without remap so the WAN port stays stable while healthy. Clients replace stale dial addrs on forced refetch. No periodic UPnP poll — see `docs/TRANSPORT.md` § Event-driven async.
 
 App (Let's Encrypt — no insecure flag):
 

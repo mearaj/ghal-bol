@@ -373,23 +373,20 @@ fn spawn_upnp_remap_worker(
                 .lock()
                 .ok()
                 .and_then(|g| g.as_ref().map(|m| m.external_port));
-            match relay_nat::renew_or_map_relay_port(listen, previous_port).await {
+            match relay_nat::remap_after_client_bootstrap_failure(listen, previous_port).await {
                 Ok(mapping) => {
                     tracing::info!(
                         external_port = mapping.external_port,
                         external = %mapping.external_ip,
-                        renewed = previous_port == Some(mapping.external_port),
                         previous_port = ?previous_port,
                         "relay UPnP remapped after client bootstrap-failure signal"
                     );
-                    if let (Some(old), new) = (previous_port, mapping.external_port) {
-                        if old != new {
-                            tracing::warn!(
-                                old,
-                                new,
-                                "relay UPnP external port changed — GET /v1/relay updated"
-                            );
-                        }
+                    if previous_port != Some(mapping.external_port) {
+                        tracing::warn!(
+                            old = ?previous_port,
+                            new = mapping.external_port,
+                            "relay UPnP external port changed — GET /v1/relay updated"
+                        );
                     }
                     if let Ok(mut g) = current_mapping.lock() {
                         *g = Some(mapping.clone());

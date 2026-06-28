@@ -56,7 +56,7 @@ async fn get_relay(
     State(state): State<Arc<RouteState>>,
     Query(query): Query<RelayQuery>,
 ) -> Json<RelayResponse> {
-    // Home UPnP: only `?remap=1` after bootstrap failure — not every relay poll (would rotate ports).
+    // Home UPnP: only `?remap=true` after bootstrap failure — not every relay poll (would rotate ports).
     if query.remap {
         state.app.request_upnp_remap();
     }

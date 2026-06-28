@@ -139,9 +139,19 @@ fn peer_lan_handover_outbound_stuck(session: &SessionState, peer: PeerId) -> boo
         && session.peer_outbound_stuck_for(peer, chrono_now_ms(), LAN_HANDOVER_STUCK_MS)
 }
 
-/// Zombie chat mux: `stream=true` but writer path dead after remote left LAN (flutter_linux.log 07:23+).
+/// Zombie chat mux during documented LAN handover — requires `lan_listen_rediscovery_requested`.
 fn peer_needs_wan_mux_reopen(session: &SessionState, peer: PeerId) -> bool {
     peer_lan_handover_outbound_stuck(session, peer) && session.dm_peer_stream_up(peer)
+}
+
+/// Writer looks open (`stream=true`) but outbound has been on the wire ≥ `LAN_HANDOVER_STUCK_MS`
+/// without delivery ack — remote may have dropped all paths while libp2p still reports connected
+/// (half-open TCP) or we are writing into a dead mux. Does **not** require LAN handover flag and
+/// does **not** close direct links (TRANSPORT.md § Post-mortem 2026-06-24 class D, § Asymmetric
+/// mux recovery — distinct from `reconcile_stale_lan_mux_for_wan` which owns close-direct).
+fn peer_needs_zombie_mux_reopen(session: &SessionState, peer: PeerId) -> bool {
+    session.dm_peer_stream_up(peer)
+        && session.peer_outbound_stuck_for(peer, chrono_now_ms(), LAN_HANDOVER_STUCK_MS)
 }
 
 /// Wi‑Fi side asymmetric LAN↔WAN — stale mDNS/TTL + stuck outbound while remote peer is on cell.
@@ -240,6 +250,9 @@ fn dm_peer_chat_link_stable(
     now_ms: i64,
 ) -> bool {
     if session.dm_peer_stream_up(peer) {
+        if peer_needs_zombie_mux_reopen(session, peer) {
+            return false;
+        }
         if session.peer_has_relay_connection(peer) {
             if peer_wan_asymmetric_mux_likely(session, peer) || peer_needs_wan_mux_reopen(session, peer) {
                 return false;
@@ -288,6 +301,9 @@ fn coord_lookup_upkeep_satisfied(
         return false;
     }
     if peer_wan_asymmetric_mux_likely(session, peer) {
+        return false;
+    }
+    if peer_needs_zombie_mux_reopen(session, peer) {
         return false;
     }
     if dm_peer_chat_link_stable(swarm, session, peer, Some(pk), now_ms) {

@@ -345,6 +345,44 @@ fn reconcile_stale_lan_mux_for_wan(
     }
 }
 
+/// Replace a dead writer while `stream=true` — invalidate + reopen only; no close-direct (TRANSPORT.md).
+fn reopen_zombie_dm_mux_if_needed(
+    session: &SessionState,
+    writers: &StreamWriters,
+    peer: PeerId,
+) {
+    if !peer_needs_zombie_mux_reopen(session, peer) {
+        return;
+    }
+    let now_ms = chrono_now_ms();
+    if wan_mux_reconcile_throttled(peer, now_ms) {
+        return;
+    }
+    native_log::info(
+        "stream",
+        format!(
+            "reopen {peer} — outbound on wire stuck ≥{WAN_MUX_RECONCILE_STUCK_MS}ms; replace dead mux writer"
+        ),
+    );
+    invalidate_dm_chat_stream(session, writers, peer);
+    session.request_dm_stream_reopen(peer);
+    if session.peer_has_pending_wire_work(peer) || session.is_foreground_peer(peer) {
+        if let Some(pk) = session
+            .dm_peer_for_libp2p(peer)
+            .and_then(|d| d.public_key_hex.clone())
+        {
+            session.mark_dm_reconnect_urgent(&pk);
+        }
+    }
+    notify_coord_lookup();
+}
+
+fn reopen_all_zombie_dm_mux(session: &SessionState, writers: &StreamWriters) {
+    for peer in session.dm_peer_ids() {
+        reopen_zombie_dm_mux_if_needed(session, writers, peer);
+    }
+}
+
 /// DM upkeep: stream up → noop; else unified connect (LAN mDNS → coord).
 fn upkeep_dm_peers(
     swarm: &mut Swarm<ChatBehaviour>,
@@ -357,7 +395,13 @@ fn upkeep_dm_peers(
     peers.sort_by_key(|p| (!session.peer_has_pending_wire_work(*p), *p));
     for peer in peers {
         if session.dm_peer_stream_up(peer) {
-            if asymmetric_relay_recover_on_existing_link(session.as_ref(), peer) {
+            if !swarm.is_connected(&peer) {
+                invalidate_dm_chat_stream(session.as_ref(), &writers, peer);
+                continue;
+            }
+            if peer_needs_zombie_mux_reopen(session.as_ref(), peer) {
+                reopen_zombie_dm_mux_if_needed(session.as_ref(), &writers, peer);
+            } else if asymmetric_relay_recover_on_existing_link(session.as_ref(), peer) {
                 reconcile_stale_lan_mux_for_wan(swarm, session.as_ref(), &writers, peer);
             }
             continue;
