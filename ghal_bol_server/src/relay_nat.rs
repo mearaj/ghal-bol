@@ -31,6 +31,16 @@ impl MappedPort {
             IpAddr::V6(v6) => Some(format!("/ip6/{v6}/tcp/{}", self.external_port)),
         }
     }
+
+    /// Direct LAN dial to the relay listen socket — same-subnet when WAN hairpin fails.
+    pub fn local_lan_multiaddr(&self) -> Option<String> {
+        match self.local_addr.ip() {
+            IpAddr::V4(v4) if v4.is_private() && !v4.is_loopback() => {
+                Some(format!("/ip4/{v4}/tcp/{}", self.local_addr.port()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Best-effort LAN IPv4 for UPnP internal address (UDP trick to default route).
@@ -185,6 +195,10 @@ mod tests {
         assert_eq!(
             m.external_multiaddr().as_deref(),
             Some("/ip4/117.212.85.107/tcp/51234")
+        );
+        assert_eq!(
+            m.local_lan_multiaddr().as_deref(),
+            Some("/ip4/192.168.1.38/tcp/45123")
         );
     }
 }

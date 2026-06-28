@@ -255,6 +255,11 @@ fn finalize_public_addrs(
                 addrs.push(ip_ma);
             }
         }
+        if let Some(lan_ma) = mapping.local_lan_multiaddr() {
+            if !addrs.iter().any(|a| a == &lan_ma) {
+                addrs.push(lan_ma);
+            }
+        }
     }
     addrs
 }

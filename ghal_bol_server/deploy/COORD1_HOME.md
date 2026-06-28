@@ -13,15 +13,21 @@ No manual router rule for relay port. `install_coord1_home.sh` sets `GHAL_BOL_RE
 
 ## 1 — GoDaddy DDNS
 
+DDNS runs **inside `ghal_bol_server`** (same systemd unit as coord/relay). No separate timer.
+
 ```bash
 cp ghal_bol_server/deploy/godaddy-ddns-coord1.credentials.example \
    ghal_bol_server/deploy/godaddy-ddns-coord1.credentials
 # edit GODADDY_API_KEY / GODADDY_API_SECRET
 chmod 600 ghal_bol_server/deploy/godaddy-ddns-coord1.credentials
-./ghal_bol_server/deploy/godaddy-ddns.sh
+./ghal_bol_server/deploy/install_coord1_home.sh
 ```
 
-Timer is installed with `install_coord1_home.sh` (`godaddy-ddns.timer`, user systemd).
+The server reads `GHAL_BOL_DDNS_CREDENTIALS`, compares public IPv4 vs GoDaddy on **start** and every **5 minutes** (`GHAL_BOL_DDNS_POLL_SECS`, minimum 60). This is a **guardrail poll** (TRANSPORT.md § Event-driven async — allowed storm/guardrail timers), not connect-path recovery policy.
+
+One-shot manual update (optional): `./ghal_bol_server/deploy/godaddy-ddns.sh`
+
+**Upgrading from the old separate timer:** run once — `systemctl --user disable --now godaddy-ddns.timer`
 
 ---
 

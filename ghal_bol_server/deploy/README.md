@@ -3,7 +3,7 @@
 | | **Home** (`coord1.ghalbol.com`) | **GCP** (`coord.ghalbol.com`) | **Local dev** |
 |---|----------------------------------|--------------------------------|---------------|
 | **Coord HTTP** | nginx `:8443` → `127.0.0.1:8765` | nginx `:443` → `127.0.0.1:8765` | `run_server.sh` |
-| **DDNS** | GoDaddy API (`godaddy-ddns.sh`) | static | — |
+| **DDNS** | In-process GoDaddy API (`GHAL_BOL_DDNS_CREDENTIALS`) | static | — |
 | **WAN relay** | **UPnP dynamic** — port from `GET /v1/relay` | fixed `:4002` | bore or `PUBLIC_HOST` |
 | **Install** | `install_coord1_home.sh` | `deploy_server.sh` | `run_server.sh` |
 

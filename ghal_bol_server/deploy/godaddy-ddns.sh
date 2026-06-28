@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Update GoDaddy A record for coord1.ghalbol.com when public IPv4 changes.
+# One-shot GoDaddy A record update for coord1.ghalbol.com (manual / emergency).
+#
+# Normal path: DDNS runs inside ghal_bol_server (see install_coord1_home.sh).
+# Use this script only when you need a manual update without restarting the server.
 #
 #   ./ghal_bol_server/deploy/godaddy-ddns.sh
 #

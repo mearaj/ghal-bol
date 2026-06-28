@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod endpoint_expand;
 mod error;
+mod godaddy_ddns;
 mod presence;
 mod relay_live;
 mod relay_nat;
@@ -18,6 +19,7 @@ pub use auth::registration_message_digest;
 pub use config::ServerConfig;
 pub use error::ServerError;
 pub use presence::{PeerEndpoint, PeerRecord, PresenceStore};
+pub use godaddy_ddns::{DdnsConfig, spawn_ddns_task};
 pub use relay_live::RelayLiveRegistry;
 pub use relay::{RelayConfig, RelayInfo};
 

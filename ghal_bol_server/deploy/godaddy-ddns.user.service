@@ -1,8 +1,0 @@
-# User systemd oneshot — installed by install_coord1_home.sh
-
-[Unit]
-Description=GoDaddy DDNS for coord1.ghalbol.com
-
-[Service]
-Type=oneshot
-ExecStart=REPLACE_GODADDY_DDNS_SCRIPT

@@ -25,9 +25,9 @@ CURRENT_IP="$(curl -4 -fsS --connect-timeout 8 https://api.ipify.org 2>/dev/null
 
 note "GoDaddy DNS"
 if [[ -z "${PUBLIC_IP}" ]]; then
-  fail "DNS: no A record for ${HOST} — run godaddy-ddns.sh"
+  fail "DNS: no A record for ${HOST} — check GHAL_BOL_DDNS_CREDENTIALS and journalctl --user -u ghal-bol-server-coord1"
 elif [[ -n "${CURRENT_IP}" && "${PUBLIC_IP}" != "${CURRENT_IP}" ]]; then
-  fail "DNS stale: ${HOST} → ${PUBLIC_IP}, this PC is ${CURRENT_IP} — godaddy-ddns.timer or run godaddy-ddns.sh"
+  fail "DNS stale: ${HOST} → ${PUBLIC_IP}, this PC is ${CURRENT_IP} — restart ghal-bol-server-coord1 or run godaddy-ddns.sh once"
 else
   pass "${HOST} → ${PUBLIC_IP}"
 fi

@@ -2,7 +2,7 @@
 //!
 //! Presence and endpoint discovery only — no chat transcripts or message payloads.
 
-use ghal_bol_server::{AppState, RelayConfig, ServerConfig, app, relay};
+use ghal_bol_server::{AppState, DdnsConfig, RelayConfig, ServerConfig, app, relay, spawn_ddns_task};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let shutdown = Arc::new(Notify::new());
     let purge = spawn_purge_task(Arc::clone(&state), Arc::clone(&shutdown));
+    let ddns = DdnsConfig::from_env().map(|cfg| spawn_ddns_task(cfg, Arc::clone(&shutdown)));
     let app = app(state);
 
     // Dual-stack: also serve the counterpart IP family on the same port so both IPv4 and IPv6
@@ -84,6 +85,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     purge.abort();
+    if let Some(handle) = ddns {
+        handle.abort();
+    }
     tracing::info!("ghal_bol_server stopped");
     Ok(())
 }
