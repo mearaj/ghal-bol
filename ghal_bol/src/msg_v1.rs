@@ -42,6 +42,10 @@ pub struct MsgEnvelope {
     pub sender_public_key_hex: String,
     pub recipient_public_key_hex: String,
     pub created_at_ms: i64,
+    /// On **`ack_received` only:** when the recipient first accepted the referenced text
+    /// (`ref_id`). Recipient authority; must not change on duplicate text retries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_at_ms: Option<i64>,
     pub ciphertext_hex: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_hex: Option<String>,
@@ -62,6 +66,7 @@ pub struct ParsedAck {
     pub kind: MsgKind,
     pub sender_public_key_hex: String,
     pub created_at_ms: i64,
+    pub received_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +135,7 @@ pub fn build_text_envelope(
         sender_public_key_hex: sender_hex,
         recipient_public_key_hex: recipient.to_string(),
         created_at_ms,
+        received_at_ms: None,
         ciphertext_hex: hex::encode(sealed),
         signature_hex: None,
     };
@@ -144,6 +150,7 @@ pub fn build_ack_envelope(
     sender: &Keypair,
     recipient_public_key_hex: &str,
     created_at_ms: i64,
+    received_at_ms: Option<i64>,
 ) -> Result<MsgEnvelope, String> {
     if kind != MsgKind::AckReceived && kind != MsgKind::AckRead && kind != MsgKind::AckRequest {
         return Err("build_ack_envelope: kind must be ack".to_string());
@@ -162,6 +169,11 @@ pub fn build_ack_envelope(
         sender_public_key_hex: sender_hex,
         recipient_public_key_hex: recipient_public_key_hex.trim().to_string(),
         created_at_ms,
+        received_at_ms: if kind == MsgKind::AckReceived {
+            received_at_ms.filter(|t| *t > 0)
+        } else {
+            None
+        },
         ciphertext_hex: String::new(),
         signature_hex: None,
     };
@@ -211,6 +223,7 @@ pub fn parse_envelope(
                 kind: env.kind,
                 sender_public_key_hex: env.sender_public_key_hex.trim().to_string(),
                 created_at_ms: env.created_at_ms,
+                received_at_ms: env.received_at_ms.filter(|t| *t > 0),
             }))
         }
     }
@@ -258,6 +271,31 @@ mod tests {
         match parsed {
             ParsedMsg::Text(t) => assert_eq!(t.text, "hello"),
             _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn ack_received_includes_received_at_ms_in_signature() {
+        let (_ks_a, alice) = create_keystore_v1("pw", None).unwrap();
+        let (_ks_b, bob) = create_keystore_v1("pw2", None).unwrap();
+        let env = build_ack_envelope(
+            "ack-1",
+            "msg-1",
+            MsgKind::AckReceived,
+            bob.keypair(),
+            &alice.public_key_hex(),
+            1_700_000_000_100,
+            Some(1_700_000_000_000),
+        )
+        .unwrap();
+        verify_envelope(&env).unwrap();
+        let parsed = parse_envelope(&env, &alice.public_key_hex(), alice.secp256k1_secret()).unwrap();
+        match parsed {
+            ParsedMsg::Ack(a) => {
+                assert_eq!(a.ref_id, "msg-1");
+                assert_eq!(a.received_at_ms, Some(1_700_000_000_000));
+            }
+            _ => panic!("expected ack"),
         }
     }
 }

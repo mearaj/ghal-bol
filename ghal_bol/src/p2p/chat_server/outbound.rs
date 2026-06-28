@@ -293,12 +293,10 @@ async fn process_outbound_cmd(
     }
     if let OutboundCmd::RunReadAckCatchup { peer_id } = &cmd {
         let peer = *peer_id;
-        // Always seed from transcript first — throttle only the burst drain (hub nudge / resume).
-        seed_read_acks_for_peer_from_transcript(session.as_ref(), peer);
         if !may_send_in_room_read_ack(session.as_ref(), peer) {
             native_log::debug(
                 "read_ack",
-                format!("catch-up {peer} deferred — read gate off; transcript backlog seeded"),
+                format!("catch-up {peer} deferred — read gate off"),
             );
             return Ok(());
         }
@@ -309,12 +307,15 @@ async fn process_outbound_cmd(
             "read_ack",
             format!("read gate opened — catch-up ack_read for foreground {peer}"),
         );
-        let session2 = Arc::clone(&session);
-        let writers2 = Arc::clone(&writers);
-        let control2 = control.clone();
-        tokio::spawn(async move {
-            read_ack_catchup_for_peer(session2, writers2, peer, true, false, Some(control2)).await;
-        });
+        let cutoff = read_ack_cutoff_ms(session.as_ref(), peer);
+        dispatch_read_ack_pass(
+            Arc::clone(&session),
+            Arc::clone(&writers),
+            peer,
+            cutoff,
+            true,
+            Some(control.clone()),
+        );
         return Ok(());
     }
     if let OutboundCmd::SetForegroundPeer {
@@ -340,13 +341,13 @@ async fn process_outbound_cmd(
             })
         });
         let same_room_reenter = matches!((peer_id, previous), (Some(n), Some(p)) if *n == p);
-        session.set_foreground_peer(*peer_id);
         if let Some(left) = previous {
             let leaving = match peer_id {
                 None => true,
                 Some(new) => *new != left,
             };
             if leaving {
+                freeze_chat_room_for_peer(session.as_ref(), left);
                 spawn_leave_read_ack_drain(
                     Arc::clone(&session),
                     Arc::clone(&writers),
@@ -355,7 +356,9 @@ async fn process_outbound_cmd(
                 );
             }
         }
+        session.set_foreground_peer(*peer_id);
         if peer_id.is_none() {
+            clear_chat_room_session();
             if let Ok(mut last) = last_room_peer_mx().write() {
                 *last = None;
             }
@@ -369,45 +372,40 @@ async fn process_outbound_cmd(
             );
             return Ok(());
         }
-        seed_read_acks_for_peer_from_transcript(session.as_ref(), peer);
+        begin_chat_room_session(session.as_ref(), peer);
         if !app_ack_read_enabled() || !app_ui_visible() {
             native_log::debug(
                 "read_ack",
-                format!(
-                    "chat room enter {peer} deferred — read gate off; seeded transcript backlog"
-                ),
+                format!("chat room enter {peer} deferred — read gate off"),
             );
             return Ok(());
         }
         if same_room_reenter && read_ack_catchup_throttled(peer, chrono_now_ms()) {
             native_log::debug(
                 "read_ack",
-                format!("chat room reassert {peer} — seeded backlog, catch-up throttled"),
+                format!("chat room reassert {peer} — catch-up throttled"),
             );
             return Ok(());
         }
         native_log::info(
             "read_ack",
             format!(
-                "chat room enter {peer} — ack_read for in-room backlog only{}",
+                "chat room enter {peer} — ack_read pass{}",
                 if same_room_reenter { " (reassert)" } else { "" }
             ),
         );
         if let (Some(path), Some(ns)) = (&session.transcript_path, &session.app_namespace) {
             transcript_sync_outbound_tick(session.as_ref(), Path::new(path), ns.trim());
         }
-        let session2 = Arc::clone(&session);
-        let writers2 = Arc::clone(&writers);
-        let control2 = control.clone();
-        tokio::spawn(async move {
-            if session2.current_foreground_peer() != Some(peer) {
-                return;
-            }
-            if !may_send_in_room_read_ack(session2.as_ref(), peer) {
-                return;
-            }
-            read_ack_catchup_for_peer(session2, writers2, peer, true, false, Some(control2)).await;
-        });
+        let cutoff = read_ack_cutoff_ms(session.as_ref(), peer);
+        dispatch_read_ack_pass(
+            Arc::clone(&session),
+            Arc::clone(&writers),
+            peer,
+            cutoff,
+            true,
+            Some(control.clone()),
+        );
         return Ok(());
     }
 
@@ -541,6 +539,7 @@ async fn process_outbound_cmd(
                         message_id: Some(message_id.clone()),
                         delivery: "pending".to_string(),
                         created_at_ms: Some(now),
+                        received_at_ms: None,
                         read_ack_sent: false,
                     };
                     match crate::dm_transcript_store::append_if_new(ns, &conv_key, line) {
@@ -581,6 +580,7 @@ async fn process_outbound_cmd(
                 session.identity.keypair(),
                 &recipient_public_key_hex,
                 chrono_now_ms(),
+                None,
             )?;
             (peer_id, envelope_to_frame_bytes(&env)?, None)
         }
@@ -761,6 +761,9 @@ fn merge_outbound_row_into_outbox(
     if session.outbox_contains(&row.message_id) {
         return false;
     }
+    if session.outbound_ack_blocks_transcript_merge(&row.message_id) {
+        return false;
+    }
     let Some((peer_id, pk)) = resolve_send_pair_for_row(session, row) else {
         return false;
     };
@@ -775,7 +778,7 @@ fn merge_outbound_row_into_outbox(
         } else {
             now
         },
-        last_send_ms: 0,
+        last_send_ms: now,
         on_wire: false,
     });
     true

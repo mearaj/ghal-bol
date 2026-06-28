@@ -182,17 +182,15 @@ pub(crate) fn spawn_leave_read_ack_drain(
     left: PeerId,
     control: stream::Control,
 ) {
-    seed_read_acks_for_peer_from_transcript(session.as_ref(), left);
+    let cutoff = read_ack_cutoff_ms(session.as_ref(), left);
     let pk_label = secp256k1_public_key_hex_from_peer_id(&left).unwrap_or_else(|| left.to_string());
     native_log::info(
         "read_ack",
         format!(
-            "chat room leave {pk_label} — drain ack_read for in-room backlog (new mail: recv only)"
+            "chat room leave {pk_label} — drain ack_read cutoff_ms={cutoff} (new mail: recv only)"
         ),
     );
-    tokio::spawn(async move {
-        read_ack_catchup_for_peer(session, writers, left, true, false, Some(control)).await;
-    });
+    dispatch_read_ack_pass(session, writers, left, cutoff, true, Some(control));
 }
 
 fn is_transient_outbound_error(err: &str) -> bool {

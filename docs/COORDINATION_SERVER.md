@@ -87,6 +87,7 @@ See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
 | GET | `/v1/peers/{public_key_hex}` |
 | GET | `/v1/peers` |
 | GET | `/v1/relay` |
+| GET | `/v1/relay?remap=true` | Home UPnP coord only: renew WAN port mapping before returning addrs (bool query — **`true`/`false`**, not `1`/`0`) |
 
 Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256k1 ECDSA DER).
 

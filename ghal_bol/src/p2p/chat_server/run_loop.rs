@@ -229,6 +229,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                 }
             }
             _ = dm_upkeep_tick.tick() => {
+                tick_chat_room_session_if_active(session.as_ref());
                 let now_ms = chrono_now_ms();
                 for peer in session.expire_stale_circuit_dials(now_ms) {
                     if !swarm.is_connected(&peer) {

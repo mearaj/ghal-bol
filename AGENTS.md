@@ -154,7 +154,7 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **Empty native reload wiping chat** — `force: true` reload that clears persisted lines when `transcriptLoadMerged` returns 0 rows during same-room refresh.
 - Contact trust UI that changes **ack policy**, **foreground order**, or blocks **`ack_received`** for `is_known: false` peers — see `docs/DESIGN.md` § Contact trust (additive only).
 - A second block store in preferences instead of **`is_blocked`** on `contacts_v1.json`.
-- **Fake ticks** — Flutter showing delivered/read without transcript patch from poll.
+- **Read-ack seed without `received_at_ms` or cutoff** — false blue ticks and ack storms; use **`dispatch_read_ack_pass`** eligibility (DESIGN.md § “Inbound `received_at_ms`”).
 - **Clearing read-ack queue on leave** or clearing foreground inside `set_app_ack_read_enabled(false)` before leave drain.
 - **Wrong hub close order** — `setAppAckReadEnabled(false)` before `setForegroundConversation(null)`.
 - **Single conversation key** for transcript load when history uses both peer id and public key buckets.
@@ -224,9 +224,11 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `queued` forever, no `chat_ready` | `dm_peers` registered? guest has host `public_key_hex`? `p2p_start` / `already_running` path? |
 | Receiver gets text, sender no tick | `delivery_ack` in `:p2p`? stale foreground suppressing delivery? |
 | Many `ack_read` same `ref=` / poll saturated | Broken confirm loop or retry throttle — DESIGN.md § “Read receipts”; not “add dedupe” |
-| Blue tick missing | Sender not getting `ack_read`, or poll not applying; room open + visible + `may_send_in_room_read_ack`? |
+| Blue tick missing | Sender not getting `ack_read`, or poll not applying; room open + visible + `may_send_in_room_read_ack`? Logs: `seeded N … cutoff_ms=`, `ack_read sent`, `patch outbound read` |
+| False blue tick (peer never got read) | Read-ack seed without **`received_at_ms`** or past **`chat_room_exit_at_ms`** cutoff — DESIGN.md § “Inbound `received_at_ms`” |
+| `GET /v1/relay failed (relay HTTP 400 Bad Request)` loop | Client sent `remap=1`; server expects **`remap=true`**. Fix `coord.rs` `get_relay_remap`; rebuild native |
 | Blue tick when app inactive/background | **Android:** read gate off on `inactive` — expected. **Linux desktop:** chat visible + `read=false` after `inactive` — regression (DESIGN.md § Fixed 2026-06-15). |
-| Read tick missing after user left room | Leave drain must run: log `chat room leave … drain ack_read`; hub close order; queue not cleared |
+| Read tick missing after user left room | Leave drain must run: log `chat room leave … cutoff_ms=` + `chat room frozen`; hub close order; queue not cleared |
 | `chat room enter … skipped — app not visible` | Gate off before foreground cmd; fix hub open order or `RunReadAckCatchup` |
 | Hub preview OK, chat empty | Transcript key split; use merged load (peer id + public key) — DESIGN.md § “Transcript threads” |
 | Ticks appear without peer ack | Fake state — Flutter must not promote; check poll + transcript patch only |

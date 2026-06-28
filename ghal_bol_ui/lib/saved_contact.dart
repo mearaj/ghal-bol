@@ -16,6 +16,7 @@ class SavedContact {
     this.updatedAtMs,
     this.isKnown = true,
     this.isBlocked = false,
+    this.chatRoomExitAtMs,
   });
 
   final String publicKeyHex;
@@ -27,6 +28,8 @@ class SavedContact {
   final int? updatedAtMs;
   final bool isKnown;
   final bool isBlocked;
+  /// Last active in-room moment with this peer (`:p2p` writes; UI read-only).
+  final int? chatRoomExitAtMs;
 
   bool get hasPublicKey => isValidPublicKeyHex(publicKeyHex);
 
@@ -89,6 +92,7 @@ class SavedContact {
     "is_blocked": isBlocked,
     if (createdAtMs != null) "created_at_ms": createdAtMs,
     if (updatedAtMs != null) "updated_at_ms": updatedAtMs,
+    if (chatRoomExitAtMs != null) "chat_room_exit_at_ms": chatRoomExitAtMs,
   };
 
   static SavedContact? fromJson(dynamic raw) {
@@ -111,6 +115,7 @@ class SavedContact {
       isBlocked: raw["is_blocked"] == true,
       createdAtMs: raw["created_at_ms"] is int ? raw["created_at_ms"] as int : null,
       updatedAtMs: raw["updated_at_ms"] is int ? raw["updated_at_ms"] as int : null,
+      chatRoomExitAtMs: raw["chat_room_exit_at_ms"] is int ? raw["chat_room_exit_at_ms"] as int : null,
     );
   }
 

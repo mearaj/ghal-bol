@@ -5,6 +5,8 @@ pub(crate) struct SessionState {
     connected: RwLock<HashSet<PeerId>>,
     /// Messages we sent that are not yet `ack_received` by the peer.
     outbox: RwLock<HashMap<String, PendingOutbound>>,
+    /// Wire ack cleared outbox but poll has not patched transcript yet — block re-merge from pending rows.
+    outbound_ack_pending_poll: RwLock<HashSet<String>>,
     /// Dedupe inbound `text` emits (retries / duplicate frames).
     seen_inbound_ids: RwLock<HashMap<String, i64>>,
     /// FFI/UI: `peer_identified` at most once per remote libp2p peer.
@@ -245,6 +247,7 @@ impl SessionState {
             peers: RwLock::new(tables),
             connected: RwLock::new(HashSet::new()),
             outbox: RwLock::new(HashMap::new()),
+            outbound_ack_pending_poll: RwLock::new(HashSet::new()),
             seen_inbound_ids: RwLock::new(HashMap::new()),
             identified_emitted: RwLock::new(HashSet::new()),
             chat_ready_emitted: RwLock::new(HashSet::new()),
@@ -2058,6 +2061,45 @@ impl SessionState {
         }
     }
 
+    /// Outbox cleared on wire ack; hold transcript→outbox re-merge until poll patches delivery
+    /// (GHAL_BOL_DM_MSG_V1.md — poll owns outbound tick patches; no dual wire transcript writer).
+    fn finalize_outbound_ack(&self, message_id: &str) {
+        let id = message_id.trim();
+        if id.is_empty() {
+            return;
+        }
+        self.complete_outbound(id);
+        if let Ok(mut g) = self.outbound_ack_pending_poll.write() {
+            g.insert(id.to_string());
+            if g.len() > SEEN_INBOUND_MAX {
+                let trim = SEEN_INBOUND_MAX / 8;
+                let mut keys: Vec<String> = g.iter().cloned().collect();
+                keys.sort();
+                for k in keys.into_iter().take(trim) {
+                    g.remove(&k);
+                }
+            }
+        }
+    }
+
+    fn outbound_ack_blocks_transcript_merge(&self, message_id: &str) -> bool {
+        let id = message_id.trim();
+        if id.is_empty() {
+            return false;
+        }
+        self.outbound_ack_pending_poll
+            .read()
+            .ok()
+            .is_some_and(|g| g.contains(id))
+    }
+
+    fn purge_outbound_ack_pending_poll(&self, still_pending_ids: &HashSet<String>) {
+        let Ok(mut g) = self.outbound_ack_pending_poll.write() else {
+            return;
+        };
+        g.retain(|id| still_pending_ids.contains(id));
+    }
+
     fn outbox_due_for_resend(&self, now_ms: i64) -> Vec<PendingOutbound> {
         let Ok(g) = self.outbox.read() else {
             return Vec::new();
@@ -2157,6 +2199,18 @@ impl SessionState {
         }
         g.insert(id.to_string(), now_ms);
         true
+    }
+
+    /// First local accept time for an inbound text id (never updated on duplicate resends).
+    pub(crate) fn inbound_received_at_ms(&self, message_id: &str) -> Option<i64> {
+        let id = message_id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        self.seen_inbound_ids
+            .read()
+            .ok()
+            .and_then(|g| g.get(id).copied())
     }
 
     fn note_connected(&self, peer: PeerId) {
@@ -2472,31 +2526,6 @@ impl SessionState {
             .unwrap_or(0)
     }
 
-    fn enqueue_read_ack(&self, peer_id: PeerId, inbound_id: &str, recipient_signing: &str) {
-        let id = inbound_id.trim().to_string();
-        if id.is_empty() {
-            return;
-        }
-        if self.is_read_ack_confirmed(&id) {
-            return;
-        }
-        let Ok(mut q) = self.pending_read_acks.write() else {
-            return;
-        };
-        if q.len() >= MAX_PENDING_READ_ACKS {
-            q.pop_front();
-        }
-        if q.iter().any(|p| p.inbound_id == id) {
-            return;
-        }
-        q.push_back(PendingReadAck {
-            peer_id,
-            inbound_id: id,
-            recipient_public_key_hex: recipient_signing.trim().to_string(),
-            last_send_ms: 0,
-        });
-    }
-
     fn mark_read_ack_wire_sent(&self, inbound_id: &str) {
         let id = inbound_id.trim();
         if id.is_empty() {
@@ -2644,7 +2673,13 @@ impl SessionState {
         due
     }
 
-    fn enqueue_delivery_ack(&self, peer_id: PeerId, inbound_id: &str, recipient_signing: &str) {
+    fn enqueue_delivery_ack(
+        &self,
+        peer_id: PeerId,
+        inbound_id: &str,
+        recipient_signing: &str,
+        received_at_ms: i64,
+    ) {
         let id = inbound_id.trim().to_string();
         if id.is_empty() {
             return;
@@ -2662,6 +2697,7 @@ impl SessionState {
             peer_id,
             inbound_id: id,
             recipient_public_key_hex: recipient_signing.trim().to_string(),
+            received_at_ms,
             queued_at_ms: chrono_now_ms(),
         });
     }

@@ -43,6 +43,9 @@ pub struct SavedContact {
     pub is_known: bool,
     /// User blocked this peer on this device.
     pub is_blocked: bool,
+    /// Last moment user was actively in the chat room with this peer (DESIGN.md). Updated in lockstep
+    /// with the live session clock while the room is open; frozen on leave/switch/inactive.
+    pub chat_room_exit_at_ms: Option<i64>,
 }
 
 impl SavedContact {
@@ -79,6 +82,9 @@ impl SavedContact {
         }
         if let Some(t) = self.updated_at_ms {
             m["updated_at_ms"] = Value::Number(t.into());
+        }
+        if let Some(t) = self.chat_room_exit_at_ms {
+            m["chat_room_exit_at_ms"] = Value::Number(t.into());
         }
         m
     }
@@ -131,6 +137,7 @@ impl SavedContact {
             updated_at_ms: obj.get("updated_at_ms").and_then(|v| v.as_i64()),
             is_known,
             is_blocked,
+            chat_room_exit_at_ms: obj.get("chat_room_exit_at_ms").and_then(|v| v.as_i64()),
         })
     }
 }
@@ -342,6 +349,9 @@ pub fn upsert_contact(
             updated_at_ms: Some(now),
             is_known: contact.is_known || base.is_known,
             is_blocked: contact.is_blocked || base.is_blocked,
+            chat_room_exit_at_ms: contact
+                .chat_room_exit_at_ms
+                .or(base.chat_room_exit_at_ms),
         };
         if let Some(i) = idx {
             list[i] = next.clone();
@@ -394,6 +404,7 @@ pub fn merge_discovered_peer_id(
             updated_at_ms: Some(now_ms()),
             is_known: false,
             is_blocked: false,
+            chat_room_exit_at_ms: None,
         },
     )?;
     Ok(())
@@ -444,6 +455,39 @@ pub fn set_contact_trust(
     })
 }
 
+/// Mirror the live chat-room session clock onto the foreground contact (DESIGN.md).
+pub fn sync_chat_room_exit_at_ms(
+    app_namespace: &str,
+    public_key_hex: &str,
+    at_ms: i64,
+) -> Result<(), ContactsError> {
+    if at_ms <= 0 {
+        return Ok(());
+    }
+    let pk = public_key_hex.trim().to_lowercase();
+    if !is_valid_public_key_hex(&pk) {
+        return Ok(());
+    }
+    with_store(app_namespace, |_path, mut all| {
+        let list = all.entry(app_namespace.to_string()).or_default();
+        let Some(i) = list.iter().position(|c| c.public_key_hex == pk) else {
+            return Ok(((), all));
+        };
+        let mut c = list[i].clone();
+        c.chat_room_exit_at_ms = Some(at_ms);
+        list[i] = c;
+        Ok(((), all))
+    })
+}
+
+pub fn chat_room_exit_at_ms(
+    app_namespace: &str,
+    public_key_hex: &str,
+) -> Result<Option<i64>, ContactsError> {
+    Ok(find_by_public_key(app_namespace, public_key_hex)?
+        .and_then(|c| c.chat_room_exit_at_ms))
+}
+
 /// Update contact list preview for the latest message in a thread (`contact_public_key_hex`
 /// is the **other** party — inbound sender or outbound recipient).
 pub fn record_inbound_preview(
@@ -470,6 +514,7 @@ pub fn record_inbound_preview(
                 list[i] = SavedContact {
                     unread_count: c.unread_count.saturating_add(1),
                     updated_at_ms: Some(now_ms()),
+                    chat_room_exit_at_ms: c.chat_room_exit_at_ms,
                     ..c.clone()
                 };
             }
@@ -491,6 +536,7 @@ pub fn record_inbound_preview(
             updated_at_ms: Some(now_ms()),
             is_known: c.is_known,
             is_blocked: c.is_blocked,
+            chat_room_exit_at_ms: c.chat_room_exit_at_ms,
         };
         Ok(((), all))
     })
@@ -562,6 +608,7 @@ mod tests {
                 updated_at_ms: None,
                 is_known: true,
                 is_blocked: false,
+                chat_room_exit_at_ms: None,
             },
         )
         .unwrap();
@@ -578,6 +625,7 @@ mod tests {
                 updated_at_ms: None,
                 is_known: true,
                 is_blocked: false,
+                chat_room_exit_at_ms: None,
             },
         )
         .unwrap();
@@ -596,6 +644,7 @@ mod tests {
                 updated_at_ms: None,
                 is_known: true,
                 is_blocked: false,
+                chat_room_exit_at_ms: None,
             },
         )
         .unwrap();
@@ -622,6 +671,7 @@ mod tests {
                 updated_at_ms: None,
                 is_known: false,
                 is_blocked: false,
+                chat_room_exit_at_ms: None,
             },
         )
         .unwrap();

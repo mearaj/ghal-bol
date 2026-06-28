@@ -13,6 +13,7 @@ mod prelude;
 mod util;
 mod notify;
 mod ui_session;
+mod chat_room_session;
 
 // Core logic is split across `include!` fragments (single module scope — no circular imports).
 // Submodules: prelude, util, notify, ui_session.
@@ -24,6 +25,10 @@ pub(crate) use notify::{
     drop_pending_call_invite, notify_coord_lookup, notify_stream_reopen, take_coord_lookup_notify,
     take_dm_presence_wake_notify, take_network_change_notify, take_relay_refresh_notify,
     take_stream_reopen_notify, ANDROID_WIFI_TRANSPORT, LAN_RECOVERY_MIN_MS,
+};
+pub(crate) use chat_room_session::{
+    begin_chat_room_session, clear_chat_room_session, freeze_chat_room_for_peer,
+    freeze_open_chat_room_session, read_ack_cutoff_ms, tick_chat_room_session_if_active,
 };
 pub(crate) use ui_session::{
     app_ack_read_enabled, app_ui_visible, emit_call_media, foreground_peer_cmd_gen_latest,

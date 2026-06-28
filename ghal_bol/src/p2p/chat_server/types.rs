@@ -95,6 +95,7 @@ pub enum GossipChatEvent {
         ref_id: Option<String>,
         sender_public_key_hex: String,
         created_at_ms: i64,
+        received_at_ms: Option<i64>,
     },
     /// Remote contact keys are known (invite, libp2p PeerId, or verified on first DM frame).
     PeerIdentified {
@@ -282,6 +283,8 @@ pub(crate) struct PendingDeliveryAck {
     peer_id: PeerId,
     inbound_id: String,
     recipient_public_key_hex: String,
+    /// When the recipient first accepted the inbound text (`ack_received.received_at_ms`).
+    received_at_ms: i64,
     /// When this ack was first queued — used to tell a transient in-flight ack (healthy mux)
     /// from a sustained-stuck ack (dead direct mux after LAN→WAN handover).
     queued_at_ms: i64,

@@ -1,6 +1,7 @@
 use super::prelude::*;
 use super::notify::drop_pending_call_invite;
 use super::notify::notify_dm_presence_wake;
+use super::chat_room_session::freeze_open_chat_room_session;
 use super::{GossipChatEvent, OutboundCmd, READ_ACK_CATCHUP_THROTTLE_MS, SessionState};
 use crate::dm_transport::ContactPk;
 /// UI foreground peer — single source of truth for in-room read receipts and unread skip.
@@ -140,6 +141,8 @@ pub fn set_app_ui_visible(visible: bool) {
         if !was {
             notify_dm_presence_wake();
         }
+    } else if was {
+        freeze_open_chat_room_session();
     }
 }
 

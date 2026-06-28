@@ -42,7 +42,7 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 | Envelope crypto | `msg_v1.rs`, `secp256k1_seal.rs` |
 | Apply `dm_message` → contacts + transcript | `dm_event_handler.rs` (on **`p2p_poll`** in the P2P process) |
 | Contacts / previews / unread | `contacts_v1.rs` (disk; UI reads via FFI) |
-| Transcript lines, `delivery`, `read_ack_sent` | `dm_transcript_store.rs`, `dm_transcript_v1.rs` |
+| Transcript lines, `delivery`, `read_ack_sent`, `received_at_ms` | `dm_transcript_store.rs`, `dm_transcript_v1.rs` |
 | Invite build/parse/verify | `connect_invite_v1.rs`, `invite_ffi.rs` |
 | Hub, roster, foreground, layout | `chat_hub_screen.dart` |
 | Delivery tick **display** rules (comments) | `dm_delivery_sync.dart` |
@@ -145,6 +145,7 @@ until ack_received or ack_read          until written on wire
 | **Chat room closed** (list, other tab, navigated back, app paused) | New mail stays “delivered” only | **`ack_received` only** for **new** inbound |
 | **Left room but mail arrived while open** | Still finish read signaling for that backlog | **Keep** read-ack retry queue; do **not** clear on leave |
 | **Mail arrives after leave** | Do not auto-read | **`ack_received` only** until room opens again |
+| **Not received locally yet** | Do not read-ack toward sender | No inbound transcript row with **`received_at_ms`** → **never** queue **`ack_read`** (avoids false read when B sent but A never got the text) |
 | **Opened chat UI** | Does **not** by itself mean read is done on the wire | **`read_ack_sent`** only after sender’s **`ack_received`** confirms our **`ack_read`** |
 
 Native code: `send_inbound_delivery_ack`, `send_inbound_read_ack_if_possible`, `pending_delivery_acks` / `pending_read_acks` in `chat_server.rs`. Runs in **`:p2p` / daemon** — not in the Flutter isolate.
@@ -184,27 +185,29 @@ Some stacks store `Received` / `Read` **on the message struct** and echo the **f
 | Read | **`ack_read`** (`ref_id` = text `id`) | Outbound **`delivery`**: `read`; inbound **`read_ack_sent`** after confirm |
 | Sender learns | Inbound ack events on **`p2p_poll`** → `dm_event_handler` | Not from a resent text blob with embedded status |
 
-Read still reaches the sender when the recipient has marked read locally and the stream is up: native **retries `ack_read`** on upkeep (and on enter-room seed), instead of embedding `Read` inside a resent text payload.
+Read still reaches the sender when the recipient has marked read locally and the stream is up: native **retries `ack_read`** on upkeep and on **enter/leave read-ack passes** (`dispatch_read_ack_pass`), instead of embedding `Read` inside a resent text payload.
 
 ### Leave / backlog (do not get this wrong)
 
-This is a **sensitive** product rule. Users expect: “I saw it in the chat while the room was open” → the other side should eventually get **read**, even after I go back to the list or switch tabs.
+This is a **sensitive** product rule. Users expect mail they **received while actively in the room** (per **`received_at_ms` ≤ frozen `chat_room_exit_at_ms`**) → the other side should eventually get **read**, even after they go back to the list or switch tabs.
 
 | | Behaviour |
 |---|-----------|
 | **Wrong** | Leaving the chat **clears** the read-ack queue or **stops** all `ack_read` work. |
 | **Wrong** | Turning off `app_ack_read_enabled` **clears** `live_foreground_peer` before native can run leave drain (loses which peer to flush). |
 | **Wrong** | Hub disables read gate **before** `SetForegroundPeer(null)`, so leave seed/drain never runs. |
+| **Wrong** | Read-ack seed from “inbound row exists” without **`received_at_ms`** — false read when sender transmitted but this device never accepted. |
 | **Right** | Leaving stops **new** `ack_read` for **new** inbound only. |
-| **Right** | Mail that arrived **while the room was open** stays in `pending_read_acks` + transcript; native **keeps retrying** `ack_read` (~1 s) until the sender’s **`ack_received`** confirms each id. |
+| **Right** | Eligible inbound (`received_at_ms` set, `read_ack_sent: false`, `received_at_ms ≤ chat_room_exit_at_ms`) stays in `pending_read_acks`; native **keeps retrying** `ack_read` (~1 s) until the sender’s **`ack_received`** confirms each id. |
 | **Right** | **`ack_received`** for **all** inbound (including after leave) continues in `:p2p` — delivery is never gated on the room. |
 
-**Native (`chat_server.rs`):**
+**Native (`chat_server/`):**
 
 - **`pending_read_acks` is not cleared on leave** — only per-id dequeue on confirm or successful policy.
-- On leave: `seed_read_acks_for_peer_from_transcript` + `spawn_leave_read_ack_drain` (not gated on `app_ack_read_enabled`).
+- On leave/switch: **`freeze_chat_room_for_peer`** (writes **`chat_room_exit_at_ms`** on the contact) then **`dispatch_read_ack_pass`** with the frozen cutoff (not gated on `app_ack_read_enabled`).
+- While in-room: live session clock + foreground contact **`chat_room_exit_at_ms`** update ~1 s (`tick_chat_room_session_if_active` on `dm_upkeep_tick`).
 - **`last_room_peer`**: remembers who was in the room if `SetForegroundPeer` enter was still queued — leave drain still runs.
-- **Leave read-ack drain**: only from **`SetForegroundPeer(null)`** on the outbound queue — **not** from `set_app_ack_read_enabled(false)` (that duplicated leave work and starved `SendText`).
+- **Leave read-ack drain**: only from **`SetForegroundPeer(null)`** or peer switch on the outbound queue — **not** from `set_app_ack_read_enabled(false)`.
 - **`set_app_ack_read_enabled(false)` does not call `sync_foreground_peer_now(None)`** — foreground is cleared by hub via **`SetForegroundPeer(null)`** so leave logic sees the previous peer.
 
 **Hub close order (`chat_hub_screen.dart`):**
@@ -216,7 +219,34 @@ This is a **sensitive** product rule. Users expect: “I saw it in the chat whil
 
 1. `setAppAckReadEnabled(true)` first (read gate on before enter-room cmd may run on outbound queue).
 2. `setForegroundConversation(peer)` and await.
-3. Native: seed transcript + enter-room catch-up (`RunReadAckCatchup` if gate opened after foreground was already set).
+3. Native: **`begin_chat_room_session`** + **`dispatch_read_ack_pass`** on enter (`RunReadAckCatchup` if gate opens after foreground was already set).
+
+### Inbound `received_at_ms` and read-ack eligibility
+
+**Problem:** Seeding read acks from “inbound row exists + `read_ack_sent: false`” can falsely read-ack mail the sender transmitted but this device **never accepted** (outbox on their side, no local receive yet).
+
+**Rule:** **`received_at_ms`** is the recipient’s **first local accept** time for that text `id`.
+
+| Where | Who sets it | Stability |
+|-------|-------------|-----------|
+| Inbound transcript row | Recipient on first wire accept / poll append | **Set once**; duplicate text resends must **not** overwrite |
+| Wire **`ack_received`** | Recipient in the signed ack envelope | Same value as inbound row; sender learns when peer got the text |
+| Outbound transcript row | Sender from peer’s **`ack_received.received_at_ms`** | First value wins |
+
+**Chat room session cutoff (`contacts_v1.json`):**
+
+| Field | Role |
+|-------|------|
+| Live session clock (in-memory) | Updates ~1 s while room open + read gate + UI visible |
+| **`chat_room_exit_at_ms`** on each contact | Mirrors the live clock for the **foreground** peer while in-room; **frozen** on leave, peer switch, or UI inactive |
+
+**Read-ack pass (enter + leave):** queue **`ack_read`** only when **`received_at_ms` is set**, **`read_ack_sent: false`**, and **`received_at_ms <= chat_room_exit_at_ms`** for that contact (after leave/switch, the frozen contact value is the cutoff).
+
+**Room enter:** begin session clock + read-ack pass with live cutoff.
+
+**Room leave / switch:** freeze prior contact’s **`chat_room_exit_at_ms`**, then read-ack pass with that frozen cutoff.
+
+**Legacy rows** (inbound without `received_at_ms` on disk but with `message_id`): treated as received for eligibility only; new accepts always persist **`received_at_ms`**.
 
 ### Who must not touch policy
 
@@ -270,9 +300,8 @@ mark_read_ack_confirmed(X)
 | Rule | Implementation |
 |------|----------------|
 | First send in-room | `send_inbound_read_ack_if_possible` after `ack_received`; enqueue + try wire immediately |
+| Enter / leave pass | **`dispatch_read_ack_pass`**: seed when `received_at_ms` set + `read_ack_sent: false` + `received_at_ms ≤ cutoff_ms`; drain once |
 | Retry cadence | `PendingReadAck.last_send_ms`: no second wire send for same id until **`OUTBOX_RESEND_INTERVAL_MS` (~1 s)** |
-| Room enter backlog | `seed_read_acks_for_peer_from_transcript` then **`ACK_BURST_MAX_ROUNDS = 1`** (one pass), not multi-hundred-round bursts |
-| Upkeep | `run_ack_upkeep` ~1 s; read batch respects `last_send_ms` and `is_read_ack_confirmed` |
 | Poll events | Emit inbound **`ack_read`** to the poll queue **always** (first apply patches `read`; wire retries no-op in `apply_inbound_ack`). Emit outbound **`ack_received`** when outbox had the row or read-ack confirm advanced. |
 | Transcript on poll | `dm_event_handler::apply_inbound_ack` returns **`stores_updated` only if** `patch_outgoing_delivery` / `patch_inbound_read_ack_sent` returns **changed** |
 | Poll drain | `p2p_poll_event` skips returning duplicate ack events that did not change stores |
@@ -377,7 +406,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | Confirm loop | `mark_read_ack_confirmed` only when `has_pending_read_ack(ref_id)` — **removed** `has_seen_inbound_id` from that branch (`chat_server.rs`) |
 | Merged keys | `inbound_transcript_lookup_keys` in `dm_event_handler.rs` — pk + wire peer id + contact buckets; used by poll-replay dedupe, `apply_inbound_ack`, and `seed_read_acks_for_peer_from_transcript` |
 | Hub unread | `set_foreground_peer`: `clear_unread` on **leave/switch** (old pk) and on **enter** (new pk) |
-| Room-enter seed | Still `pending_inbound_read_ack_rows` only (`read_ack_sent: false` on disk); seed keys expanded via `inbound_transcript_lookup_keys` — **not** “all inbound rows” |
+| Room-enter seed | `received_at_ms` set + `read_ack_sent: false` on disk; seed keys via `inbound_transcript_lookup_keys` — **not** “all inbound rows” and **not** unreceived mail |
 
 **Attempted fixes that were reverted (do not reintroduce):**
 
@@ -387,7 +416,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Legacy transcript note:** Rows written while the loose confirm loop was active may still show `read_ack_sent: true` without the peer ever getting a blue tick. **New** messages after this fix follow the normative confirm loop. Repairing old rows is optional data hygiene, not required for new chat.
 
-**Code:** `ghal_bol/src/p2p/chat_server.rs` (`handle_inbound_stream`, `seed_read_acks_for_peer_from_transcript`), `ghal_bol/src/dm_event_handler.rs` (`inbound_transcript_lookup_keys`, `set_foreground_peer`, `apply_inbound_ack`). Tests: `apply_inbound_text_poll_replay_peer_id_bucket_no_double_unread`.
+**Code:** `ghal_bol/src/p2p/chat_server/chat_room_session.rs`, `outbox_acks.rs` (`dispatch_read_ack_pass`, `seed_read_acks_for_peer_from_transcript`), `frames.rs`, `ghal_bol/src/dm_event_handler.rs` (`inbound_transcript_lookup_keys`, `apply_inbound_ack`). Tests: `apply_inbound_text_poll_replay_peer_id_bucket_no_double_unread`, `msg_v1::ack_received_includes_received_at_ms_in_signature`.
 
 ### Regression symptoms (treat as bugs)
 
@@ -405,7 +434,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | Single tick while peer “read” it | Recipient never sent `ack_read` (room/gate closed on **their** device) — check their logs for `ack_read sent`, not sender UI |
 | `inbound ack no matching row` / `has_out=false` on `ack_received` | Ack patch used single transcript bucket — fix merged keys (`inbound_transcript_lookup_keys`). § “Fixed 2026-06-19”. |
 | Desktop `read_ack_sent=true` on mass inbound, peer no blue tick | Loose confirm loop (`has_seen_inbound_id` in `mark_read_ack_confirmed`) — § “Fixed 2026-06-19”. |
-| `seeded N pending read ack(s)` with N ≫ room backlog (hundreds+) | Room-enter seed ignoring `read_ack_sent` or seeding all inbound — revert to `pending_inbound_read_ack_rows` only. |
+| `seeded N pending read ack(s)` with N ≫ room backlog (hundreds+) | Read-ack seed ignoring eligibility (`received_at_ms`, `read_ack_sent`, cutoff) — fix `dispatch_read_ack_pass`, not “seed all inbound”. |
 
 **Do not fix floods by:** larger poll batches, Dart-side ack filtering alone, or “dedupe” without fixing confirm + retry cadence in Rust.
 
@@ -420,7 +449,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 - Loading chat with a **single** conversation key when history spans peer id + public key buckets.
 - Setting `read_ack_sent` on enter without sender `ack_received` confirm.
 - **`mark_read_ack_confirmed` on `has_seen_inbound_id`** — receiving inbound text must not count as having sent `ack_read`; confirm only when `has_pending_read_ack` (§ “Fixed 2026-06-19”).
-- **Room-enter seed of all inbound rows** or seed without `read_ack_sent: false` filter — causes ack/poll storms.
+- **Room-enter seed of all inbound rows** or seed without **`received_at_ms` + cutoff** — causes false read and ack/poll storms.
 - Sender emitting `ack_request`.
 - Mutual-QR / “both sides must scan” requirement.
 - **High-volume `ack_read` retry** (burst rounds ≫ 1, upkeep every tick without `last_send_ms`, or 128×512 style bursts).
@@ -447,7 +476,7 @@ Rust `may_send_in_room_read_ack(peer)` requires **all** of:
 | `app_ack_read_enabled` | Read gate on (derived when room open + visible) |
 | `foreground_peer == peer` | Hub has this conversation open |
 
-**Leave backlog** (`pending_read_acks` retries after the user left the room) is **not** gated on `app_ui_visible` — mail seen while the room was open still gets `ack_read` until the sender confirms.
+**Leave backlog** (`pending_read_acks` retries after the user left the room) is **not** gated on `app_ui_visible` — eligible mail (`received_at_ms ≤` frozen **`chat_room_exit_at_ms`**) still gets `ack_read` until the sender confirms.
 
 **Delivery** (`ack_received`) is **never** gated on UI — `:p2p` may outlive the UI process.
 
@@ -806,6 +835,7 @@ Each contact row has two required booleans:
 |-------|------|---------|
 | **`is_known`** | `bool` | `true` when the user accepted this peer on this device; `false` when the peer is **unknown** in the UI. |
 | **`is_blocked`** | `bool` | `true` when the user blocked this peer on this device. |
+| **`chat_room_exit_at_ms`** | `i64` (optional) | **Rust-owned.** Last active in-room moment with this peer; mirrors live session clock while foreground; **frozen** on leave/switch/inactive. Read-ack cutoff — see § “Inbound `received_at_ms` and read-ack eligibility”. |
 
 **Initial values when the row is created:**
 
@@ -881,8 +911,8 @@ Details: [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
 
 | File | Contents |
 |------|----------|
-| `contacts_v1.json` | Roster, alias, preview, unread, **`is_known`**, **`is_blocked`** |
-| `chat_transcript_v1.json` | Per-conversation lines; outbound `delivery`; inbound `read_ack_sent` |
+| `contacts_v1.json` | Roster, alias, preview, unread, **`is_known`**, **`is_blocked`**, **`chat_room_exit_at_ms`** (read-ack cutoff; Rust-owned) |
+| `chat_transcript_v1.json` | Per-conversation lines; outbound `delivery` + `received_at_ms`; inbound `read_ack_sent` + `received_at_ms` |
 | Keystore | Encrypted identity under app namespace |
 
 Transcript survives restart; native re-seeds outbox and read-ack queues from disk.

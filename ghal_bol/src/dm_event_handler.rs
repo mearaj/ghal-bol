@@ -12,6 +12,7 @@ use crate::contacts_v1::{
 };
 use crate::dm_transcript_store::{
     StoredChatLine, append_if_new, load_merged, patch_outgoing_delivery,
+    patch_outgoing_received_at,
 };
 use crate::flow_log::{self, short_hex};
 use crate::public_key_util::same_contact_pk;
@@ -142,6 +143,7 @@ pub fn persist_inbound_text_on_wire(
     text: &str,
     sender_public_key_hex: &str,
     created_at_ms: i64,
+    received_at_ms: i64,
 ) -> bool {
     let ev = serde_json::json!({
         "kind": "dm_message",
@@ -151,6 +153,7 @@ pub fn persist_inbound_text_on_wire(
         "text": text,
         "sender_public_key_hex": sender_public_key_hex,
         "created_at_ms": created_at_ms,
+        "received_at_ms": received_at_ms,
     });
     apply_p2p_event_json(&ev)
 }
@@ -366,6 +369,7 @@ fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
                     updated_at_ms: None,
                     is_known: false,
                     is_blocked: false,
+                    chat_room_exit_at_ms: None,
                 },
             );
         }
@@ -386,6 +390,11 @@ fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
         .and_then(|v| v.as_i64())
         .filter(|&t| t > 0)
         .unwrap_or_else(now_ms);
+    let received_at_ms = ev
+        .get("received_at_ms")
+        .and_then(|v| v.as_i64())
+        .filter(|&t| t > 0)
+        .unwrap_or_else(now_ms);
     let local_id = format!("bg-{created_at_ms}-{}", from_key.len());
     let line_from = if !wire_peer_id.is_empty() {
         wire_peer_id.to_string()
@@ -400,6 +409,7 @@ fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
         message_id: ev.get("id").and_then(|v| v.as_str()).map(str::to_string),
         delivery: "pending".to_string(),
         created_at_ms: Some(created_at_ms),
+        received_at_ms: Some(received_at_ms),
         read_ack_sent: false,
     };
     if poll_replay {
@@ -503,15 +513,20 @@ fn apply_inbound_ack(ns: &str, ev: &Value, msg_kind: &str) -> bool {
 
     if msg_kind == "ack_received" {
         if has_outgoing {
+            let peer_received_at = ev
+                .get("received_at_ms")
+                .and_then(|v| v.as_i64())
+                .filter(|&t| t > 0);
+            let mut changed = false;
             match patch_outgoing_delivery(ns, &conv, ref_id, "delivered") {
                 Ok(true) => {
                     flow_log::info(
                         "DM/store",
                         format!("patch outbound delivered ref={ref_id} conv={conv}"),
                     );
-                    return true;
+                    changed = true;
                 }
-                Ok(false) => return false,
+                Ok(false) => {}
                 Err(e) => {
                     flow_log::warn(
                         "DM/store",
@@ -520,9 +535,25 @@ fn apply_inbound_ack(ns: &str, ev: &Value, msg_kind: &str) -> bool {
                     return false;
                 }
             }
+            if let Some(at) = peer_received_at {
+                match patch_outgoing_received_at(ns, &conv, ref_id, at) {
+                    Ok(true) => changed = true,
+                    Ok(false) => {}
+                    Err(e) => {
+                        flow_log::warn(
+                            "DM/store",
+                            format!("patch outbound received_at_ms failed ref={ref_id}: {e}"),
+                        );
+                    }
+                }
+            }
+            return changed;
         }
         // Inbound read-receipt confirm is owned by the wire path (`mark_read_ack_confirmed`
         // after `has_pending_read_ack`). Poll replay must not set `read_ack_sent` alone.
+        if has_inbound && !has_outgoing {
+            return false;
+        }
     }
     flow_log::warn(
         "DM/store",
@@ -610,6 +641,7 @@ mod tests {
             message_id: Some("peer-bucket-1".to_string()),
             delivery: "pending".to_string(),
             created_at_ms: Some(1000),
+            received_at_ms: Some(1000),
             read_ack_sent: false,
         };
         append_if_new(NS, PEER_ID, line).unwrap();

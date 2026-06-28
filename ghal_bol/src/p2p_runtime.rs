@@ -282,7 +282,9 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             ref_id,
             sender_public_key_hex,
             created_at_ms,
-        } => serde_json::json!({
+            received_at_ms,
+        } => {
+            let mut j = serde_json::json!({
             "kind": "dm_message",
             "from": from.to_string(),
             "id": id,
@@ -291,7 +293,12 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             "ref_id": ref_id,
             "sender_public_key_hex": sender_public_key_hex,
             "created_at_ms": created_at_ms,
-        }),
+        });
+            if let Some(at) = received_at_ms.filter(|t| *t > 0) {
+                j["received_at_ms"] = serde_json::json!(at);
+            }
+            j
+        }
         GossipChatEvent::PeerIdentified {
             peer_id,
             public_key_hex,

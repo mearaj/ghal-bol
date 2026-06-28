@@ -13,6 +13,7 @@ class StoredChatLine {
     this.delivery = "pending",
     this.createdAtMs,
     this.readAckSent = false,
+    this.receivedAtMs,
   });
 
   final String localId;
@@ -23,6 +24,7 @@ class StoredChatLine {
   final String delivery;
   final int? createdAtMs;
   final bool readAckSent;
+  final int? receivedAtMs;
 
   Map<String, dynamic> toJson() => {
     "local_id": localId,
@@ -32,6 +34,7 @@ class StoredChatLine {
     if (messageId != null) "message_id": messageId,
     "delivery": delivery,
     if (createdAtMs != null) "created_at_ms": createdAtMs,
+    if (receivedAtMs != null) "received_at_ms": receivedAtMs,
     if (readAckSent) "read_ack_sent": true,
   };
 
@@ -44,6 +47,7 @@ class StoredChatLine {
     delivery: delivery ?? this.delivery,
     createdAtMs: createdAtMs,
     readAckSent: readAckSent ?? this.readAckSent,
+    receivedAtMs: receivedAtMs,
   );
 
   static StoredChatLine? fromJson(dynamic raw) {
@@ -59,6 +63,7 @@ class StoredChatLine {
       messageId: raw["message_id"]?.toString(),
       delivery: raw["delivery"]?.toString() ?? "pending",
       createdAtMs: raw["created_at_ms"] is int ? raw["created_at_ms"] as int : null,
+      receivedAtMs: raw["received_at_ms"] is int ? raw["received_at_ms"] as int : null,
       readAckSent: raw["read_ack_sent"] == true,
     );
   }

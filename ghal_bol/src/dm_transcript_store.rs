@@ -171,6 +171,8 @@ pub struct StoredChatLine {
     pub message_id: Option<String>,
     pub delivery: String,
     pub created_at_ms: Option<i64>,
+    /// Inbound: when this device first accepted the text. Outbound: peer's `ack_received.received_at_ms`.
+    pub received_at_ms: Option<i64>,
     pub read_ack_sent: bool,
 }
 
@@ -190,6 +192,9 @@ impl StoredChatLine {
         }
         if let Some(t) = self.created_at_ms {
             m["created_at_ms"] = Value::Number(t.into());
+        }
+        if let Some(t) = self.received_at_ms {
+            m["received_at_ms"] = Value::Number(t.into());
         }
         if self.read_ack_sent {
             m["read_ack_sent"] = Value::Bool(true);
@@ -219,6 +224,7 @@ impl StoredChatLine {
                 .unwrap_or("pending")
                 .to_string(),
             created_at_ms: obj.get("created_at_ms").and_then(|v| v.as_i64()),
+            received_at_ms: obj.get("received_at_ms").and_then(|v| v.as_i64()),
             read_ack_sent: obj.get("read_ack_sent").and_then(|v| v.as_bool()) == Some(true),
         })
     }
@@ -663,6 +669,56 @@ pub fn patch_outgoing_delivery(
     Ok(changed)
 }
 
+/// Set outbound `received_at_ms` from peer `ack_received` (first value wins).
+pub fn patch_outgoing_received_at(
+    app_namespace: &str,
+    conversation_key: &str,
+    message_id: &str,
+    received_at_ms: i64,
+) -> Result<bool, TranscriptStoreError> {
+    let mid = message_id.trim();
+    if mid.is_empty() || conversation_key.trim().is_empty() || received_at_ms <= 0 {
+        return Ok(false);
+    }
+    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
+    let mut all = read_root_unlocked(&path)?;
+    let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
+        return Ok(false);
+    };
+    let keys = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
+    let mut changed = false;
+    for ck in keys {
+        let Some(thread) = ns_obj.get_mut(ck.as_str()).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for item in thread.iter_mut() {
+            let Some(parsed) = StoredChatLine::from_json(item) else {
+                continue;
+            };
+            if parsed.outgoing
+                && parsed.message_id.as_deref().unwrap_or("").trim() == mid
+                && parsed.received_at_ms.is_none()
+            {
+                let mut next = parsed;
+                next.received_at_ms = Some(received_at_ms);
+                *item = next.to_json();
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        flow_log::info(
+            "Transcript",
+            format!(
+                "patched outgoing received_at_ms={received_at_ms} mid={mid} conv={conversation_key}"
+            ),
+        );
+        write_root_unlocked(&path, &all)?;
+        bump_transcript_revision(app_namespace, conversation_key);
+    }
+    Ok(changed)
+}
+
 pub fn patch_inbound_read_ack_sent_for_thread(
     app_namespace: &str,
     conversation_key: &str,
@@ -801,6 +857,7 @@ mod tests {
             message_id: Some("mid1".into()),
             delivery: "delivered".into(),
             created_at_ms: Some(100),
+            received_at_ms: None,
             read_ack_sent: false,
         };
         let read = StoredChatLine {

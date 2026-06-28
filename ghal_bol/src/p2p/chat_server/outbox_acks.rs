@@ -2,6 +2,8 @@ fn sync_outbox_from_transcript(session: &SessionState, path: &Path, app_namespac
     let Ok(rows) = crate::dm_transcript_v1::pending_outbound_rows(path, app_namespace) else {
         return 0;
     };
+    let still_pending: HashSet<String> = rows.iter().map(|r| r.message_id.clone()).collect();
+    session.purge_outbound_ack_pending_poll(&still_pending);
     let mut merged = 0usize;
     for row in rows {
         if merge_outbound_row_into_outbox(session, &row) {
@@ -68,7 +70,71 @@ fn bootstrap_outbox_from_transcript(session: &SessionState, path: &Path, app_nam
     }
 }
 
-fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId) {
+fn inbound_received_at_for_row(row: &crate::dm_transcript_store::StoredChatLine) -> Option<i64> {
+    if row.received_at_ms.filter(|t| *t > 0).is_some() {
+        return row.received_at_ms;
+    }
+    // Legacy rows persisted before `received_at_ms` existed were still received locally.
+    if !row.outgoing
+        && row
+            .message_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+    {
+        return row.created_at_ms.filter(|t| *t > 0);
+    }
+    None
+}
+
+fn resolve_inbound_received_at_ms(
+    session: &SessionState,
+    peer: PeerId,
+    inbound_id: &str,
+) -> i64 {
+    if let Some(t) = session.inbound_received_at_ms(inbound_id) {
+        return t;
+    }
+    let ns = session
+        .app_namespace
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let Some(ns) = ns else {
+        return chrono_now_ms();
+    };
+    let Some(dm) = session.dm_peer_for_libp2p(peer) else {
+        return chrono_now_ms();
+    };
+    let Some(signing) = dm.public_key_hex.as_deref() else {
+        return chrono_now_ms();
+    };
+    let wire_peer = peer.to_string();
+    let lookup_keys = crate::dm_event_handler::inbound_transcript_lookup_keys(
+        ns,
+        signing,
+        signing,
+        &wire_peer,
+    );
+    if let Ok(rows) =
+        crate::dm_transcript_store::load_merged(ns, &lookup_keys, Some(&wire_peer))
+    {
+        for row in rows {
+            if row.message_id.as_deref().map(str::trim) == Some(inbound_id.trim()) {
+                if let Some(t) = inbound_received_at_for_row(&row) {
+                    return t;
+                }
+            }
+        }
+    }
+    chrono_now_ms()
+}
+
+fn seed_read_acks_for_peer_from_transcript(
+    session: &SessionState,
+    peer: PeerId,
+    cutoff_ms: i64,
+) {
     let ns = session
         .app_namespace
         .as_deref()
@@ -100,6 +166,12 @@ fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId)
         if row.outgoing || row.read_ack_sent {
             continue;
         }
+        let Some(received_at) = inbound_received_at_for_row(&row) else {
+            continue;
+        };
+        if received_at > cutoff_ms {
+            continue;
+        }
         let Some(message_id) = row
             .message_id
             .as_deref()
@@ -116,7 +188,9 @@ fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId)
     if seeded > 0 {
         native_log::info(
             "read_ack",
-            format!("seeded {seeded} pending read ack(s) for {peer} from transcript"),
+            format!(
+                "seeded {seeded} pending read ack(s) for {peer} cutoff_ms={cutoff_ms}"
+            ),
         );
     } else if eligible > 0 && session.should_log_read_ack_seed_skip(peer, chrono_now_ms()) {
         native_log::debug(
@@ -126,6 +200,21 @@ fn seed_read_acks_for_peer_from_transcript(session: &SessionState, peer: PeerId)
             ),
         );
     }
+}
+
+/// Seed transcript rows then drain `ack_read` on a background task (enter / leave handler).
+pub(crate) fn dispatch_read_ack_pass(
+    session: Arc<SessionState>,
+    writers: StreamWriters,
+    peer: PeerId,
+    cutoff_ms: i64,
+    wait_for_writer: bool,
+    control: Option<stream::Control>,
+) {
+    seed_read_acks_for_peer_from_transcript(session.as_ref(), peer, cutoff_ms);
+    tokio::spawn(async move {
+        read_ack_catchup_for_peer(session, writers, peer, wait_for_writer, false, control).await;
+    });
 }
 
 /// In-room read acks require the read gate; leave backlog (non-foreground peer) does not.
@@ -147,6 +236,7 @@ async fn send_inbound_delivery_ack(
     if session.is_delivery_ack_sent(inbound_id) {
         return;
     }
+    let received_at_ms = resolve_inbound_received_at_ms(session, peer, inbound_id);
     if send_ack_frame(
         peer,
         sender_signing,
@@ -154,6 +244,7 @@ async fn send_inbound_delivery_ack(
         MsgKind::AckReceived,
         session,
         writers,
+        Some(received_at_ms),
     )
     .await
     {
@@ -161,11 +252,13 @@ async fn send_inbound_delivery_ack(
         session.dequeue_delivery_ack(inbound_id);
         native_log::info(
             "delivery_ack",
-            format!("ack_received sent for inbound {inbound_id} to {peer}"),
+            format!(
+                "ack_received sent for inbound {inbound_id} to {peer} received_at_ms={received_at_ms}"
+            ),
         );
         return;
     }
-    session.enqueue_delivery_ack(peer, inbound_id, sender_signing);
+    session.enqueue_delivery_ack(peer, inbound_id, sender_signing, received_at_ms);
     native_log::warn(
         "delivery_ack",
         format!("ack_received queued for inbound {inbound_id} to {peer} (stream not ready)"),
@@ -193,6 +286,7 @@ async fn send_inbound_read_ack_if_possible(
         MsgKind::AckRead,
         session,
         writers,
+        None,
     )
     .await
     {
@@ -217,6 +311,7 @@ async fn send_ack_frame(
     kind: MsgKind,
     session: &SessionState,
     writers: &StreamWriters,
+    received_at_ms: Option<i64>,
 ) -> bool {
     let Ok(env) = build_ack_envelope(
         &new_msg_id(),
@@ -225,6 +320,7 @@ async fn send_ack_frame(
         session.identity.keypair(),
         recipient_signing,
         chrono_now_ms(),
+        received_at_ms,
     ) else {
         return false;
     };
@@ -248,14 +344,13 @@ async fn run_ack_upkeep(
         return;
     }
     for peer in connected_peers {
+        let cutoff = read_ack_cutoff_ms(session.as_ref(), *peer);
         if session.has_pending_read_acks_for(*peer) && !is_live_foreground_peer(*peer) {
-            // Leave backlog: refresh queue from transcript (`read_ack_sent: false` only).
-            seed_read_acks_for_peer_from_transcript(session.as_ref(), *peer);
+            seed_read_acks_for_peer_from_transcript(session.as_ref(), *peer, cutoff);
         } else if is_live_foreground_peer(*peer)
             && may_send_in_room_read_ack(session.as_ref(), *peer)
         {
-            // In-room catch-up while read gate is open (enter / nudge / resume).
-            seed_read_acks_for_peer_from_transcript(session.as_ref(), *peer);
+            seed_read_acks_for_peer_from_transcript(session.as_ref(), *peer, cutoff);
         }
     }
     run_ack_upkeep_limited(
@@ -315,6 +410,7 @@ async fn run_ack_upkeep_limited(
             MsgKind::AckReceived,
             session.as_ref(),
             &writers,
+            Some(item.received_at_ms),
         )
         .await
         {
@@ -346,6 +442,7 @@ async fn run_ack_upkeep_limited(
                 MsgKind::AckRead,
                 session.as_ref(),
                 &writers,
+                None,
             )
             .await
             {
@@ -370,7 +467,11 @@ async fn read_ack_catchup_for_peer(
     control: Option<stream::Control>,
 ) {
     if seed_transcript {
-        seed_read_acks_for_peer_from_transcript(session.as_ref(), peer);
+        seed_read_acks_for_peer_from_transcript(
+            session.as_ref(),
+            peer,
+            read_ack_cutoff_ms(session.as_ref(), peer),
+        );
     }
     if wait_for_writer
         && session.libp2p_peer_connected(peer)

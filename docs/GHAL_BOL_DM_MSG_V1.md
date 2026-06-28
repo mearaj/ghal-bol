@@ -40,7 +40,8 @@ Common fields:
 | `sender_public_key_hex` | Sender secp256k1 public key (**66 hex**) |
 | `recipient_public_key_hex` | Recipient secp256k1 public key (**66 hex**) |
 | `ciphertext_hex` | Sealed inner `{"text":"…"}` for `kind: text`; empty for acks |
-| `created_at_ms` | Unix milliseconds |
+| `created_at_ms` | Unix milliseconds (frame construction time) |
+| `received_at_ms` | On **`ack_received` only:** when the recipient **first** accepted the referenced text (`ref_id`). Recipient authority; **stable on duplicate text retries**; omitted on `ack_read`. |
 | `signature_hex` | Signature over canonical JSON (all fields except `signature_hex`) |
 | `ref_id` | On acks: original text message `id` |
 
@@ -60,7 +61,7 @@ Ghal Bol does **not** pull chat history from the other device. Reliability is **
 - **Truthful UI** — ticks reflect transcript after poll only; never optimistic or cross-device sync (see [DESIGN.md](DESIGN.md) § “Truthful status in the UI”).
 - **No shared state machine** — each peer’s transcript may disagree until acks arrive; no “sync ticks” RPC.
 - **Delivered vs read** — two steps; read requires an **open chat room** in the hub (see DESIGN.md).
-- **Leave** — stop **new** read for **new** mail; **keep retrying** `ack_read` for every message that was in the thread while the room was open, until the sender confirms; delivery always continues in `:p2p`.
+- **Leave** — stop **new** read for **new** mail; **keep retrying** `ack_read` for inbound with **`received_at_ms ≤ chat_room_exit_at_ms`** (frozen on leave) until the sender confirms; delivery always continues in `:p2p`.
 - **Wire** — `text` carries body only; **`ack_received`** / **`ack_read`** carry progress (`ref_id` = text `id`). Sender learns only from those acks on poll, not from status embedded in a resent text frame.
 
 ### Local fields (each device)
@@ -68,6 +69,8 @@ Ghal Bol does **not** pull chat history from the other device. Reliability is **
 | Role | Field | Progress |
 |------|-------|----------|
 | **Sender** (outbound) | `delivery` | `pending` → `delivered` → `read` when peer acks arrive |
+| **Sender** (outbound) | `received_at_ms` | Set from peer **`ack_received.received_at_ms`** (when they first got the text); first value wins |
+| **Recipient** (inbound) | `received_at_ms` | Set once on **first local accept** of the text; never overwritten on duplicate/resend |
 | **Recipient** (inbound) | `read_ack_sent` | true after we sent `ack_read` and peer confirmed with `ack_received` on our inbound `id` |
 
 **Outbox:** clears on peer **`ack_received`** or **`ack_read`** (`ack_read` implies delivered).
@@ -76,7 +79,7 @@ Ghal Bol does **not** pull chat history from the other device. Reliability is **
 
 On every verified inbound **`text`** (including duplicates), in `chat_server.rs`:
 
-1. **Always** `send_inbound_delivery_ack` → **`ack_received`** (send now or enqueue in `pending_delivery_acks`; ~1 s upkeep retries). Log tag: `delivery_ack`.
+1. **Always** `send_inbound_delivery_ack` → **`ack_received`** including **`received_at_ms`** (first local accept time; send now or enqueue in `pending_delivery_acks`; ~1 s upkeep retries). Log tag: `delivery_ack`.
 2. If **`app_ack_read_enabled`** and **`live_foreground_peer == peer`**: also `send_inbound_read_ack_if_possible` → **`ack_read`**.
 
 | Situation | Action |
@@ -84,12 +87,12 @@ On every verified inbound **`text`** (including duplicates), in `chat_server.rs`
 | **Any** inbound text (`:p2p` / daemon, UI optional) | **`ack_received`** (mandatory) |
 | Chat room **open** in UI for this peer | **`ack_received`** + **`ack_read`** |
 | Hub / background / room **closed** | **`ack_received` only** (no new `ack_read`) |
-| User **enters** chat | Hub: **`set_app_ack_read_enabled(true)`** then **`set_foreground_peer`**. Native: seed transcript → **one pass** of queued **`ack_read`** (`RunReadAckCatchup` if gate opens after foreground). |
-| User **leaves** / app **paused** | Hub: **`set_foreground_peer(null)`** and await **first**, then **`set_app_ack_read_enabled(false)`**. Native: **`SetForegroundPeer(null)`** leave handler seeds + drains backlog (once per session); **new** mail → **`ack_received` only** until room opens again |
+| User **enters** chat | Hub: **`set_app_ack_read_enabled(true)`** then **`set_foreground_peer`**. Native: **`begin_chat_room_session`** + **`dispatch_read_ack_pass`** (`RunReadAckCatchup` if gate opens after foreground). |
+| User **leaves** / app **paused** | Hub: **`set_foreground_peer(null)`** and await **first**, then **`set_app_ack_read_enabled(false)`**. Native: freeze **`chat_room_exit_at_ms`**, **`dispatch_read_ack_pass`** with frozen cutoff; **new** mail → **`ack_received` only** until room opens again |
 
 **Do not** use “in-room → `ack_read` only” without step 1 when the networking process can outlive the Flutter UI process.
 
-**Leave backlog (normative):** messages the user saw while the room was open must still get **`ack_read`** on the wire after leave. Closing the room only closes the gate for **future** inbound; it does **not** cancel queued read acks. See [DESIGN.md](DESIGN.md) § “Leave / backlog”.
+**Leave backlog (normative):** inbound with **`received_at_ms` set** and **`received_at_ms ≤ chat_room_exit_at_ms`** (contact field, frozen on leave/switch) must still get **`ack_read`** on the wire after leave. Closing the room only closes the gate for **future** inbound; it does **not** cancel queued read acks. See [DESIGN.md](DESIGN.md) § “Leave / backlog” and § “Inbound `received_at_ms` and read-ack eligibility”.
 
 On inbound **`ack_read`** (peer read our outbound text `id` = `ref_id`):
 
@@ -99,7 +102,7 @@ On inbound **`ack_read`** (peer read our outbound text `id` = `ref_id`):
 
 On inbound **`ack_received`**:
 
-- `ref_id` matches our outbound id → mark outbox delivered; poll event only if outbox still tracked that id.
+- `ref_id` matches our outbound id → mark outbox delivered; patch outbound **`received_at_ms`** from ack when present; poll event only if outbox still tracked that id or transcript changed.
 - `ref_id` matches inbound id we sent `ack_read` for → **`mark_read_ack_confirmed`** → `read_ack_sent` in transcript (only after this confirm); poll event only if we had a pending read ack for that id.
 
 ### Read-ack wire volume (normative)
@@ -149,13 +152,14 @@ Before changing ack policy, verify:
 6. **Sender outbox:** resend **text** only until `ack_received` or `ack_read`.
 7. **Never** skip `ack_received` because `:p2p` still has a stale foreground peer after the UI exited.
 8. **Read retry throttle:** after a successful wire `ack_read`, set `last_send_ms`; do not resend the same id until `OUTBOX_RESEND_INTERVAL_MS` unless never sent.
-9. **Room-enter backlog:** `ACK_BURST_MAX_ROUNDS = 1` (one pass over the queue); do not use multi-hundred-round bursts.
-10. **Poll emit gate:** `GossipChatEvent::DmMessage` for acks only when outbox/transcript state actually advances (see DESIGN.md § “Read receipts — wire volume”).
-11. **`apply_inbound_ack`:** return `stores_updated = false` when `patch_outgoing_delivery` / `patch_inbound_read_ack_sent` returns unchanged.
-12. **Confirm loop:** inbound `ack_read` → always wire `ack_received` back; inbound `ack_received` with pending read ack → `mark_read_ack_confirmed`. **`mark_read_ack_confirmed` only when `has_pending_read_ack`** — never `has_seen_inbound_id` alone (false `read_ack_sent` on disk; § DESIGN.md “Fixed 2026-06-19”).
-13. **Leave drain:** `pending_read_acks` not cleared on leave; `set_app_ack_read_enabled(false)` does not clear foreground — hub `SetForegroundPeer(null)` first.
-14. **Transcript keys:** `load_merged` / patch paths expand peer id + `public_key_hex` so old threads and ack patches match (see DESIGN.md § “Transcript threads”). Poll replay dedupe and `apply_inbound_ack` use **`inbound_transcript_lookup_keys`** — single-bucket ack apply caused `has_out=false` / stuck delivery tick (§ “Fixed 2026-06-19”).
-15. **Truthful ticks:** UI shows `delivery` / read only after `dm_event_handler` patches transcript; `stores_updated` only on real change.
+9. **Room-enter / leave backlog:** **`dispatch_read_ack_pass`** — seed only when `received_at_ms` set, `read_ack_sent: false`, and `received_at_ms ≤ cutoff_ms` (`chat_room_exit_at_ms` or live session); one drain pass; no multi-hundred-round bursts.
+10. **Read-ack eligibility:** never queue `ack_read` without **`received_at_ms`** (not received locally). **`ack_received`** on the wire includes **`received_at_ms`** (recipient authority; stable on duplicate text).
+11. **Poll emit gate:** `GossipChatEvent::DmMessage` for acks only when outbox/transcript state actually advances (see DESIGN.md § “Read receipts — wire volume”).
+12. **`apply_inbound_ack`:** return `stores_updated = false` when `patch_outgoing_delivery` / `patch_inbound_read_ack_sent` returns unchanged.
+13. **Confirm loop:** inbound `ack_read` → always wire `ack_received` back; inbound `ack_received` with pending read ack → `mark_read_ack_confirmed`. **`mark_read_ack_confirmed` only when `has_pending_read_ack`** — never `has_seen_inbound_id` alone (false `read_ack_sent` on disk; § DESIGN.md “Fixed 2026-06-19”).
+14. **Leave drain:** `pending_read_acks` not cleared on leave; freeze **`chat_room_exit_at_ms`** before drain; `set_app_ack_read_enabled(false)` does not clear foreground — hub `SetForegroundPeer(null)` first.
+15. **Transcript keys:** `load_merged` / patch paths expand peer id + `public_key_hex` so old threads and ack patches match (see DESIGN.md § “Transcript threads”). Poll replay dedupe and `apply_inbound_ack` use **`inbound_transcript_lookup_keys`** — single-bucket ack apply caused `has_out=false` / stuck delivery tick (§ “Fixed 2026-06-19”).
+16. **Truthful ticks:** UI shows `delivery` / read only after `dm_event_handler` patches transcript; `stores_updated` only on real change.
 
 ### Android background listener
 
@@ -237,7 +241,7 @@ Poll responses may include **`stores_updated": true`** after `dm_event_handler` 
 | Store | Path / key |
 |-------|------------|
 | Contacts | `contacts_v1.json` — keyed by conversation identity (`public_key_hex` / derived PeerId) |
-| Chat transcript | `chat_transcript_v1.json` — per conversation; outbound `delivery`, inbound `read_ack_sent` |
+| Chat transcript | `chat_transcript_v1.json` — per conversation; outbound `delivery` + `received_at_ms`; inbound `read_ack_sent` + `received_at_ms` |
 | Keystore | App namespace (`com.ghalbol` on Android) |
 
 Transcripts survive app restarts; **network delivery** and **read-ack retries** are owned by the native node (outbox + `pending_read_acks`), with transcript used to re-seed backlog on enter-chat.

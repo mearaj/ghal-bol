@@ -440,12 +440,16 @@ async fn handle_inbound_stream(
                 }
                 let mut persisted_on_wire = false;
                 if is_new {
+                    let received_at_ms = session
+                        .inbound_received_at_ms(&t.id)
+                        .unwrap_or_else(chrono_now_ms);
                     persisted_on_wire = crate::dm_event_handler::persist_inbound_text_on_wire(
                         &peer.to_string(),
                         &t.id,
                         &t.text,
                         &t.sender_public_key_hex,
                         t.created_at_ms,
+                        received_at_ms,
                     );
                     if !persisted_on_wire {
                         native_log::warn(
@@ -464,6 +468,7 @@ async fn handle_inbound_stream(
                             ref_id: None,
                             sender_public_key_hex: t.sender_public_key_hex.clone(),
                             created_at_ms: t.created_at_ms,
+                            received_at_ms: Some(received_at_ms),
                         });
                     }
                 } else {
@@ -560,16 +565,18 @@ async fn handle_inbound_stream(
                     continue;
                 }
                 if a.kind == MsgKind::AckReceived {
-                    session.complete_outbound(&a.ref_id);
                     // Peer confirms they got our `ack_read` for their text (ref_id = their message id).
                     // Only after we actually queued/sent `ack_read` — not merely because we saw inbound id.
+                    // Must not treat as our outbound delivered (GHAL_BOL_DM_MSG_V1.md § ack_received).
                     if session.has_pending_read_ack(&a.ref_id) {
                         session.mark_read_ack_confirmed(&a.ref_id);
+                        continue;
                     }
+                    session.finalize_outbound_ack(&a.ref_id);
                 }
                 if a.kind == MsgKind::AckRead {
                     // Read implies delivery — stop outbox retry without a separate `ack_received`.
-                    session.complete_outbound(&a.ref_id);
+                    session.finalize_outbound_ack(&a.ref_id);
                     session.ensure_dm_peer(&a.sender_public_key_hex, peer);
                     let _ = send_ack_frame(
                         peer,
@@ -578,6 +585,7 @@ async fn handle_inbound_stream(
                         MsgKind::AckReceived,
                         session.as_ref(),
                         &writers,
+                        None,
                     )
                     .await;
                 }
@@ -607,6 +615,7 @@ async fn handle_inbound_stream(
                         ref_id: Some(a.ref_id.clone()),
                         sender_public_key_hex: a.sender_public_key_hex.clone(),
                         created_at_ms: a.created_at_ms,
+                        received_at_ms: a.received_at_ms,
                     });
                 }
             }
