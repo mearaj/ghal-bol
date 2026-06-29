@@ -1327,7 +1327,10 @@ fn run_wan_recovery_pass(
         if coord_relays.is_empty() {
             notify_relay_refresh();
         } else {
-            ensure_wan_relay_circuit(swarm, session, Some(coord_relays), true);
+            // Recurring recovery ticks must not use `force` — it bypasses RELAY_RESERVE_THROTTLE_MS
+            // and re-issues listen_on every coord_tick, cancelling the in-flight reservation
+            // (logs: "Failed to get Reservation" + listen_on every ~1s after left LAN).
+            ensure_wan_relay_circuit(swarm, session, Some(coord_relays), false);
         }
     }
     let listen = coord_register_listen_snapshot(swarm, session);
@@ -1888,7 +1891,18 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
             .load(Ordering::Relaxed)
             && (!session.wan_recovery_active.load(Ordering::Relaxed)
                 || relay_circuit_listening(swarm));
-        if session.any_dm_circuit_dial_in_flight(now_ms) && wan_handshake_may_succeed {
+        // Defer only when WAN may still complete. Stale mDNS or stuck outbox mean LAN must not wait
+        // on a relay-circuit dial to a dead coord port (TRANSPORT.md § Parallel LAN + WAN).
+        let defer_lan_for_circuit_dial = session.any_dm_circuit_dial_in_flight(now_ms)
+            && wan_handshake_may_succeed
+            && !handover_reason.contains("stale mDNS")
+            && !session.dm_peer_ids().iter().any(|p| {
+                session.should_dial_libp2p_peer(*p)
+                    && peer_eligible_for_lan_handover(session, *p)
+                    && !swarm.is_connected(p)
+                    && session.peer_has_pending_wire_work(*p)
+            });
+        if defer_lan_for_circuit_dial {
             if swarm_has_ephemeral_dm_tcp_listen(swarm) {
                 // Full kick closes/rebinds ephemeral TCP — defer until circuit dial finishes so we
                 // do not destabilize an in-flight WAN handshake (TRANSPORT.md § Deferred full LAN kick).

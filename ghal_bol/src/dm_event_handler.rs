@@ -15,7 +15,6 @@ use crate::dm_transcript_store::{
     patch_outgoing_received_at,
 };
 use crate::flow_log::{self, short_hex};
-use crate::public_key_util::same_contact_pk;
 use crate::storage::base_data_dir;
 
 struct HandlerState {
@@ -309,12 +308,8 @@ fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
         return false;
     }
 
-    let mut skip_unread = false;
-    if let Some(live) = crate::p2p::live_foreground_peer_pk() {
-        if same_contact_pk(&live, &from_key) || same_contact_pk(&live, &sender_pk) {
-            skip_unread = true;
-        }
-    }
+    let mut skip_unread =
+        crate::p2p::chat_server::inbound_suppresses_hub_unread(&sender_pk, &from_key);
 
     let contact = if is_valid_public_key_hex(&sender_pk) {
         find_by_public_key(ns, &sender_pk).ok().flatten()
@@ -703,5 +698,52 @@ mod tests {
         assert_eq!(c.unread_count, 3);
         assert_eq!(c.last_message_preview.as_deref(), Some("third"));
         clear_p2p_handler_context();
+    }
+
+    #[test]
+    fn apply_inbound_text_bumps_unread_when_room_open_but_read_gate_off() {
+        const NS: &str = "test.unread.inactive_room";
+        let _store = isolated_store(NS);
+        crate::p2p::sync_foreground_peer_now(Some(PK_A.to_string()));
+        crate::p2p::set_app_ui_visible(false);
+        crate::p2p::set_app_ack_read_enabled(false);
+        let ev = json!({
+            "kind": "dm_message",
+            "msg_kind": "text",
+            "id": "bg-inactive-1",
+            "text": "while backgrounded",
+            "sender_public_key_hex": PK_A,
+            "created_at_ms": 1000
+        });
+        assert!(apply_p2p_event_json(&ev));
+        let c = find_by_public_key(NS, PK_A).unwrap().unwrap();
+        assert_eq!(c.unread_count, 1);
+        clear_p2p_handler_context();
+        crate::p2p::sync_foreground_peer_now(None);
+        crate::p2p::set_app_ui_visible(true);
+        crate::p2p::set_app_ack_read_enabled(false);
+    }
+
+    #[test]
+    fn apply_inbound_text_skips_unread_when_read_gate_open_for_foreground_peer() {
+        const NS: &str = "test.unread.active_room";
+        let _store = isolated_store(NS);
+        crate::p2p::sync_foreground_peer_now(Some(PK_A.to_string()));
+        crate::p2p::set_app_ui_visible(true);
+        crate::p2p::set_app_ack_read_enabled(true);
+        let ev = json!({
+            "kind": "dm_message",
+            "msg_kind": "text",
+            "id": "in-room-1",
+            "text": "while viewing chat",
+            "sender_public_key_hex": PK_A,
+            "created_at_ms": 1000
+        });
+        assert!(apply_p2p_event_json(&ev));
+        let c = find_by_public_key(NS, PK_A).unwrap().unwrap();
+        assert_eq!(c.unread_count, 0);
+        clear_p2p_handler_context();
+        crate::p2p::sync_foreground_peer_now(None);
+        crate::p2p::set_app_ack_read_enabled(false);
     }
 }

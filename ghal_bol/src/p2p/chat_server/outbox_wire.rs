@@ -134,6 +134,7 @@ async fn replay_conversation_history(
                 chrono_now_ms()
             },
             last_send_ms: chrono_now_ms(),
+            first_on_wire_ms: 0,
             on_wire: false,
         };
         let Ok(frame) = build_pending_outbound_frame(session.as_ref(), &pending) else {

@@ -787,6 +787,63 @@ When stream-open and the 1s tick coincide, the burst re-sent rows the periodic t
 
 **FORBIDDEN:** making `resync_outbox_burst_for_peer` re-send rows unconditionally (ignoring `last_send_ms`) — that reintroduces the double-send/duplicate-ack storm. Backlog drain speed must come from the **burst running on stream-open** (event-driven), not from ignoring the resend interval.
 
+### Post-mortem — 2026-06-29 WAN recovery `force` reservation storm after `left LAN` (canonical)
+
+**Symptoms observed (flutter_android.log + flutter_linux.log, coord1 home UPnP, phone on cell after Wi‑Fi→mobile handover):**
+
+| Evidence | Meaning |
+|----------|---------|
+| `left LAN — mDNS purged` then every ~1s: `reservation listen_on issued` → `listener closed with error: Failed to get Reservation` | Own circuit reservation **never completes** — libp2p keeps cancelling the in-flight reserve |
+| `relay_listen=false` `wan_recovery=true` `bootstrap_ok=true` `coord_reg=true` | Bootstrap TCP to coord relay is up, but **no stable `/p2p-circuit` listen** |
+| `coord_lookup_peer ok — dialing …/tcp/44939/…` while live relay/bootstrap uses `51495` / `58437` | Peer circuit dials hit **stale coord presence ports** (secondary; primary failure is callee cannot reserve) |
+| `conn=false,stream=false` `outbox_pending=N` on phone; desktop `conn=true,stream=true` with growing outbox | **One-way dead WAN** — desktop writes into void |
+| Chat worked for minutes after startup (`reservation accepted`), broke only after **`left LAN`** | Regression tied to **recurring WAN recovery ticks**, not initial bootstrap |
+
+**Root cause:** `run_wan_recovery_pass` called `ensure_wan_relay_circuit(…, force=true)` on **every** `coord_tick` (~1s) while `wan_recovery_active && !relay_circuit_listening`. In `try_relay_reservation`, `force=true`:
+
+- Clears `relay_reserve_last_attempt_ms` (throttle timestamp)
+- **Skips** `RELAY_RESERVE_THROTTLE_MS` (10s per relay)
+
+So each recovery tick issued a fresh `listen_on(/p2p-circuit)`. Per rust-libp2p relay-client ([#6165](https://github.com/libp2p/rust-libp2p/issues/6165)), a new `listen_on` **cancels** the prior in-flight reservation. The listener then closed with `Failed to get Reservation`; `kick_relay_ipv4_circuit_recovery` cleared in-flight state; the next tick issued `force=true` again → **1s reservation cancel loop**. WAN never recovered until the process was restarted or conditions changed.
+
+**Misread that caused the bug:** treating `force` as “WAN recovery is urgent, bypass all throttles every tick.” `force` is only for **one-shot handover entry** (`apply_left_lan_handover`, relay refetch after bootstrap TCP loss) — not for the steady `coord_tick` recovery loop.
+
+**Canonical fix (`bootstrap_relay.rs` → `run_wan_recovery_pass`):**
+
+| Call site | `force` | Why |
+|-----------|---------|-----|
+| `apply_left_lan_handover` | `true` | Once per Wi‑Fi→mobile transition; may clear throttle to kick first reserve after mDNS purge |
+| `run_wan_recovery_pass` (recurring `coord_tick`) | **`false`** | Must respect `RELAY_RESERVE_THROTTLE_MS` + `relay_reserve_in_flight_ms` — wait for `ReservationReqAccepted` or 30s in-flight timeout |
+| `ensure_wan_relay_circuit` elsewhere (startup, refetch) | `false` unless documented one-shot | Same rule |
+
+**Healthy logs after fix:**
+
+```text
+left LAN — mDNS purged …
+reservation listen_on issued … — await ReservationReqAccepted   ← at most once per 10s per relay
+reservation accepted on <relay>
+relay_listen=true  wan_coord=wan_ready (or awaiting_coord_mirror briefly)
+```
+
+**Not healthy (regression — do not ship):**
+
+```text
+reservation listen_on issued …          ← every ~1s
+Failed to get Reservation               ← repeating
+listener closed cleanly addrs=[]        ← between storms
+relay_listen=false  wan_recovery=true ← for minutes after left LAN
+```
+
+**Regression prevention (agents + reviewers):**
+
+1. **Grep before merge:** `run_wan_recovery_pass` must **not** pass `force: true` / `force=true` to `ensure_wan_relay_circuit`. Only `apply_left_lan_handover` and other **documented one-shot** paths may use `force=true`.
+2. **Soak test (mandatory for relay/reserve changes):** phone on cell, desktop on Wi‑Fi, chat 10+ min, toggle phone Wi‑Fi↔cell twice. After each `left LAN`, expect `reservation accepted` within **seconds**, not a minute of `Failed to get Reservation`.
+3. **Log assertion:** no more than one `reservation listen_on issued` per `RELAY_RESERVE_THROTTLE_MS` (10s) per relay while `relay_listen=false`; in-flight guard should log `skip relay reserve … already in flight` between attempts.
+4. **Do not “fix” by disabling WAN recovery ticks or coord lookup** — throttle **storms** only (AGENTS.md connectivity policy). The bug was **`force` on recurring ticks**, not recovery running at all.
+5. **Distinguish from 2026-06-18 renewal loop** — that was `ListenerClosed` during **renewal** re-reserve; this is `force=true` on **`wan_recovery_active`** ticks before any circuit exists. Both cancel in-flight reservations; fixes are different (renewal gap vs recurring `force`).
+
+**Related but separate:** coord1 home UPnP relay **port churn** (`GET /v1/relay` returns a new TCP port while old coord presence rows still list previous ports) can still cause peer **circuit dial timeouts** after one's own reservation is healthy. Fix server port stability or live refetch on bootstrap TCP loss — do **not** mask reservation storms with faster coord lookups.
+
 ---
 
 ### libp2p community lessons (relay v2 — applies directly)
@@ -798,7 +855,7 @@ Upstream issues that match Ghal Bol behaviour. When logs disagree with an issue 
 | [rust-libp2p #2513](https://github.com/libp2p/rust-libp2p/discussions/2513) `NoReservation` / circuit DENIED | coord 404; outbound circuit fails; server `circuit DENIED` | **Callee** must `listen_on(/p2p-circuit)` before caller dials | `ensure_wan_relay_circuit` phases B–D; coord presence on `reservation ACCEPTED` |
 | [rust-libp2p #2944](https://github.com/libp2p/rust-libp2p/discussions/2944) | Dial fails after reserve | Dial addr must be `…/p2p/<relay>/p2p-circuit/p2p/<dest>` | `coord_lookup` → `dial_dm_peer_addr` with full circuit multiaddr |
 | [rust-libp2p #6141](https://github.com/libp2p/rust-libp2p/issues/6141) | `awaiting_relay_circuit` 10–30s while reservation works | `ReservationReqAccepted` may be late/missing — also check `swarm.listeners()` / coord self-lookup | `relay_circuit_listening(swarm)` + coord presence poll |
-| [rust-libp2p #6165](https://github.com/libp2p/rust-libp2p/issues/6165) | WAN drops after handover; external addr vanishes | Replacement `listen_on` must not cancel working reservation until new one is active | `relay_reserve_in_flight_ms`; `force` bypasses throttle only — not in-flight; handover uses `clear_wan_listen_state_for_handover` once |
+| [rust-libp2p #6165](https://github.com/libp2p/rust-libp2p/issues/6165) | WAN drops after handover; external addr vanishes; `Failed to get Reservation` every ~1s | Replacement `listen_on` must not cancel working reservation until new one is active | `relay_reserve_in_flight_ms`; **`force=true` only on one-shot handover entry** (`apply_left_lan_handover`) — **not** on recurring `run_wan_recovery_pass` ticks (§ Post-mortem 2026-06-29); `clear_wan_listen_state_for_handover` once |
 | [rust-libp2p #5741](https://github.com/libp2p/rust-libp2p/discussions/5741) | `dm connection established … (direct)` on inbound relay | Inbound `ConnectionEstablished` `send_back_addr` is `/p2p/<peer>` only — not full circuit path | `InboundCircuitEstablished` → `dm_relay_circuit_pending` before classifying path |
 | [PR #4225](https://github.com/libp2p/rust-libp2p/pull/4225) / [#5996](https://github.com/libp2p/rust-libp2p/issues/5996) | `DialPeerConditionFalse`; parallel dials cancel | Default `NotDialing` — one outbound dial slot per `PeerId` | `PeerCondition::NotDialing` + separate LAN/circuit app tracking; parallel **links** after connect, not parallel unconditional dials |
 | [#4717](https://github.com/libp2p/rust-libp2p/issues/4717) / [PR #4745](https://github.com/libp2p/rust-libp2p/pull/4745) | Misleading transport errors on circuit fail | Real reason on `OutboundCircuitReqFailed` / `ListenerClosed` | Handle relay listener close + circuit dial errors in swarm handler |
@@ -1237,6 +1294,7 @@ All WAN circuit reservation must go through **`ensure_wan_relay_circuit`** in `c
 | Startup listen wait | `bootstrap_publishable_listen` forwards **all** swarm events through `handle_swarm_event` — never drop Identify/Relay in a partial match. |
 | Probe `listen_on` **only** when bootstrap TCP is down | CGNAT path; never parallel with active bootstrap dials. |
 | Throttle redundant dials / listens | `issue_bootstrap_dials`, `RELAY_RESERVE_THROTTLE_MS` — storms break mobile CGNAT. |
+| **`force` on `ensure_wan_relay_circuit`** | `force=true` clears per-relay throttle and may issue `listen_on` immediately — **only** for one-shot handover (`apply_left_lan_handover`). Recurring `run_wan_recovery_pass` ticks use **`force=false`** (§ Post-mortem 2026-06-29). |
 
 Phases: dial bootstrap (all families, one throttle window) → Identify → prune HOP → settle 450ms → **one** `listen_on` → `ReservationReqAccepted` → coord register.
 
@@ -1403,6 +1461,7 @@ Do not rename without a version bump:
 32. **Adopting the duplicate mux on every inbound frame** — gate on `duplicate_mux_should_take_over`; unconditional adoption churns healthy parallel LAN+WAN links. See § **Post-mortem 2026-06-28**.
 33. **Uncapped priority coord lookups for stale-transcript 404 ghosts** — a `PeerNotOnCoord` contact with only an old pending row (not urgent, not foreground) belongs in the bounded LRU background sweep (`pending_outbox_eligible_for_wire`), not the priority tier; and `resync_pending_outbox` filters by **connectivity**, not coord category. Intent still beats backoff via `mark_dm_reconnect_urgent` on send. See § **Post-mortem 2026-06-28**.
 34. **Instantaneous "outbound stuck" tearing down a live LAN mux** — `peer_lan_handover_outbound_stuck` / the `reconcile_stale_lan_mux_for_wan` skip-guard must use the sustained `peer_outbound_stuck_for` (≥ `LAN_HANDOVER_STUCK_MS` 4s), never instantaneous `peer_has_pending_outbound_blockers`. A peer reporting `os=cell` whose Wi‑Fi L2 still serves the LAN (mDNS + direct TCP healthy, acks < 1s) must keep the working LAN path; tearing it down per tick is the "bulk then stop then bulk" burst. See § **Post-mortem 2026-06-28 → Symptom C**.
+35. **`force=true` on recurring WAN recovery ticks** — `run_wan_recovery_pass` calling `ensure_wan_relay_circuit(…, true)` every `coord_tick` bypasses `RELAY_RESERVE_THROTTLE_MS` and re-issues `listen_on` every ~1s, cancelling in-flight reservations (`Failed to get Reservation` loop after `left LAN`). Recurring recovery must use `force=false`; `force=true` only on one-shot handover entry. See § **Post-mortem 2026-06-29**.
 
 ---
 
@@ -1483,6 +1542,7 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 
 | Date | Change |
 |------|--------|
+| 2026-06-29 | **WAN recovery `force` reservation storm after `left LAN` (canonical post-mortem):** § **Post-mortem 2026-06-29**. `run_wan_recovery_pass` passed `force=true` to `ensure_wan_relay_circuit` on every `coord_tick`, bypassing `RELAY_RESERVE_THROTTLE_MS` and re-issuing `listen_on` every ~1s — each new `listen_on` cancelled the in-flight reservation (libp2p #6165) → `Failed to get Reservation` loop, `relay_listen=false` for minutes after Wi‑Fi→cell. Fix: recurring recovery ticks use `force=false`; `force=true` only on one-shot handover entry (`apply_left_lan_handover`). Anti-regression item 35; soak test Wi‑Fi↔cell after relay changes. |
 | 2026-06-25 | **LAN re-discovery cadence — mDNS query interval:** § **“LAN re-discovery cadence — mDNS query interval”**. `libp2p::mdns::Config::default()` polls only every **5 minutes**, so after a LAN link dropped (with WAN/relay also down) neither same-Wi‑Fi peer re-discovered the other for minutes (`LAN soft rediscovery — link down, no mDNS candidate yet`, `active_links=0`). Fix: `ghal_bol_mdns_config()` sets `query_interval = 5s` at both the initial behaviour and `restart_mdns_behaviour`; LAN now recovers in seconds, port stays stable, independent of WAN. |
 | 2026-06-28 | **Home coord1 stale UPnP relay port (canonical post-mortem):** router returned OK on `AddPortMapping` renew while WAN TCP to the advertised port was dead — server kept publishing the stale port until a timeout finally forced a new map. Fix: `remap_after_client_bootstrap_failure` removes the failing external port and allocates fresh; `verify_mapping_on_gateway` before advertise; startup map uses same verify path. Client signal: bootstrap TCP failure → `GET /v1/relay?remap=true` only (not every relay poll). § “WAN prerequisites” home UPnP row. |
 | 2026-06-28 | **Writer clobber + ghost-outbox storm (canonical post-mortem):** § **Post-mortem 2026-06-28**. (1) Return acks died after LAN→mobile handover because reopen can't replace a writer on a dead direct mux while the peer writes on a live duplicate relay stream — fix: `adopt_duplicate_mux_as_writer` gated by `duplicate_mux_should_take_over` (retransmit / `peer_wan_asymmetric_mux_likely` / `peer_outbound_stuck_for` ≥ 3s). (2) A stale stream handler's exit cleanup deleted the **live** writer installed by adopt/reopen — fix: per-peer **writer generation** (`claim_dm_writer_generation` / `finalize_dm_writer_if_current`). (3) ~60 transcript-pending rows to `PeerNotOnCoord` ghosts flooded the **uncapped priority** coord tier every tick — fix: `pending_outbox_eligible_for_wire` drops non-urgent/non-foreground 404 ghosts to the bounded LRU background sweep (intent still beats backoff via `mark_dm_reconnect_urgent` on send); `resync_pending_outbox` filters to connected recipients. |

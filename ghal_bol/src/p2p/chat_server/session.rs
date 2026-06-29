@@ -1448,9 +1448,14 @@ impl SessionState {
                 if !p.recipient_public_key_hex.trim().eq_ignore_ascii_case(&pk) {
                     return false;
                 }
-                // On wire, no delivery ack yet — sustained stuck.
+                // On wire, no delivery ack yet — sustained stuck (first wire time, not resync bumps).
                 if p.on_wire {
-                    return now_ms.saturating_sub(p.last_send_ms) >= min_ms;
+                    let since = if p.first_on_wire_ms > 0 {
+                        p.first_on_wire_ms
+                    } else {
+                        p.last_send_ms
+                    };
+                    return now_ms.saturating_sub(since) >= min_ms;
                 }
                 // Never attempted on wire this session (transcript ghost at bootstrap).
                 if p.last_send_ms == 0 {
@@ -2121,6 +2126,9 @@ impl SessionState {
         if let Some(p) = g.get_mut(message_id) {
             let first_wire = !p.on_wire;
             p.on_wire = true;
+            if first_wire {
+                p.first_on_wire_ms = now_ms;
+            }
             p.last_send_ms = now_ms;
             return first_wire;
         }
@@ -2133,6 +2141,7 @@ impl SessionState {
         };
         if let Some(p) = g.get_mut(message_id) {
             p.on_wire = false;
+            p.first_on_wire_ms = 0;
             p.last_send_ms = now_ms;
         }
     }

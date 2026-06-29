@@ -161,6 +161,20 @@ pub(crate) fn may_send_in_room_read_ack(_session: &SessionState, peer: PeerId) -
     app_ui_visible() && app_ack_read_enabled() && is_live_foreground_peer(peer)
 }
 
+/// Hub unread is suppressed for the open room only while the read gate is on (user actively
+/// viewing that chat). Android inactive / background keeps foreground pk but must still bump
+/// unread — see `p2p_sync_ui_session` room-unchanged + `read=false` path.
+pub(crate) fn inbound_suppresses_hub_unread(sender_pk: &str, from_key: &str) -> bool {
+    if !app_ui_visible() || !app_ack_read_enabled() {
+        return false;
+    }
+    let Some(live) = live_foreground_peer() else {
+        return false;
+    };
+    crate::public_key_util::same_contact_pk(&live, from_key)
+        || crate::public_key_util::same_contact_pk(&live, sender_pk)
+}
+
 /// Called from FFI when the app backgrounds or UI is torn down.
 pub fn set_app_ack_read_enabled(enabled: bool) {
     app_ack_read_enabled_mx().store(enabled, Ordering::SeqCst);

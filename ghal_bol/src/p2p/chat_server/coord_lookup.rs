@@ -144,14 +144,36 @@ fn peer_needs_wan_mux_reopen(session: &SessionState, peer: PeerId) -> bool {
     peer_lan_handover_outbound_stuck(session, peer) && session.dm_peer_stream_up(peer)
 }
 
-/// Writer looks open (`stream=true`) but outbound has been on the wire ≥ `LAN_HANDOVER_STUCK_MS`
-/// without delivery ack — remote may have dropped all paths while libp2p still reports connected
-/// (half-open TCP) or we are writing into a dead mux. Does **not** require LAN handover flag and
-/// does **not** close direct links (TRANSPORT.md § Post-mortem 2026-06-24 class D, § Asymmetric
-/// mux recovery — distinct from `reconcile_stale_lan_mux_for_wan` which owns close-direct).
+/// Stuck threshold before treating an open writer as a zombie mux.
+///
+/// Relay-only WAN without stale direct: use a longer window — bursty relay delivery routinely
+/// exceeds 4s without meaning the mux is dead (TRANSPORT.md § Known symptom — bursty delivery).
+/// Asymmetric LAN↔WAN / stale direct: keep the short window.
+fn zombie_mux_stuck_threshold_ms(session: &SessionState, peer: PeerId) -> i64 {
+    if peer_has_stale_direct_lan_conn(session, peer)
+        || peer_wan_asymmetric_mux_likely(session, peer)
+        || session.lan_listen_rediscovery_requested(peer)
+    {
+        LAN_HANDOVER_STUCK_MS
+    } else if session.peer_has_relay_connection(peer) {
+        12_000
+    } else {
+        LAN_HANDOVER_STUCK_MS
+    }
+}
+
+/// Writer looks open (`stream=true`) but outbound has been on the wire long enough without
+/// delivery ack — remote may have dropped all paths while libp2p still reports connected
+/// (half-open TCP) or we are writing into a dead mux. Does **not** close direct links
+/// (TRANSPORT.md § Post-mortem 2026-06-24 class D, § Asymmetric mux recovery).
 fn peer_needs_zombie_mux_reopen(session: &SessionState, peer: PeerId) -> bool {
+    let now_ms = chrono_now_ms();
     session.dm_peer_stream_up(peer)
-        && session.peer_outbound_stuck_for(peer, chrono_now_ms(), LAN_HANDOVER_STUCK_MS)
+        && session.peer_outbound_stuck_for(
+            peer,
+            now_ms,
+            zombie_mux_stuck_threshold_ms(session, peer),
+        )
 }
 
 /// Wi‑Fi side asymmetric LAN↔WAN — stale mDNS/TTL + stuck outbound while remote peer is on cell.
@@ -207,7 +229,8 @@ fn peer_has_stale_direct_lan_conn(session: &SessionState, peer: PeerId) -> bool 
     if !peer_has_lingering_direct(session, peer) {
         return false;
     }
-    // mDNS cache or on-LAN TTL can lie after remote Wi‑Fi→mobile handover — trust stuck outbound.
+    // mDNS cache or on-LAN TTL can lie after remote Wi‑Fi→mobile handover — trust stuck outbound
+    // only during an active LAN handover window (not mere 4s WAN relay ack delay).
     if peer_has_live_mdns_lan(session, peer) {
         return peer_lan_handover_outbound_stuck(session, peer);
     }

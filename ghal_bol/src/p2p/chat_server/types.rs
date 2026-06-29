@@ -242,6 +242,8 @@ pub(crate) struct PendingOutbound {
     text: String,
     created_at_ms: i64,
     last_send_ms: i64,
+    /// First time this row hit the wire this session; resync must not reset stuck detection.
+    first_on_wire_ms: i64,
     /// False until the frame is actually written to the chat stream.
     on_wire: bool,
 }

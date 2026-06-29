@@ -358,10 +358,17 @@ fn reopen_zombie_dm_mux_if_needed(
     if wan_mux_reconcile_throttled(peer, now_ms) {
         return;
     }
+    // Mux exchanged frames recently on a relay-only path — not a zombie writer yet.
+    if session.dm_mux_recently_active(peer, now_ms)
+        && !peer_has_stale_direct_lan_conn(session, peer)
+        && !peer_wan_asymmetric_mux_likely(session, peer)
+    {
+        return;
+    }
     native_log::info(
         "stream",
         format!(
-            "reopen {peer} — outbound on wire stuck ≥{WAN_MUX_RECONCILE_STUCK_MS}ms; replace dead mux writer"
+            "reopen {peer} — outbound on wire stuck; replace dead mux writer"
         ),
     );
     invalidate_dm_chat_stream(session, writers, peer);

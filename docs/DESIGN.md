@@ -809,7 +809,7 @@ Wire detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § “UI s
 On inbound `dm_message` (text), native `dm_event_handler`:
 
 - Always updates **last message preview** on the contact (either direction).
-- Increments **unread** once per inbound text when the message is **not** from the foreground peer (including out-of-order apply when preview timestamp is older). Clears **unread** when the hub opens that peer’s room (`clear_unread` on foreground). Poll replay of the same `message_id` does not bump again. **Poll still emits `stores_updated` on inbound text** so Flutter reloads the roster after wire persist (apply may be a no-op replay).
+- Increments **unread** once per inbound text when the message is **not** from the foreground peer **while the read gate is open** (visible + `ack_read` enabled + room open — same predicate as in-room read receipts). Background/inactive with room still on the UI stack must still bump unread. Clears **unread** when the hub opens that peer’s room (`clear_unread` on foreground). Poll replay of the same `message_id` does not bump again. **Poll still emits `stores_updated` on inbound text** so Flutter reloads the roster after wire persist (apply may be a no-op replay).
 - Contact trust fields (`is_known`, `is_blocked`) follow [Contact trust](#contact-trust-is_known--is_blocked) — preview and unread behavior for unknown peers is unchanged unless the peer is **blocked**.
 
 ## Contact trust (`is_known` / `is_blocked`)

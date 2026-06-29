@@ -519,6 +519,7 @@ async fn process_outbound_cmd(
                 text: text.clone(),
                 created_at_ms: now,
                 last_send_ms: now,
+                first_on_wire_ms: 0,
                 on_wire: false,
             };
             let frame_bytes = build_pending_outbound_frame(session.as_ref(), &pending)?;
@@ -779,6 +780,7 @@ fn merge_outbound_row_into_outbox(
             now
         },
         last_send_ms: now,
+        first_on_wire_ms: 0,
         on_wire: false,
     });
     true
