@@ -3,26 +3,23 @@
 #
 #   ./ghal_bol_server/deploy/install_coord1_home.sh
 #
-# Stack: ghal_bol_server (127.0.0.1:8765) + in-process GoDaddy DDNS + relay (UPnP dynamic) → nginx :443 HTTPS.
 # See COORD1_HOME.md. Does not touch GCP coord.ghalbol.com.
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${DEPLOY_DIR}/../.." && pwd)"
 
-# --- home coord config (edit here) ---
-COORD1_USER="${COORD1_USER:-$(id -un)}"
-COORD1_BIN="${COORD1_BIN:-/home/${COORD1_USER}/bin/ghal_bol_server}"
-COORD1_HOST="${COORD1_HOST:-coord1.ghalbol.com}"
-COORD1_HTTPS_URL="${COORD1_HTTPS_URL:-https://coord1.ghalbol.com:8443}"
-GHAL_BOL_SERVER_LISTEN="${GHAL_BOL_SERVER_LISTEN:-127.0.0.1:8765}"
-GHAL_BOL_RELAY_LISTEN="${GHAL_BOL_RELAY_LISTEN:-0.0.0.0:0}"
-GHAL_BOL_RELAY_DYNAMIC="${GHAL_BOL_RELAY_DYNAMIC:-1}"
-GHAL_BOL_RELAY_UPNP="${GHAL_BOL_RELAY_UPNP:-1}"
-GHAL_BOL_RELAY_PUBLIC_HOST="${GHAL_BOL_RELAY_PUBLIC_HOST:-coord1.ghalbol.com}"
-GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES="${GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES:-0}"
-GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER="${GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER:-16}"
-GHAL_BOL_DDNS_CREDENTIALS="${GHAL_BOL_DDNS_CREDENTIALS:-${DEPLOY_DIR}/godaddy-ddns-coord1.credentials}"
+# --- home coord config (edit here if needed) ---
+COORD1_USER="$(id -un)"
+COORD1_BIN="/home/${COORD1_USER}/bin/ghal_bol_server"
+GHAL_BOL_SERVER_LISTEN="127.0.0.1:8765"
+GHAL_BOL_RELAY_LISTEN="0.0.0.0:55002"
+GHAL_BOL_RELAY_DYNAMIC="0"
+GHAL_BOL_RELAY_UPNP="0"
+GHAL_BOL_RELAY_PUBLIC_HOST="coord1.ghalbol.com"
+GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES="0"
+GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER="16"
+GHAL_BOL_DDNS_CREDENTIALS="${DEPLOY_DIR}/godaddy-ddns-coord1.credentials"
 # --- end config ---
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/build/ghal_bol_server-target}"
@@ -82,8 +79,6 @@ if ! systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
 fi
 
 echo ""
-echo "OK — ${UNIT_NAME} on ${GHAL_BOL_SERVER_LISTEN}  relay dynamic (UPnP) listen ${GHAL_BOL_RELAY_LISTEN}"
-echo "     DDNS: in-process (GHAL_BOL_DDNS_CREDENTIALS, poll every 5m + on start)"
-echo "     Next: ./ghal_bol_server/deploy/enable_coord1_https.sh   (uses LE if present)"
-echo "     App:  GHAL_BOL_COORD_URLS=[\"${COORD1_HTTPS_URL}\"]"
-echo "     WAN:  ./ghal_bol_server/deploy/verify_coord1.sh"
+echo "OK — coord1 on ${GHAL_BOL_SERVER_LISTEN}, relay ${GHAL_BOL_RELAY_LISTEN}"
+echo "     Router: forward WAN TCP 55002 → this host :55002 (and 8443 for HTTPS)"
+echo "     Verify: ./ghal_bol_server/deploy/verify_coord1.sh"

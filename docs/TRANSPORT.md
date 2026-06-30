@@ -789,7 +789,7 @@ When stream-open and the 1s tick coincide, the burst re-sent rows the periodic t
 
 ### Post-mortem — 2026-06-29 WAN recovery `force` reservation storm after `left LAN` (canonical)
 
-**Symptoms observed (flutter_android.log + flutter_linux.log, coord1 home UPnP, phone on cell after Wi‑Fi→mobile handover):**
+**Symptoms observed (flutter_android.log + flutter_linux.log, coord1 home, phone on cell after Wi‑Fi→mobile handover):**
 
 | Evidence | Meaning |
 |----------|---------|
@@ -842,7 +842,7 @@ relay_listen=false  wan_recovery=true ← for minutes after left LAN
 4. **Do not “fix” by disabling WAN recovery ticks or coord lookup** — throttle **storms** only (AGENTS.md connectivity policy). The bug was **`force` on recurring ticks**, not recovery running at all.
 5. **Distinguish from 2026-06-18 renewal loop** — that was `ListenerClosed` during **renewal** re-reserve; this is `force=true` on **`wan_recovery_active`** ticks before any circuit exists. Both cancel in-flight reservations; fixes are different (renewal gap vs recurring `force`).
 
-**Related but separate:** coord1 home UPnP relay **port churn** (`GET /v1/relay` returns a new TCP port while old coord presence rows still list previous ports) can still cause peer **circuit dial timeouts** after one's own reservation is healthy. Fix server port stability or live refetch on bootstrap TCP loss — do **not** mask reservation storms with faster coord lookups.
+**Historical (UPnP dynamic coord1, pre-2026-07):** UPnP relay **port churn** caused peer circuit dial timeouts when coord presence listed stale ports. **Fixed** on shipping coord1 by stable **`:55002`** + router forward — do not revert home coord1 to dynamic UPnP without updating this doc.
 
 ---
 
@@ -904,7 +904,7 @@ WAN chat between two internet-connected peers requires **both** channels below. 
 | Channel | Home (`coord1.ghalbol.com`) | GCP (`coord.ghalbol.com`) |
 |---------|----------------------------|----------------------------|
 | **Coord HTTP** | nginx `:8443` → `:8765` | nginx `:443` → `:8765` |
-| **Relay TCP** | **UPnP dynamic** — port from `GET /v1/relay` (no manual forward) | fixed public `:4002` on VM |
+| **Relay TCP** | fixed **`:55002`** — router forward WAN → host (see `install_coord1_home.sh`) | fixed public `:4002` on VM |
 
 Checklist before blaming the client:
 
@@ -921,14 +921,14 @@ Checklist before blaming the client:
 |--------------|---------|-----|
 | `GET /v1/relay` 200, `GET /v1/peers/…` **404 only**, no `peer registered` | Peers never registered — relay circuit or register path failed | Fix relay TCP (firewall/port forward); see deploy README |
 | `GET /v1/peers/…` 404 after server restart | Stale presence TTL expired; peer not re-registered yet | Restart apps so they re-reserve and register |
-| `GET /v1/relay` 200 but client `Connection refused` / timeout on relay addr | HTTP advertises relay but TCP unreachable (stale UPnP mapping on home coord1, or firewall on GCP `:4002`) | Home: client bootstrap failure → `GET /v1/relay?remap=true` removes stale WAN port and maps a **fresh** one (server verifies router table before advertise). GCP: fix firewall/port forward. Normal polls use `GET /v1/relay` without remap (no disk cache) |
+| `GET /v1/relay` 200 but client `Connection refused` / timeout on relay addr | HTTP advertises relay but TCP unreachable (home: router forward missing/wrong; GCP: firewall) | Home: forward **TCP 55002** on router, run `verify_coord1.sh`. GCP: open `:4002`. Clients refetch live `GET /v1/relay` (no disk cache) |
 | One side `reservation accepted`, other side 404 on coord lookup | **Asymmetric CGNAT bug** — phone never registered; Wi‑Fi side looks healthy | Check **phone** log for dial storm + missing `reservation accepted`; see § “CGNAT / mobile-data relay reservation” |
 | Phone log: many `coord relay dial` per second, no `bootstrap connection` | Bootstrap **dial storm** — do not add more dials; restore throttle + CGNAT probe path | `issue_bootstrap_dials`, `try_ghalbol_probe_style_circuit_listen` in `retry_stalled_relay_reservations` |
 | `relay has no public address advertised` at server start | `GHAL_BOL_RELAY_PUBLIC_HOST` unset or relay disabled | Set public host; restart coord server |
 
 See [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md).
 
-**Home coord1 UPnP (do not regress):** relay listen is ephemeral local TCP; router UPnP maps a WAN port → that socket. `GET /v1/relay` advertises the **external** port only after map + **router-table verify** (`relay_nat::verify_mapping_on_gateway`). On client bootstrap TCP failure, `GET /v1/relay?remap=true` (storm-throttled) **removes** the failing external port and allocates a new one — **never** “renew” the same port the client just proved dead (routers often ACK `AddPortMapping` while the forward rule is still broken). While healthy, normal relay polls omit `remap` so the WAN port stays stable. DDNS runs in-process inside `ghal_bol_server` (no separate timer).
+**Home coord1 fixed relay (shipping):** `install_coord1_home.sh` binds **`0.0.0.0:55002`** and advertises `/dns4/coord1.ghalbol.com/tcp/55002` (4002 is often blocked on home routers). Forward **8443 + 55002** on the router; verify with `./ghal_bol_server/deploy/verify_coord1.sh`. Stable port avoids the UPnP port-churn that caused stale coord presence and circuit dial timeouts (see changelog 2026-07-01). DDNS runs in-process inside `ghal_bol_server` (no separate timer). Server still supports UPnP-dynamic relay (`GHAL_BOL_RELAY_DYNAMIC=1`) for experiments — not used on shipping coord1.
 
 ### LAN vs WAN dial policy
 
@@ -1542,9 +1542,10 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 
 | Date | Change |
 |------|--------|
+| 2026-07-01 | **Home coord1 fixed relay `:55002`:** replaced UPnP-dynamic relay (ephemeral WAN ports, router blocked `:4002`) with fixed listen **`0.0.0.0:55002`** + router forward — same stability model as GCP `:4002`. `install_coord1_home.sh` + `verify_coord1.sh`; see [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md), [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Home. WAN prerequisite table updated. |
 | 2026-06-29 | **WAN recovery `force` reservation storm after `left LAN` (canonical post-mortem):** § **Post-mortem 2026-06-29**. `run_wan_recovery_pass` passed `force=true` to `ensure_wan_relay_circuit` on every `coord_tick`, bypassing `RELAY_RESERVE_THROTTLE_MS` and re-issuing `listen_on` every ~1s — each new `listen_on` cancelled the in-flight reservation (libp2p #6165) → `Failed to get Reservation` loop, `relay_listen=false` for minutes after Wi‑Fi→cell. Fix: recurring recovery ticks use `force=false`; `force=true` only on one-shot handover entry (`apply_left_lan_handover`). Anti-regression item 35; soak test Wi‑Fi↔cell after relay changes. |
 | 2026-06-25 | **LAN re-discovery cadence — mDNS query interval:** § **“LAN re-discovery cadence — mDNS query interval”**. `libp2p::mdns::Config::default()` polls only every **5 minutes**, so after a LAN link dropped (with WAN/relay also down) neither same-Wi‑Fi peer re-discovered the other for minutes (`LAN soft rediscovery — link down, no mDNS candidate yet`, `active_links=0`). Fix: `ghal_bol_mdns_config()` sets `query_interval = 5s` at both the initial behaviour and `restart_mdns_behaviour`; LAN now recovers in seconds, port stays stable, independent of WAN. |
-| 2026-06-28 | **Home coord1 stale UPnP relay port (canonical post-mortem):** router returned OK on `AddPortMapping` renew while WAN TCP to the advertised port was dead — server kept publishing the stale port until a timeout finally forced a new map. Fix: `remap_after_client_bootstrap_failure` removes the failing external port and allocates fresh; `verify_mapping_on_gateway` before advertise; startup map uses same verify path. Client signal: bootstrap TCP failure → `GET /v1/relay?remap=true` only (not every relay poll). § “WAN prerequisites” home UPnP row. |
+| 2026-06-28 | **Home coord1 stale UPnP relay port (historical — superseded 2026-07-01):** UPnP dynamic relay on home coord1 caused stale WAN ports. Shipping coord1 now uses fixed **`:55002`** + router forward; see changelog 2026-07-01. Server code for UPnP/`remap=true` remains for non-shipping configs. |
 | 2026-06-28 | **Writer clobber + ghost-outbox storm (canonical post-mortem):** § **Post-mortem 2026-06-28**. (1) Return acks died after LAN→mobile handover because reopen can't replace a writer on a dead direct mux while the peer writes on a live duplicate relay stream — fix: `adopt_duplicate_mux_as_writer` gated by `duplicate_mux_should_take_over` (retransmit / `peer_wan_asymmetric_mux_likely` / `peer_outbound_stuck_for` ≥ 3s). (2) A stale stream handler's exit cleanup deleted the **live** writer installed by adopt/reopen — fix: per-peer **writer generation** (`claim_dm_writer_generation` / `finalize_dm_writer_if_current`). (3) ~60 transcript-pending rows to `PeerNotOnCoord` ghosts flooded the **uncapped priority** coord tier every tick — fix: `pending_outbox_eligible_for_wire` drops non-urgent/non-foreground 404 ghosts to the bounded LRU background sweep (intent still beats backoff via `mark_dm_reconnect_urgent` on send); `resync_pending_outbox` filters to connected recipients. |
 | 2026-06-25 | **Coord lookup `.await` froze the swarm loop → WAN-only chat dead (canonical post-mortem):** § **Post-mortem 2026-06-25 (coord lookup `.await` froze the swarm loop)** — the per-peer coord HTTP lookup was `.await`ed inside the `tokio::select!` arm holding `&mut swarm`, so libp2p was not polled for the whole HTTP RTT and inbound relay `STOP` substreams timed out (`relay-circuit dial timed out`, server `circuit ConnectionFailed`). Fix: split into off-loop `request_coord_lookup` (`tokio::spawn`, deduped via `coord_lookup_in_flight`) + sync on-loop `apply_coord_lookup_result` / `drain_ready_coord_lookups`; `coord_lookup_dm_peer` / `run_dm_coord_lookup_pass` are now synchronous. Follow-on: `resync_outbox_burst_for_peer` now skips rows sent within `OUTBOX_RESEND_INTERVAL_MS` (was double-sending with the 1s periodic resync → duplicate `ack_received`). |
 | 2026-06-25 | **One-way WAN after LAN→mobile handover (canonical post-mortem):** § **Post-mortem 2026-06-25** — Wi‑Fi side kept zombie LAN mux (`conn=true,stream=true`) while phone on relay; coord lookup skipped for foreground peer. Fix: `peer_wan_asymmetric_mux_likely` / `peer_needs_wan_mux_reopen` / `peer_lan_handover_outbound_stuck`; `clear_peer_stale_lan_cache`; `coord_lookup_upkeep_satisfied` + `dm_peer_chat_link_stable` false during handover; `InboundCircuitEstablished` stream reopen; do not defer stream when relay up. § **Known symptom — bursty delivery** — multi-second batch delivery during recovery is expected trade-off (5s reconcile throttle + burst resync), not Flutter/`NetworkHelper`. AI handoff items 27–30. |

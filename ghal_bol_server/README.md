@@ -6,11 +6,11 @@ It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT travers
 
 ## Deployments
 
-| Host | Install |
-|------|---------|
-| **Home** `coord1.ghalbol.com` | `./deploy/install_coord1_home.sh` → `~/bin/ghal_bol_server` + GoDaddy DDNS + nginx |
-| **GCP** `coord.ghalbol.com` | `./deploy/deploy_server.sh` |
-| **Loopback smoke** | `cargo run -p ghal_bol_server` |
+| Host | Install | Relay TCP |
+|------|---------|-----------|
+| **Home** `coord1.ghalbol.com` | `./deploy/install_coord1_home.sh` | **`:55002`** (router forward) |
+| **GCP** `coord.ghalbol.com` | `./deploy/deploy_server.sh` | **`:4002`** |
+| **Loopback smoke** | `cargo run -p ghal_bol_server` | `:4002` default |
 
 Full walkthrough: **[deploy/README.md](deploy/README.md)**.
 
@@ -83,7 +83,7 @@ CGNAT/mobile peers rely on the relay row. Desktop peers with UPnP/public IP may 
 | `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` |
 | `GHAL_BOL_SERVER_PRESENCE_TTL_SECS` | `90` |
 | `GHAL_BOL_RELAY_ENABLE` | `1` |
-| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` |
+| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (GCP). Home coord1: **`0.0.0.0:55002`** via `install_coord1_home.sh` |
 | `GHAL_BOL_RELAY_PUBLIC_HOST` | unset — set on home/GCP (e.g. `coord1.ghalbol.com`, `coord.ghalbol.com`) |
 | `GHAL_BOL_RELAY_PUBLIC_ADDRS` | unset — optional comma-separated multiaddrs override |
 | `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` | `0` |

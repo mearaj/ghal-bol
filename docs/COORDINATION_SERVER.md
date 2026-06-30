@@ -38,7 +38,7 @@ Implementation: `should_throttle_register`, `spawn_register_presence_inner`, `co
 
 ## Run server
 
-**Home** — GoDaddy DDNS + `install_coord1_home.sh` + nginx `:443`. See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
+**Home** — `./ghal_bol_server/deploy/install_coord1_home.sh` + `./ghal_bol_server/deploy/verify_coord1.sh`. See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
 
 **GCP** — `./ghal_bol_server/deploy/deploy_server.sh`.
 
@@ -69,7 +69,12 @@ COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
 
 Same nginx pattern as GCP for **coord HTTP**. **GoDaddy DDNS** runs **in-process** inside `ghal_bol_server` (`GHAL_BOL_DDNS_CREDENTIALS`, poll on start + every 5 min). One-shot manual update: `godaddy-ddns.sh`.
 
-**Relay (home only):** **UPnP dynamic** — no manual router port-forward for relay. `install_coord1_home.sh` sets `GHAL_BOL_RELAY_DYNAMIC=1`, `GHAL_BOL_RELAY_LISTEN=0.0.0.0:0`, `GHAL_BOL_RELAY_UPNP=1`. The server maps an ephemeral local port via UPnP; `GET /v1/relay` advertises the **external** WAN port (e.g. `/dns4/coord1.ghalbol.com/tcp/46333`). Clients refetch live — never hardcode a relay port for coord1.
+**Relay:** fixed TCP **55002** (same model as GCP `:4002`, but home routers often block 4002). `install_coord1_home.sh` sets `GHAL_BOL_RELAY_LISTEN=0.0.0.0:55002`, `GHAL_BOL_RELAY_PUBLIC_HOST=coord1.ghalbol.com`. **Router:** forward **8443** (HTTPS) and **55002** (relay) to the coord1 host.
+
+```bash
+./ghal_bol_server/deploy/install_coord1_home.sh
+./ghal_bol_server/deploy/verify_coord1.sh
+```
 
 ```bash
 GHAL_BOL_COORD_URLS=["https://coord1.ghalbol.com:8443"]
@@ -87,7 +92,7 @@ See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
 | GET | `/v1/peers/{public_key_hex}` |
 | GET | `/v1/peers` |
 | GET | `/v1/relay` |
-| GET | `/v1/relay?remap=true` | Home UPnP coord only: after client bootstrap TCP failure — remove stale WAN port, map fresh, verify on router, then return addrs (bool query — **`true`/`false`**, not `1`/`0`; storm-throttled) |
+| GET | `/v1/relay?remap=true` | UPnP-dynamic relay only (not shipping on coord1): after client bootstrap TCP failure — remove stale WAN port, map fresh (bool query — **`true`/`false`**, not `1`/`0`; storm-throttled) |
 
 Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256k1 ECDSA DER).
 
@@ -103,8 +108,8 @@ Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256
 
 | Pattern | Likely cause | Action |
 |---------|--------------|--------|
-| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | Home: check server UPnP logs (`mapped and verified`, port change on remap); client should refetch with `remap=true` after bootstrap timeout. GCP: `nc -zv` on `/v1/relay` addr (`:4002`) |
-| `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but relay disabled, UPnP pending/failed, or mapping cleared after stale UPnP | Home: check `journalctl --user -u ghal-bol-server-coord1` for UPnP lines; GCP: set `GHAL_BOL_RELAY_PUBLIC_HOST` |
+| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | Home: `./ghal_bol_server/deploy/verify_coord1.sh` (relay `:55002` must pass). GCP: `nc -zv coord.ghalbol.com 4002` |
+| `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but relay disabled or failed to bind | Home: `journalctl --user -u ghal-bol-server-coord1`; GCP: set `GHAL_BOL_RELAY_PUBLIC_HOST` |
 | `peer registered` in **server** logs but lookup 404 | TTL expired (~90s) or wrong coord URL in app | Heartbeat/register failing; check app `coord_registered` |
 | `peer registered` but client `peer_on_coord_no_dial_addrs` | Row has relay bootstrap `tcp` or LAN-only — no `/p2p-circuit` | Phone lost reservation; client must not POST relay IP:port; wait for `reservation ACCEPTED` + server circuit upsert |
 | `relay circuit DENIED` … `NoReservation` | Destination peer has no active relay reservation | Remote `:p2p` dropped reservation (background/LAN handover); remote must re-reserve |
@@ -113,7 +118,7 @@ Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256
 
 1. Coord server running (`ghal-bol-server-coord1` or GCP systemd)  
 2. `curl -s http://127.0.0.1:8765/v1/relay | jq` — enabled + addrs  
-3. **Relay TCP reachable** — GCP: `nc -zv coord.ghalbol.com 4002`. Home coord1: `./ghal_bol_server/deploy/verify_coord1.sh` (parses port from `/v1/relay`; UPnP port changes — do not hardcode 4002)  
+3. **Relay TCP reachable** — GCP: `nc -zv coord.ghalbol.com 4002`. Home coord1: `./ghal_bol_server/deploy/verify_coord1.sh` (relay **55002**)
 4. Rebuild native + restart apps after server identity or relay config change
 
 When testing app traffic against your local server (not production), set `GHAL_BOL_COORD_URLS` to a reachable `http://…:8765` URL and restart the app.
@@ -128,7 +133,7 @@ Full detail: [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README
 | `GHAL_BOL_SERVER_DB` | `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` |
 | `GHAL_BOL_SERVER_PRESENCE_TTL_SECS` | `90` |
 | `GHAL_BOL_RELAY_ENABLE` | `1` (set `0` to disable the relay node) |
-| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (raw TCP — **open this port** directly; it is not proxied by the HTTP/TLS nginx front). Dual-stack: the relay also listens on the counterpart-family wildcard (`[::]:<port>`) so it accepts both IPv4 and IPv6 clients |
+| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (GCP default). Home coord1: **`0.0.0.0:55002`** via `install_coord1_home.sh`. Raw TCP — **open this port** on the router/firewall; not proxied by nginx |
 | `GHAL_BOL_RELAY_PUBLIC_HOST` | unset → advertises **both** `/dns6/<host>/tcp/<port>` and `/dns4/<host>/tcp/<port>` (IPv6 first; e.g. `coord.ghalbol.com`) so clients can reserve over either family. Native IPv6 needs an `AAAA` record; IPv4-only/NAT64 clients map the host themselves |
 | `GHAL_BOL_RELAY_PUBLIC_ADDRS` | unset → comma-separated dialable multiaddrs (overrides `_PUBLIC_HOST`) |
 | `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` | `0` (unlimited per circuit; set e.g. `2147483648` for 2 GiB cap) |
