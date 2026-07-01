@@ -148,6 +148,9 @@ pub(crate) struct SessionState {
     lan_listen_rediscovery_peers: RwLock<HashSet<PeerId>>,
     /// Drop asymmetric/zombie libp2p links after `open_stream` timeout (swarm loop disconnect).
     pending_dm_link_reset: RwLock<HashSet<PeerId>>,
+    /// One-shot bypass of `WAN_MUX_RECONCILE_THROTTLE_MS` after relay `InboundCircuitEstablished`
+    /// (TRANSPORT.md § Asymmetric mux — Wi‑Fi side must not wait 5s while remote re-dials on relay).
+    asymmetric_relay_recover_urgent: RwLock<HashSet<PeerId>>,
     /// Throttle repetitive coord lookup INFO logs (especially peer_not_on_coord).
     coord_lookup_info_log_ms: RwLock<HashMap<String, i64>>,
     /// Active native voice-call media sessions, keyed by `call_id`. Each entry holds the
@@ -316,6 +319,7 @@ impl SessionState {
             pending_full_lan_kick_reason: RwLock::new(None),
             lan_listen_rediscovery_peers: RwLock::new(HashSet::new()),
             pending_dm_link_reset: RwLock::new(HashSet::new()),
+            asymmetric_relay_recover_urgent: RwLock::new(HashSet::new()),
             coord_lookup_info_log_ms: RwLock::new(HashMap::new()),
             call_media: Mutex::new(HashMap::new()),
             call_video: Mutex::new(HashMap::new()),
@@ -1079,6 +1083,20 @@ impl SessionState {
             return Vec::new();
         };
         s.drain().collect()
+    }
+
+    /// Consume one-shot urgent reconcile for `peer` (set on relay inbound circuit).
+    fn take_asymmetric_relay_recover_urgent(&self, peer: PeerId) -> bool {
+        let Ok(mut g) = self.asymmetric_relay_recover_urgent.write() else {
+            return false;
+        };
+        g.remove(&peer)
+    }
+
+    fn mark_asymmetric_relay_recover_urgent(&self, peer: PeerId) {
+        if let Ok(mut g) = self.asymmetric_relay_recover_urgent.write() {
+            g.insert(peer);
+        }
     }
 
     fn begin_wan_recovery(&self) {

@@ -216,6 +216,7 @@ fn dm_peers_missing_chat_stream(
             swarm.is_connected(pid)
                 && !writer_open_for_peer(writers, *pid)
                 && !should_defer_stream_open_for_wan_mux(session, *pid)
+                && !should_defer_outbound_stream_for_asymmetric_relay(session, *pid)
         })
         .collect()
 }
@@ -293,8 +294,15 @@ fn reconcile_stale_lan_mux_for_wan(
         return;
     }
     let now_ms = chrono_now_ms();
-    if wan_mux_reconcile_throttled(peer, now_ms) {
+    let urgent_reconcile = session.take_asymmetric_relay_recover_urgent(peer);
+    if !urgent_reconcile && wan_mux_reconcile_throttled(peer, now_ms) {
         return;
+    }
+    if urgent_reconcile {
+        // Stamp throttle after one-shot bypass — no reconcile storm (TRANSPORT.md § recovery).
+        if let Ok(mut m) = wan_mux_reconcile_throttle_mx().write() {
+            m.insert(peer, now_ms);
+        }
     }
     // Bidirectional mux with a live writer — do not tear down mid-flight. Inbound-only
     // activity on a read-only duplicate stream must not block asymmetric LAN↔WAN recovery.
@@ -315,7 +323,16 @@ fn reconcile_stale_lan_mux_for_wan(
         );
         close_direct_dm_connections(swarm, session, peer);
         if !mux_reopen {
-            session.request_dm_stream_reopen(peer);
+            // Stuck outbound on a lingering direct mux → writer is zombie; full invalidate per
+            // TRANSPORT.md § Asymmetric mux recovery. Healthy relay-only path keeps flag-only
+            // reopen (Symptom C — do not tear down a live LAN mux).
+            if session.peer_outbound_stuck_for(peer, now_ms, WAN_MUX_RECONCILE_STUCK_MS)
+                && writer_open_for_peer(writers, peer)
+            {
+                invalidate_dm_chat_stream(session, writers, peer);
+            } else {
+                session.request_dm_stream_reopen(peer);
+            }
             notify_coord_lookup();
             return;
         }
@@ -426,6 +443,20 @@ fn upkeep_dm_peers(
                         format!(
                             "stream open deferred {peer} — connected on a transient mux; \
                              waiting for stable WAN relay mux before opening chat stream"
+                        ),
+                    );
+                }
+                continue;
+            }
+            if should_defer_outbound_stream_for_asymmetric_relay(session.as_ref(), peer) {
+                if peer_connect_trace_enabled(session.as_ref(), peer)
+                    && session.should_log_dial_skip(peer, chrono_now_ms(), 5_000)
+                {
+                    native_log::debug(
+                        "stream",
+                        format!(
+                            "stream open deferred {peer} — asymmetric relay on LAN; \
+                             waiting for peer inbound stream"
                         ),
                     );
                 }

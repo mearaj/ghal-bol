@@ -619,10 +619,17 @@ fn handle_swarm_event(
                     session.note_relay_circuit_pending_peer(src_peer_id);
                     // Remote peer re-dialed on relay after leaving LAN — kick WAN mux recovery on
                     // the Wi‑Fi side (asymmetric inbound-only duplicate mux, 07:23 logs).
-                    if peer_wan_asymmetric_mux_likely(session, src_peer_id)
+                    let asymmetric_relay =
+                        asymmetric_relay_recover_on_existing_link(session, src_peer_id);
+                    if asymmetric_relay
+                        || peer_wan_asymmetric_mux_likely(session, src_peer_id)
                         || peer_needs_wan_mux_reopen(session, src_peer_id)
                         || peer_needs_zombie_mux_reopen(session, src_peer_id)
                     {
+                        // One-shot reconcile bypass only for relay+stale-direct (not zombie alone).
+                        if asymmetric_relay {
+                            session.mark_asymmetric_relay_recover_urgent(src_peer_id);
+                        }
                         session.request_dm_stream_reopen(src_peer_id);
                         notify_coord_lookup();
                     }

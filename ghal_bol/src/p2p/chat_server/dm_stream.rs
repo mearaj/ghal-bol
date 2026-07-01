@@ -169,6 +169,18 @@ async fn open_outbound_stream_if_needed(
     if should_defer_stream_open_for_wan_mux(session.as_ref(), peer) {
         return;
     }
+    if should_defer_outbound_stream_for_asymmetric_relay(session.as_ref(), peer) {
+        if session.log_stream_open_once(peer) {
+            native_log::debug(
+                "stream",
+                format!(
+                    "defer outbound open_stream {peer} — asymmetric relay; \
+                     waiting for peer inbound on relay (LAN side)"
+                ),
+            );
+        }
+        return;
+    }
     if !session.try_begin_stream_open(peer) {
         // Another task is already trying; avoid creating a self-cancel storm.
         return;
@@ -212,6 +224,9 @@ async fn ensure_dm_chat_stream(
         return;
     }
     if should_defer_stream_open_for_wan_mux(session.as_ref(), peer) {
+        return;
+    }
+    if should_defer_outbound_stream_for_asymmetric_relay(session.as_ref(), peer) {
         return;
     }
     open_outbound_stream_if_needed(peer, control, writers, session, events_tx).await;

@@ -243,9 +243,19 @@ fn peer_has_stale_direct_lan_conn(session: &SessionState, peer: PeerId) -> bool 
 
 /// Relay already established but a stale direct LAN mux lingers — recover on the existing relay
 /// (close direct + stream reopen), not by opening another circuit (TRANSPORT.md § Asymmetric mux).
-fn asymmetric_relay_recover_on_existing_link(session: &SessionState, peer: PeerId) -> bool {
+pub(crate) fn asymmetric_relay_recover_on_existing_link(session: &SessionState, peer: PeerId) -> bool {
     if peer_wan_asymmetric_mux_likely(session, peer) {
         return true;
+    }
+    session.peer_has_relay_connection(peer) && peer_has_stale_direct_lan_conn(session, peer)
+}
+
+/// Wi‑Fi side during asymmetric LAN↔WAN: relay is up but we still hold a stale direct mux — defer
+/// our outbound `open_stream` and accept the mobile peer's inbound stream instead (avoids symmetric
+/// open_stream deadlock on relay). Mobile-data re-dialer must not defer (no active LAN).
+fn should_defer_outbound_stream_for_asymmetric_relay(session: &SessionState, peer: PeerId) -> bool {
+    if !session.network_profile_snapshot().has_active_lan() {
+        return false;
     }
     session.peer_has_relay_connection(peer) && peer_has_stale_direct_lan_conn(session, peer)
 }

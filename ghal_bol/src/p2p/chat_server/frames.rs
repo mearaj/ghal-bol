@@ -127,6 +127,9 @@ fn duplicate_mux_should_take_over(
     if strong {
         return true;
     }
+    if asymmetric_relay_recover_on_existing_link(session, peer) {
+        return true;
+    }
     if peer_wan_asymmetric_mux_likely(session, peer) || peer_needs_wan_mux_reopen(session, peer) {
         return true;
     }
@@ -254,6 +257,22 @@ async fn handle_inbound_stream(
             "stream",
             format!("inbound chat stream from {peer} — duplicate mux; read-only"),
         );
+        // Phone re-dialed on relay while we still hold the writer on stale direct — adopt
+        // immediately so their `open_stream` completes (TRANSPORT.md § duplicate-mux adoption).
+        // **Only** `asymmetric_relay_recover_on_existing_link` here — not outbound-stuck/zombie at
+        // stream-open (avoids churn on symmetric-connect duplicates; Symptom C).
+        if asymmetric_relay_recover_on_existing_link(session.as_ref(), peer) {
+            adopt_duplicate_mux_as_writer(
+                peer,
+                &mut spare_writer,
+                &mut write_task,
+                &mut owns_writer,
+                &mut my_gen,
+                Arc::clone(&session),
+                Arc::clone(&writers),
+                events_tx.clone(),
+            );
+        }
     }
 
     let my_public = session.my_public_key_hex.clone();
