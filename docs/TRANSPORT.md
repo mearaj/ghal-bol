@@ -789,7 +789,9 @@ When stream-open and the 1s tick coincide, the burst re-sent rows the periodic t
 
 **Fix (`dm_dial.rs`, `resync_outbox_burst_for_peer`):** the burst now skips rows already sent within `OUTBOX_RESEND_INTERVAL_MS` (`now − last_send_ms ≥ OUTBOX_RESEND_INTERVAL_MS`, same predicate as `outbox_due_for_resend`). Backlog and freshly-enqueued rows (`last_send_ms` old or seeded to `now − interval`) still drain immediately; only rows the periodic tick *just* sent are skipped. No message can be lost — the periodic resync still owns the 1s retry cadence; the burst is only an instant-drain optimisation.
 
-**FORBIDDEN:** making `resync_outbox_burst_for_peer` re-send rows unconditionally (ignoring `last_send_ms`) — that reintroduces the double-send/duplicate-ack storm. Backlog drain speed must come from the **burst running on stream-open** (event-driven), not from ignoring the resend interval.
+**Follow-on (2026-06-29 — burst ordering + `on_wire` guard):** on **`chat_ready`**, **`resync_outbox_burst_for_peer` must run before `resync_pending_outbox`** in the same spawn (`outbox_wire.rs`). If periodic resync ran first, it marked rows **`on_wire`** inside the resend window and the burst skipped them while the peer still had no frame. The burst filter was tightened to skip only rows that are **`on_wire` *and*** inside **`OUTBOX_RESEND_INTERVAL_MS`** — failed sends (`on_wire=false`) still drain immediately. **`ensure_dm_peer_from_libp2p`** + transcript sync run before **`chat_ready`** emit so signing pk / pending rows exist for burst + transcript replay.
+
+**FORBIDDEN:** making `resync_outbox_burst_for_peer` re-send rows unconditionally (ignoring `last_send_ms`) — that reintroduces the double-send/duplicate-ack storm. Backlog drain speed must come from the **burst running on stream-open** (event-driven), not from ignoring the resend interval. **Also forbidden:** running periodic outbox resync before the stream-open burst on the same **`chat_ready`** path.
 
 ### Post-mortem — 2026-06-29 WAN recovery `force` reservation storm after `left LAN` (canonical)
 

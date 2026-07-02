@@ -321,6 +321,29 @@ fn pick_better_duplicate(a: &StoredChatLine, b: &StoredChatLine) -> StoredChatLi
     if bt > at { b.clone() } else { a.clone() }
 }
 
+fn line_sort_key(line: &StoredChatLine) -> (i64, String, String) {
+    (
+        line.created_at_ms.unwrap_or(0),
+        line
+            .message_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        line.local_id.clone(),
+    )
+}
+
+/// Insert so thread order matches [`dedupe_lines`] / hub chat sort (`created_at_ms`, then `message_id`).
+fn insert_line_in_thread_order(existing: &mut Vec<StoredChatLine>, line: StoredChatLine) {
+    let key = line_sort_key(&line);
+    let pos = existing
+        .iter()
+        .position(|e| line_sort_key(e) > key)
+        .unwrap_or(existing.len());
+    existing.insert(pos, line);
+}
+
 fn dedupe_lines(lines: Vec<StoredChatLine>) -> Vec<StoredChatLine> {
     if lines.len() < 2 {
         return lines;
@@ -339,16 +362,7 @@ fn dedupe_lines(lines: Vec<StoredChatLine>) -> Vec<StoredChatLine> {
         }
     }
     let mut kept: Vec<StoredChatLine> = by_mid.into_values().chain(no_mid).collect();
-    kept.sort_by(|a, b| {
-        let c = a
-            .created_at_ms
-            .unwrap_or(0)
-            .cmp(&b.created_at_ms.unwrap_or(0));
-        if c != std::cmp::Ordering::Equal {
-            return c;
-        }
-        a.local_id.cmp(&b.local_id)
-    });
+    kept.sort_by(|a, b| line_sort_key(a).cmp(&line_sort_key(b)));
     kept
 }
 
@@ -598,7 +612,7 @@ pub fn append_if_new(
     }
     let outgoing = line.outgoing;
     let text_len = line.text.len();
-    existing.push(line);
+    insert_line_in_thread_order(&mut existing, line);
     ns_obj.insert(
         conversation_key.to_string(),
         Value::Array(existing.iter().map(|l| l.to_json()).collect()),
@@ -870,5 +884,44 @@ mod tests {
         // WAN ack_received after LAN ack_read must not downgrade
         let picked2 = pick_better_duplicate(&read, &delivered);
         assert_eq!(picked2.delivery, "read");
+    }
+
+    #[test]
+    fn append_if_new_inserts_by_created_at_ms_not_append_order() {
+        use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
+        use tempfile::TempDir;
+
+        let td = TempDir::new().unwrap();
+        let ns = "dev.transcript.order";
+        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
+        let early = StoredChatLine {
+            local_id: "late-send".into(),
+            text: "newer".into(),
+            outgoing: true,
+            from: None,
+            message_id: Some("mid-new".into()),
+            delivery: "pending".into(),
+            created_at_ms: Some(2000),
+            received_at_ms: None,
+            read_ack_sent: false,
+        };
+        let late = StoredChatLine {
+            local_id: "early-recv".into(),
+            text: "older".into(),
+            outgoing: false,
+            from: Some("peer".into()),
+            message_id: Some("mid-old".into()),
+            delivery: "pending".into(),
+            created_at_ms: Some(1000),
+            received_at_ms: Some(1500),
+            read_ack_sent: false,
+        };
+        append_if_new(ns, "peerpk", early).unwrap();
+        append_if_new(ns, "peerpk", late).unwrap();
+        let rows = load_merged(ns, &["peerpk".to_string()], None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "older");
+        assert_eq!(rows[1].text, "newer");
     }
 }

@@ -781,9 +781,17 @@ impl SessionState {
             .any(|p| self.should_dial_libp2p_peer(*p) && !self.dm_peer_stream_up(*p))
     }
 
-    pub(crate) fn peer_has_pending_outbox(&self, peer: PeerId) -> bool {
+    /// Signing public key for a connected libp2p peer — roster entry first, then derive from
+    /// secp256k1 `PeerId` (stream can open before `merge_discovered` fills the roster row).
+    pub(crate) fn signing_pk_for_libp2p_peer(&self, peer: PeerId) -> Option<String> {
         self.dm_peer_for_libp2p(peer)
             .and_then(|d| d.public_key_hex.clone())
+            .filter(|pk| pk.len() == 66)
+            .or_else(|| secp256k1_public_key_hex_from_peer_id(&peer))
+    }
+
+    pub(crate) fn peer_has_pending_outbox(&self, peer: PeerId) -> bool {
+        self.signing_pk_for_libp2p_peer(peer)
             .is_some_and(|pk| self.has_pending_outbox_for_pk(&pk))
     }
 
@@ -2149,11 +2157,26 @@ impl SessionState {
             .is_some_and(|g| g.contains(id))
     }
 
+    /// Drop poll-merge holds once the transcript no longer lists a message as pending.
     fn purge_outbound_ack_pending_poll(&self, still_pending_ids: &HashSet<String>) {
         let Ok(mut g) = self.outbound_ack_pending_poll.write() else {
             return;
         };
         g.retain(|id| still_pending_ids.contains(id));
+    }
+
+    /// Transcript still marks delivery pending — allow re-merge into the outbox on reconnect
+    /// (`DESIGN.md`: `:p2p` owns resend; poll-merge hold is only until poll patches delivered).
+    fn release_outbox_merge_blocks_for_transcript_pending(
+        &self,
+        still_pending_ids: &HashSet<String>,
+    ) {
+        let Ok(mut g) = self.outbound_ack_pending_poll.write() else {
+            return;
+        };
+        for id in still_pending_ids {
+            g.remove(id);
+        }
     }
 
     fn outbox_due_for_resend(&self, now_ms: i64) -> Vec<PendingOutbound> {
@@ -2195,6 +2218,56 @@ impl SessionState {
             p.first_on_wire_ms = 0;
             p.last_send_ms = now_ms;
         }
+    }
+
+    /// Full peer disconnect: pending rows must be eligible for instant burst on the next stream-open
+    /// (DESIGN.md — delivery does not wait for hub room open).
+    fn reset_outbox_wire_state_for_peer(&self, peer: PeerId) {
+        let Some(pk) = self
+            .dm_peer_for_libp2p(peer)
+            .and_then(|d| d.public_key_hex.clone())
+            .filter(|pk| pk.len() == 66)
+            .or_else(|| secp256k1_public_key_hex_from_peer_id(&peer))
+        else {
+            return;
+        };
+        let Ok(mut g) = self.outbox.write() else {
+            return;
+        };
+        let now = chrono_now_ms();
+        let eligible = now.saturating_sub(OUTBOX_RESEND_INTERVAL_MS);
+        for p in g.values_mut() {
+            if !p.recipient_public_key_hex.eq_ignore_ascii_case(&pk) {
+                continue;
+            }
+            p.on_wire = false;
+            p.first_on_wire_ms = 0;
+            p.last_send_ms = eligible;
+        }
+    }
+
+    fn release_outbox_merge_blocks_for_peer_pending_transcript(&self, peer: PeerId) {
+        let (Some(path), Some(ns)) = (&self.transcript_path, &self.app_namespace) else {
+            return;
+        };
+        let Some(pk) = self.signing_pk_for_libp2p_peer(peer) else {
+            return;
+        };
+        let Ok(rows) =
+            crate::dm_transcript_v1::pending_outbound_rows(Path::new(path), ns.trim())
+        else {
+            return;
+        };
+        let peer_s = peer.to_string();
+        let pending: HashSet<String> = rows
+            .into_iter()
+            .filter(|r| {
+                let ck = r.conversation_key.as_str();
+                ck == peer_s || ck == pk
+            })
+            .map(|r| r.message_id)
+            .collect();
+        self.release_outbox_merge_blocks_for_transcript_pending(&pending);
     }
 
     fn outbox_contains(&self, message_id: &str) -> bool {
@@ -2284,6 +2357,8 @@ impl SessionState {
         if let Ok(mut g) = self.connected.write() {
             g.remove(peer);
         }
+        self.reset_outbox_wire_state_for_peer(*peer);
+        self.release_outbox_merge_blocks_for_peer_pending_transcript(*peer);
         self.clear_chat_ready_emitted(*peer);
         if let Ok(mut g) = self.history_replay_done.write() {
             g.remove(peer);

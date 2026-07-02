@@ -219,7 +219,7 @@ This is a **sensitive** product rule. Users expect mail they **received while ac
 
 1. `setAppAckReadEnabled(true)` first (read gate on before enter-room cmd may run on outbound queue).
 2. `setForegroundConversation(peer)` and await.
-3. Native: **`begin_chat_room_session`** + **`dispatch_read_ack_pass`** on enter (`RunReadAckCatchup` if gate opens after foreground was already set).
+3. Native: **`begin_chat_room_session`** + **`dispatch_read_ack_pass`** on enter. When **`SetForegroundPeer`** is skipped (same pk already foreground — e.g. Android **`inactive`→`resumed`**), **`p2p_sync_ui_session`** still queues **`RunReadAckCatchup`** so backlog **`ack_read`** drains (§ “Fixed 2026-06-29”).
 
 ### Inbound `received_at_ms` and read-ack eligibility
 
@@ -333,7 +333,7 @@ Native **`ack_read`** is gated on **`may_send_in_room_read_ack`** in **`ghal_bol
 | Linux read-gate nudge | Debounced **`GhalBolUiSession.nudge()`** (+ `setVisible(true)`) on inbound text / stream ready / preview bump / 8 s keepalive while room open — **belt-and-suspenders only**; primary fix is Linux `inactive` rule below. |
 | `node_ready` in hub | Poll refresh only (`setState`) — **no** extra session reapply from hub (bridge already runs `_reapplyDeferredSessionRpc` on `node_ready`). |
 | GTK minimize | `paused`/`hidden` do **not** clear room (minimize ≠ leave). |
-| **Linux `inactive`** | **Do not** `setVisible(false)`. GTK window drag / brief focus loss must **not** set `:p2p` `read=false` while chat pane is visible. Log: `lifecycle inactive on Linux — read gate unchanged`. **Android `inactive` still gates read off.** |
+| **Linux `inactive`** | **Do not** `setVisible(false)`. GTK window drag / brief focus loss must **not** set `:p2p` `read=false` while chat pane is visible. Log: `lifecycle inactive on Linux — read gate unchanged`. **Android `inactive` still gates read off** — no new **`ack_read`** while shade/task switcher; **`resumed`** must re-open the gate **and** native must run read catch-up (§ “Fixed 2026-06-29”). |
 
 **Delivery/read ticks (sender view):** blue tick only after peer **`ack_read`** patches transcript on poll (`mergeTranscriptFromNative(deliveryOnly: true)`). Never promote ticks in Dart.
 
@@ -418,6 +418,43 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Code:** `ghal_bol/src/p2p/chat_server/chat_room_session.rs`, `outbox_acks.rs` (`dispatch_read_ack_pass`, `seed_read_acks_for_peer_from_transcript`), `frames.rs`, `ghal_bol/src/dm_event_handler.rs` (`inbound_transcript_lookup_keys`, `apply_inbound_ack`). Tests: `apply_inbound_text_poll_replay_peer_id_bucket_no_double_unread`, `msg_v1::ack_received_includes_received_at_ms_in_signature`.
 
+#### Fixed 2026-06-29 — single tick after peer read, transcript order, background outbox
+
+**Symptoms (Android ↔ Linux desktop):**
+
+| Symptom | What users saw |
+|---------|----------------|
+| **Single tick while peer “already read”** | Reader had the thread on screen (sometimes during Android **`inactive`**); sender stayed at **`delivered`** — no **`ack_read`** on wire |
+| **Different last message** hub vs chat | Hub preview showed an older line; open chat sorted correctly by time |
+| **Outbox stuck after reconnect** | Pending outbound not draining until hub room opened; **`chat_ready`** with **`outbox_pending>0`** but no send |
+
+**Root causes (native):**
+
+1. **Android `inactive`→`resumed` skipped read catch-up.** Shade/task switcher sets **`read=false`** while foreground pk stays set. On **`resumed`**, **`p2p_sync_ui_session`** turned the read gate on but **`p2p_set_foreground_peer`** returned **`unchanged`** → no **`SetForegroundPeer`** enter pass and no **`RunReadAckCatchup`**. Mail viewed while the gate was off never got **`ack_read`** sent to the sender.
+
+2. **Transcript append order ≠ display order.** **`append_if_new`** appended at array tail while **`load_merged`** sorts by **`created_at_ms`**. Batches that crossed on the wire (local outbound after remote inbound with older timestamp) left disk order wrong and confused hub preview vs thread.
+
+3. **Hub preview not transcript-authoritative.** **`record_inbound_preview`** on poll could run before a later local outbound line was persisted, leaving **`last_message_preview`** stale.
+
+4. **Stream-open outbox ordering.** Periodic **`resync_pending_outbox`** running before the stream-open **burst** could mark rows **`on_wire`** within **`OUTBOX_RESEND_INTERVAL_MS`**, so the burst skipped them even when the peer never got the frame. **`chat_ready`** also ran before **`ensure_dm_peer_from_libp2p`** / transcript sync in some peer-key races.
+
+**Fix (shipped — Rust only):**
+
+| Area | Change |
+|------|--------|
+| Read catch-up on gate open | **`p2p_sync_ui_session`**: when **`ui_visible && room`**, always **`queue_read_ack_catchup`** after enabling read gate — even if foreground pk unchanged (`p2p_runtime.rs`) |
+| Transcript order | **`insert_line_in_thread_order`** in **`append_if_new`** — disk order matches **`created_at_ms`** sort (`dm_transcript_store.rs`) |
+| Hub preview | **`refresh_thread_preview_from_transcript`** on **`chat_ready`**; **`record_thread_message_preview`** on outbound send (`contacts_v1.rs`, `outbox_wire.rs`, `outbound.rs`) |
+| Background outbox | **`chat_ready`**: **`ensure_dm_peer_from_libp2p`** + transcript sync before emit; **burst before** periodic resync; burst skips only **`on_wire`** rows inside resend interval; transcript replay when in-memory outbox still pending (`outbox_wire.rs`, `dm_dial.rs`, `session.rs`) |
+
+**Regression — never reintroduce:**
+
+- Relying on **`SetForegroundPeer`** alone for read catch-up when Android **`inactive`** can skip it.
+- Treating “user saw the bubble” as **`ack_read`** without read gate + wire send.
+- Appending transcript lines without chronological insert (breaks preview refresh and merged load assumptions).
+
+**Code:** `p2p_runtime.rs` (`queue_read_catchup_for_room`), `dm_transcript_store.rs`, `contacts_v1.rs`, `outbox_wire.rs`, `dm_dial.rs`, `session.rs`. Tests: `append_if_new_inserts_by_created_at_ms_not_append_order`, `refresh_thread_preview_uses_latest_created_at_in_transcript`.
+
 ### Regression symptoms (treat as bugs)
 
 | Log / behaviour | Likely cause |
@@ -431,7 +468,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | Linux desktop: chat open, `ack_received` only, no `ack_read sent` | **Regression:** Linux **`inactive`** called `setVisible(false)` while room open (`read=false` in `ui_session_applied`). Fix: § “Fixed 2026-06-15 — Linux desktop read ticks”. **Do not** use forbidden `lastApplySucceeded` patch. |
 | Android/iOS: chat dead, `stream_ready_count=0`, many `room closed` + `leave drain` at hub open | **Regression:** forbidden session-sync patch or hub foreground storm — check log for burst `sync_ui_session` / `set_foreground_peer (none)` before first `chat_ready`. |
 | App “empty” after session churn, `conv=solo rows=0`, files still on disk under `ghal_bol/` | UI/session desync — not directory wipe. Do not create new identity; fix foreground sync. See forbidden patch table above. |
-| Single tick while peer “read” it | Recipient never sent `ack_read` (room/gate closed on **their** device) — check their logs for `ack_read sent`, not sender UI |
+| Single tick while peer “read” it | Recipient never sent `ack_read` (room/gate closed on **their** device — common: Android **`inactive`** without resume catch-up). Check **reader** logs: `ack_read sent`, `read gate opened — catch-up ack_read`. Sender: `patch outbound delivery=read`. § “Fixed 2026-06-29”. |
 | `inbound ack no matching row` / `has_out=false` on `ack_received` | Ack patch used single transcript bucket — fix merged keys (`inbound_transcript_lookup_keys`). § “Fixed 2026-06-19”. |
 | Desktop `read_ack_sent=true` on mass inbound, peer no blue tick | Loose confirm loop (`has_seen_inbound_id` in `mark_read_ack_confirmed`) — § “Fixed 2026-06-19”. |
 | `seeded N pending read ack(s)` with N ≫ room backlog (hundreds+) | Read-ack seed ignoring eligibility (`received_at_ms`, `read_ack_sent`, cutoff) — fix `dispatch_read_ack_pass`, not “seed all inbound”. |
@@ -492,8 +529,9 @@ Native applies in one place (`p2p_sync_ui_session` in `p2p_runtime.rs`):
 | Transition | Order |
 |------------|--------|
 | **Close room** | `SetForegroundPeer(null)` → leave drain → `app_ack_read_enabled=false` |
-| **Open room** (visible) | `app_ack_read_enabled=true` → `SetForegroundPeer(peer)` → enter catch-up |
-| **Inactive** (room still in UI stack) | `app_ack_read_enabled=false`; room peer unchanged in Flutter desired state |
+| **Open room** (visible) | `app_ack_read_enabled=true` → `SetForegroundPeer(peer)` if pk changed → **`RunReadAckCatchup`** always queued (`queue_read_catchup_for_room`) |
+| **Inactive** (room still in UI stack) | `app_ack_read_enabled=false`; foreground pk unchanged — **no** new in-room `ack_read` |
+| **Resumed** (same room) | `app_ack_read_enabled=true`; catch-up queued even when `SetForegroundPeer` is `unchanged` |
 
 **Safe default:** `app_ack_read_enabled` starts **`false`** until the integrator syncs an open, visible room.
 

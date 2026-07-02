@@ -3,7 +3,7 @@ fn sync_outbox_from_transcript(session: &SessionState, path: &Path, app_namespac
         return 0;
     };
     let still_pending: HashSet<String> = rows.iter().map(|r| r.message_id.clone()).collect();
-    session.purge_outbound_ack_pending_poll(&still_pending);
+    session.release_outbox_merge_blocks_for_transcript_pending(&still_pending);
     let mut merged = 0usize;
     for row in rows {
         if merge_outbound_row_into_outbox(session, &row) {
@@ -23,6 +23,7 @@ fn purge_outbox_delivered_from_transcript(
         return;
     };
     let still_pending: HashSet<String> = rows.into_iter().map(|r| r.message_id).collect();
+    session.purge_outbound_ack_pending_poll(&still_pending);
     let Ok(mut g) = session.outbox.write() else {
         return;
     };

@@ -1395,6 +1395,9 @@ pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) 
     if ui_visible {
         crate::p2p::set_app_ack_read_enabled(true);
         let r = p2p_set_foreground_peer(room);
+        // Android inactive keeps foreground pk but turns read gate off. On resumed the room is
+        // unchanged so SetForegroundPeer is skipped — still seed + drain ack_read backlog.
+        queue_read_catchup_for_room(room);
         if r.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             return json_ok(serde_json::json!({
                 "ok": true,
@@ -1496,6 +1499,21 @@ fn native_log_should_forward_to_ui(line: &native_log::NativeLogLine) -> bool {
         return true;
     }
     false
+}
+
+fn queue_read_catchup_for_room(room: Option<&str>) {
+    let Some(peer_pk) = room
+        .map(str::trim)
+        .filter(|s| s.len() == 66)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if let Ok(g) = p2p_mx().lock() {
+        if let Some(h) = g.as_ref() {
+            queue_read_ack_catchup(&h.out_tx, peer_pk);
+        }
+    }
 }
 
 fn foreground_room_unchanged(public_key_hex: Option<&str>) -> bool {

@@ -224,13 +224,13 @@ async fn handle_inbound_stream(
         }
         session.set_dm_stream_writer(peer, true);
         session.note_dm_inbound_activity(peer);
+        session.ensure_dm_peer_from_libp2p(peer);
         emit_chat_ready_if_can_send(
             Arc::clone(&session),
             peer,
             Arc::clone(&writers),
             events_tx.clone(),
         );
-        session.ensure_dm_peer_from_libp2p(peer);
         if let Some(pk) = session
             .dm_peer_for_libp2p(peer)
             .and_then(|d| d.public_key_hex.clone())

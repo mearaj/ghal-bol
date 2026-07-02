@@ -129,11 +129,11 @@ async fn resync_outbox_burst_for_peer(
     control: Option<stream::Control>,
 ) {
     refresh_outbox_peer_ids(session.as_ref());
-    let pk = session
-        .dm_peer_for_libp2p(peer)
-        .and_then(|d| d.public_key_hex.clone())
-        .filter(|pk| pk.len() == 66);
-    let Some(pk) = pk else {
+    let Some(pk) = session.signing_pk_for_libp2p_peer(peer) else {
+        native_log::info(
+            "outbox",
+            format!("burst skip {peer}: no signing pk for connected peer yet"),
+        );
         return;
     };
     let now = chrono_now_ms();
@@ -143,20 +143,30 @@ async fn resync_outbox_burst_for_peer(
         .ok()
         .map(|g| {
             g.values()
-                .filter(|p| p.recipient_public_key_hex.eq_ignore_ascii_case(&pk))
-                // Skip rows the ~1s periodic `resync_pending_outbox` just put on the wire. The
-                // burst intentionally ignores the resend interval to drain backlog instantly, but
-                // when stream-open and the 1s tick coincide (≈90ms apart, see logs) re-sending an
-                // already-in-flight row double-delivers it, so the peer replies with a **duplicate
-                // `ack_received`** for the same ref — the ack storm in TRANSPORT.md § Post-mortem
-                // 2026-06-25 (outbox double-send). Backlog rows (never sent this session →
-                // `last_send_ms` old/0) still satisfy this and drain immediately.
-                .filter(|p| now.saturating_sub(p.last_send_ms) >= OUTBOX_RESEND_INTERVAL_MS)
+                .filter(|p| {
+                    p.recipient_public_key_hex.eq_ignore_ascii_case(&pk) || p.peer_id == peer
+                })
+                // Skip only rows already on the wire within OUTBOX_RESEND_INTERVAL_MS — not failed
+                // sends (`on_wire=false`). Re-sending an in-flight row double-delivers and the peer
+                // emits duplicate `ack_received` (TRANSPORT.md § Post-mortem 2026-06-25). Backlog
+                // and not-yet-delivered rows drain immediately on stream-open.
+                .filter(|p| {
+                    !p.on_wire
+                        || now.saturating_sub(p.last_send_ms) >= OUTBOX_RESEND_INTERVAL_MS
+                })
                 .cloned()
                 .collect()
         })
         .unwrap_or_default();
     if rows.is_empty() {
+        if session.has_pending_outbox_for_pk(&pk) {
+            native_log::info(
+                "outbox",
+                format!(
+                    "burst skip {peer}: in-memory rows not eligible (on_wire/throttle) — transcript replay will retry"
+                ),
+            );
+        }
         return;
     }
     native_log::info(

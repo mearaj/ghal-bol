@@ -555,6 +555,13 @@ async fn process_outbound_cmd(
                             format!("transcript append outbound failed msg_id={message_id}: {e}"),
                         ),
                     }
+                    let _ = crate::contacts_v1::record_thread_message_preview(
+                        ns,
+                        &conv_key,
+                        &text,
+                        false,
+                        Some(now),
+                    );
                 }
             }
             native_log::info(

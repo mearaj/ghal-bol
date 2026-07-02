@@ -7,6 +7,10 @@ fn emit_chat_ready_if_can_send(
     if !session.is_dm_contact(peer) || !writer_open_for_peer(&writers, peer) {
         return;
     }
+    session.ensure_dm_peer_from_libp2p(peer);
+    if let (Some(path), Some(ns)) = (&session.transcript_path, &session.app_namespace) {
+        transcript_sync_outbound_tick(session.as_ref(), Path::new(path), ns.trim());
+    }
     let first = session
         .chat_ready_emitted
         .write()
@@ -25,12 +29,10 @@ fn emit_chat_ready_if_can_send(
             "stream",
             format!("chat_ready {peer} — chat stream open, can send now (outbox_pending={has_outbox})"),
         );
-        if let Some(pk) = session
-            .dm_peer_for_libp2p(peer)
-            .and_then(|d| d.public_key_hex.clone())
-            .filter(|pk| pk.len() == 66)
-        {
-            session.clear_dm_reconnect_urgent(&pk);
+        if let Some(pk) = session.signing_pk_for_libp2p_peer(peer) {
+            if !session.has_pending_outbox_for_pk(&pk) {
+                session.clear_dm_reconnect_urgent(&pk);
+            }
         }
         if let Some(tx) = events_tx.clone() {
             let _ = tx.send(GossipChatEvent::ChatReady { peer_id: peer });
@@ -39,21 +41,22 @@ fn emit_chat_ready_if_can_send(
     let session2 = Arc::clone(&session);
     let writers2 = Arc::clone(&writers);
     tokio::spawn(async move {
-        if let (Some(path), Some(ns)) = (&session2.transcript_path, &session2.app_namespace) {
-            transcript_sync_outbound_tick(session2.as_ref(), Path::new(path), ns.trim());
-        }
-        resync_pending_outbox(
-            session2.clone(),
-            writers2.clone(),
-            vec![peer],
-            events_tx.clone(),
-            None,
-        )
-        .await;
+        // Burst before the ~1s periodic resync in this task: backlog must drain on stream-open
+        // without waiting for upkeep (DESIGN.md — :p2p owns background delivery). Running periodic
+        // resync first marks rows on_wire within OUTBOX_RESEND_INTERVAL_MS and the burst would
+        // skip them even when the peer never got the frame (TRANSPORT.md § outbox burst ordering).
         resync_outbox_burst_for_peer(
             session2.clone(),
             writers2.clone(),
             peer,
+            events_tx.clone(),
+            None,
+        )
+        .await;
+        resync_pending_outbox(
+            session2.clone(),
+            writers2.clone(),
+            vec![peer],
             events_tx.clone(),
             None,
         )
@@ -75,14 +78,33 @@ fn emit_chat_ready_if_can_send(
         // Read receipts: only on room enter (`RunReadAckCatchup` / `SetForegroundPeer`), inbound
         // text while in-room, leave drain, and ack upkeep — never on automatic stream reopen
         // after network handover (would mark unread mail read on the sender).
+        // Transcript-authoritative fallback when in-memory outbox missed rows (peer-key race on
+        // stream open, stale merge). Once per connection; no room/foreground gate (DESIGN.md).
         let first_replay = session2
             .history_replay_done
             .write()
             .ok()
             .is_some_and(|mut g| g.insert(peer));
-        if first_replay {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            replay_conversation_history(session2, writers2, peer).await;
+        if first_replay
+            && session2
+                .signing_pk_for_libp2p_peer(peer)
+                .is_some_and(|pk| session2.has_pending_outbox_for_pk(&pk))
+        {
+            replay_conversation_history(session2.clone(), writers2, peer).await;
+        }
+        if let Some(pk) = session2.signing_pk_for_libp2p_peer(peer) {
+            if let Some(ns) = session2
+                .app_namespace
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let _ = crate::contacts_v1::refresh_thread_preview_from_transcript(
+                    ns,
+                    &pk,
+                    Some(&peer.to_string()),
+                );
+            }
         }
     });
 }
@@ -102,13 +124,9 @@ async fn replay_conversation_history(
     if !writer_open_for_peer(&writers, peer) {
         return;
     }
-    let dm = match session.dm_peer_for_libp2p(peer) {
-        Some(d) => d,
+    let recipient_pk = match session.signing_pk_for_libp2p_peer(peer) {
+        Some(pk) => pk,
         None => return,
-    };
-    let recipient_pk = match dm.public_key_hex.as_deref() {
-        Some(s) if s.len() == 66 => s,
-        _ => return,
     };
     let Ok(rows) = crate::dm_transcript_v1::pending_outbound_rows(Path::new(&path), &ns) else {
         return;
@@ -149,7 +167,7 @@ async fn replay_conversation_history(
         tokio::time::sleep(Duration::from_millis(HISTORY_REPLAY_SPACING_MS)).await;
     }
     if sent > 0 {
-        native_log::debug(
+        native_log::info(
             "history",
             format!("replayed {sent} pending outbound line(s) to {peer}"),
         );
