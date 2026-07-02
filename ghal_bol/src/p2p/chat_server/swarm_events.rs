@@ -617,6 +617,10 @@ fn handle_swarm_event(
                 );
                 if session.is_dm_contact(src_peer_id) {
                     session.note_relay_circuit_pending_peer(src_peer_id);
+                    if should_mark_relay_inbound_handover(session, src_peer_id) {
+                        session.mark_relay_inbound_handover_peer(src_peer_id);
+                        session.request_lan_listen_rediscovery(src_peer_id);
+                    }
                     // Remote peer re-dialed on relay after leaving LAN — kick WAN mux recovery on
                     // the Wi‑Fi side (asymmetric inbound-only duplicate mux, 07:23 logs).
                     let asymmetric_relay =

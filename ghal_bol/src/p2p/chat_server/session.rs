@@ -151,6 +151,9 @@ pub(crate) struct SessionState {
     /// One-shot bypass of `WAN_MUX_RECONCILE_THROTTLE_MS` after relay `InboundCircuitEstablished`
     /// (TRANSPORT.md § Asymmetric mux — Wi‑Fi side must not wait 5s while remote re-dials on relay).
     asymmetric_relay_recover_urgent: RwLock<HashSet<PeerId>>,
+    /// Fresh relay `InboundCircuitEstablished` during `lan_listen_rediscovery` — mobile peer re-dialed
+    /// on WAN while we still hold lingering direct (flutter_linux.log 2026-07-02 05:41:22).
+    relay_inbound_handover_peers: RwLock<HashSet<PeerId>>,
     /// Throttle repetitive coord lookup INFO logs (especially peer_not_on_coord).
     coord_lookup_info_log_ms: RwLock<HashMap<String, i64>>,
     /// Active native voice-call media sessions, keyed by `call_id`. Each entry holds the
@@ -320,6 +323,7 @@ impl SessionState {
             lan_listen_rediscovery_peers: RwLock::new(HashSet::new()),
             pending_dm_link_reset: RwLock::new(HashSet::new()),
             asymmetric_relay_recover_urgent: RwLock::new(HashSet::new()),
+            relay_inbound_handover_peers: RwLock::new(HashSet::new()),
             coord_lookup_info_log_ms: RwLock::new(HashMap::new()),
             call_media: Mutex::new(HashMap::new()),
             call_video: Mutex::new(HashMap::new()),
@@ -627,7 +631,7 @@ impl SessionState {
         false
     }
 
-    fn request_lan_listen_rediscovery(&self, peer: PeerId) {
+    pub(crate) fn request_lan_listen_rediscovery(&self, peer: PeerId) {
         if let Ok(mut s) = self.lan_listen_rediscovery_peers.write() {
             s.insert(peer);
         }
@@ -637,6 +641,7 @@ impl SessionState {
         if let Ok(mut s) = self.lan_listen_rediscovery_peers.write() {
             s.remove(&peer);
         }
+        self.clear_relay_inbound_handover_peer(peer);
     }
 
     /// After LAN→WAN handover — drop mDNS candidates + on-LAN TTL that block asymmetric mux recovery.
@@ -717,6 +722,14 @@ impl SessionState {
         }
     }
 
+    fn pending_interface_drift_lan_kick(&self) -> bool {
+        self.pending_full_lan_kick_reason
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some_and(|r| r == "interface drift")
+    }
+
     fn take_pending_full_lan_kick_reason(&self) -> Option<String> {
         self.pending_full_lan_kick_reason
             .write()
@@ -768,7 +781,7 @@ impl SessionState {
             .any(|p| self.should_dial_libp2p_peer(*p) && !self.dm_peer_stream_up(*p))
     }
 
-    fn peer_has_pending_outbox(&self, peer: PeerId) -> bool {
+    pub(crate) fn peer_has_pending_outbox(&self, peer: PeerId) -> bool {
         self.dm_peer_for_libp2p(peer)
             .and_then(|d| d.public_key_hex.clone())
             .is_some_and(|pk| self.has_pending_outbox_for_pk(&pk))
@@ -1096,6 +1109,26 @@ impl SessionState {
     fn mark_asymmetric_relay_recover_urgent(&self, peer: PeerId) {
         if let Ok(mut g) = self.asymmetric_relay_recover_urgent.write() {
             g.insert(peer);
+        }
+    }
+
+    /// Mobile peer re-dialed inbound on relay during our LAN rediscovery window.
+    pub(crate) fn mark_relay_inbound_handover_peer(&self, peer: PeerId) {
+        if let Ok(mut g) = self.relay_inbound_handover_peers.write() {
+            g.insert(peer);
+        }
+    }
+
+    pub(crate) fn relay_inbound_handover_active(&self, peer: PeerId) -> bool {
+        self.relay_inbound_handover_peers
+            .read()
+            .ok()
+            .is_some_and(|g| g.contains(&peer))
+    }
+
+    pub(crate) fn clear_relay_inbound_handover_peer(&self, peer: PeerId) {
+        if let Ok(mut g) = self.relay_inbound_handover_peers.write() {
+            g.remove(&peer);
         }
     }
 
@@ -1450,7 +1483,7 @@ impl SessionState {
     /// Transcript-restored ghost rows (never on wire this session) must **not** count — they have
     /// ancient `created_at_ms` and falsely trip reconcile every upkeep tick (flutter_linux.log
     /// 2026-06-28: `close stale direct` every ~5s while relay inbound still delivered).
-    fn peer_outbound_stuck_for(&self, peer: PeerId, now_ms: i64, min_ms: i64) -> bool {
+    pub(crate) fn peer_outbound_stuck_for(&self, peer: PeerId, now_ms: i64, min_ms: i64) -> bool {
         if self.has_pending_delivery_acks_older_than(peer, now_ms, min_ms) {
             return true;
         }

@@ -581,6 +581,12 @@ pub(crate) fn relay_bootstrap_family_rank(ma: &Multiaddr, mobile: bool, ipv6_deg
     }
 }
 
+/// CGNAT / shared address space (100.64.0.0/10) — Tailscale, carrier NAT, etc. Not home LAN RFC1918.
+pub(crate) fn is_cgnat_shared_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (o[1] & 0xC0) == 64
+}
+
 pub(crate) fn ipv4_from_ma_str(s: &str) -> Option<std::net::Ipv4Addr> {
     let host = s.split("/ip4/").nth(1)?.split('/').next()?;
     host.parse().ok()
@@ -1216,5 +1222,12 @@ mod tests {
         cell.os.default_transport = OsDefaultTransport::Cellular;
         cell.os.wifi_link_up = false;
         assert_ne!(network_handover_key(&wifi), network_handover_key(&cell));
+    }
+
+    #[test]
+    fn cgnat_shared_ipv4_detects_tailscale_range() {
+        assert!(is_cgnat_shared_ipv4("100.89.67.185".parse().unwrap()));
+        assert!(!is_cgnat_shared_ipv4("192.168.1.41".parse().unwrap()));
+        assert!(!is_cgnat_shared_ipv4("10.0.0.1".parse().unwrap()));
     }
 }

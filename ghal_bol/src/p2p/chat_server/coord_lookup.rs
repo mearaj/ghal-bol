@@ -241,10 +241,68 @@ fn peer_has_stale_direct_lan_conn(session: &SessionState, peer: PeerId) -> bool 
     true
 }
 
+/// Wi‑Fi side: mobile peer re-dialed inbound on relay while we still hold direct — set session
+/// flag so step 6 adopt + step 7 no-defer fire before stale mDNS / Symptom C (05:56:22 soak).
+pub(crate) fn should_mark_relay_inbound_handover(session: &SessionState, peer: PeerId) -> bool {
+    if !session.network_profile_snapshot().has_active_lan() {
+        return false;
+    }
+    if session.lan_listen_rediscovery_requested(peer) {
+        return true;
+    }
+    if peer_wan_asymmetric_mux_likely(session, peer) {
+        return true;
+    }
+    if !peer_has_lingering_direct(session, peer) {
+        return false;
+    }
+    let now_ms = chrono_now_ms();
+    // In-flight or queued outbound while remote opens relay inbound — not healthy parallel LAN+WAN
+    // (direct acks land in well under 1s when the mux is live).
+    session.peer_outbound_stuck_for(peer, now_ms, 0) || session.peer_has_pending_outbox(peer)
+}
+
+/// Wi‑Fi side relay-only handover: mobile peer re-dialed on relay while we hunt LAN but hold **no**
+/// direct `ConnectionId`s — writer may sit on a pre-handover relay mux (flutter_linux.log
+/// 2026-07-02 05:29:54). Requires `lan_listen_rediscovery_requested` so healthy parallel
+/// LAN+WAN on the same subnet (relay **and** direct both up) stays on `peer_has_stale_direct_lan_conn`.
+fn peer_relay_inbound_handover_mux_recovery(session: &SessionState, peer: PeerId) -> bool {
+    if !session.network_profile_snapshot().has_active_lan() {
+        return false;
+    }
+    // Event-driven handover — adopt immediately; do not wait for 4s Symptom C or lan rediscovery.
+    if session.relay_inbound_handover_active(peer) {
+        return true;
+    }
+    if !session.lan_listen_rediscovery_requested(peer) {
+        return false;
+    }
+    if !session.peer_has_relay_connection(peer) {
+        return false;
+    }
+    if peer_has_lingering_direct(session, peer) {
+        return false;
+    }
+    let now_ms = chrono_now_ms();
+    // Symptom C — direct LAN mux still draining; not relay-only WAN handover.
+    if session.peer_has_direct_connection(peer)
+        && session.dm_peer_stream_up(peer)
+        && session.dm_mux_recently_active(peer, now_ms)
+        && !session.peer_outbound_stuck_for(peer, now_ms, LAN_HANDOVER_STUCK_MS)
+    {
+        return false;
+    }
+    true
+}
+
 /// Relay already established but a stale direct LAN mux lingers — recover on the existing relay
 /// (close direct + stream reopen), not by opening another circuit (TRANSPORT.md § Asymmetric mux).
+/// Also true for relay-only inbound handover (no lingering direct) during `lan_listen_rediscovery`.
 pub(crate) fn asymmetric_relay_recover_on_existing_link(session: &SessionState, peer: PeerId) -> bool {
     if peer_wan_asymmetric_mux_likely(session, peer) {
+        return true;
+    }
+    if peer_relay_inbound_handover_mux_recovery(session, peer) {
         return true;
     }
     session.peer_has_relay_connection(peer) && peer_has_stale_direct_lan_conn(session, peer)
@@ -255,6 +313,10 @@ pub(crate) fn asymmetric_relay_recover_on_existing_link(session: &SessionState, 
 /// open_stream deadlock on relay). Mobile-data re-dialer must not defer (no active LAN).
 fn should_defer_outbound_stream_for_asymmetric_relay(session: &SessionState, peer: PeerId) -> bool {
     if !session.network_profile_snapshot().has_active_lan() {
+        return false;
+    }
+    // Peer already opened inbound on relay — adopt (step 6), do not defer our outbound.
+    if session.relay_inbound_handover_active(peer) {
         return false;
     }
     session.peer_has_relay_connection(peer) && peer_has_stale_direct_lan_conn(session, peer)

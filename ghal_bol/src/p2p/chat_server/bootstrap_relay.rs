@@ -1046,9 +1046,73 @@ fn handle_lan_interface_drift(
         "net",
         format!("LAN interface drift {old_mode} -> {new_mode} (listen sync only)"),
     );
+    let now_ms = chrono_now_ms();
+    // TRANSPORT.md § Deferred full LAN kick — do not close/rebind ephemeral TCP while coord
+    // relay bootstrap or circuit is live (Wi‑Fi→cell flickers lan→lan before `left LAN`).
+    if interface_drift_should_defer_full_kick(session, swarm, now_ms) {
+        native_log::info(
+            "net",
+            "LAN interface drift — defer full kick (relay bootstrap/circuit up); soft nudge",
+        );
+        soft_lan_rediscovery_nudge(swarm, session, "interface drift — defer full TCP rebind");
+        session.note_pending_full_lan_kick("interface drift");
+        refresh_coord_presence_soft(swarm, session, coord_relays);
+        return;
+    }
+    // CGNAT/VPN-only listen, bootstrap not up yet — soft nudge only (no full kick).
+    if interface_drift_cgnat_only_listen(swarm) {
+        native_log::info(
+            "net",
+            "LAN interface drift — CGNAT/VPN-only listen; soft nudge, relay kept",
+        );
+        soft_lan_rediscovery_nudge(swarm, session, "interface drift CGNAT/VPN-only");
+        refresh_coord_presence_soft(swarm, session, coord_relays);
+        let need_bootstrap = ghalbol_relay_peer(session)
+            .map(|relay| !has_tracked_bootstrap_tcp(session, relay))
+            .unwrap_or(true);
+        if need_bootstrap {
+            ensure_coord_relays_connected(swarm, session, coord_relays);
+        }
+        return;
+    }
     kick_lan_dm_rediscovery_after_handover(swarm, session, "interface drift", false);
     refresh_coord_presence_soft(swarm, session, coord_relays);
     ensure_coord_relays_connected(swarm, session, coord_relays);
+}
+
+/// Defer interface-drift full kick while parallel WAN bootstrap/circuit is live (TRANSPORT.md § Deferred full LAN kick).
+fn interface_drift_should_defer_full_kick(
+    session: &SessionState,
+    swarm: &Swarm<ChatBehaviour>,
+    now_ms: i64,
+) -> bool {
+    let bootstrap_tracked = ghalbol_relay_peer(session)
+        .map(|relay| has_tracked_bootstrap_tcp(session, relay))
+        .unwrap_or(false);
+    if !bootstrap_tracked {
+        return false;
+    }
+    if session.any_dm_circuit_dial_in_flight(now_ms) {
+        return true;
+    }
+    if relay_circuit_listening(swarm) {
+        return true;
+    }
+    session.wan_recovery_active.load(Ordering::Relaxed)
+}
+
+fn swarm_has_cgnat_shared_dm_listen(swarm: &Swarm<ChatBehaviour>) -> bool {
+    swarm.listeners().any(|ma| {
+        crate::p2p::network_transport::is_dm_listen_tcp_multiaddr(ma)
+            && !crate::p2p::network_transport::is_relay_circuit_multiaddr(ma)
+            && crate::p2p::network_transport::ipv4_from_ma_str(&ma.to_string())
+                .is_some_and(crate::p2p::network_transport::is_cgnat_shared_ipv4)
+    })
+}
+
+/// Interface drift soft path: CGNAT/VPN (100.64/10) DM listen with no active RFC1918 LAN listen.
+fn interface_drift_cgnat_only_listen(swarm: &Swarm<ChatBehaviour>) -> bool {
+    swarm_has_cgnat_shared_dm_listen(swarm) && !swarm_has_lan_dm_listen(swarm)
 }
 
 /// True when Wi‑Fi is linked enough to run LAN listen + mDNS (profile may lag after toggle).
@@ -1381,6 +1445,7 @@ fn apply_peer_left_local_lan(
 
 /// Wi‑Fi → mobile-data handover — TRANSPORT.md § “LAN ↔ WAN handover” (parallel; keep relay links).
 fn apply_left_lan_handover(swarm: &mut Swarm<ChatBehaviour>, session: &SessionState) {
+    session.clear_pending_full_lan_kick();
     for peer in session.dm_peer_ids() {
         session.forget_peer_on_local_lan(peer);
         session.clear_lan_dial_in_flight(peer);
@@ -1842,6 +1907,11 @@ fn try_flush_pending_full_lan_kick(
     now_ms: i64,
 ) {
     if session.any_dm_circuit_dial_in_flight(now_ms) {
+        return;
+    }
+    // Interface drift (lan→lan before `left LAN`): soft nudge only — pending cleared by
+    // `apply_left_lan_handover`, never a deferred full TCP rebind (TRANSPORT.md § Deferred full LAN kick).
+    if session.pending_interface_drift_lan_kick() {
         return;
     }
     let Some(reason) = session.take_pending_full_lan_kick_reason() else {

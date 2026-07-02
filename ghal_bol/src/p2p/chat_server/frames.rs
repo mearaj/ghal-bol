@@ -162,6 +162,7 @@ fn adopt_duplicate_mux_as_writer(
         "stream",
         format!("inbound on duplicate mux from {peer} — adopt live writer (stale mux replaced)"),
     );
+    session.clear_relay_inbound_handover_peer(peer);
     // Evict the stale writer (drops its mpsc tx → its write task ends; generation guard stops that
     // task from clearing the slot we are about to install).
     invalidate_dm_chat_stream(session.as_ref(), &writers, peer);
