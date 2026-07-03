@@ -11,6 +11,7 @@ import "chat_screen.dart";
 import "chat_transcript_store.dart";
 import "contact_store.dart";
 import "contacts_screen.dart";
+import "embedder_storage.dart";
 import "ghal_bol_constants.dart";
 import "native_build_hint.dart";
 import "ghal_bol_ffi.dart";
@@ -529,6 +530,42 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     if (pending != null && mounted) {
       await _joinFromUri(pending);
     }
+    unawaited(_checkUnusedAppRestrictions());
+  }
+
+  static bool _backgroundCheckDone = false;
+
+  Future<void> _checkUnusedAppRestrictions() async {
+    if (_backgroundCheckDone) return;
+    _backgroundCheckDone = true;
+    if (!Platform.isAndroid) return;
+    final enabled = await isUnusedAppPauseEnabled();
+    if (!enabled || !mounted) return;
+    AppLog.instance.flow("Hub", "unused app pause enabled — showing prompt");
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Background messaging restricted"),
+        content: const Text(
+          '"Pause app activity if unused" is enabled for Ghal Bol. '
+          "This prevents the app from receiving messages when the screen is off.\n\n"
+          "Please disable it in the next screen to ensure reliable message delivery.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text("Later"),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              openUnusedAppSettings();
+            },
+            child: const Text("Open Settings"),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _reloadContactsListOnly() async {

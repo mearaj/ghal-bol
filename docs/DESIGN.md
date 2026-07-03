@@ -455,6 +455,24 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Code:** `p2p_runtime.rs` (`queue_read_catchup_for_room`), `dm_transcript_store.rs`, `contacts_v1.rs`, `outbox_wire.rs`, `dm_dial.rs`, `session.rs`. Tests: `append_if_new_inserts_by_created_at_ms_not_append_order`, `refresh_thread_preview_uses_latest_created_at_in_transcript`.
 
+#### Fixed 2026-07-03 — Android display off: no delivery ack (single tick)
+
+**Symptom:** When the Android display turns off, the device stops sending **`ack_received`** (single tick) for inbound messages. The sender sees no tick. As soon as the display unlocks, messages flow immediately. Issue present on both Wi-Fi and mobile data, while other messaging apps work fine.
+
+**Root cause:** Android's **"Pause app activity if unused"** (API 30+ auto-revoke / app hibernation) was enabled by default. This allows Android to suspend background activity for the app, including the `:p2p` foreground service's tokio event loop. The daemon process stays alive but its CPU scheduling is throttled — libp2p connections time out, keepalive pings don't fire, and inbound messages never arrive. On display unlock, Android lifts the restriction and the event loop resumes immediately.
+
+**Not the cause:** Wi-Fi power save — the issue occurs identically on mobile data, and other apps with persistent connections work fine. The `ack_received` code path is **never** gated on `app_ui_visible`.
+
+**Fix (three layers, automatic → fallback):**
+
+1. **Battery optimization whitelist (automatic, one-time):** On hub bootstrap, `isBatteryOptimized()` checks `PowerManager.isIgnoringBatteryOptimizations()`. If the app is **not** whitelisted, `requestBatteryOptimizationExemption()` fires `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` — a **standard Android system dialog** ("Allow app to always run in the background?"). Once the user taps "Allow", the whitelist is **permanent** (survives reboots). This is what WhatsApp, Telegram, and Signal do. Requires manifest permission `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (Play Store allows this for messaging apps).
+
+2. **Hibernation fallback prompt:** If after battery whitelist, `isUnusedAppPauseEnabled()` still reports `isAutoRevokeWhitelisted == false` (app hibernation active), a custom dialog guides the user to the app settings page to toggle off "Pause app activity if unused". This covers edge cases where the battery whitelist alone doesn't disable hibernation (OEM-specific). Note: `setAutoRevokeWhitelisted` requires `WHITELIST_AUTO_REVOKE_PERMISSIONS` (system-level only) — apps cannot disable hibernation programmatically; the user must toggle it. On devices where the foreground service auto-disables this toggle, the check returns `false` and no prompt is shown.
+
+3. **Defensive `WifiLock`:** `GhalBolP2pService` holds a `WifiManager.WifiLock` (`WIFI_MODE_FULL_LOW_LATENCY` on API 29+) alongside the existing `PARTIAL_WAKE_LOCK` and `MulticastLock`, preventing Wi-Fi power-save from degrading TCP on aggressive OEMs.
+
+**Code:** `AndroidManifest.xml` (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`), `MainActivity.kt` (`isBatteryOptimized`, `requestBatteryOptimizationExemption`, `isUnusedAppPauseEnabled`, `openUnusedAppSettings`), `embedder_storage.dart`, `chat_hub_screen.dart` (`_checkUnusedAppRestrictions`), `GhalBolP2pService.kt` (`acquireWifiLock`).
+
 ### Regression symptoms (treat as bugs)
 
 | Log / behaviour | Likely cause |

@@ -1,8 +1,11 @@
 package com.ghalbol
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -27,6 +30,20 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "dataRootForFfi" ->
                         result.success(NativeStorage.dataRoot(applicationContext).absolutePath)
+                    "isBatteryOptimized" -> {
+                        result.success(isBatteryOptimized())
+                    }
+                    "requestBatteryOptimizationExemption" -> {
+                        requestBatteryOptimizationExemption()
+                        result.success(null)
+                    }
+                    "isUnusedAppPauseEnabled" -> {
+                        result.success(isUnusedAppPauseEnabled())
+                    }
+                    "openUnusedAppSettings" -> {
+                        openUnusedAppSettings()
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -182,5 +199,68 @@ class MainActivity : FlutterActivity() {
             "openedFromNotification",
             mapOf("publicKeyHex" to pk, "displayName" to name),
         )
+    }
+
+    private fun isBatteryOptimized(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        return try {
+            val pm = getSystemService(POWER_SERVICE) as? PowerManager ?: return false
+            !pm.isIgnoringBatteryOptimizations(packageName)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    @Suppress("BatteryLife")
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        try {
+            val pm = getSystemService(POWER_SERVICE) as? PowerManager ?: return
+            if (pm.isIgnoringBatteryOptimizations(packageName)) return
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName"),
+                ),
+            )
+        } catch (e: Throwable) {
+            android.util.Log.w("GhalBol", "requestBatteryOptExemption: ${e.message}")
+        }
+    }
+
+    private fun isUnusedAppPauseEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return try {
+            !packageManager.isAutoRevokeWhitelisted
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun openUnusedAppSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", packageName, null)
+                    },
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startActivity(
+                    Intent(Intent.ACTION_AUTO_REVOKE_PERMISSIONS).apply {
+                        data = Uri.fromParts("package", packageName, null)
+                    },
+                )
+            }
+        } catch (e: Throwable) {
+            android.util.Log.w("GhalBol", "openUnusedAppSettings: ${e.message}")
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", packageName, null)
+                    },
+                )
+            } catch (_: Throwable) {}
+        }
     }
 }
