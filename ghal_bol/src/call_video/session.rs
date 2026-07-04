@@ -292,7 +292,15 @@ mod tests {
             b_ctl.clone(),
         ));
 
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        // Wait for all 8 frames to arrive at B (deterministic instead of fixed sleep).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let count = b_rendered.lock().unwrap().len();
+            if count >= 8 || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
         a_ctl.request_stop();
         b_ctl.request_stop();
         let _ = tokio::time::timeout(Duration::from_secs(2), a).await;
@@ -300,7 +308,6 @@ mod tests {
 
         let rendered = b_rendered.lock().unwrap();
         assert!(!rendered.is_empty(), "B rendered no frames from A");
-        // The exact frames A captured must reappear (NullVideoCodec is lossless).
         assert!(
             rendered.iter().any(|f| *f == frame(1)),
             "first frame missing"
