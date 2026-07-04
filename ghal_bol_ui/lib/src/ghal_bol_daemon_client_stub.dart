@@ -39,4 +39,8 @@ class GhalBolDaemonClient {
   Future<void> disconnect() async {}
 
   Future<void> stopSession() async {}
+
+  static Future<void> installLinuxAutostart() async {}
+
+  static Future<void> removeLinuxAutostart() async {}
 }

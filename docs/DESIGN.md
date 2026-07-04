@@ -473,6 +473,48 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Code:** `AndroidManifest.xml` (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`), `MainActivity.kt` (`isBatteryOptimized`, `requestBatteryOptimizationExemption`, `isUnusedAppPauseEnabled`, `openUnusedAppSettings`), `embedder_storage.dart`, `chat_hub_screen.dart` (`_checkUnusedAppRestrictions`), `GhalBolP2pService.kt` (`acquireWifiLock`).
 
+#### Boot auto-start and unlock notification
+
+**Problem:** After device reboot, the `:p2p` service is dead — no messages are received until the user manually opens the app and enters their password.
+
+**Solution:** A `BOOT_COMPLETED` receiver starts the service automatically when a keystore file exists (user has previously created or imported an identity). The daemon runs locked (cannot decrypt the secp256k1 key without the password), so it posts a high-priority notification prompting the user to open the app and unlock.
+
+**Flow:**
+
+1. **Device boots** → `BootReceiver.onReceive()` checks `hasKeystore()` (looks for `keystore_v1.json` under `NativeStorage.dataRoot`). If found, starts `GhalBolP2pService` via `startForegroundService`.
+2. **Service starts** → `onStartCommand` runs normal setup (wake lock, wifi lock, multicast lock, daemon thread, connectivity callbacks), then calls `postUnlockNotificationIfNeeded()`.
+3. **Unlock notification** → posted on `ghalbol_unlock` channel (`IMPORTANCE_HIGH` for heads-up) with `PendingIntent` to `MainActivity`. Title: "Ghal Bol", body: "Enter your password to start receiving messages". `setAutoCancel(true)`.
+4. **User taps notification** (or opens app manually) → `MainActivity` starts → Flutter shows `IdentityScreen` → user enters password → FFI unlock + daemon unlock RPC → P2P starts.
+5. **Notification dismissed** → `cancelUnlockNotification()` called from `chat_hub_screen.dart` on hub bootstrap, and from `GhalBolP2pService` on logout stop.
+
+**Same logic for `START_STICKY`:** `postUnlockNotificationIfNeeded` runs in `onStartCommand`, so if Android restarts the service after a process kill (while the Flutter UI process is dead and `SessionCredentials` lost), the same notification flow applies.
+
+**No keystore = no boot start:** If the user has never created an identity (fresh install), `BootReceiver` does nothing — no service start, no notification.
+
+**Code:** `BootReceiver.kt`, `AndroidManifest.xml` (`RECEIVE_BOOT_COMPLETED` + `<receiver>`), `GhalBolP2pService.kt` (`postUnlockNotificationIfNeeded`, `cancelUnlockNotification`, `UNLOCK_CHANNEL_ID`), `MainActivity.kt` (`cancelUnlockNotification` method channel), `embedder_storage.dart` (`cancelUnlockNotification()`), `chat_hub_screen.dart` (hub bootstrap cancel).
+
+#### Linux desktop — daemon auto-start and unlock notification
+
+**Problem:** After a system reboot or fresh login, `ghal_bol_daemon` is not running. The user must manually open the app to start receiving messages.
+
+**Solution:** XDG autostart entry + daemon-side unlock notification (same UX as the Android flow).
+
+**Flow:**
+
+1. **XDG autostart install:** On the first successful daemon unlock, Flutter writes `~/.config/autostart/com.ghalbol.daemon.desktop` with `Exec=<absolute_daemon_path>`. Re-runs on each unlock to update the path if the bundle moved. Removed on logout via `removeLinuxAutostart()`.
+
+2. **Login → daemon starts** via XDG autostart. No keystore password available — session stays locked.
+
+3. **Unlock reminder (10 s grace):** The daemon spawns a thread that sleeps 10 seconds. If `session_unlocked()` is still false (no UI connected and unlocked in time), it posts a `notify-rust` desktop notification: "Ghal Bol — Enter your password to start receiving messages". The notification action runs `gtk-launch com.ghalbol` to open the Flutter app.
+
+4. **User clicks notification** → Flutter app opens → `IdentityScreen` (password) → unlock → daemon gets the `unlock` RPC → P2P starts.
+
+5. **Grace period prevents false notifications:** When the user opens the app normally (which spawns the daemon via `ensureDaemonRunning`), unlock happens within seconds — the 10 s timer never fires.
+
+**Systemd alternative:** `scripts/ghal-bol-daemon.user.service` is still available for users who prefer `systemctl --user enable`. The daemon notification works the same way regardless of how it was started.
+
+**Code:** `ghal_bol_daemon.rs` (`spawn_unlock_reminder`), `lib.rs` (`pub use session_unlocked`), `ghal_bol_daemon_client_io.dart` (`installLinuxAutostart`, `removeLinuxAutostart`), `ghal_bol_daemon.dart` (forwarding), `bootstrap_native.dart` (install on unlock), `ghal_bol_background.dart` (remove on logout).
+
 ### Regression symptoms (treat as bugs)
 
 | Log / behaviour | Likely cause |

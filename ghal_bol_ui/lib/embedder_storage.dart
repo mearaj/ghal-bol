@@ -68,3 +68,12 @@ Future<void> openUnusedAppSettings() async {
     await _embedderChannel.invokeMethod<void>("openUnusedAppSettings");
   } catch (_) {}
 }
+
+/// Dismisses the "unlock needed" notification posted by [GhalBolP2pService] after
+/// device boot or START_STICKY restart.
+Future<void> cancelUnlockNotification() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await _embedderChannel.invokeMethod<void>("cancelUnlockNotification");
+  } catch (_) {}
+}

@@ -332,6 +332,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
     SessionFlowLog.daemon("daemon_unlock_ok");
     P2pNetworkCoordinator.markSessionRefresh();
     unawaited(P2pEventBridge.instance.recoverP2pIfNeeded());
+    unawaited(GhalBolDaemon.installLinuxAutostart());
   }
 
   Future<bool> _confirmImportPrivateKeyWarning(BuildContext context) async {

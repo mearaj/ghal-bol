@@ -298,6 +298,7 @@ class GhalBolP2pService : Service() {
             userRequestedStop = true
             mainHandler.removeCallbacks(restartRunnable)
             mainHandler.removeCallbacks(networkNotifyRunnable)
+            cancelUnlockNotification()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -309,7 +310,48 @@ class GhalBolP2pService : Service() {
         acquireMulticastLock()
         startDaemonThreadIfNeeded()
         registerConnectivityCallback()
+        val bootOrRestart = intent == null || intent.getBooleanExtra(EXTRA_BOOT_START, false)
+        if (bootOrRestart) postUnlockNotificationIfNeeded()
         return START_STICKY
+    }
+
+    private fun postUnlockNotificationIfNeeded() {
+        if (!BootReceiver.hasKeystore(applicationContext)) return
+        val nm = getSystemService(NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val ch = NotificationChannel(
+                UNLOCK_CHANNEL_ID,
+                "Unlock prompt",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Prompts you to unlock Ghal Bol after device restart"
+            }
+            nm.createNotificationChannel(ch)
+        }
+        val open = PendingIntent.getActivity(
+            this,
+            1,
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(this, UNLOCK_CHANNEL_ID)
+            .setContentTitle("Ghal Bol")
+            .setContentText("Enter your password to start receiving messages")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .build()
+        nm.notify(UNLOCK_NOTIFICATION_ID, notification)
+    }
+
+    fun cancelUnlockNotification() {
+        try {
+            (getSystemService(NOTIFICATION_SERVICE) as? NotificationManager)
+                ?.cancel(UNLOCK_NOTIFICATION_ID)
+        } catch (_: Throwable) {}
     }
 
     private fun promoteForegroundNotification() {
@@ -428,11 +470,14 @@ class GhalBolP2pService : Service() {
 
     companion object {
         const val ACTION_STOP_FOR_LOGOUT = "com.ghalbol.STOP_P2P_LOGOUT"
+        const val EXTRA_BOOT_START = "com.ghalbol.BOOT_START"
 
         @Volatile
         private var userRequestedStop = false
 
         private const val NOTIFICATION_ID = 0x6768_6c62
+        private const val UNLOCK_CHANNEL_ID = "ghalbol_unlock"
+        private const val UNLOCK_NOTIFICATION_ID = 0x6768_756e
 
         fun stopIntent(context: Context): Intent =
             Intent(context, GhalBolP2pService::class.java).setAction(ACTION_STOP_FOR_LOGOUT)
@@ -440,6 +485,13 @@ class GhalBolP2pService : Service() {
         fun socketPath(context: Context): String {
             val dir = File(context.filesDir, "ghalbol")
             return File(dir, "p2p.sock").absolutePath
+        }
+
+        fun cancelUnlockNotification(context: Context) {
+            try {
+                (context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+                    ?.cancel(UNLOCK_NOTIFICATION_ID)
+            } catch (_: Throwable) {}
         }
     }
 }

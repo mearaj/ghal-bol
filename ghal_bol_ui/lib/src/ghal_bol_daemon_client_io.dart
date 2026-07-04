@@ -570,4 +570,46 @@ class GhalBolDaemonClient {
       await ghalBolAndroidStopP2pService();
     }
   }
+
+  /// Install an XDG autostart entry so `ghal_bol_daemon` starts on login.
+  /// Re-runs on each unlock to update the binary path if the bundle moved.
+  static Future<void> installLinuxAutostart() async {
+    if (!Platform.isLinux) return;
+    final bin = await resolveDaemonExecutable();
+    if (bin == null) return;
+    try {
+      final home = Platform.environment["HOME"];
+      if (home == null || home.isEmpty) return;
+      final dir = Directory("$home/.config/autostart");
+      if (!await dir.exists()) await dir.create(recursive: true);
+      final file = File("${dir.path}/com.ghalbol.daemon.desktop");
+      await file.writeAsString(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Ghal Bol Background\n"
+        "Exec=$bin\n"
+        "NoDisplay=true\n"
+        "X-GNOME-Autostart-enabled=true\n"
+        "Comment=Keeps Ghal Bol P2P networking active after login\n",
+      );
+      AppLog.instance.d("Daemon", "XDG autostart installed: ${file.path}");
+    } catch (e) {
+      AppLog.instance.w("Daemon", "XDG autostart install failed: $e");
+    }
+  }
+
+  static Future<void> removeLinuxAutostart() async {
+    if (!Platform.isLinux) return;
+    try {
+      final home = Platform.environment["HOME"];
+      if (home == null || home.isEmpty) return;
+      final file = File("$home/.config/autostart/com.ghalbol.daemon.desktop");
+      if (await file.exists()) {
+        await file.delete();
+        AppLog.instance.d("Daemon", "XDG autostart removed");
+      }
+    } catch (e) {
+      AppLog.instance.w("Daemon", "XDG autostart remove failed: $e");
+    }
+  }
 }

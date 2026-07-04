@@ -44,6 +44,10 @@ class MainActivity : FlutterActivity() {
                         openUnusedAppSettings()
                         result.success(null)
                     }
+                    "cancelUnlockNotification" -> {
+                        GhalBolP2pService.cancelUnlockNotification(applicationContext)
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }

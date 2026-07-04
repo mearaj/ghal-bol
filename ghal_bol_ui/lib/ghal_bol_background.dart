@@ -56,5 +56,6 @@ class GhalBolBackground {
     } else {
       await GhalBolP2p.stop();
     }
+    unawaited(GhalBolDaemon.removeLinuxAutostart());
   }
 }

@@ -531,6 +531,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       await _joinFromUri(pending);
     }
     unawaited(_checkUnusedAppRestrictions());
+    unawaited(cancelUnlockNotification());
   }
 
   static bool _backgroundCheckDone = false;

@@ -92,6 +92,12 @@ abstract final class GhalBolDaemon {
     return r["ok"] == true && r["unlocked"] == true;
   }
 
+  static Future<void> installLinuxAutostart() =>
+      GhalBolDaemonClient.installLinuxAutostart();
+
+  static Future<void> removeLinuxAutostart() =>
+      GhalBolDaemonClient.removeLinuxAutostart();
+
   /// OS network truth from `:p2p` / `ghal_bol_daemon` (`android_network` / `linux_network`).
   static Future<Map<String, dynamic>?> networkSnapshot() async {
     if (!isSupported) return null;
