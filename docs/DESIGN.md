@@ -47,6 +47,7 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 | Hub, roster, foreground, layout | `chat_hub_screen.dart` |
 | Delivery tick **display** rules (comments) | `dm_delivery_sync.dart` |
 | P2P RPC + poll bridge | `p2p_runtime.rs`, `daemon/server.rs`, `ghal_bol_p2p.dart`, `p2p_event_bridge.dart` |
+| Android background permissions (screen off) | `android_background_readiness.dart`, `BackgroundReadiness.kt`, `embedder_storage.dart` |
 
 **Rule:** New protocol or state-machine behaviour belongs in **Rust** first, exposed via FFI or daemon RPC; Dart should not re-implement ack policy, outbox, or `dm_message` store merges.
 
@@ -455,24 +456,6 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Code:** `p2p_runtime.rs` (`queue_read_catchup_for_room`), `dm_transcript_store.rs`, `contacts_v1.rs`, `outbox_wire.rs`, `dm_dial.rs`, `session.rs`. Tests: `append_if_new_inserts_by_created_at_ms_not_append_order`, `refresh_thread_preview_uses_latest_created_at_in_transcript`.
 
-#### Fixed 2026-07-03 — Android display off: no delivery ack (single tick)
-
-**Symptom:** When the Android display turns off, the device stops sending **`ack_received`** (single tick) for inbound messages. The sender sees no tick. As soon as the display unlocks, messages flow immediately. Issue present on both Wi-Fi and mobile data, while other messaging apps work fine.
-
-**Root cause:** Android's **"Pause app activity if unused"** (API 30+ auto-revoke / app hibernation) was enabled by default. This allows Android to suspend background activity for the app, including the `:p2p` foreground service's tokio event loop. The daemon process stays alive but its CPU scheduling is throttled — libp2p connections time out, keepalive pings don't fire, and inbound messages never arrive. On display unlock, Android lifts the restriction and the event loop resumes immediately.
-
-**Not the cause:** Wi-Fi power save — the issue occurs identically on mobile data, and other apps with persistent connections work fine. The `ack_received` code path is **never** gated on `app_ui_visible`.
-
-**Fix (three layers, automatic → fallback):**
-
-1. **Battery optimization whitelist (automatic, one-time):** On hub bootstrap, `isBatteryOptimized()` checks `PowerManager.isIgnoringBatteryOptimizations()`. If the app is **not** whitelisted, `requestBatteryOptimizationExemption()` fires `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` — a **standard Android system dialog** ("Allow app to always run in the background?"). Once the user taps "Allow", the whitelist is **permanent** (survives reboots). This is what WhatsApp, Telegram, and Signal do. Requires manifest permission `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (Play Store allows this for messaging apps).
-
-2. **Hibernation fallback prompt:** If after battery whitelist, `isUnusedAppPauseEnabled()` still reports `isAutoRevokeWhitelisted == false` (app hibernation active), a custom dialog guides the user to the app settings page to toggle off "Pause app activity if unused". This covers edge cases where the battery whitelist alone doesn't disable hibernation (OEM-specific). Note: `setAutoRevokeWhitelisted` requires `WHITELIST_AUTO_REVOKE_PERMISSIONS` (system-level only) — apps cannot disable hibernation programmatically; the user must toggle it. On devices where the foreground service auto-disables this toggle, the check returns `false` and no prompt is shown.
-
-3. **Defensive `WifiLock`:** `GhalBolP2pService` holds a `WifiManager.WifiLock` (`WIFI_MODE_FULL_LOW_LATENCY` on API 29+) alongside the existing `PARTIAL_WAKE_LOCK` and `MulticastLock`, preventing Wi-Fi power-save from degrading TCP on aggressive OEMs.
-
-**Code:** `AndroidManifest.xml` (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`), `MainActivity.kt` (`isBatteryOptimized`, `requestBatteryOptimizationExemption`, `isUnusedAppPauseEnabled`, `openUnusedAppSettings`), `embedder_storage.dart`, `chat_hub_screen.dart` (`_checkUnusedAppRestrictions`), `GhalBolP2pService.kt` (`acquireWifiLock`).
-
 #### Boot auto-start and unlock notification
 
 **Problem:** After device reboot, the `:p2p` service is dead — no messages are received until the user manually opens the app and enters their password.
@@ -482,7 +465,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 **Flow:**
 
 1. **Device boots** → `BootReceiver.onReceive()` checks `hasKeystore()` (looks for `keystore_v1.json` under `NativeStorage.dataRoot`). If found, starts `GhalBolP2pService` via `startForegroundService`.
-2. **Service starts** → `onStartCommand` runs normal setup (wake lock, wifi lock, multicast lock, daemon thread, connectivity callbacks), then calls `postUnlockNotificationIfNeeded()`.
+2. **Service starts** → `onStartCommand` runs normal setup (wake lock, multicast lock, daemon thread, connectivity callbacks), then calls `postUnlockNotificationIfNeeded()`.
 3. **Unlock notification** → posted on `ghalbol_unlock` channel (`IMPORTANCE_HIGH` for heads-up) with `PendingIntent` to `MainActivity`. Title: "Ghal Bol", body: "Enter your password to start receiving messages". `setAutoCancel(true)`.
 4. **User taps notification** (or opens app manually) → `MainActivity` starts → Flutter shows `IdentityScreen` → user enters password → FFI unlock + daemon unlock RPC → P2P starts.
 5. **Notification dismissed** → `cancelUnlockNotification()` called from `chat_hub_screen.dart` on hub bootstrap, and from `GhalBolP2pService` on logout stop.
@@ -492,6 +475,39 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 **No keystore = no boot start:** If the user has never created an identity (fresh install), `BootReceiver` does nothing — no service start, no notification.
 
 **Code:** `BootReceiver.kt`, `AndroidManifest.xml` (`RECEIVE_BOOT_COMPLETED` + `<receiver>`), `GhalBolP2pService.kt` (`postUnlockNotificationIfNeeded`, `cancelUnlockNotification`, `UNLOCK_CHANNEL_ID`), `MainActivity.kt` (`cancelUnlockNotification` method channel), `embedder_storage.dart` (`cancelUnlockNotification()`), `chat_hub_screen.dart` (hub bootstrap cancel).
+
+#### Fixed 2026-07-05 — Android background readiness (screen off)
+
+**Problem:** With the device locked and the screen off, inbound messaging could stop even though `:p2p` stayed alive as a **`remoteMessaging` foreground service** with **`WAKE_LOCK`** and multicast lock. This is **not** the read-receipt gate (`app_ui_visible` / `inactive`) — **`ack_received`** could still work for a short window after lock, then wire traffic and heartbeats went silent until the user turned the screen on again.
+
+Root causes stack in layers:
+
+| Layer | Effect |
+|-------|--------|
+| **Stock Android** | Doze / App Standby while not on the battery-optimization ignore list; Android 11+ **“Pause app activity if unused”** (`isAutoRevokeWhitelisted` false) |
+| **OEM power managers** | Autostart / high-background-power restrictions on Xiaomi, Oppo/Realme, Vivo, Huawei/Honor, OnePlus, Asus, etc. — often **no manifest permission**; user must allow in manufacturer settings |
+| **Aggressive OEM freezers** | Some devices (e.g. Vivo **`fast_freezer`**) freeze the **entire app UID** seconds after `SCREEN_OFF` (`am_app_frozen` in the **events** log buffer). FGS alone does not exempt the UID from that layer — user OEM settings + stock exemptions are still required |
+
+A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only checks without a full sequential onboarding flow; it did **not** fix screen-off delivery in testing. **Do not reintroduce** that as the primary fix.
+
+**Solution:** After unlock, **`ChatHubScreen._bootstrapHub`** runs **`AndroidBackgroundReadiness.runIfNeeded`** **before** `P2pEventBridge.ensureStarted`. Steps run **one at a time**, each skipped when already satisfied:
+
+1. **Notifications** (Android 13+) — `POST_NOTIFICATIONS`; required for visible FGS notification
+2. **Battery optimization** — manifest **`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`** + system **`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`** when `PowerManager.isIgnoringBatteryOptimizations` is false
+3. **Unused-app pause** — when `PackageManager.isAutoRevokeWhitelisted` is false, open app settings to disable “Pause app activity if unused”
+4. **OEM background** — when `BackgroundReadiness` detects a resolvable manufacturer autostart/background settings activity and autostart is not already verified (Vivo: content-provider query when available; others: one-time settings shortcut after user opens OEM screen)
+
+**Prompt rules (regression guards):**
+
+- **Do not prompt** if the step is already satisfied (re-check before each dialog)
+- **Do not overlap** prompts — await dialog dismiss, `Permission.request()` return, or app **resume** after settings before the next step
+- **Do not** request notification permission from **`ghal_bol_listener_foreground_io.dart`** — that raced hub onboarding
+
+**Manifest (canonical):** `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_REMOTE_MESSAGING`, `WAKE_LOCK`, `POST_NOTIFICATIONS`, `RECEIVE_BOOT_COMPLETED`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, plus call FGS types as needed.
+
+**Code:** `android_background_readiness.dart`, `BackgroundReadiness.kt`, `MainActivity.kt` (embedder method channel), `embedder_storage.dart`, `AndroidManifest.xml`, `chat_hub_screen.dart` (`_bootstrapHub` order), `ghal_bol_listener_foreground_io.dart` (start FGS only — no permission prompt).
+
+**Verified:** User-confirmed screen-off messaging after completing the prompted steps (2026-07-05).
 
 #### Linux desktop — daemon auto-start and unlock notification
 
@@ -532,6 +548,8 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | `inbound ack no matching row` / `has_out=false` on `ack_received` | Ack patch used single transcript bucket — fix merged keys (`inbound_transcript_lookup_keys`). § “Fixed 2026-06-19”. |
 | Desktop `read_ack_sent=true` on mass inbound, peer no blue tick | Loose confirm loop (`has_seen_inbound_id` in `mark_read_ack_confirmed`) — § “Fixed 2026-06-19”. |
 | `seeded N pending read ack(s)` with N ≫ room backlog (hundreds+) | Read-ack seed ignoring eligibility (`received_at_ms`, `read_ack_sent`, cutoff) — fix `dispatch_read_ack_pass`, not “seed all inbound”. |
+| Android: messages stop ~minutes after lock; `:p2p` PID unchanged; events log `am_app_frozen` / `fast_freezer` | OEM UID freezer +/or battery optimization / unused-app pause / autostart — not Flutter poll or read gate. Hub must run **`AndroidBackgroundReadiness`** before P2P; user completes stock + OEM prompts. § “Fixed 2026-07-05”. |
+| Overlapping Android permission dialogs at unlock | **`Permission.notification.request`** in listener foreground **and** hub readiness — regression. Listener starts FGS only; readiness owns all prompts sequentially. § “Fixed 2026-07-05”. |
 
 **Do not fix floods by:** larger poll batches, Dart-side ack filtering alone, or “dedupe” without fixing confirm + retry cadence in Rust.
 
@@ -555,6 +573,9 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 - **Hub `previewChangeCount` → full `mergeTranscriptFromNative`** while the open chat already handles the same events in `ingestP2pEvent`.
 - Treating duplicate read acks as expected — fix the confirm loop and retry cadence instead.
 - **Linux desktop `inactive` → `setVisible(false)`** while chat room open — sets `:p2p` `read=false` without leave drain; ticks stall until resize/`resumed`. **Keep** `lifecycle inactive on Linux — read gate unchanged`. Android shade/task switcher still uses `inactive` gate-off.
+- **WifiLock-only / hibernation-dialog-only screen-off fix (reverted 2026-07-03)** — did not restore screen-off delivery in testing; use sequential **`AndroidBackgroundReadiness`** instead. § “Fixed 2026-07-05”.
+- **Overlapping Android background permission prompts** — listener foreground must not call `Permission.notification.request()`; hub **`AndroidBackgroundReadiness.runIfNeeded`** runs before P2P and owns all steps one at a time.
+- **Assuming FGS + `WAKE_LOCK` exempt `:p2p` from all OEM freezers** — user must still complete battery optimization + OEM autostart settings when prompted.
 - **Forbidden 2026-06-15 hub session patch** — `lastApplySucceeded`, `_invalidateNativeForegroundSync`, per-frame `!lastApplySucceeded` retry in `_syncNativeForegroundIfLayoutChanged`, hub `node_ready` + `_attachHubChat` session reapply. **Broke P2P messaging** and indirectly caused identity/data loss UX. § “FORBIDDEN — reverted 2026-06-15”. **Do not** substitute for the Linux `inactive` fix.
 
 ## UI session contract (integrator app ↔ native P2P)
@@ -797,6 +818,8 @@ If sends stay `queued` / `not connected yet`, the break is in the **native chain
 
 **Android:** `GhalBolP2pService` in process **`:p2p`** (foreground + multicast lock). JSON-RPC on `filesDir/.../ghalbol/p2p.sock`. Same `configure_android_data_directory` path as Flutter (`getApplicationDocumentsDirectory`).
 
+**Android screen off:** FGS + wake lock are necessary but not always sufficient. Hub unlock runs **`AndroidBackgroundReadiness`** (battery optimization, unused-app pause, OEM autostart) **before** P2P start — see § “Fixed 2026-07-05 — Android background readiness”.
+
 **Linux desktop:** **`ghal_bol_daemon`** under `libexec/`. Socket: `$XDG_RUNTIME_DIR/ghalbol/p2p.sock` (or `GHAL_BOL_DAEMON_SOCKET`).
 
 **Both:**
@@ -899,6 +922,7 @@ Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p
 5. Incoming call with app hidden → notification tap → call UI visible and answerable.
 6. Login unlock (UI lock, not logout) during call → call **continues** (suppress window applies).
 7. Linux desktop chat open → drag window / brief focus loss → send inbound text → **`ack_read sent`** without resize (`inactive` must **not** log `read=false` with room still set). Soak **>10 min** LAN Android↔Linux: **`conn=true,stream=true`**, ticks stable. **Do not** fix regressions with forbidden `lastApplySucceeded` patch (§ “FORBIDDEN — reverted 2026-06-15”).
+8. **Android screen off:** unlock → complete **`AndroidBackgroundReadiness`** prompts if shown → lock device → peer sends text → **`ack_received`** / delivery tick within normal WAN/LAN latency (not only while screen on). If dead: check battery optimization, unused-app pause, OEM autostart; events buffer may show `am_app_frozen`. § “Fixed 2026-07-05”.
 
 Wire detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § “UI session and privacy”.
 

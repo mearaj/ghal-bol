@@ -4,6 +4,7 @@ import "dart:io";
 import "package:flutter/foundation.dart" show kIsWeb;
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
+import "android_background_readiness.dart";
 import "app_log.dart";
 import "app_log_screen.dart";
 import "blocked_peers_screen.dart";
@@ -524,49 +525,15 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   Future<void> _bootstrapHub() async {
     await _reloadContactsListOnly();
     if (!mounted) return;
+    await AndroidBackgroundReadiness.runIfNeeded(context);
+    if (!mounted) return;
     unawaited(P2pEventBridge.instance.ensureStarted(_s));
     _syncNativeForegroundPeer();
     final pending = InviteDeepLink.takePending();
     if (pending != null && mounted) {
       await _joinFromUri(pending);
     }
-    unawaited(_checkUnusedAppRestrictions());
     unawaited(cancelUnlockNotification());
-  }
-
-  static bool _backgroundCheckDone = false;
-
-  Future<void> _checkUnusedAppRestrictions() async {
-    if (_backgroundCheckDone) return;
-    _backgroundCheckDone = true;
-    if (!Platform.isAndroid) return;
-    final enabled = await isUnusedAppPauseEnabled();
-    if (!enabled || !mounted) return;
-    AppLog.instance.flow("Hub", "unused app pause enabled — showing prompt");
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Background messaging restricted"),
-        content: const Text(
-          '"Pause app activity if unused" is enabled for Ghal Bol. '
-          "This prevents the app from receiving messages when the screen is off.\n\n"
-          "Please disable it in the next screen to ensure reliable message delivery.",
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text("Later"),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              openUnusedAppSettings();
-            },
-            child: const Text("Open Settings"),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _reloadContactsListOnly() async {

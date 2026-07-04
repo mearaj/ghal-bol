@@ -28,7 +28,6 @@ import java.io.File
 class GhalBolP2pService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var daemonThread: Thread? = null
     private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
@@ -92,32 +91,6 @@ class GhalBolP2pService : Service() {
         } catch (_: Throwable) {
         }
         wakeLock = null
-    }
-
-    @Suppress("DEPRECATION")
-    private fun acquireWifiLock() {
-        releaseWifiLock()
-        try {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
-            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-            } else {
-                WifiManager.WIFI_MODE_FULL_HIGH_PERF
-            }
-            wifiLock = wm.createWifiLock(mode, "ghal_bol_p2p_wifi").apply {
-                setReferenceCounted(false)
-                acquire()
-            }
-        } catch (e: Throwable) {
-            android.util.Log.w("GhalBol", "wifi lock (p2p): ${e.message}")
-        }
-    }
-
-    private fun releaseWifiLock() {
-        try {
-            wifiLock?.let { if (it.isHeld) it.release() }
-        } catch (_: Throwable) {}
-        wifiLock = null
     }
 
     private fun acquireMulticastLock() {
@@ -306,7 +279,6 @@ class GhalBolP2pService : Service() {
         promoteForegroundNotification()
         configureNativeDataDir()
         acquireWakeLock()
-        acquireWifiLock()
         acquireMulticastLock()
         startDaemonThreadIfNeeded()
         registerConnectivityCallback()
@@ -453,7 +425,6 @@ class GhalBolP2pService : Service() {
         mainHandler.removeCallbacks(networkNotifyRunnable)
         unregisterConnectivityCallback()
         releaseMulticastLock()
-        releaseWifiLock()
         releaseWakeLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         val restart = !userRequestedStop

@@ -26,9 +26,16 @@ Future<void> ghalBolAlignNativeStorage() async {
   AppLog.instance.d("Storage", "using native platform data root");
 }
 
-/// Android 6+: returns `true` when the app is subject to battery optimization (not whitelisted).
-/// Once whitelisted via [requestBatteryOptimizationExemption], returns `false` permanently
-/// unless the user revokes it manually in settings.
+/// Dismisses the "unlock needed" notification posted by [GhalBolP2pService] after
+/// device boot or START_STICKY restart.
+Future<void> cancelUnlockNotification() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await _embedderChannel.invokeMethod<void>("cancelUnlockNotification");
+  } catch (_) {}
+}
+
+/// Android 6+: `true` when Doze / App Standby still applies (not on the ignore list).
 Future<bool> isBatteryOptimized() async {
   if (!Platform.isAndroid) return false;
   try {
@@ -39,8 +46,6 @@ Future<bool> isBatteryOptimized() async {
   }
 }
 
-/// Shows the standard Android system dialog: "Allow [app] to always run in the background?"
-/// Once allowed, the app is permanently whitelisted for battery optimization.
 Future<void> requestBatteryOptimizationExemption() async {
   if (!Platform.isAndroid) return;
   try {
@@ -48,8 +53,7 @@ Future<void> requestBatteryOptimizationExemption() async {
   } catch (_) {}
 }
 
-/// Android 11+: returns `true` when "Pause app activity if unused" is enabled for this app.
-/// On non-Android platforms or older API levels, returns `false`.
+/// Android 11+: `true` when "Pause app activity if unused" is enabled.
 Future<bool> isUnusedAppPauseEnabled() async {
   if (!Platform.isAndroid) return false;
   try {
@@ -60,8 +64,6 @@ Future<bool> isUnusedAppPauseEnabled() async {
   }
 }
 
-/// Opens the Android app settings page where the user can toggle off
-/// "Pause app activity if unused".
 Future<void> openUnusedAppSettings() async {
   if (!Platform.isAndroid) return;
   try {
@@ -69,11 +71,42 @@ Future<void> openUnusedAppSettings() async {
   } catch (_) {}
 }
 
-/// Dismisses the "unlock needed" notification posted by [GhalBolP2pService] after
-/// device boot or START_STICKY restart.
-Future<void> cancelUnlockNotification() async {
+Future<List<String>> pendingNativeBackgroundSteps() async {
+  if (!Platform.isAndroid) return const [];
+  try {
+    final raw = await _embedderChannel.invokeMethod<List<Object?>>(
+      "pendingNativeBackgroundSteps",
+    );
+    if (raw == null) return const [];
+    return raw.map((e) => e.toString()).toList();
+  } catch (_) {
+    return const [];
+  }
+}
+
+Future<bool> needsOemBackgroundStep() async {
+  if (!Platform.isAndroid) return false;
+  try {
+    final v = await _embedderChannel.invokeMethod<bool>("needsOemBackgroundStep");
+    return v == true;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<bool> openOemBackgroundSettings() async {
+  if (!Platform.isAndroid) return false;
+  try {
+    final v = await _embedderChannel.invokeMethod<bool>("openOemBackgroundSettings");
+    return v == true;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<void> markOemBackgroundStepAcknowledged() async {
   if (!Platform.isAndroid) return;
   try {
-    await _embedderChannel.invokeMethod<void>("cancelUnlockNotification");
+    await _embedderChannel.invokeMethod<void>("markOemBackgroundStepAcknowledged");
   } catch (_) {}
 }

@@ -202,7 +202,7 @@ Mobile networking is inherently unstable because of:
 - CGNAT
 - WiFi/mobile switching
 - app suspension
-- battery optimizations
+- battery optimizations and OEM autostart / “pause if unused” policies (Android: hub **`AndroidBackgroundReadiness`** after unlock — see `docs/DESIGN.md` § “Fixed 2026-07-05”)
 - temporary reachability loss
 
 Ghal Bol assumes:

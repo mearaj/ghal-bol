@@ -9,6 +9,8 @@ Thin UI over **`ghal_bol`** (Rust): unlock, hub, chat, QR invites, calls, delive
 | Target | Entry | P2P |
 |--------|--------|-----|
 | Android | `bootstrap_native.dart` | `:p2p` process + JNI |
+
+**Android screen off:** after unlock, `ChatHubScreen` runs `AndroidBackgroundReadiness` (notifications, battery optimization, unused-app pause, OEM autostart) **before** P2P starts — see [DESIGN.md § Fixed 2026-07-05](../docs/DESIGN.md#fixed-2026-07-05--android-background-readiness-screen-off).
 | Linux desktop | `bootstrap_native.dart` | `ghal_bol_daemon` in `linux/native/libexec/` |
 | Web (marketing only) | `bootstrap_web.dart` | Not compiled — static site in `lib/web/` |
 
