@@ -1,5 +1,6 @@
-import "package:ghal_bol_daemon_client/ghal_bol_daemon_client.dart";
-import "package:test/test.dart";
+import "package:ghal_bol_ui/daemon_client_api.dart";
+import "package:ghal_bol_ui/src/daemon_integrator_config.dart";
+import "package:flutter_test/flutter_test.dart";
 
 /// Must match `DaemonMethod::ALL` wire order in `ghal_bol/src/daemon/client_api.rs`.
 const _rustMirrorWireNames = <String>[

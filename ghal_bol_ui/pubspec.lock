@@ -288,13 +288,6 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
-  ghal_bol_daemon_client:
-    dependency: "direct main"
-    description:
-      path: "../packages/ghal_bol_daemon_client"
-      relative: true
-    source: path
-    version: "0.1.0"
   glob:
     dependency: transitive
     description:

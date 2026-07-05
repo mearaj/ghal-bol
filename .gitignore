@@ -53,3 +53,8 @@ ghal_bol_ui/web/downloads/*.tar.gz
 # Logs and profiling dumps
 *.log
 *.profraw
+
+# Dart / Flutter (all packages in workspace)
+.dart_tool/
+.pub/
+.pub-cache/

@@ -1,8 +1,10 @@
 import "dart:async";
 import "dart:io";
 
-import "package:ghal_bol_daemon_client/ghal_bol_daemon_client.dart";
 import "package:ghal_bol_ui/app_env_config.dart";
+import "package:ghal_bol_ui/daemon_client_api.dart";
+import "package:ghal_bol_ui/src/daemon_integrator_config.dart";
+import "package:ghal_bol_ui/src/daemon_rpc_connection.dart";
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/ghal_bol_constants.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
@@ -11,8 +13,8 @@ import "package:ghal_bol_ui/src/ghal_bol_android_p2p_service.dart"
 
 /// Reference integrator shell around [`DaemonClient`] / [`RpcConnection`].
 ///
-/// Platform spawn (Linux `ghal_bol_daemon`, Android `:p2p` FGS) stays here;
-/// third-party apps should depend on `ghal_bol_daemon_client` directly.
+/// Platform spawn (Linux `ghal_bol_daemon`, Android `:p2p` FGS) stays here.
+/// Wire names: `daemon_client_api.dart`; Rust SDK: `ghal_bol::daemon`.
 class GhalBolDaemonClient {
   GhalBolDaemonClient._();
 

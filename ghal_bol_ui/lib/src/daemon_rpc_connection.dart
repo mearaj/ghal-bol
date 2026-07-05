@@ -2,7 +2,7 @@ import "dart:async";
 import "dart:convert";
 import "dart:io";
 
-import "daemon_client_api.dart";
+import "package:ghal_bol_ui/daemon_client_api.dart";
 
 /// One serialized JSON-RPC line channel over a Unix domain socket.
 class RpcConnection {

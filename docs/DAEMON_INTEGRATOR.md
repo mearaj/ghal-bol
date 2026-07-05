@@ -1,6 +1,6 @@
 # Ghal Bol daemon — integrator model (precompiled engine + SDK)
 
-**Status:** Canonical integrator architecture. Wire contract: `ghal_bol/src/daemon/client_api.rs`. **SDK:** Rust `ghal_bol::daemon::{IntegratorConfig, DaemonClient, …}` + Dart package [`packages/ghal_bol_daemon_client`](../packages/ghal_bol_daemon_client/).
+**Status:** Canonical integrator architecture. Wire contract: `ghal_bol/src/daemon/client_api.rs`. **SDK:** Rust `ghal_bol::daemon::{IntegratorConfig, DaemonClient, …}`; Dart mirror `ghal_bol_ui/lib/daemon_client_api.dart`.
 
 **Goal:** Any app on any UI stack integrates **`ghal_bol_daemon`** (precompiled binary / Android `:p2p` native bundle) **without patching Ghal Bol Rust source**. The daemon does **not** know which integrator app is connected — only that the client speaks the JSON-RPC contract and satisfies **integrator obligations** (present UI, session sync, consume wakes).
 
@@ -43,8 +43,8 @@ Wire details: [DESIGN.md § UI integrator contract](DESIGN.md#ui-integrator-cont
 
 | Platform | Engine artifact | SDK |
 |----------|-----------------|-----|
-| **Linux desktop** | `ghal_bol_daemon` binary (bundle under `libexec/` or PATH) | `ghal_bol::daemon` (Rust), [`packages/ghal_bol_daemon_client`](../packages/ghal_bol_daemon_client/) (Dart) |
-| **Android** | `libghal_bol.so` + `:p2p` foreground service (same Rust node) | Same Dart SDK over app-private Unix socket |
+| **Linux desktop** | `ghal_bol_daemon` binary (bundle under `libexec/` or PATH) | `ghal_bol::daemon` (Rust), [`daemon_client_api.dart`](../ghal_bol_ui/lib/daemon_client_api.dart) (Dart mirror) |
+| **Android** | `libghal_bol.so` + `:p2p` foreground service (same Rust node) | Same Dart mirror over app-private Unix socket |
 | **In-process (dev)** | `libghal_bol.so` FFI | Optional; not the multi-process integrator path |
 
 Integrators **configure**, they do **not** edit `ghal_bol/src/…`:
@@ -134,11 +134,11 @@ The daemon expects the host app to provide these **behaviours**. Names match the
 Any replacement (Qt, Tauri, Swift, etc.) must:
 
 1. Bundle or spawn the **same precompiled** `ghal_bol_daemon` / Android `:p2p` artifacts.
-2. Use the **SDK** (or protocol doc) for all daemon RPCs — no duplicated method strings.
+2. Use the **contract** (`client_api.rs` + `daemon_client_api.dart`) for all daemon RPCs — no duplicated method strings.
 3. Implement **integrator obligations** above.
 4. Use a **distinct** `app_namespace` unless intentionally sharing identity with Ghal Bol.
 
-`ghal_bol_ui` remains the reference implementation: [`GhalBolDaemonClient`](../ghal_bol_ui/lib/src/ghal_bol_daemon_client_io.dart) (platform spawn + logging) wrapping the Dart SDK, plus [`P2pEventBridge`](../ghal_bol_ui/lib/p2p_event_bridge.dart), [`GhalBolUiSession`](../ghal_bol_ui/lib/ghal_bol_ui_session.dart).
+`ghal_bol_ui` remains the reference implementation: [`GhalBolDaemonClient`](../ghal_bol_ui/lib/src/ghal_bol_daemon_client_io.dart) (platform spawn + socket RPC), plus [`P2pEventBridge`](../ghal_bol_ui/lib/p2p_event_bridge.dart), [`GhalBolUiSession`](../ghal_bol_ui/lib/ghal_bol_ui_session.dart).
 
 ---
 

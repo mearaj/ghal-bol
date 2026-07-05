@@ -584,7 +584,7 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 
 **Authority:** The background node (`ghal_bol_daemon` on Linux, Android `:p2p` / `GhalBolP2pService`) owns product behaviour — P2P, outbox, ack policy, transcript merge on poll, network truth, coord/WAN recovery, call teardown when the UI session ends. **`ghal_bol_ui` is reference integrator #1**, not the spec — any app may replace it using the same contract. See **[DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md)** (precompiled daemon + SDK, multi-integrator isolation).
 
-Integrators must speak only the contract in [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs) (Rust) and [`packages/ghal_bol_daemon_client`](../packages/ghal_bol_daemon_client/) (Dart). Rust integrators use `ghal_bol::daemon::{IntegratorConfig, DaemonClient}`. Do not invent parallel policy in the UI (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
+Integrators must speak only the contract in [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs) (Rust) and [`daemon_client_api.dart`](../ghal_bol_ui/lib/daemon_client_api.dart) (Dart mirror). Rust integrators use `ghal_bol::daemon::{IntegratorConfig, DaemonClient}`. Do not invent parallel policy in the UI (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
 
 **Wire:** Newline-delimited JSON on the Unix socket: `{ "id", "method", "params" }` → `{ "id", "result" }` or `{ "id", "error" }`. Method names are stable literals from [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs).
 
@@ -606,7 +606,7 @@ Integrators must speak only the contract in [`DaemonMethod`](../ghal_bol/src/dae
 | Coord (dev) | `coord_lookup_peer`, `coord_register_now` | Tests/tools only |
 | Health | `ping` | Socket probe |
 
-Full enum: `DaemonMethod::ALL` in `client_api.rs` (36 methods). New RPCs **must** be added there and in the Dart SDK before use. Run `./scripts/check_daemon_sdk_parity.sh`.
+Full enum: `DaemonMethod::ALL` in `client_api.rs` (36 methods). New RPCs **must** be added there and in `daemon_client_api.dart` before use. Run `./scripts/check_daemon_sdk_parity.sh`.
 
 ### Daemon → UI (poll events, wakes, lifecycle)
 

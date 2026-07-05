@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn all_method_count_matches_dart_mirror() {
-        /// Keep in sync with `packages/ghal_bol_daemon_client` `DaemonMethod.all`.
+        /// Keep in sync with `ghal_bol_ui/lib/daemon_client_api.dart` `DaemonMethod.all`.
         const DART_MIRROR_METHOD_COUNT: usize = 36;
         assert_eq!(DaemonMethod::ALL.len(), DART_MIRROR_METHOD_COUNT);
     }

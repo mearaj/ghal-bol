@@ -1,4 +1,4 @@
-import "daemon_client_api.dart";
+import "package:ghal_bol_ui/daemon_client_api.dart";
 
 /// Per-integrator configuration (mirrors Rust `ghal_bol::daemon::IntegratorConfig`).
 class IntegratorConfig {
