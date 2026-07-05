@@ -1,6 +1,7 @@
 import "dart:io";
 
 import "package:ghal_bol_ui/app_log.dart";
+import "package:ghal_bol_ui/daemon_client_api.dart";
 import "package:ghal_bol_ui/coordination_url.dart";
 import "package:ghal_bol_ui/native_build_hint.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
@@ -34,7 +35,7 @@ abstract final class GhalBolCoord {
     if (usesDaemon) {
       await GhalBolDaemonClient.ensureDaemonRunning();
       return GhalBolDaemonClient.instance.call(
-        "coord_set_base_url",
+        DaemonMethod.coordSetBaseUrl,
         params: {
           "base_urls": cleaned,
           "insecure_tls": tls,

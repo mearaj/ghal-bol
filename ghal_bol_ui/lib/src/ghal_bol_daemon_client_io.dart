@@ -3,6 +3,7 @@ import "dart:convert";
 import "dart:io";
 
 import "package:ghal_bol_ui/app_env_config.dart";
+import "package:ghal_bol_ui/daemon_client_api.dart";
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/ghal_bol_constants.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
@@ -69,7 +70,7 @@ class GhalBolDaemonClient {
         0,
       ).timeout(const Duration(seconds: 2));
       final id = 0;
-      s.writeln(jsonEncode({"id": id, "method": "ping", "params": {}}));
+      s.writeln(jsonEncode({"id": id, "method": DaemonMethod.ping, "params": {}}));
       final lines = s
           .cast<List<int>>()
           .transform(utf8.decoder)
@@ -451,16 +452,16 @@ class GhalBolDaemonClient {
     int elapsedMs, {
     required bool stateSocket,
   }) {
-    if (method == "ping") return;
+    if (method == DaemonMethod.ping) return;
     final ok = result["ok"] == true;
     final err = result["error"]?.toString();
-    if (method == "p2p_poll" ||
-        method == "p2p_is_running" ||
-        method == "p2p_take_incoming_call_wake" ||
-        method == "p2p_take_unlock_wake" ||
-        method == "network_snapshot") {
+    if (method == DaemonMethod.p2pPoll ||
+        method == DaemonMethod.p2pIsRunning ||
+        method == DaemonMethod.p2pTakeIncomingCallWake ||
+        method == DaemonMethod.p2pTakeUnlockWake ||
+        method == DaemonMethod.networkSnapshot) {
       if (!ok &&
-          (method == "p2p_poll" || method == "p2p_is_running")) {
+          (method == DaemonMethod.p2pPoll || method == DaemonMethod.p2pIsRunning)) {
         final now = DateTime.now();
         final last = _lastPollRpcFailureLogAt;
         if (last == null || now.difference(last).inSeconds >= 30) {
@@ -470,10 +471,10 @@ class GhalBolDaemonClient {
       }
       return;
     }
-    if (method == "p2p_call_video_frame" ||
-        method == "p2p_call_video_push_camera_frame") {
+    if (method == DaemonMethod.p2pCallVideoFrame ||
+        method == DaemonMethod.p2pCallVideoPushCameraFrame) {
       final now = DateTime.now();
-      final last = method == "p2p_call_video_push_camera_frame"
+      final last = method == DaemonMethod.p2pCallVideoPushCameraFrame
           ? _lastCameraPushRpcLogAt
           : _lastVideoFrameRpcLogAt;
       // Throttle noisy success logs only — failures always log.
@@ -505,7 +506,7 @@ class GhalBolDaemonClient {
         );
       }
     }
-    if (method == "unlock" && ok) {
+    if (method == DaemonMethod.unlock && ok) {
       AppLog.instance.trace(
         "daemon_unlock",
         "ns=${result["app_namespace"]} pk=${_shortPk(result["public_key_hex"])}",
@@ -555,7 +556,7 @@ class GhalBolDaemonClient {
     required String password,
   }) =>
       call(
-        "unlock",
+        DaemonMethod.unlock,
         params: {
           "app_namespace": appNamespace,
           "password": password,
@@ -564,8 +565,8 @@ class GhalBolDaemonClient {
       );
 
   Future<void> stopSession() async {
-    await call("p2p_stop");
-    await call("lock");
+    await call(DaemonMethod.p2pStop);
+    await call(DaemonMethod.lock);
     await disconnect();
     _cachedSocketPath = null;
     if (Platform.isAndroid) {
@@ -582,7 +583,7 @@ class GhalBolDaemonClient {
       if (runtime == null || runtime.isEmpty) return;
       final dir = Directory("$runtime/ghalbol");
       if (!await dir.exists()) await dir.create(recursive: true);
-      await File("${dir.path}/ui_present").writeAsString("1");
+      await File("${dir.path}/${UiWakeKind.uiPresenceMarker}").writeAsString("1");
     } catch (_) {}
   }
 
@@ -591,7 +592,7 @@ class GhalBolDaemonClient {
     try {
       final runtime = Platform.environment["XDG_RUNTIME_DIR"];
       if (runtime == null || runtime.isEmpty) return;
-      final file = File("$runtime/ghalbol/ui_present");
+      final file = File("$runtime/ghalbol/${UiWakeKind.uiPresenceMarker}");
       if (await file.exists()) await file.delete();
     } catch (_) {}
   }

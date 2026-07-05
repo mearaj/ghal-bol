@@ -1,9 +1,13 @@
 //! Unix-socket JSON-RPC for the out-of-process **`ghal_bol_daemon`** (Linux desktop).
 
+mod client_api;
 mod paths;
 mod server;
 mod ui_session;
 
+pub use client_api::{
+    DaemonMethod, DaemonPollEventKind, UiIntegratorCallbacks, UiWakeKind, dispatch_method,
+};
 pub use paths::{
     clear_incoming_call_wake, clear_unlock_wake, default_socket_path, incoming_call_wake_path,
     take_incoming_call_wake, take_unlock_wake, touch_incoming_call_wake, touch_unlock_wake,

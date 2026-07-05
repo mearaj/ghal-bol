@@ -1,5 +1,6 @@
 import "dart:io" show Platform;
 
+import "package:ghal_bol_ui/daemon_client_api.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/src/ghal_bol_daemon_client_io.dart"
     if (dart.library.html) "package:ghal_bol_ui/src/ghal_bol_daemon_client_stub.dart";
@@ -86,7 +87,7 @@ abstract final class GhalBolDaemon {
     if (!isSupported) return false;
     if (!await GhalBolDaemonClient.probeDaemon()) return false;
     final r = await GhalBolDaemonClient.instance.call(
-      "session_unlocked",
+      DaemonMethod.sessionUnlocked,
       ensureDaemon: false,
     );
     return r["ok"] == true && r["unlocked"] == true;
@@ -110,7 +111,7 @@ abstract final class GhalBolDaemon {
     if (!isSupported) return null;
     if (!await GhalBolDaemonClient.probeDaemon()) return null;
     final r = await GhalBolDaemonClient.instance.callState(
-      "network_snapshot",
+      DaemonMethod.networkSnapshot,
       ensureDaemon: false,
     );
     if (r["ok"] != true) return null;

@@ -10,9 +10,9 @@ use std::thread;
 
 use serde_json::Value;
 
-use crate::coord_runtime;
+use crate::daemon::client_api::{DaemonMethod, dispatch_method};
 use crate::daemon::paths::default_socket_path;
-use crate::daemon::ui_session::{UiSessionGuard, suppress_ui_exit_hangup_ms, ui_process_exiting};
+use crate::daemon::ui_session::UiSessionGuard;
 use crate::p2p_runtime;
 use crate::session_runtime;
 
@@ -65,8 +65,7 @@ fn handle_client(stream: UnixStream, shutting_down: Arc<AtomicBool>) -> Result<(
         let method = req
             .get("method")
             .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(Value::Null);
 
         if method == "shutdown" {
@@ -78,7 +77,10 @@ fn handle_client(stream: UnixStream, shutting_down: Arc<AtomicBool>) -> Result<(
             break;
         }
 
-        let result = dispatch(&method, &params);
+        let result = match DaemonMethod::parse(method) {
+            Some(m) => dispatch_method(m, &params),
+            None => Err(format!("unknown method: {method}")),
+        };
         let resp = match result {
             Ok(v) => rpc_ok(id, v),
             Err(e) => rpc_err(id, &e),
@@ -117,188 +119,16 @@ fn rpc_err(id: Option<Value>, error: &str) -> Value {
     serde_json::json!({ "id": id, "error": error })
 }
 
-fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
-    match method {
-        "ping" => Ok(serde_json::json!({ "ok": true, "pong": true })),
-        "unlock" => {
-            let ns = param_str(params, "app_namespace")?;
-            let password = param_str(params, "password")?;
-            let result = session_runtime::unlock_identity(&ns, &password);
-            if result.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-                crate::daemon::clear_unlock_wake();
-            }
-            Ok(result)
-        }
-        "lock" => {
-            session_runtime::lock_identity();
-            Ok(serde_json::json!({ "ok": true }))
-        }
-        "session_unlocked" => Ok(serde_json::json!({
-            "ok": true,
-            "unlocked": session_runtime::session_unlocked(),
-        })),
-        "p2p_start" => {
-            let config = params
-                .get("config")
-                .cloned()
-                .unwrap_or_else(|| params.clone());
-            Ok(p2p_runtime::p2p_start(&config))
-        }
-        "p2p_stop" => {
-            p2p_runtime::p2p_stop();
-            Ok(serde_json::json!({ "ok": true }))
-        }
-        "p2p_is_running" => Ok(p2p_runtime::p2p_is_running()),
-        "network_snapshot" => Ok(crate::network_ffi::network_snapshot_rpc()),
-        "p2p_poll" => Ok(match p2p_runtime::p2p_poll_event() {
-            Some(ev) => serde_json::json!({ "ok": true, "event": ev }),
-            None => serde_json::json!({ "ok": true, "event": null }),
-        }),
-        "p2p_send_text_dm" => {
-            let recipient = param_str(params, "recipient_public_key_hex")?;
-            let text = param_str(params, "text")?;
-            Ok(p2p_runtime::p2p_send_text_dm(&recipient, &text))
-        }
-        "p2p_call_signal" => Ok(p2p_runtime::p2p_call_signal(params)),
-        "p2p_call_media" => Ok(p2p_runtime::p2p_call_media(params)),
-        "p2p_call_status" => Ok(p2p_runtime::p2p_call_status(params)),
-        "p2p_dismiss_incoming_call_alert" => Ok(p2p_runtime::p2p_dismiss_incoming_call_alert()),
-        "p2p_force_end_active_call" => {
-            let reason = params
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("rpc");
-            Ok(p2p_runtime::p2p_force_end_active_call(reason))
-        }
-        "p2p_take_incoming_call_wake" => Ok(p2p_runtime::p2p_take_incoming_call_wake()),
-        "p2p_take_unlock_wake" => Ok(p2p_runtime::p2p_take_unlock_wake()),
-        "ui_session_prepare_reconnect" => {
-            let ms = params
-                .get("suppress_ms")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(5_000);
-            suppress_ui_exit_hangup_ms(ms);
-            Ok(serde_json::json!({ "ok": true }))
-        }
-        "ui_process_exiting" => {
-            ui_process_exiting();
-            Ok(serde_json::json!({ "ok": true }))
-        }
-        "p2p_transcript_load_merged" => Ok(p2p_runtime::p2p_transcript_load_merged(params)),
-        "p2p_call_video" => Ok(p2p_runtime::p2p_call_video(params)),
-        "p2p_call_video_frame" => Ok(p2p_runtime::p2p_call_video_frame(params)),
-        "p2p_call_video_texture" => Ok(p2p_runtime::p2p_call_video_texture(params)),
-        "p2p_call_video_push_camera_frame" => {
-            Ok(p2p_runtime::p2p_call_video_push_camera_frame(params))
-        }
-        "p2p_requeue_outbound_dm" => {
-            let message_id = param_str(params, "message_id")?;
-            let recipient = param_str(params, "recipient_public_key_hex")?;
-            let text = param_str(params, "text")?;
-            Ok(p2p_runtime::p2p_requeue_outbound_dm(
-                &message_id,
-                &recipient,
-                &text,
-            ))
-        }
-        "p2p_send_ack_dm" => {
-            let recipient = param_str(params, "recipient_public_key_hex")?;
-            let ref_id = param_str(params, "ref_id")?;
-            let ack_kind = param_str(params, "ack_kind")?;
-            Ok(p2p_runtime::p2p_send_ack_dm(&recipient, &ref_id, &ack_kind))
-        }
-        "p2p_dial_bootstrap" => {
-            let addrs: Vec<String> = params
-                .get("bootstrap_peers")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|x| x.as_str())
-                        .map(|s| s.to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let parsed: Vec<crate::dm_transport::DmDialAddr> = addrs
-                .iter()
-                .filter_map(|s| crate::dm_transport::DmDialAddr::parse(s))
-                .collect();
-            Ok(p2p_runtime::p2p_dial_bootstrap_peers(&parsed))
-        }
-        "p2p_register_dm_peer" => {
-            let pk = param_str(params, "public_key_hex")?;
-            Ok(p2p_runtime::p2p_register_dm_peer(&pk))
-        }
-        "p2p_set_app_ack_read_enabled" => {
-            let enabled = params
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            Ok(p2p_runtime::p2p_set_app_ack_read_enabled(enabled))
-        }
-        "p2p_set_app_ui_visible" => {
-            let visible = params
-                .get("visible")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            Ok(p2p_runtime::p2p_set_app_ui_visible(visible))
-        }
-        "p2p_sync_ui_session" => {
-            let ui_visible = params
-                .get("ui_visible")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let room = params
-                .get("room_public_key_hex")
-                .or_else(|| params.get("public_key_hex"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            Ok(p2p_runtime::p2p_sync_ui_session(ui_visible, room))
-        }
-        "p2p_nudge_read_catchup" => Ok(p2p_runtime::p2p_nudge_read_catchup()),
-        "p2p_set_foreground_peer" => {
-            let pk = params
-                .get("public_key_hex")
-                .or_else(|| params.get("peer_id"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            Ok(p2p_runtime::p2p_set_foreground_peer(pk))
-        }
-        "coord_set_base_url" => {
-            let insecure = params
-                .get("insecure_tls")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let urls = coord_runtime::coord_urls_from_json_value(params);
-            if urls.is_empty() {
-                return Err("base_url or base_urls required".to_string());
-            }
-            Ok(coord_runtime::coord_set_base_urls_json(&urls, insecure))
-        }
-        "coord_lookup_peer" => {
-            let pk = param_str(params, "public_key_hex")?;
-            Ok(coord_runtime::coord_lookup_peer_json(&pk))
-        }
-        "coord_register_now" => Ok(coord_runtime::coord_register_now_json()),
-        other => Err(format!("unknown method: {other}")),
-    }
-}
-
-fn param_str(params: &Value, key: &str) -> Result<String, String> {
-    params
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("missing param: {key}"))
-}
-
 /// Try connecting to an existing daemon; returns true if it answers ping.
 pub fn probe_existing_daemon(socket_path: &Path) -> bool {
     let Ok(mut stream) = UnixStream::connect(socket_path) else {
         return false;
     };
-    let req = serde_json::json!({ "id": 0, "method": "ping", "params": {} });
+    let req = serde_json::json!({
+        "id": 0,
+        "method": DaemonMethod::Ping.wire_name(),
+        "params": {}
+    });
     let Ok(mut line) = serde_json::to_string(&req) else {
         return false;
     };
@@ -324,8 +154,6 @@ pub fn socket_path_from_env_or_default() -> std::path::PathBuf {
     std::env::var("GHAL_BOL_DAEMON_SOCKET")
         .ok()
         .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+        .map(std::path::PathBuf::from)
         .unwrap_or_else(default_socket_path)
 }
-
-use std::path::PathBuf;

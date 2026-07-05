@@ -1,5 +1,6 @@
 import "dart:io" show Platform;
 
+import "package:ghal_bol_ui/daemon_client_api.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 import "package:ghal_bol_ui/p2p_event_log.dart";
@@ -27,7 +28,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       await GhalBolDaemonClient.ensureDaemonRunning();
       return GhalBolDaemonClient.instance.call(
-        "p2p_start",
+        DaemonMethod.p2pStart,
         params: {"config": config},
       );
     }
@@ -36,7 +37,7 @@ abstract final class GhalBolP2p {
 
   static Future<void> stop() async {
     if (usesDaemon) {
-      await GhalBolDaemonClient.instance.call("p2p_stop");
+      await GhalBolDaemonClient.instance.call(DaemonMethod.p2pStop);
       return;
     }
     GhalBolFfi.p2pStop();
@@ -46,7 +47,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       if (!await GhalBolDaemonClient.probeDaemon()) return false;
       final r = await GhalBolDaemonClient.instance.call(
-        "p2p_is_running",
+        DaemonMethod.p2pIsRunning,
         ensureDaemon: false,
       );
       return r["ok"] == true && r["running"] == true;
@@ -57,7 +58,7 @@ abstract final class GhalBolP2p {
   static Future<void> registerDmPeer(String publicKeyHex) async {
     if (usesDaemon) {
       await GhalBolDaemonClient.instance.call(
-        "p2p_register_dm_peer",
+        DaemonMethod.p2pRegisterDmPeer,
         params: {"public_key_hex": publicKeyHex},
       );
       return;
@@ -72,7 +73,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       // State socket — must not queue behind poll-driven p2p_register_dm_peer on main.
       return _callStateWithDaemonRecovery(
-        "p2p_send_text_dm",
+        DaemonMethod.p2pSendTextDm,
         params: {
           "recipient_public_key_hex": recipientPublicKeyHex,
           "text": text,
@@ -119,7 +120,7 @@ abstract final class GhalBolP2p {
   }) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_requeue_outbound_dm",
+        DaemonMethod.p2pRequeueOutboundDm,
         params: {
           "message_id": messageId,
           "recipient_public_key_hex": recipientPublicKeyHex,
@@ -147,7 +148,7 @@ abstract final class GhalBolP2p {
     }
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_sync_ui_session",
+        DaemonMethod.p2pSyncUiSession,
         params: params,
         ensureDaemon: true,
       );
@@ -169,7 +170,7 @@ abstract final class GhalBolP2p {
   static Future<Map<String, dynamic>> nudgeReadCatchup() async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_nudge_read_catchup",
+        DaemonMethod.p2pNudgeReadCatchup,
         ensureDaemon: true,
       );
     }
@@ -181,7 +182,7 @@ abstract final class GhalBolP2p {
   static Future<Map<String, dynamic>> setAppAckReadEnabled(bool enabled) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_set_app_ack_read_enabled",
+        DaemonMethod.p2pSetAppAckReadEnabled,
         params: {"enabled": enabled},
         ensureDaemon: true,
       );
@@ -193,7 +194,7 @@ abstract final class GhalBolP2p {
   static Future<Map<String, dynamic>> setAppUiVisible(bool visible) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_set_app_ui_visible",
+        DaemonMethod.p2pSetAppUiVisible,
         params: {"visible": visible},
         ensureDaemon: true,
       );
@@ -206,7 +207,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       final pk = publicKeyHex?.trim() ?? "";
       return GhalBolDaemonClient.instance.callState(
-        "p2p_set_foreground_peer",
+        DaemonMethod.p2pSetForegroundPeer,
         params: pk.isEmpty ? {} : {"public_key_hex": pk},
         ensureDaemon: true,
       );
@@ -219,7 +220,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       // State socket — must not queue behind `p2p_call_video_frame` polls on main (~60/s in-call).
       return GhalBolDaemonClient.instance.callState(
-        "p2p_call_signal",
+        DaemonMethod.p2pCallSignal,
         params: config,
       );
     }
@@ -231,7 +232,7 @@ abstract final class GhalBolP2p {
   static Future<Map<String, dynamic>> callMedia(Map<String, dynamic> config) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_call_media",
+        DaemonMethod.p2pCallMedia,
         params: config,
       );
     }
@@ -280,7 +281,7 @@ abstract final class GhalBolP2p {
     const config = <String, dynamic>{};
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_call_status",
+        DaemonMethod.p2pCallStatus,
         params: config,
       );
     }
@@ -291,7 +292,7 @@ abstract final class GhalBolP2p {
   static Future<void> dismissIncomingCallAlert() async {
     if (usesDaemon) {
       await GhalBolDaemonClient.instance.callState(
-        "p2p_dismiss_incoming_call_alert",
+        DaemonMethod.p2pDismissIncomingCallAlert,
         params: const {},
       );
       return;
@@ -306,7 +307,7 @@ abstract final class GhalBolP2p {
     final params = <String, dynamic>{"reason": reason};
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_force_end_active_call",
+        DaemonMethod.p2pForceEndActiveCall,
         params: params,
       );
     }
@@ -317,7 +318,7 @@ abstract final class GhalBolP2p {
   static Future<bool> takeIncomingCallWake() async {
     if (usesDaemon) {
       final r = await GhalBolDaemonClient.instance.callState(
-        "p2p_take_incoming_call_wake",
+        DaemonMethod.p2pTakeIncomingCallWake,
         params: const {},
       );
       return r["wake"] == true;
@@ -329,7 +330,7 @@ abstract final class GhalBolP2p {
   static Future<bool> takeUnlockWake() async {
     if (!usesDaemon) return false;
     final r = await GhalBolDaemonClient.instance.callState(
-      "p2p_take_unlock_wake",
+      DaemonMethod.p2pTakeUnlockWake,
       params: const {},
       ensureDaemon: false,
     );
@@ -340,7 +341,7 @@ abstract final class GhalBolP2p {
   static Future<void> suppressUiExitHangup({int suppressMs = 5000}) async {
     if (!usesDaemon) return;
     await GhalBolDaemonClient.instance.call(
-      "ui_session_prepare_reconnect",
+      DaemonMethod.uiSessionPrepareReconnect,
       params: {"suppress_ms": suppressMs},
     );
   }
@@ -348,7 +349,7 @@ abstract final class GhalBolP2p {
   /// Best-effort before process exit (Ctrl+C may skip this; daemon uses socket EOF).
   static Future<void> notifyUiProcessExiting() async {
     if (usesDaemon) {
-      await GhalBolDaemonClient.instance.call("ui_process_exiting");
+      await GhalBolDaemonClient.instance.call(DaemonMethod.uiProcessExiting);
       return;
     }
     await forceEndActiveCall(reason: "ui_process_exiting");
@@ -368,7 +369,7 @@ abstract final class GhalBolP2p {
     };
     if (usesDaemon) {
       final r = await GhalBolDaemonClient.instance.callState(
-        "p2p_transcript_load_merged",
+        DaemonMethod.p2pTranscriptLoadMerged,
         params: params,
       );
       if (r["ok"] != true) return (revision: 0, lines: <Map<String, dynamic>>[]);
@@ -403,7 +404,7 @@ abstract final class GhalBolP2p {
   static Future<Map<String, dynamic>> callVideo(Map<String, dynamic> config) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_call_video",
+        DaemonMethod.p2pCallVideo,
         params: config,
       );
     }
@@ -465,7 +466,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       // State socket — must not queue behind chat/poll on the main socket (~30 fps).
       return GhalBolDaemonClient.instance.callState(
-        "p2p_call_video_push_camera_frame",
+        DaemonMethod.p2pCallVideoPushCameraFrame,
         params: config,
         ensureDaemon: false,
       );
@@ -484,7 +485,7 @@ abstract final class GhalBolP2p {
     };
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
-        "p2p_call_video_texture",
+        DaemonMethod.p2pCallVideoTexture,
         params: config,
         ensureDaemon: false,
       );
@@ -513,7 +514,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       // State socket — must not queue behind desktop camera push on the main socket.
       return GhalBolDaemonClient.instance.callState(
-        "p2p_call_video_frame",
+        DaemonMethod.p2pCallVideoFrame,
         params: config,
         ensureDaemon: false,
       );
@@ -528,7 +529,7 @@ abstract final class GhalBolP2p {
   }) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.call(
-        "p2p_send_ack_dm",
+        DaemonMethod.p2pSendAckDm,
         params: {
           "recipient_public_key_hex": recipientPublicKeyHex,
           "ref_id": refId,
@@ -559,7 +560,7 @@ abstract final class GhalBolP2p {
     if (usesDaemon) {
       // Poll on the state socket so events are not stuck behind send_text_dm / sync RPCs.
       var r = await GhalBolDaemonClient.instance.callState(
-        "p2p_poll",
+        DaemonMethod.p2pPoll,
         ensureDaemon: false,
       );
       if (r["ok"] != true) {
@@ -573,7 +574,7 @@ abstract final class GhalBolP2p {
             return null;
           }
           r = await GhalBolDaemonClient.instance.callState(
-            "p2p_poll",
+            DaemonMethod.p2pPoll,
             ensureDaemon: false,
           );
         }
@@ -628,8 +629,8 @@ abstract final class GhalBolP2p {
         if (ev == null) break;
         drained = true;
         final kind = ev["kind"]?.toString();
-        if (kind == "node_ready") return true;
-        if (kind == "node_stopped") return false;
+        if (kind == DaemonPollEventKind.nodeReady) return true;
+        if (kind == DaemonPollEventKind.nodeStopped) return false;
       }
       if (!drained && !await isRunning()) return false;
       await Future<void>.delayed(const Duration(milliseconds: 50));

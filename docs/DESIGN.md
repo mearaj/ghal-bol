@@ -580,6 +580,67 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 - **Assuming FGS + `WAKE_LOCK` exempt `:p2p` from all OEM freezers** — user must still complete battery optimization + OEM autostart settings when prompted.
 - **Forbidden 2026-06-15 hub session patch** — `lastApplySucceeded`, `_invalidateNativeForegroundSync`, per-frame `!lastApplySucceeded` retry in `_syncNativeForegroundIfLayoutChanged`, hub `node_ready` + `_attachHubChat` session reapply. **Broke P2P messaging** and indirectly caused identity/data loss UX. § “FORBIDDEN — reverted 2026-06-15”. **Do not** substitute for the Linux `inactive` fix.
 
+## UI integrator contract (daemon-owned)
+
+**Authority:** The background node (`ghal_bol_daemon` on Linux, Android `:p2p` / `GhalBolP2pService`) owns product behaviour — P2P, outbox, ack policy, transcript merge on poll, network truth, coord/WAN recovery, call teardown when the UI session ends. **`ghal_bol_ui` is a thin integrator** — screens, navigation, rendering, OS permission/window glue. It must speak only the contract declared in `ghal_bol/src/daemon/client_api.rs` (Rust) and `ghal_bol_ui/lib/daemon_client_api.dart` (Dart mirror). Do not invent parallel policy in Dart (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
+
+**Wire:** Newline-delimited JSON on the Unix socket: `{ "id", "method", "params" }` → `{ "id", "result" }` or `{ "id", "error" }`. Method names are stable literals from [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs).
+
+### UI → daemon (JSON-RPC methods)
+
+| Category | Methods | Integrator use |
+|----------|---------|----------------|
+| Session | `unlock`, `lock`, `session_unlocked` | Password unlock; UI lock; probe locked state |
+| P2P lifecycle | `p2p_start`, `p2p_stop`, `p2p_is_running` | Start/stop libp2p after unlock |
+| UI session (canonical) | `p2p_sync_ui_session`, `p2p_nudge_read_catchup` | **Only** allowed foreground/read gate API — see § UI session contract below |
+| UI session (deprecated) | `p2p_set_app_ack_read_enabled`, `p2p_set_app_ui_visible`, `p2p_set_foreground_peer` | Kept for compat; integrators must use `GhalBolUiSession` → `p2p_sync_ui_session` |
+| Chat / outbox | `p2p_send_text_dm`, `p2p_requeue_outbound_dm`, `p2p_register_dm_peer`, `p2p_send_ack_dm` | Send text; dev/test ack RPC only — normal acks are native |
+| Poll / stores | `p2p_poll`, `p2p_transcript_load_merged` | Poll applies events to disk; UI reloads via FFI — poll never sends acks |
+| Calls | `p2p_call_signal`, `p2p_call_media`, `p2p_call_status`, `p2p_call_video*`, `p2p_dismiss_incoming_call_alert`, `p2p_force_end_active_call` | Signaling + native media; force-end on UI exit |
+| Wakes (consume) | `p2p_take_incoming_call_wake`, `p2p_take_unlock_wake` | After daemon wake marker — present call or identity UI |
+| UI lifecycle | `ui_session_prepare_reconnect`, `ui_process_exiting` | Transient reconnect suppress; process exit / last socket EOF |
+| Network | `network_snapshot` | OS default route / link truth from Rust — UI displays only |
+| Coord (URL only) | `coord_set_base_url` | Push coord URL at unlock; lookup/register run in `:p2p` tick — not from Dart |
+| Coord (dev) | `coord_lookup_peer`, `coord_register_now` | Tests/tools only |
+| Health | `ping` | Socket probe |
+
+Full enum: `DaemonMethod::ALL` in `client_api.rs` (36 methods). New RPCs **must** be added there and in `daemon_client_api.dart` before use.
+
+### Daemon → UI (poll events, wakes, lifecycle)
+
+**Poll events** (`p2p_poll` → `event.kind`): display hints only — never drive ack or send policy.
+
+| `kind` | Meaning |
+|--------|---------|
+| `node_ready` / `node_stopped` | P2P stack up/down |
+| `peer_connected` / `peer_disconnected` | Connection hints |
+| `chat_ready` | DM stream open |
+| `dm_message` | Inbound/outbound text or ack applied on poll |
+| `stores_updated` | Contacts/transcript disk changed |
+| `peer_identified` | Roster identity |
+| `listening` | Listen addrs changed |
+
+Common kinds: `DaemonPollEventKind` in `client_api.rs`.
+
+**Runtime wake files** (`$XDG_RUNTIME_DIR/ghalbol/` on Linux; Android equivalent under app files):
+
+| File | `UiWakeKind` | Daemon writes when | Integrator action |
+|------|--------------|-------------------|-------------------|
+| `unlock_wake` | Unlock | Keystore exists, session locked, UI not engaged after grace | Poll + `p2p_take_unlock_wake` → present identity / password UI |
+| `incoming_call_wake` | IncomingCall | E2E call invite while UI backgrounded | Poll + `p2p_take_incoming_call_wake` → call UI |
+| `ui_present` | (presence) | **UI writes** on shell startup/resume | Daemon skips auto unlock wake when present |
+
+**Lifecycle rules (daemon-owned):**
+
+- **Last UI socket EOF** → `ui_process_exiting` path → `p2p_force_end_active_call` (call privacy).
+- **Successful `unlock` RPC** → clears stale `unlock_wake`.
+- **Linux inactive** → integrator must **not** call `setVisible(false)` while chat room open (read ticks) — see § UI session contract.
+- **Android inactive** → `setVisible(false)` — no new read receipts while room stays in stack.
+
+**Dual surface on Linux:** Keystore/contacts may use in-process FFI in the UI process while P2P runs in `ghal_bol_daemon`. Both share the same data dir after unlock; integrators must not duplicate P2P policy in FFI-only code paths on daemon platforms.
+
+**Reference implementation:** `GhalBolUiSession`, `P2pEventBridge`, `GhalBolP2p`, `GhalBolDaemon` — all daemon RPC method strings via `DaemonMethod` constants only.
+
 ## UI session contract (integrator app ↔ native P2P)
 
 **Scope:** `ghal_bol` (and `:p2p` / daemon) — **not** `ghal_bol_server`. The coord server never knows whether the UI is foreground; it only stores dialable endpoints. Any app integrating `ghal_bol` must drive this contract.
