@@ -186,6 +186,12 @@ pub fn p2p_take_incoming_call_wake() -> Value {
     json_ok(serde_json::json!({ "ok": true, "wake": wake }))
 }
 
+/// Consume daemon unlock wake marker (login after reboot → present unlock UI).
+pub fn p2p_take_unlock_wake() -> Value {
+    let wake = crate::daemon::take_unlock_wake();
+    json_ok(serde_json::json!({ "ok": true, "wake": wake }))
+}
+
 fn drain_holder_events_into_pending(h: &P2pHolder) {
     let Ok(mut q) = pending_p2p_events_mx().lock() else {
         return;

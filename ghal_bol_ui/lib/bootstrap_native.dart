@@ -10,8 +10,8 @@ import "call/call_controller.dart";
 import "ghal_bol_p2p.dart";
 import "chat_hub_screen.dart";
 import "ghal_bol_background.dart";
-import "ghal_bol_daemon.dart";
 import "ghal_bol_constants.dart";
+import "ghal_bol_daemon.dart";
 import "ghal_bol_host_init.dart";
 import "identity_alias_form.dart";
 import "identity_alias_store.dart";
@@ -100,11 +100,22 @@ class _GhalBolRootState extends State<GhalBolRoot> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.linux &&
+        GhalBolDaemon.isSupported) {
+      unawaited(GhalBolDaemon.touchLinuxUiPresence());
+      P2pEventBridge.instance.startLinuxWakePollIfNeeded();
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.linux &&
+        GhalBolDaemon.isSupported) {
+      unawaited(GhalBolDaemon.clearLinuxUiPresence());
+    }
     unawaited(InviteDeepLink.dispose());
     super.dispose();
   }
@@ -115,6 +126,9 @@ class _GhalBolRootState extends State<GhalBolRoot> with WidgetsBindingObserver {
       CallController.instance.onAppForeground();
     } else if (state == AppLifecycleState.detached) {
       unawaited(GhalBolP2p.notifyUiProcessExiting());
+      if (GhalBolDaemon.isSupported) {
+        unawaited(GhalBolDaemon.clearLinuxUiPresence());
+      }
     }
   }
 

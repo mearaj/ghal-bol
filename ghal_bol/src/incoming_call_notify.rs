@@ -10,8 +10,6 @@ mod linux {
 
     use notify_rust::{Hint, Notification, Timeout, Urgency};
 
-    use crate::daemon::touch_incoming_call_wake;
-
     static ACTIVE: Mutex<Option<(String, u32)>> = Mutex::new(None);
     /// GTK `application-id` — `com.ghalbol.debug` for `flutter run`, `com.ghalbol` for release.
     static DESKTOP_APP_ID: RwLock<String> = RwLock::new(String::new());
@@ -58,29 +56,9 @@ mod linux {
             .unwrap_or_else(|| crate::storage::ANDROID_LIBRARY_NAMESPACE.to_string())
     }
 
-    fn dbus_object_path(app_id: &str) -> String {
-        format!("/{}", app_id.replace('.', "/"))
-    }
-
     /// Wake the Flutter UI: runtime wake file (polled by UI) + D-Bus activate + desktop entry.
     fn wake_ui() {
-        touch_incoming_call_wake();
-        let app_id = desktop_app_id();
-        let object_path = dbus_object_path(&app_id);
-        let _ = Command::new("gdbus")
-            .args([
-                "call",
-                "-e",
-                "-d",
-                &app_id,
-                "-o",
-                &object_path,
-                "-m",
-                "org.freedesktop.Application.Activate",
-                "{}",
-            ])
-            .status();
-        let _ = Command::new("gtk-launch").arg(&app_id).spawn();
+        crate::linux_desktop_launch::wake_for_incoming_call(&desktop_app_id());
     }
 
     pub fn show(peer_public_key_hex: &str, call_id: &str) {

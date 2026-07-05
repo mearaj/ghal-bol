@@ -19,6 +19,11 @@ pub fn suppress_ui_exit_hangup_ms(ms: i64) {
     UI_EXIT_HANGUP_SUPPRESS_UNTIL_MS.store(until, Ordering::SeqCst);
 }
 
+/// Whether at least one Flutter UI RPC socket is connected to the daemon.
+pub fn ui_session_active() -> bool {
+    UI_SESSIONS.load(Ordering::SeqCst) > 0
+}
+
 /// Explicit UI exit (best-effort before process death).
 pub fn ui_process_exiting() {
     let _ = crate::p2p_runtime::p2p_force_end_active_call("ui_process_exiting");

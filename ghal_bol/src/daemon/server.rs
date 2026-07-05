@@ -123,7 +123,11 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
         "unlock" => {
             let ns = param_str(params, "app_namespace")?;
             let password = param_str(params, "password")?;
-            Ok(session_runtime::unlock_identity(&ns, &password))
+            let result = session_runtime::unlock_identity(&ns, &password);
+            if result.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                crate::daemon::clear_unlock_wake();
+            }
+            Ok(result)
         }
         "lock" => {
             session_runtime::lock_identity();
@@ -167,6 +171,7 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, String> {
             Ok(p2p_runtime::p2p_force_end_active_call(reason))
         }
         "p2p_take_incoming_call_wake" => Ok(p2p_runtime::p2p_take_incoming_call_wake()),
+        "p2p_take_unlock_wake" => Ok(p2p_runtime::p2p_take_unlock_wake()),
         "ui_session_prepare_reconnect" => {
             let ms = params
                 .get("suppress_ms")

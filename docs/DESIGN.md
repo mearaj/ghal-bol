@@ -521,15 +521,17 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 
 2. **Login → daemon starts** via XDG autostart. No keystore password available — session stays locked.
 
-3. **Unlock reminder (10 s grace):** The daemon spawns a thread that sleeps 10 seconds. If `session_unlocked()` is still false (no UI connected and unlocked in time), it posts a `notify-rust` desktop notification: "Ghal Bol — Enter your password to start receiving messages". The notification action runs `gtk-launch com.ghalbol` to open the Flutter app.
+3. **Unlock wake (10 s grace):** The daemon spawns a thread that sleeps 10 seconds (override: `GHAL_BOL_UNLOCK_GRACE_SECS`). If `session_unlocked()` is still false **and** the UI is not already present (`ui_presence` runtime marker or an active UI RPC socket), it raises the desktop app (`gtk-launch` + D-Bus `Activate` + `unlock_wake` file polled by Flutter) and posts a `notify-rust` notification as fallback: "Ghal Bol — Enter your password to start receiving messages".
 
-4. **User clicks notification** → Flutter app opens → `IdentityScreen` (password) → unlock → daemon gets the `unlock` RPC → P2P starts.
+4. **User sees unlock screen** → enters password → daemon gets the `unlock` RPC → P2P starts (stale `unlock_wake` cleared on successful unlock).
 
-5. **Grace period prevents false notifications:** When the user opens the app normally (which spawns the daemon via `ensureDaemonRunning`), unlock happens within seconds — the 10 s timer never fires.
+5. **Grace period prevents false wakes:** Flutter touches `$XDG_RUNTIME_DIR/ghalbol/ui_present` as soon as the shell starts. During grace the daemon also records if the UI was ever present — if the user opened the app and closed it without unlocking, the end-of-grace auto-wake is **skipped** (they already engaged; not nagged again). If the app is still open at grace end, auto-wake is also skipped. **One auto-wake per daemon start** when the user never opened the app. Dismissing the fallback notification does **not** re-open the app; only tapping **Open** does. **Does not** call `GhalBolUiSession`, change read gates, or auto-unlock.
 
-**Systemd alternative:** `scripts/ghal-bol-daemon.user.service` is still available for users who prefer `systemctl --user enable`. The daemon notification works the same way regardless of how it was started.
+**Namespace detection (portable):** On unlock, Flutter writes `Environment=GHAL_BOL_APP_NAMESPACE=…` into the XDG autostart desktop entry. The daemon resolves the GTK application id via `GHAL_BOL_APP_NAMESPACE` when set, else release (`com.ghalbol`) or debug (`com.ghalbol.debug`) keystore on disk.
 
-**Code:** `ghal_bol_daemon.rs` (`spawn_unlock_reminder`), `lib.rs` (`pub use session_unlocked`), `ghal_bol_daemon_client_io.dart` (`installLinuxAutostart`, `removeLinuxAutostart`), `ghal_bol_daemon.dart` (forwarding), `bootstrap_native.dart` (install on unlock), `ghal_bol_background.dart` (remove on logout).
+**Systemd alternative:** `scripts/ghal-bol-daemon.user.service` is still available for users who prefer `systemctl --user enable`. The daemon unlock wake works the same way regardless of how it was started.
+
+**Code:** `linux_desktop_launch.rs`, `app_paths::detect_keystore_app_namespace`, `daemon/paths.rs` (`unlock_wake`), `ghal_bol_daemon.rs` (`spawn_unlock_reminder`), `p2p_event_bridge.dart` (`startLinuxWakePollIfNeeded`), `ghal_bol_daemon_client_io.dart` (`installLinuxAutostart`), `bootstrap_native.dart` (early wake poll).
 
 ### Regression symptoms (treat as bugs)
 

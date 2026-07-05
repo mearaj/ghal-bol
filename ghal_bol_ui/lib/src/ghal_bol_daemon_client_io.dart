@@ -4,8 +4,9 @@ import "dart:io";
 
 import "package:ghal_bol_ui/app_env_config.dart";
 import "package:ghal_bol_ui/app_log.dart";
-import "package:ghal_bol_ui/user_flow_log.dart";
+import "package:ghal_bol_ui/ghal_bol_constants.dart";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
+import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/src/ghal_bol_android_p2p_service.dart"
     if (dart.library.html) "package:ghal_bol_ui/src/ghal_bol_android_p2p_service_stub.dart";
 
@@ -456,6 +457,7 @@ class GhalBolDaemonClient {
     if (method == "p2p_poll" ||
         method == "p2p_is_running" ||
         method == "p2p_take_incoming_call_wake" ||
+        method == "p2p_take_unlock_wake" ||
         method == "network_snapshot") {
       if (!ok &&
           (method == "p2p_poll" || method == "p2p_is_running")) {
@@ -573,6 +575,27 @@ class GhalBolDaemonClient {
 
   /// Install an XDG autostart entry so `ghal_bol_daemon` starts on login.
   /// Re-runs on each unlock to update the binary path if the bundle moved.
+  static Future<void> touchLinuxUiPresence() async {
+    if (!Platform.isLinux) return;
+    try {
+      final runtime = Platform.environment["XDG_RUNTIME_DIR"];
+      if (runtime == null || runtime.isEmpty) return;
+      final dir = Directory("$runtime/ghalbol");
+      if (!await dir.exists()) await dir.create(recursive: true);
+      await File("${dir.path}/ui_present").writeAsString("1");
+    } catch (_) {}
+  }
+
+  static Future<void> clearLinuxUiPresence() async {
+    if (!Platform.isLinux) return;
+    try {
+      final runtime = Platform.environment["XDG_RUNTIME_DIR"];
+      if (runtime == null || runtime.isEmpty) return;
+      final file = File("$runtime/ghalbol/ui_present");
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
   static Future<void> installLinuxAutostart() async {
     if (!Platform.isLinux) return;
     final bin = await resolveDaemonExecutable();
@@ -588,6 +611,7 @@ class GhalBolDaemonClient {
         "Type=Application\n"
         "Name=Ghal Bol Background\n"
         "Exec=$bin\n"
+        "Environment=GHAL_BOL_APP_NAMESPACE=$kGhalBolAppNamespace\n"
         "NoDisplay=true\n"
         "X-GNOME-Autostart-enabled=true\n"
         "Comment=Keeps Ghal Bol P2P networking active after login\n",

@@ -325,6 +325,17 @@ abstract final class GhalBolP2p {
     return GhalBolFfi.p2pTakeIncomingCallWake()["wake"] == true;
   }
 
+  /// Linux daemon reboot unlock wake → present password UI (consumes wake marker).
+  static Future<bool> takeUnlockWake() async {
+    if (!usesDaemon) return false;
+    final r = await GhalBolDaemonClient.instance.callState(
+      "p2p_take_unlock_wake",
+      params: const {},
+      ensureDaemon: false,
+    );
+    return r["wake"] == true;
+  }
+
   /// Best-effort before UI socket reconnect (login unlock) — avoids hangup on transient EOF.
   static Future<void> suppressUiExitHangup({int suppressMs = 5000}) async {
     if (!usesDaemon) return;

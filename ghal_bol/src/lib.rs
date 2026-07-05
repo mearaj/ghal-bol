@@ -20,6 +20,8 @@ mod android_jni_cache;
 #[cfg(target_os = "android")]
 mod android_network;
 mod app_paths;
+#[cfg(not(target_arch = "wasm32"))]
+pub use app_paths::detect_keystore_app_namespace;
 mod c_ffi;
 #[cfg(not(target_arch = "wasm32"))]
 mod call_ffi;
@@ -58,6 +60,10 @@ mod incoming_call_android;
 mod incoming_call_notify;
 mod invite_ffi;
 mod keystore_v1;
+#[cfg(target_os = "linux")]
+mod linux_desktop_launch;
+#[cfg(target_os = "linux")]
+pub use linux_desktop_launch::{wake_for_incoming_call, wake_for_unlock};
 #[cfg(target_os = "linux")]
 mod linux_network;
 mod msg_v1;

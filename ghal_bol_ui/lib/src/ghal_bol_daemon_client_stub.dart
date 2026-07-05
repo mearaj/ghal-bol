@@ -43,4 +43,8 @@ class GhalBolDaemonClient {
   static Future<void> installLinuxAutostart() async {}
 
   static Future<void> removeLinuxAutostart() async {}
+
+  static Future<void> touchLinuxUiPresence() async {}
+
+  static Future<void> clearLinuxUiPresence() async {}
 }

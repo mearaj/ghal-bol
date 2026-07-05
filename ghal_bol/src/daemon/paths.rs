@@ -48,3 +48,45 @@ pub fn take_incoming_call_wake() -> bool {
 pub fn clear_incoming_call_wake() {
     let _ = std::fs::remove_file(incoming_call_wake_path());
 }
+
+/// Touched when the daemon needs the UI for keystore unlock (login after reboot).
+pub fn unlock_wake_path() -> PathBuf {
+    runtime_ghalbol_dir().join("unlock_wake")
+}
+
+/// Signal the Flutter UI to present the unlock screen (polled when the app is already running).
+pub fn touch_unlock_wake() {
+    let dir = runtime_ghalbol_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = unlock_wake_path();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "1".to_string());
+    let _ = std::fs::write(path, ts);
+}
+
+/// True when the daemon wrote [unlock_wake_path] and the UI has not consumed it yet.
+pub fn take_unlock_wake() -> bool {
+    let path = unlock_wake_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => false,
+    }
+}
+
+/// Drop stale unlock wake marker (successful unlock or previous session).
+pub fn clear_unlock_wake() {
+    let _ = std::fs::remove_file(unlock_wake_path());
+}
+
+/// Touched by the Flutter shell on startup so the daemon grace timer knows the UI is already open.
+pub fn ui_presence_path() -> PathBuf {
+    runtime_ghalbol_dir().join("ui_present")
+}
+
+/// True when the Flutter process has marked itself running (see `ui_present` in runtime dir).
+pub fn ui_presence_active() -> bool {
+    ui_presence_path().exists()
+}

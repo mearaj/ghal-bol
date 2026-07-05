@@ -30,6 +30,31 @@ pub fn storage_config_for_namespace(app_namespace: &str) -> StorageConfig {
     crate::c_ffi::resolved_storage_config(app_namespace)
 }
 
+/// Resolve the installed app namespace when the daemon starts without an unlocked session.
+///
+/// Order: `GHAL_BOL_APP_NAMESPACE` (when that keystore exists), then release, then debug.
+pub fn detect_keystore_app_namespace() -> Option<String> {
+    if let Ok(raw) = std::env::var("GHAL_BOL_APP_NAMESPACE") {
+        let ns = raw.trim();
+        if !ns.is_empty() {
+            let cfg = StorageConfig::new(ns);
+            if crate::keystore_v1_file_exists(&cfg).unwrap_or(false) {
+                return Some(ns.to_string());
+            }
+        }
+    }
+    for ns in [
+        crate::storage::ANDROID_LIBRARY_NAMESPACE,
+        "com.ghalbol.debug",
+    ] {
+        let cfg = StorageConfig::new(ns);
+        if crate::keystore_v1_file_exists(&cfg).unwrap_or(false) {
+            return Some(ns.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

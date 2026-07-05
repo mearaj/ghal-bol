@@ -23,7 +23,7 @@ class P2pEventBridge {
 
   Timer? _poll;
   Timer? _heartbeat;
-  Timer? _incomingCallWakePoll;
+  Timer? _linuxWakePoll;
   Timer? _coordDialDebounce;
   Future<void>? _coordDialInFlight;
   String _appNs = kGhalBolAppNamespace;
@@ -206,7 +206,7 @@ class P2pEventBridge {
     _heartbeat ??= Timer.periodic(const Duration(minutes: 2), (_) {
       unawaited(_logSessionHeartbeat());
     });
-    _startIncomingCallWakePollIfNeeded();
+    _startLinuxWakePollIfNeeded();
     _uiVisibleDesired = true;
     _scheduleUiSessionApply();
     if (_networkBootstrapOk) return;
@@ -380,8 +380,8 @@ class P2pEventBridge {
     _poll = null;
     _heartbeat?.cancel();
     _heartbeat = null;
-    _incomingCallWakePoll?.cancel();
-    _incomingCallWakePoll = null;
+    _linuxWakePoll?.cancel();
+    _linuxWakePoll = null;
     _coordDialDebounce?.cancel();
     _coordDialDebounce = null;
     _coordDialInFlight = null;
@@ -448,14 +448,30 @@ class P2pEventBridge {
     return next;
   }
 
-  /// Linux only: daemon libnotify tap writes `incoming_call_wake` — poll when D-Bus activate misses.
-  void _startIncomingCallWakePollIfNeeded() {
-    if (_incomingCallWakePoll != null) return;
+  /// Linux only: daemon wake files (unlock after reboot, incoming-call notify tap).
+  void startLinuxWakePollIfNeeded() {
+    _startLinuxWakePollIfNeeded();
+  }
+
+  void _startLinuxWakePollIfNeeded() {
+    if (_linuxWakePoll != null) return;
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.linux) return;
     if (!GhalBolP2p.usesDaemon) return;
-    _incomingCallWakePoll = Timer.periodic(const Duration(seconds: 2), (_) {
+    _linuxWakePoll = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_maybeHandleUnlockWake());
       unawaited(_maybeHandleIncomingCallWake());
     });
+  }
+
+  Future<void> _maybeHandleUnlockWake() async {
+    if (!GhalBolP2p.usesDaemon) return;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.linux) return;
+    try {
+      if (!await GhalBolP2p.takeUnlockWake()) return;
+      SessionFlowLog.step("unlock_wake", {"source": "daemon_autostart"});
+      // Present only — no GhalBolUiSession / onAppForeground (DESIGN.md: no session-sync on wake).
+      await CallIncomingAlert.presentWindow();
+    } catch (_) {}
   }
 
   Future<void> _maybeHandleIncomingCallWake() async {
