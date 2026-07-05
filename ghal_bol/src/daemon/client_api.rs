@@ -1,8 +1,8 @@
 //! Canonical **daemon ↔ UI integrator** contract.
 //!
 //! The background node (`ghal_bol_daemon` / Android `:p2p`) owns product behaviour.
-//! Host UI shells (e.g. `ghal_bol_ui`) must use only the RPC methods and wake signals
-//! declared here — never duplicate ack/outbox/dial/session policy in Dart.
+//! Host UI shells must use only the RPC methods and wake signals declared here.
+//! Integrator architecture: `docs/DAEMON_INTEGRATOR.md`.
 //!
 //! Wire format: newline-delimited JSON `{ "id", "method", "params" }` on the Unix socket.
 //! Method names are stable string literals from [`DaemonMethod::wire_name`].
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn all_method_count_matches_dart_mirror() {
-        /// Keep in sync with `ghal_bol_ui/test/daemon_client_api_test.dart`.
+        /// Keep in sync with `packages/ghal_bol_daemon_client` `DaemonMethod.all`.
         const DART_MIRROR_METHOD_COUNT: usize = 36;
         assert_eq!(DaemonMethod::ALL.len(), DART_MIRROR_METHOD_COUNT);
     }

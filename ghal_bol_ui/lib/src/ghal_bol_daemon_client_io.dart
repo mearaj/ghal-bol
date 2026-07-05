@@ -1,51 +1,53 @@
 import "dart:async";
-import "dart:convert";
 import "dart:io";
 
+import "package:ghal_bol_daemon_client/ghal_bol_daemon_client.dart";
 import "package:ghal_bol_ui/app_env_config.dart";
-import "package:ghal_bol_ui/daemon_client_api.dart";
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/ghal_bol_constants.dart";
-import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/src/ghal_bol_android_p2p_service.dart"
     if (dart.library.html) "package:ghal_bol_ui/src/ghal_bol_android_p2p_service_stub.dart";
 
-/// Unix-socket client for out-of-process P2P (`ghal_bol_daemon` on Linux, `:p2p` service on Android).
+/// Reference integrator shell around [`DaemonClient`] / [`RpcConnection`].
+///
+/// Platform spawn (Linux `ghal_bol_daemon`, Android `:p2p` FGS) stays here;
+/// third-party apps should depend on `ghal_bol_daemon_client` directly.
 class GhalBolDaemonClient {
   GhalBolDaemonClient._();
 
   static final GhalBolDaemonClient instance = GhalBolDaemonClient._();
 
-  Socket? _socket;
-  StreamIterator<String>? _lines;
-  int _nextId = 1;
-  /// Separate socket for room/ack gates — must not queue behind `send_text_dm` / poll.
-  Socket? _stateSocket;
-  StreamIterator<String>? _stateLines;
-  int _stateNextId = 1;
+  final RpcConnection _main = RpcConnection();
+  final RpcConnection _state = RpcConnection();
   String? _cachedSocketPath;
-
-  /// One in-flight RPC at a time per socket (line iterator is not multiplexed).
-  Future<void> _rpcChain = Future<void>.value();
-  Future<void> _stateRpcChain = Future<void>.value();
 
   static bool get _usesOutOfProcessP2p =>
       Platform.isLinux || Platform.isAndroid;
 
-  static Future<String> resolveSocketPath() async {
+  static IntegratorConfig _integratorConfig({String? appNamespace}) {
+    final ns = appNamespace?.trim().isNotEmpty == true
+        ? appNamespace!.trim()
+        : kGhalBolAppNamespace;
+    return IntegratorConfig(
+      appNamespace: ns,
+      xdgRuntimeDir: Platform.environment["XDG_RUNTIME_DIR"],
+      socketPathOverride: Platform.environment["GHAL_BOL_DAEMON_SOCKET"]?.trim(),
+      runtimeDirOverride: Platform.environment["GHAL_BOL_RUNTIME_DIR"]?.trim(),
+    );
+  }
+
+  static Future<String> resolveSocketPath({String? appNamespace}) async {
     if (Platform.isAndroid) {
       return ghalBolAndroidP2pSocketPath();
     }
-    final fromEnv = Platform.environment["GHAL_BOL_DAEMON_SOCKET"]?.trim();
-    if (fromEnv != null && fromEnv.isNotEmpty) return fromEnv;
-    final fromNative = GhalBolFfi.daemonSocketPath();
-    if (fromNative != null && fromNative.isNotEmpty) return fromNative;
-    return "/tmp/ghalbol/p2p.sock";
+    return _integratorConfig(appNamespace: appNamespace).socketPath;
   }
 
   Future<String> _socketPath() async {
-    _cachedSocketPath ??= await resolveSocketPath();
+    _cachedSocketPath ??= await resolveSocketPath(
+      appNamespace: kGhalBolAppNamespace,
+    );
     return _cachedSocketPath!;
   }
 
@@ -62,35 +64,6 @@ class GhalBolDaemonClient {
     return null;
   }
 
-  static Future<bool> _pingSocket(String path) async {
-    Socket? s;
-    try {
-      s = await Socket.connect(
-        InternetAddress(path, type: InternetAddressType.unix),
-        0,
-      ).timeout(const Duration(seconds: 2));
-      final id = 0;
-      s.writeln(jsonEncode({"id": id, "method": DaemonMethod.ping, "params": {}}));
-      final lines = s
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .transform(const LineSplitter());
-      await for (final line in lines) {
-        if (line.trim().isEmpty) continue;
-        final raw = jsonDecode(line);
-        if (raw is Map && raw["id"] == id) {
-          return raw["result"]?["pong"] == true;
-        }
-        break;
-      }
-      return false;
-    } catch (_) {
-      return false;
-    } finally {
-      await s?.close();
-    }
-  }
-
   static DateTime? _probeOkAt;
   static const Duration _probeTtl = Duration(seconds: 60);
 
@@ -98,7 +71,6 @@ class GhalBolDaemonClient {
     _probeOkAt = null;
   }
 
-  /// Cached reachability — do not open a new ping socket on every [p2p_poll] (was ~5×/sec).
   static Future<bool> probeDaemon({bool force = false}) async {
     if (!_usesOutOfProcessP2p) return false;
     if (!force &&
@@ -115,7 +87,7 @@ class GhalBolDaemonClient {
     }
     try {
       final path = await instance._socketPath();
-      final ok = await _pingSocket(path);
+      final ok = await RpcConnection.pingSocket(path);
       if (ok) {
         _probeOkAt = DateTime.now();
       } else {
@@ -138,12 +110,11 @@ class GhalBolDaemonClient {
     return next;
   }
 
-  /// Drop stale UI RPC sockets only — does **not** stop the `:p2p` process (keeps libp2p up).
   static Future<void> reconnectDaemon() async {
     if (!_usesOutOfProcessP2p) return;
     try {
       await instance.call(
-        "ui_session_prepare_reconnect",
+        DaemonMethod.uiSessionPrepareReconnect,
         params: {"suppress_ms": 5000},
         ensureDaemon: false,
       );
@@ -161,7 +132,6 @@ class GhalBolDaemonClient {
     SessionFlowLog.daemonIssue("reconnect_failed");
   }
 
-  /// Drop stale UI sockets and bring `:p2p` / `ghal_bol_daemon` back before unlock.
   static Future<void> prepareForLoginUnlock() async {
     if (!_usesOutOfProcessP2p) return;
     SessionFlowLog.daemon("prepare_login", {"action": "disconnect_sockets"});
@@ -173,7 +143,6 @@ class GhalBolDaemonClient {
     }
   }
 
-  /// Stop and restart Android `:p2p` — last resort (drops active libp2p until unlock + p2p_start).
   static Future<void> hardResetP2pService() async {
     if (!_usesOutOfProcessP2p) return;
     await instance.disconnect();
@@ -197,7 +166,6 @@ class GhalBolDaemonClient {
     SessionFlowLog.daemonIssue("hard_reset_failed");
   }
 
-  /// Reconnect UI sockets; only hard-reset `:p2p` if the daemon still does not answer ping.
   static Future<void> forceRecoverDaemon() async {
     if (!_usesOutOfProcessP2p) return;
     await reconnectDaemon();
@@ -216,11 +184,6 @@ class GhalBolDaemonClient {
         low.contains("timed out");
   }
 
-  /// Unlock with `:p2p` restart on transient socket failures.
-  ///
-  /// Does **not** call [prepareForLoginUnlock] on the first attempt — login and
-  /// UI-lock flows must call that once before FFI unlock. Re-unlock via [unlock]
-  /// must not disconnect sockets mid-session.
   Future<Map<String, dynamic>> unlockWithRecovery({
     required String appNamespace,
     required String password,
@@ -267,19 +230,14 @@ class GhalBolDaemonClient {
         return;
       }
       SessionFlowLog.daemon("spawn_daemon", {"bin": bin});
+      final spawnEnv = Map<String, String>.from(Platform.environment);
+      spawnEnv.addAll(_integratorConfig().daemonSpawnEnv());
+      spawnEnv.addAll(_verboseLogEnv() ?? const {});
       await Process.start(
         bin,
         [],
         mode: ProcessStartMode.detached,
-        environment: {
-          if (Platform.environment["GHAL_BOL_DAEMON_SOCKET"] != null)
-            "GHAL_BOL_DAEMON_SOCKET":
-                Platform.environment["GHAL_BOL_DAEMON_SOCKET"]!,
-          // Full libp2p flow on the terminal: the daemon runs in its own process, so
-          // its `GHAL_BOL_VERBOSE_LOG` must be set at spawn (env/.env.development).
-          // It forwards Rust `debug` lines through the log sink → App log → terminal.
-          ...?_verboseLogEnv(),
-        },
+        environment: spawnEnv,
       );
     }
 
@@ -297,73 +255,24 @@ class GhalBolDaemonClient {
     );
   }
 
-  /// `{GHAL_BOL_VERBOSE_LOG: <val>}` when enabled in env, else null (spread no-op).
   static Map<String, String>? _verboseLogEnv() {
     final v = AppEnvConfig.get("GHAL_BOL_VERBOSE_LOG")?.trim() ?? "";
     if (v.isEmpty) return null;
     return {"GHAL_BOL_VERBOSE_LOG": v};
   }
 
-  Future<void> _connect() async {
-    if (_socket != null) return;
+  Future<void> _ensureConnected({required bool state}) async {
     final path = await _socketPath();
-    final s = await Socket.connect(
-      InternetAddress(path, type: InternetAddressType.unix),
-      0,
-    );
-    _socket = s;
-    _lines = StreamIterator(
-      s.cast<List<int>>().transform(utf8.decoder).transform(const LineSplitter()),
-    );
-  }
-
-  Future<void> _connectState() async {
-    if (_stateSocket != null) return;
-    final path = await _socketPath();
-    final s = await Socket.connect(
-      InternetAddress(path, type: InternetAddressType.unix),
-      0,
-    );
-    _stateSocket = s;
-    _stateLines = StreamIterator(
-      s.cast<List<int>>().transform(utf8.decoder).transform(const LineSplitter()),
-    );
-  }
-
-  Future<void> _resetConnection() async {
-    await _lines?.cancel();
-    _lines = null;
-    try {
-      await _socket?.close();
-    } catch (_) {}
-    _socket = null;
-    invalidateProbeCache();
-  }
-
-  Future<void> _resetStateConnection() async {
-    await _stateLines?.cancel();
-    _stateLines = null;
-    try {
-      await _stateSocket?.close();
-    } catch (_) {}
-    _stateSocket = null;
-    invalidateProbeCache();
+    if (state) {
+      await _state.connect(path);
+    } else {
+      await _main.connect(path);
+    }
   }
 
   Future<void> disconnect() async {
-    await _resetConnection();
-    await _resetStateConnection();
-  }
-
-  Future<T> _serialized<T>(Future<T> Function() run, {required bool state}) {
-    final chain = state ? _stateRpcChain : _rpcChain;
-    final next = chain.then((_) => run());
-    if (state) {
-      _stateRpcChain = next.then((_) {}, onError: (_) {});
-    } else {
-      _rpcChain = next.then((_) {}, onError: (_) {});
-    }
-    return next;
+    await _main.disconnect();
+    await _state.disconnect();
   }
 
   Future<Map<String, dynamic>> _callOnSocket({
@@ -371,75 +280,29 @@ class GhalBolDaemonClient {
     required Map<String, dynamic> params,
     required bool ensureDaemon,
     required bool stateSocket,
-  }) {
-    Future<Map<String, dynamic>> run() async {
-      final sw = Stopwatch()..start();
-      Map<String, dynamic> result;
-      if (ensureDaemon) {
-        await ensureDaemonRunning();
-      } else if (!await probeDaemon()) {
-        result = {"ok": false, "error": "daemon not running"};
-        sw.stop();
-        _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
-        return result;
-      }
-      try {
-        if (stateSocket) {
-          await _connectState();
-        } else {
-          await _connect();
-        }
-        final socket = stateSocket ? _stateSocket! : _socket!;
-        final lines = stateSocket ? _stateLines! : _lines!;
-        final id = stateSocket ? _stateNextId++ : _nextId++;
-        final req = jsonEncode({"id": id, "method": method, "params": params});
-        socket.writeln(req);
-        while (await lines.moveNext()) {
-          final line = lines.current.trim();
-          if (line.isEmpty) continue;
-          final raw = jsonDecode(line);
-          if (raw is! Map) continue;
-          if (raw["id"] != id) continue;
-          if (raw["error"] != null) {
-            result = {"ok": false, "error": raw["error"].toString()};
-            sw.stop();
-            _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
-            return result;
-          }
-          final payload = raw["result"];
-          if (payload is Map<String, dynamic>) {
-            result = payload;
-          } else if (payload is Map) {
-            result = Map<String, dynamic>.from(payload);
-          } else {
-            result = {"ok": true, "result": payload};
-          }
-          sw.stop();
-          _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
-          return result;
-        }
-        if (stateSocket) {
-          await _resetStateConnection();
-        } else {
-          await _resetConnection();
-        }
-        result = {"ok": false, "error": "daemon disconnected"};
-        sw.stop();
-        _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
-        return result;
-      } catch (e) {
-        if (stateSocket) {
-          await _resetStateConnection();
-        } else {
-          await _resetConnection();
-        }
-        result = {"ok": false, "error": e.toString()};
-        sw.stop();
-        _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
-        return result;
-      }
+  }) async {
+    final sw = Stopwatch()..start();
+    if (ensureDaemon) {
+      await ensureDaemonRunning();
+    } else if (!await probeDaemon()) {
+      final result = {"ok": false, "error": "daemon not running"};
+      sw.stop();
+      _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
+      return result;
     }
-    return _serialized(run, state: stateSocket);
+    try {
+      await _ensureConnected(state: stateSocket);
+    } catch (e) {
+      final result = {"ok": false, "error": e.toString()};
+      sw.stop();
+      _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
+      return result;
+    }
+    final conn = stateSocket ? _state : _main;
+    final result = await conn.call(method, params: params);
+    sw.stop();
+    _logRpcResult(method, result, sw.elapsedMilliseconds, stateSocket: stateSocket);
+    return result;
   }
 
   static DateTime? _lastPollRpcFailureLogAt;
@@ -477,11 +340,10 @@ class GhalBolDaemonClient {
       final last = method == DaemonMethod.p2pCallVideoPushCameraFrame
           ? _lastCameraPushRpcLogAt
           : _lastVideoFrameRpcLogAt;
-      // Throttle noisy success logs only — failures always log.
       if (ok && last != null && now.difference(last).inMilliseconds < 1000) {
         return;
       }
-      if (method == "p2p_call_video_push_camera_frame") {
+      if (method == DaemonMethod.p2pCallVideoPushCameraFrame) {
         _lastCameraPushRpcLogAt = now;
       } else {
         _lastVideoFrameRpcLogAt = now;
@@ -512,7 +374,7 @@ class GhalBolDaemonClient {
         "ns=${result["app_namespace"]} pk=${_shortPk(result["public_key_hex"])}",
       );
     }
-    if (method == "p2p_start" && ok) {
+    if (method == DaemonMethod.p2pStart && ok) {
       AppLog.instance.trace(
         "p2p_start",
         "already_running=${result["already_running"] == true}",
@@ -538,7 +400,6 @@ class GhalBolDaemonClient {
         stateSocket: false,
       );
 
-  /// Foreground peer + ack-read gate — never blocked behind chat send / poll.
   Future<Map<String, dynamic>> callState(
     String method, {
     Map<String, dynamic> params = const {},
@@ -574,25 +435,19 @@ class GhalBolDaemonClient {
     }
   }
 
-  /// Install an XDG autostart entry so `ghal_bol_daemon` starts on login.
-  /// Re-runs on each unlock to update the binary path if the bundle moved.
-  static Future<void> touchLinuxUiPresence() async {
+  static Future<void> touchLinuxUiPresence({String? appNamespace}) async {
     if (!Platform.isLinux) return;
     try {
-      final runtime = Platform.environment["XDG_RUNTIME_DIR"];
-      if (runtime == null || runtime.isEmpty) return;
-      final dir = Directory("$runtime/ghalbol");
-      if (!await dir.exists()) await dir.create(recursive: true);
-      await File("${dir.path}/${UiWakeKind.uiPresenceMarker}").writeAsString("1");
+      final file = File(_integratorConfig(appNamespace: appNamespace).uiPresencePath);
+      await file.parent.create(recursive: true);
+      await file.writeAsString("1");
     } catch (_) {}
   }
 
-  static Future<void> clearLinuxUiPresence() async {
+  static Future<void> clearLinuxUiPresence({String? appNamespace}) async {
     if (!Platform.isLinux) return;
     try {
-      final runtime = Platform.environment["XDG_RUNTIME_DIR"];
-      if (runtime == null || runtime.isEmpty) return;
-      final file = File("$runtime/ghalbol/${UiWakeKind.uiPresenceMarker}");
+      final file = File(_integratorConfig(appNamespace: appNamespace).uiPresencePath);
       if (await file.exists()) await file.delete();
     } catch (_) {}
   }

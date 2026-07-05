@@ -3,6 +3,8 @@
 #          systemctl --user enable --now ghal-bol-daemon.service
 #
 # Set GHAL_BOL_DAEMON_BIN to your built or bundled binary path.
+# Set GHAL_BOL_APP_NAMESPACE to your integrator bundle id (one daemon per namespace).
+# Example: Environment=GHAL_BOL_APP_NAMESPACE=com.ghalbol
 
 [Unit]
 Description=Ghal Bol libp2p background listener
@@ -10,6 +12,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=GHAL_BOL_APP_NAMESPACE=com.ghalbol
 ExecStart=%h/.local/bin/ghal_bol_daemon
 Restart=on-failure
 RestartSec=3

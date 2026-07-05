@@ -308,6 +308,16 @@ fn reconcile_stale_lan_mux_for_wan(
     if !urgent_reconcile && wan_mux_reconcile_throttled(peer, now_ms) {
         return;
     }
+    // Peer still on LAN with a healthy mux — clear spurious soft-nudge flag; do not WAN-reconcile.
+    if session.network_profile_snapshot().has_active_lan()
+        && (peer_has_live_mdns_lan(session, peer) || session.peer_on_local_lan(peer))
+        && session.dm_peer_stream_up(peer)
+        && session.dm_mux_recently_active(peer, now_ms)
+        && !session.peer_outbound_stuck_for(peer, now_ms, WAN_MUX_RECONCILE_STUCK_MS)
+    {
+        session.clear_lan_listen_rediscovery(peer);
+        return;
+    }
     if urgent_reconcile {
         // Stamp throttle after one-shot bypass — no reconcile storm (TRANSPORT.md § recovery).
         if let Ok(mut m) = wan_mux_reconcile_throttle_mx().write() {

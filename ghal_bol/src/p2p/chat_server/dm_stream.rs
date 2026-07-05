@@ -12,17 +12,20 @@ fn is_direct_lan_tcp_ma(ma: &Multiaddr) -> bool {
 
 /// Peer may be reachable on local mDNS/LAN (not a mobile-data / off-LAN WAN-only contact).
 fn peer_expects_lan_discovery(session: &SessionState, peer: PeerId) -> bool {
-    if session.peer_on_local_lan(peer)
-        || session.lan_listen_rediscovery_requested(peer)
-        || session.peer_mdns_lan_addr(peer).is_some()
-    {
+    if session.peer_on_local_lan(peer) || session.peer_mdns_lan_addr(peer).is_some() {
         return true;
     }
+    let now_ms = chrono_now_ms();
+    let active_intent = session.is_foreground_peer(peer)
+        || session.is_peer_reconnect_urgent(peer, now_ms)
+        || session.peer_has_pending_outbox(peer);
+    // `lan_listen_rediscovery` alone must not qualify ghost coord-404 roster peers — that caused
+    // a self-sustaining soft-nudge loop (TRANSPORT.md § LAN stability — peer_eligible_for_lan_handover).
+    if session.lan_listen_rediscovery_requested(peer) {
+        return active_intent || session.peer_on_local_lan(peer) || session.peer_mdns_lan_addr(peer).is_some();
+    }
     // First connect on Wi‑Fi: active-intent peers must get LAN discovery even without prior LAN history.
-    session.network_profile_snapshot().has_active_lan()
-        && (session.is_foreground_peer(peer)
-            || session.is_peer_reconnect_urgent(peer, chrono_now_ms())
-            || session.peer_has_pending_outbox(peer))
+    session.network_profile_snapshot().has_active_lan() && active_intent
 }
 
 /// TRANSPORT.md § Hybrid coord presence — gate full LAN kicks (not all roster peers on Wi‑Fi).

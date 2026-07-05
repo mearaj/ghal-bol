@@ -52,6 +52,10 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
+      - name: Daemon SDK parity (Rust + Dart)
+        working-directory: .
+        run: ./scripts/check_daemon_sdk_parity.sh
+
       - name: Ephemeral env files for asset check
         run: |
           cp env/.env.development.example env/.env.development

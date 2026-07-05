@@ -1,5 +1,5 @@
-import "package:flutter_test/flutter_test.dart";
-import "package:ghal_bol_ui/daemon_client_api.dart";
+import "package:ghal_bol_daemon_client/ghal_bol_daemon_client.dart";
+import "package:test/test.dart";
 
 /// Must match `DaemonMethod::ALL` wire order in `ghal_bol/src/daemon/client_api.rs`.
 const _rustMirrorWireNames = <String>[
@@ -50,13 +50,13 @@ void main() {
     expect(DaemonMethod.all.toSet().length, DaemonMethod.all.length);
   });
 
-  test("DaemonMethod.all contains integrator session RPC", () {
-    expect(DaemonMethod.all, contains(DaemonMethod.p2pSyncUiSession));
-  });
-
-  test("UiWakeKind markers are stable", () {
-    expect(UiWakeKind.unlockMarker, "unlock_wake");
-    expect(UiWakeKind.incomingCallMarker, "incoming_call_wake");
-    expect(UiWakeKind.uiPresenceMarker, "ui_present");
+  test("IntegratorConfig paths match Rust layout", () {
+    final cfg = IntegratorConfig(
+      appNamespace: "com.example.chat",
+      xdgRuntimeDir: "/run/user/1000",
+    );
+    expect(cfg.socketPath, "/run/user/1000/ghalbol/com.example.chat/p2p.sock");
+    expect(cfg.runtimeDir, "/run/user/1000/ghalbol/com.example.chat");
+    expect(cfg.daemonSpawnEnv()["GHAL_BOL_APP_NAMESPACE"], "com.example.chat");
   });
 }

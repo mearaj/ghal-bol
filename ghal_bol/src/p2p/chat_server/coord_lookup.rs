@@ -319,6 +319,10 @@ fn should_defer_outbound_stream_for_asymmetric_relay(session: &SessionState, pee
     if session.relay_inbound_handover_active(peer) {
         return false;
     }
+    // Parallel LAN+WAN on the same subnet — open our outbound stream; do not wait for inbound.
+    if peer_has_live_mdns_lan(session, peer) || session.peer_on_local_lan(peer) {
+        return false;
+    }
     session.peer_has_relay_connection(peer) && peer_has_stale_direct_lan_conn(session, peer)
 }
 

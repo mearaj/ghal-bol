@@ -646,6 +646,13 @@ impl SessionState {
 
     /// After LAN→WAN handover — drop mDNS candidates + on-LAN TTL that block asymmetric mux recovery.
     fn clear_peer_stale_lan_cache(&self, peer: PeerId) {
+        // Live mDNS means the peer is still on our LAN — keep on-LAN TTL (TRANSPORT.md § Parallel LAN + WAN).
+        if self.peer_mdns_lan_addr(peer).is_some() {
+            if let Ok(mut e) = self.lan_candidates_exhausted.write() {
+                e.remove(&peer);
+            }
+            return;
+        }
         self.forget_peer_on_local_lan(peer);
         if let Ok(mut m) = self.peer_mdns_lan_candidate_addrs.write() {
             m.remove(&peer);

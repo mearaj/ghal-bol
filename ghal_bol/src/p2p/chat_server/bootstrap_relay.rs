@@ -1054,7 +1054,12 @@ fn handle_lan_interface_drift(
             "net",
             "LAN interface drift — defer full kick (relay bootstrap/circuit up); soft nudge",
         );
-        soft_lan_rediscovery_nudge(swarm, session, "interface drift — defer full TCP rebind");
+        soft_lan_rediscovery_nudge(
+            swarm,
+            session,
+            "interface drift — defer full TCP rebind",
+            &peers_for_soft_lan_rediscovery(session, swarm),
+        );
         session.note_pending_full_lan_kick("interface drift");
         refresh_coord_presence_soft(swarm, session, coord_relays);
         return;
@@ -1065,7 +1070,12 @@ fn handle_lan_interface_drift(
             "net",
             "LAN interface drift — CGNAT/VPN-only listen; soft nudge, relay kept",
         );
-        soft_lan_rediscovery_nudge(swarm, session, "interface drift CGNAT/VPN-only");
+        soft_lan_rediscovery_nudge(
+            swarm,
+            session,
+            "interface drift CGNAT/VPN-only",
+            &peers_for_soft_lan_rediscovery(session, swarm),
+        );
         refresh_coord_presence_soft(swarm, session, coord_relays);
         let need_bootstrap = ghalbol_relay_peer(session)
             .map(|relay| !has_tracked_bootstrap_tcp(session, relay))
@@ -1129,6 +1139,49 @@ fn platform_wifi_linked(session: &SessionState) -> bool {
     platform_wifi_linked_from_profile(&session.network_profile_snapshot())
 }
 
+fn soft_nudge_should_reopen_streams(
+    session: &SessionState,
+    swarm: &Swarm<ChatBehaviour>,
+    rediscover_peers: &[PeerId],
+) -> bool {
+    let now_ms = chrono_now_ms();
+    rediscover_peers.iter().any(|p| {
+        swarm.is_connected(p)
+            || session.is_foreground_peer(*p)
+            || session.is_peer_reconnect_urgent(*p, now_ms)
+            || session.peer_has_pending_outbox(*p)
+    })
+}
+
+/// Peers that need `lan_listen_rediscovery` for a soft mDNS nudge — never healthy connected DMs
+/// (blanket flagging caused false WAN mux reconcile on foreground chat — 2026-07-06).
+fn peers_for_soft_lan_rediscovery(
+    session: &SessionState,
+    swarm: &Swarm<ChatBehaviour>,
+) -> Vec<PeerId> {
+    let now_ms = chrono_now_ms();
+    session
+        .dm_peer_ids()
+        .into_iter()
+        .filter(|p| {
+            if !session.should_dial_libp2p_peer(*p) {
+                return false;
+            }
+            if !peer_eligible_for_lan_handover(session, *p) {
+                return false;
+            }
+            if swarm.is_connected(p)
+                && session.dm_peer_stream_up(*p)
+                && session.dm_mux_recently_active(*p, now_ms)
+                && !session.peer_outbound_stuck_for(*p, now_ms, 4_000)
+            {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
 /// Interim LAN recovery while a relay circuit dial is in flight — mDNS + stream reopen only.
 /// Does **not** replace full kick: `try_flush_pending_full_lan_kick` runs fresh ephemeral TCP
 /// once `circuit_dial_in_flight` clears (TRANSPORT.md § “Deferred full LAN kick”).
@@ -1136,16 +1189,20 @@ fn soft_lan_rediscovery_nudge(
     swarm: &mut Swarm<ChatBehaviour>,
     session: &SessionState,
     reason: &str,
+    rediscover_peers: &[PeerId],
 ) {
+    if rediscover_peers.is_empty() {
+        return;
+    }
     native_log::info("net", format!("LAN soft rediscovery — {reason}"));
-    for peer in session.dm_peer_ids() {
-        if peer_eligible_for_lan_handover(session, peer) {
-            session.request_lan_listen_rediscovery(peer);
-        }
+    for peer in rediscover_peers {
+        session.request_lan_listen_rediscovery(*peer);
     }
     restart_mdns_behaviour(swarm, session, false);
-    notify_stream_reopen();
-    notify_dm_presence_wake();
+    if soft_nudge_should_reopen_streams(session, swarm, rediscover_peers) {
+        notify_stream_reopen();
+        notify_dm_presence_wake();
+    }
 }
 
 /// Relay dropped or interface drift while still on LAN — reopen listen, restart mDNS, allow LAN dials again.
@@ -1935,23 +1992,32 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
         let _ = ensure_wan_relay_circuit(swarm, session, None, false);
     }
     let mut handover_reason = "link down, no mDNS candidate yet";
-    let needs_mdns_nudge = session.dm_peer_ids().iter().any(|p| {
-        if !session.should_dial_libp2p_peer(*p) {
-            return false;
+    let mut rediscover_peers: Vec<PeerId> = Vec::new();
+    for p in session.dm_peer_ids() {
+        if session.lan_listen_rediscovery_requested(p)
+            && !peer_eligible_for_lan_handover(session, p)
+        {
+            session.clear_lan_listen_rediscovery(p);
         }
-        if !peer_eligible_for_lan_handover(session, *p) {
-            return false;
+        if !session.should_dial_libp2p_peer(p) {
+            continue;
+        }
+        if !peer_eligible_for_lan_handover(session, p) {
+            continue;
         }
         // Missing chat stream while libp2p-connected is upkeep_dm_peers' job — not a LAN handover.
-        if swarm.is_connected(p) {
-            return false;
+        if swarm.is_connected(&p) {
+            continue;
         }
-        let stale_lan_candidate = session.peer_mdns_lan_addr(*p).is_some();
+        let stale_lan_candidate = session.peer_mdns_lan_addr(p).is_some();
         if stale_lan_candidate {
             handover_reason = "link down, stale mDNS candidate";
         }
-        session.peer_mdns_lan_addr(*p).is_none() || stale_lan_candidate
-    });
+        if session.peer_mdns_lan_addr(p).is_none() || stale_lan_candidate {
+            rediscover_peers.push(p);
+        }
+    }
+    let needs_mdns_nudge = !rediscover_peers.is_empty();
     if needs_mdns_nudge {
         // Defer full LAN kick only while a WAN circuit dial may still succeed. When bootstrap
         // relay TCP is down / WAN recovery is stuck, parallel LAN must proceed (TRANSPORT.md §
@@ -1982,20 +2048,15 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
                         swarm,
                         session,
                         "circuit dial in flight — defer full TCP rebind",
+                        &rediscover_peers,
                     );
-                } else {
-                    notify_stream_reopen();
-                    notify_dm_presence_wake();
                 }
             } else {
                 // Parallel LAN+WAN: mDNS cannot advertise without a TCP listener — bind one now
                 // even while a relay circuit dial is in flight (do not block LAN on WAN).
                 ensure_lan_tcp_listen(swarm, session, false);
                 if session.should_restart_mdns(now_ms) {
-                    soft_lan_rediscovery_nudge(swarm, session, handover_reason);
-                } else {
-                    notify_stream_reopen();
-                    notify_dm_presence_wake();
+                    soft_lan_rediscovery_nudge(swarm, session, handover_reason, &rediscover_peers);
                 }
             }
         } else if swarm_has_ephemeral_dm_tcp_listen(swarm) {
@@ -2019,10 +2080,7 @@ fn lan_handover_upkeep_if_needed(swarm: &mut Swarm<ChatBehaviour>, session: &Ses
                 // stable and only nudge the mDNS query (throttled). The full destructive kick stays for
                 // genuine handover triggers (connectivity notify / relay-lost / dial-path-failed) and
                 // for the no-listener branch below.
-                soft_lan_rediscovery_nudge(swarm, session, handover_reason);
-            } else {
-                notify_stream_reopen();
-                notify_dm_presence_wake();
+                soft_lan_rediscovery_nudge(swarm, session, handover_reason, &rediscover_peers);
             }
         } else {
             // No ephemeral LAN listener (e.g. one was closed by a real interface handover) — bind a

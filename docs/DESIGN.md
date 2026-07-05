@@ -582,7 +582,9 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 
 ## UI integrator contract (daemon-owned)
 
-**Authority:** The background node (`ghal_bol_daemon` on Linux, Android `:p2p` / `GhalBolP2pService`) owns product behaviour — P2P, outbox, ack policy, transcript merge on poll, network truth, coord/WAN recovery, call teardown when the UI session ends. **`ghal_bol_ui` is a thin integrator** — screens, navigation, rendering, OS permission/window glue. It must speak only the contract declared in `ghal_bol/src/daemon/client_api.rs` (Rust) and `ghal_bol_ui/lib/daemon_client_api.dart` (Dart mirror). Do not invent parallel policy in Dart (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
+**Authority:** The background node (`ghal_bol_daemon` on Linux, Android `:p2p` / `GhalBolP2pService`) owns product behaviour — P2P, outbox, ack policy, transcript merge on poll, network truth, coord/WAN recovery, call teardown when the UI session ends. **`ghal_bol_ui` is reference integrator #1**, not the spec — any app may replace it using the same contract. See **[DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md)** (precompiled daemon + SDK, multi-integrator isolation).
+
+Integrators must speak only the contract in [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs) (Rust) and [`packages/ghal_bol_daemon_client`](../packages/ghal_bol_daemon_client/) (Dart). Rust integrators use `ghal_bol::daemon::{IntegratorConfig, DaemonClient}`. Do not invent parallel policy in the UI (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
 
 **Wire:** Newline-delimited JSON on the Unix socket: `{ "id", "method", "params" }` → `{ "id", "result" }` or `{ "id", "error" }`. Method names are stable literals from [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs).
 
@@ -604,7 +606,7 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 | Coord (dev) | `coord_lookup_peer`, `coord_register_now` | Tests/tools only |
 | Health | `ping` | Socket probe |
 
-Full enum: `DaemonMethod::ALL` in `client_api.rs` (36 methods). New RPCs **must** be added there and in `daemon_client_api.dart` before use.
+Full enum: `DaemonMethod::ALL` in `client_api.rs` (36 methods). New RPCs **must** be added there and in the Dart SDK before use. Run `./scripts/check_daemon_sdk_parity.sh`.
 
 ### Daemon → UI (poll events, wakes, lifecycle)
 
@@ -639,7 +641,11 @@ Common kinds: `DaemonPollEventKind` in `client_api.rs`.
 
 **Dual surface on Linux:** Keystore/contacts may use in-process FFI in the UI process while P2P runs in `ghal_bol_daemon`. Both share the same data dir after unlock; integrators must not duplicate P2P policy in FFI-only code paths on daemon platforms.
 
-**Reference implementation:** `GhalBolUiSession`, `P2pEventBridge`, `GhalBolP2p`, `GhalBolDaemon` — all daemon RPC method strings via `DaemonMethod` constants only.
+### Multiple integrators on one device
+
+Each integrator app uses its own **`app_namespace`** (keystore/data dir) and **namespace-scoped runtime dir** for the daemon socket and wake files (`GHAL_BOL_APP_NAMESPACE` or `GHAL_BOL_RUNTIME_DIR`). One daemon process per namespace — do not point two apps at the same socket. Full table: [DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md).
+
+**Reference implementation:** `GhalBolUiSession`, `P2pEventBridge`, `GhalBolP2p`, `GhalBolDaemon` — daemon RPC method strings via `DaemonMethod` / `DaemonIntegratorConfig` only.
 
 ## UI session contract (integrator app ↔ native P2P)
 
@@ -883,7 +889,7 @@ If sends stay `queued` / `not connected yet`, the break is in the **native chain
 
 **Android screen off:** FGS + wake lock are necessary but not always sufficient. Hub unlock runs **`AndroidBackgroundReadiness`** (battery optimization, unused-app pause, OEM autostart) **before** P2P start — see § “Fixed 2026-07-05 — Android background readiness”.
 
-**Linux desktop:** **`ghal_bol_daemon`** under `libexec/`. Socket: `$XDG_RUNTIME_DIR/ghalbol/p2p.sock` (or `GHAL_BOL_DAEMON_SOCKET`).
+**Linux desktop:** **`ghal_bol_daemon`** under `libexec/`. Socket: `$XDG_RUNTIME_DIR/ghalbol/<app_namespace>/p2p.sock` (`GHAL_BOL_APP_NAMESPACE` on spawn). Override with `GHAL_BOL_DAEMON_SOCKET` / `GHAL_BOL_RUNTIME_DIR`. See [DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md).
 
 **Both:**
 
