@@ -37,4 +37,6 @@ if [[ ! -f ghal_bol_ui/env/.env.production ]]; then
 fi
 
 cd ghal_bol_ui && flutter test test/daemon_client_api_test.dart
-cd "$root" && cargo test -p ghal_bol daemon:: --quiet
+
+# Daemon Rust unit tests (client_api, paths, …) run in CI job "Rust tests"
+# (`cargo test -p ghal_bol --lib`) which installs ALSA/opus; do not compile ghal_bol here.
