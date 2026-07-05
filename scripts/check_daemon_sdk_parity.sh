@@ -28,5 +28,13 @@ fi
 
 echo "SDK parity OK: $rust_all daemon RPC methods (Rust + Dart)"
 
+# flutter test bundles pubspec assets; env/*.env.* are gitignored (see ghal_bol_ui/env/README.md).
+if [[ ! -f ghal_bol_ui/env/.env.development ]]; then
+  cp ghal_bol_ui/env/.env.development.example ghal_bol_ui/env/.env.development
+fi
+if [[ ! -f ghal_bol_ui/env/.env.production ]]; then
+  cp ghal_bol_ui/env/.env.production.example ghal_bol_ui/env/.env.production
+fi
+
 cd ghal_bol_ui && flutter test test/daemon_client_api_test.dart
 cd "$root" && cargo test -p ghal_bol daemon:: --quiet
