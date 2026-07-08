@@ -585,13 +585,8 @@ mod tests {
         _guard: std::sync::MutexGuard<'static, ()>,
     }
 
-    fn isolated_store_lock() -> &'static std::sync::Mutex<()> {
-        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        L.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     fn isolated_store(ns: &str) -> IsolatedStore {
-        let guard = isolated_store_lock()
+        let guard = crate::c_ffi::test_storage_isolation_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();

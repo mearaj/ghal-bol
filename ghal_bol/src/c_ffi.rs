@@ -32,6 +32,13 @@ pub(crate) fn configure_android_data_directory(path: &str) {
     }
 }
 
+/// Serialize tests that mutate the process-global Android/test data root.
+#[cfg(test)]
+pub(crate) fn test_storage_isolation_lock() -> &'static Mutex<()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
 /// Android / `:p2p` data root when configured (shared with UI via `app_flutter`).
 #[cfg(target_os = "android")]
 pub(crate) fn optional_android_data_dir() -> Option<PathBuf> {

@@ -813,9 +813,14 @@ mod tests {
 
     #[test]
     fn refresh_thread_preview_uses_latest_created_at_in_transcript() {
+        use crate::c_ffi::configure_android_data_directory;
         use crate::dm_transcript_store::{StoredChatLine, append_if_new};
 
+        let _guard = crate::c_ffi::test_storage_isolation_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
+        configure_android_data_directory(td.path().to_str().unwrap());
         let ns = "dev.contacts.preview";
         let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
         let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
