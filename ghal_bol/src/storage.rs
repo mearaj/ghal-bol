@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use directories::ProjectDirs;
 use thiserror::Error;
 
+use crate::identity::IdentityAlgorithm;
 use crate::keystore_v1::{
-    DecryptedIdentity, KeystoreError, KeystoreV1, create_keystore_v1,
-    create_keystore_v1_from_secret, parse_secret_key_hex, secret_key_hex_from_identity,
-    unlock_keystore_v1,
+    DecryptedIdentity, KeystoreError, KeystoreV1,
+    create_keystore_v1_from_secret_with_algorithm, create_keystore_v1_with_algorithm,
+    parse_secret_bytes_for_algorithm, secret_key_hex_from_identity, unlock_keystore_v1,
 };
 
 /// Product / packaging id for **`ghal_bol`** (Rust keystore storage root via `directories`).
@@ -177,12 +178,22 @@ pub fn create_or_unlock_identity_v1(
     cfg: &StorageConfig,
     password: &str,
 ) -> Result<DecryptedIdentity, KeystoreStorageError> {
+    create_or_unlock_identity_v1_with_algorithm(cfg, password, None)
+}
+
+/// Same as [`create_or_unlock_identity_v1`] but selects algorithm on **first-time create** only.
+pub fn create_or_unlock_identity_v1_with_algorithm(
+    cfg: &StorageConfig,
+    password: &str,
+    create_algorithm: Option<IdentityAlgorithm>,
+) -> Result<DecryptedIdentity, KeystoreStorageError> {
     if let Some(stored) = load_keystore_v1(cfg)? {
         let id = unlock_keystore_v1(password, &stored.keystore)?;
         return Ok(id);
     }
 
-    let (ks, id) = create_keystore_v1(password, None)?;
+    let algo = create_algorithm.unwrap_or(IdentityAlgorithm::Secp256k1);
+    let (ks, id) = create_keystore_v1_with_algorithm(password, algo, None)?;
     let _ = save_keystore_v1(cfg, &ks)?;
     Ok(id)
 }
@@ -194,27 +205,43 @@ pub fn import_identity_from_secret_hex_v1(
     password: &str,
     secret_key_hex: &str,
 ) -> Result<DecryptedIdentity, KeystoreStorageError> {
+    import_identity_from_secret_hex_v1_with_algorithm(
+        cfg,
+        password,
+        secret_key_hex,
+        IdentityAlgorithm::Secp256k1,
+    )
+}
+
+/// Import existing secret for a specific identity algorithm.
+pub fn import_identity_from_secret_hex_v1_with_algorithm(
+    cfg: &StorageConfig,
+    password: &str,
+    secret_key_hex: &str,
+    algorithm: IdentityAlgorithm,
+) -> Result<DecryptedIdentity, KeystoreStorageError> {
     if keystore_v1_file_exists(cfg)? {
         return Err(KeystoreStorageError::Crypto(KeystoreError::Invalid(
             "keystore already exists; delete identity before import",
         )));
     }
-    let secret = parse_secret_key_hex(secret_key_hex)?;
-    let (ks, id) = create_keystore_v1_from_secret(password, &secret, None)?;
+    let secret = parse_secret_bytes_for_algorithm(algorithm, secret_key_hex)?;
+    let (ks, id) =
+        create_keystore_v1_from_secret_with_algorithm(password, algorithm, &secret, None)?;
     let _ = save_keystore_v1(cfg, &ks)?;
     Ok(id)
 }
 
-/// Verify [password] and return the 64-char secret key hex (sensitive).
+/// Verify [password] and return the secret key hex (sensitive) + algorithm.
 pub fn reveal_secret_key_hex_v1(
     cfg: &StorageConfig,
     password: &str,
-) -> Result<String, KeystoreStorageError> {
+) -> Result<(String, IdentityAlgorithm), KeystoreStorageError> {
     let stored = load_keystore_v1(cfg)?.ok_or(KeystoreStorageError::Crypto(
         KeystoreError::Invalid("no keystore on disk"),
     ))?;
     let id = unlock_keystore_v1(password, &stored.keystore)?;
-    Ok(secret_key_hex_from_identity(&id))
+    Ok((secret_key_hex_from_identity(&id), id.algorithm()))
 }
 
 /// Export encrypted `keystore_v1.json` contents (password still required to decrypt elsewhere).
@@ -266,6 +293,7 @@ pub fn reset_first_time_identity_v1(cfg: &StorageConfig) -> Result<(), KeystoreS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keystore_v1::create_keystore_v1;
     use tempfile::TempDir;
 
     #[test]
@@ -321,6 +349,22 @@ mod tests {
         let json = export_keystore_json_v1(&cfg_a).unwrap();
         let id2 = import_keystore_from_json_v1(&cfg_b, "pw", &json).unwrap();
         assert_eq!(id1.public_key_hex(), id2.public_key_hex());
+    }
+
+    #[test]
+    fn create_ed25519_identity_on_first_time() {
+        let td = TempDir::new().unwrap();
+        let cfg = StorageConfig::new("dev.ed25519").with_override_data_dir(td.path());
+        let id = create_or_unlock_identity_v1_with_algorithm(
+            &cfg,
+            "pw",
+            Some(IdentityAlgorithm::Ed25519),
+        )
+        .unwrap();
+        assert_eq!(id.algorithm(), IdentityAlgorithm::Ed25519);
+        assert!(id.identity_wire().starts_with("ed25519:"));
+        assert!(id.p2p_ready());
+        assert!(id.to_libp2p_keypair().is_ok());
     }
 
     #[test]

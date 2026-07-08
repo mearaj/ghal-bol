@@ -8,20 +8,22 @@ The coordination server does **not** own identities. Identity exists independent
 
 ## What an identity is
 
-Each user has a **secp256k1 public/private keypair**.
+Each user has a **cryptographic public/private keypair**. **Multi-algorithm identity** (optional `algorithm:` prefix, public-key-only wire format) is specified in [MULTI_ALGO.md](MULTI_ALGO.md). **Shipping P2P chat** still requires **secp256k1**; other algorithms can be created for keystore/invites but cannot enter the chat shell until P2P supports them.
 
 | Key | Role |
 |-----|------|
 | **Private key** | Communication ownership, peer identity ownership, synchronization authority (signing, registration challenges) |
-| **Public key** | Peer identifier (66 hex chars), invite links, `ghal_bol_server` lookup |
+| **Public key** | Contact identity wire (bare secp256k1 hex or `algo:hex`); invite links; coord lookup |
 
 The system does not require phone numbers, email addresses, or centralized account registration.
 
-**Wire formats (implemented):**
+**Wire formats (implemented today):**
 
-- Public: 66 hex chars (compressed secp256k1)
-- Private: 64 hex chars (32-byte secret)
+- Public identity: bare secp256k1 hex (66 chars) or prefixed form per [MULTI_ALGO.md](MULTI_ALGO.md)
+- Private export: 64 hex chars for secp256k1 devices (other algorithms: raw secret hex via native reveal)
 - On disk: `keystore_v1.json` — Argon2id + ChaCha20-Poly1305 (`ghal_bol/src/keystore_v1.rs`)
+  - Optional `identity_algorithm` field (`secp256k1`, `ed25519`, `ecdsa-p256`, `ml-dsa-65`, …). **Omitted or empty → implicit `secp256k1`** (definition — same rule as wire identity).
+  - New non-secp256k1 keystores set `identity_algorithm` explicitly.
 
 Storage root — one namespace directory per build; keystore, prefs, and `ghal_bol/` (contacts, transcript) all live under it:
 
@@ -51,10 +53,12 @@ Two modes on first launch when **no keystore** exists on the device.
 
 ### Option 1 — Automatic generation (recommended)
 
-1. User chooses **Create new** and sets an **app password** (required).
-2. App generates a keypair locally in Rust (`create_keystore_v1`).
+1. User chooses **Create new**, selects an **identity algorithm** (`secp256k1` default), and sets an **app password** (required).
+2. App generates a keypair locally in Rust (`create_keystore_v1_with_algorithm`; default omits `identity_algorithm` on disk for secp256k1).
 3. Private key is encrypted and written to `keystore_v1.json`.
 4. Public key becomes the peer identity (invites, server registration).
+
+**secp256k1** is the default. **All four** supported algorithms (`secp256k1`, `ed25519`, `ecdsa-p256`, `ml-dsa-65`) can enter the chat shell and run P2P on this build (`p2p_ready` from native unlock). **ml-dsa-65** uses PQ signatures for identity and a companion libp2p transport key — see [MULTI_ALGO.md](MULTI_ALGO.md).
 
 **App password is always required** for create, unlock, import, view private key, and delete identity. It encrypts the keystore at rest and is never sent to servers. Optional biometrics may unlock the same blob later, but they do not replace the password.
 
@@ -64,7 +68,7 @@ Two modes on first launch when **no keystore** exists on the device.
 
 1. User chooses **Import key** and pastes a **64-hex private key**, or **Import encrypted keystore backup** (JSON).
 2. User sets or enters the **app password** (always required — new encryption for raw-key import, or the backup’s password for keystore import).
-3. Imported identity is **fully equivalent** to auto-generated (same APIs, invites, sync).
+3. Imported identity is **fully equivalent** to auto-generated for the same algorithm (same APIs, invites, keystore shape). **P2P chat** still requires **secp256k1** on this build.
 
 Use cases: device migration, multi-device setup, recovery from a **Ghal Bol** backup.
 
@@ -167,6 +171,7 @@ Rebuild native after API changes: `sync_ghal_bol_native_for_flutter.sh` (desktop
 
 ## Related docs
 
+- [MULTI_ALGO.md](MULTI_ALGO.md) — multi-algorithm identity spec, identity vs transport/E2E
 - [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) — paid Tier 3 relay, payment rails, membership vs identity
 - [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) — invites and coordination lookup
 - [TRANSPORT.md](TRANSPORT.md) — WAN/LAN dial policy

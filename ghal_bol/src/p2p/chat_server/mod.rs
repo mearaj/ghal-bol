@@ -28,7 +28,7 @@ pub(crate) use notify::{
 };
 pub(crate) use chat_room_session::{
     begin_chat_room_session, clear_chat_room_session, freeze_chat_room_for_peer,
-    freeze_open_chat_room_session, read_ack_cutoff_ms, tick_chat_room_session_if_active,
+    read_ack_cutoff_ms, tick_chat_room_session_if_active,
 };
 pub(crate) use ui_session::{
     app_ack_read_enabled, app_ui_visible, emit_call_media, foreground_peer_cmd_gen_latest,
@@ -39,6 +39,8 @@ pub(crate) use ui_session::{
 
 include!("types.rs");
 include!("session.rs");
+include!("dm_transport_kem.rs");
+include!("transport_lookup.rs");
 include!("outbox_wire.rs");
 include!("behaviour.rs");
 include!("bootstrap_relay.rs");

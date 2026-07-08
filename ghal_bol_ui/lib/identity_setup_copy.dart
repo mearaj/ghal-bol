@@ -5,6 +5,12 @@ abstract final class IdentitySetupCopy {
   static const String appPasswordRequired =
       "An app password is always required. It encrypts your identity on this device and is never sent to any server.";
 
+  static const String identityAlgorithmTitle = "Identity algorithm";
+
+  static const String identityAlgorithmHint =
+      "All listed algorithms support P2P chat, calls, and coord on this build. "
+      "ml-dsa-65 uses your PQ signing key for identity and a companion transport key for libp2p.";
+
   static const String importPrivateKeyWarningTitle =
       "Cryptocurrency wallet keys are not recommended";
 
@@ -24,6 +30,12 @@ abstract final class IdentitySetupCopy {
   /// Appended when first-time create/import fails and any partial keystore was removed.
   static const String firstTimeRetryHint =
       " Setup did not finish — nothing was saved. You can choose a new app password and try again.";
+
+  /// Shown when unlock succeeds but identity cannot run shipping P2P (non-secp256k1 today).
+  static const String nonP2pIdentityBlocked =
+      "This identity was created, but P2P chat and calls require secp256k1 on this build. "
+      "Delete the identity on this device and create again with secp256k1 (default), "
+      "or import a secp256k1 keystore backup.";
 }
 
 /// First-launch hints on the identity / unlock screen.

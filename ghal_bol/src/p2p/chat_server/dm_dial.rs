@@ -5,7 +5,7 @@ fn outbox_target_peer(
     connected_peers: &[PeerId],
 ) -> Option<PeerId> {
     let pk = p.recipient_public_key_hex.trim();
-    if pk.len() == 66 {
+    if crate::contacts_v1::is_valid_public_key_hex(pk) {
         for id in connected_peers {
             if session
                 .dm_peer_for_libp2p(*id)
@@ -34,7 +34,7 @@ fn refresh_outbox_peer_ids(session: &SessionState) {
     };
     for p in g.values_mut() {
         let pk = p.recipient_public_key_hex.trim();
-        if pk.len() == 66 {
+        if crate::contacts_v1::is_valid_public_key_hex(pk) {
             if let Some(id) = session.resolve_send_peer(pk) {
                 p.peer_id = id;
             }
@@ -1213,7 +1213,7 @@ fn handle_mdns_discovered_list(
     }
     for (peer, addrs) in by_peer {
         if session.is_dm_contact(peer) {
-            if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&peer) {
+            if let Some(pk) = session.signing_pk_for_libp2p_peer(peer) {
                 session.clear_peer_coord_absent_state(&pk);
             }
         }
@@ -1420,7 +1420,8 @@ fn log_connectivity_snapshot(
     for peer in session.dm_peer_ids() {
         let connected = swarm.is_connected(&peer);
         let stream = writer_open_for_peer(writers, peer);
-        let label = secp256k1_public_key_hex_from_peer_id(&peer)
+        let label = session
+            .signing_pk_for_libp2p_peer(peer)
             .map(|pk| crate::flow_log::short_hex(&pk))
             .unwrap_or_else(|| peer.to_string());
         dm_lines.push(format!("{label}:conn={connected},stream={stream}"));

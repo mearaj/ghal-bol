@@ -276,8 +276,7 @@ async fn handle_inbound_stream(
         }
     }
 
-    let my_public = session.my_public_key_hex.clone();
-    let my_secret = session.identity.secp256k1_secret();
+    let identity = session.identity.clone();
 
     loop {
         let frame = match read_frame(&mut reader).await {
@@ -300,14 +299,24 @@ async fn handle_inbound_stream(
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            let parsed = match parse_call_envelope(&env, &my_public, &my_secret) {
+            let peer_transport_pk = session.peer_transport_pk(env.sender_public_key_hex.trim());
+            let parsed = match parse_call_envelope_with_transport(
+                &env,
+                &identity,
+                peer_transport_pk.as_ref().map(|peer_pk| {
+                    crate::call_sig_v1::CallOpenTransportCtx {
+                        local_sk: session.dm_local_transport_sk(),
+                        peer_pk,
+                    }
+                }),
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     native_log::warn("call", format!("drop call frame from {peer}: {e}"));
                     continue;
                 }
             };
-            if !secp256k1_public_hex_matches_peer_id(&parsed.sender_public_key_hex, &peer) {
+            if !contact_identity_wire_matches_peer_id(&parsed.sender_public_key_hex, &peer) {
                 native_log::warn(
                     "call",
                     format!("drop call from {peer}: signing key mismatch"),
@@ -421,7 +430,16 @@ async fn handle_inbound_stream(
             Ok(e) => e,
             Err(_) => continue,
         };
-        let parsed = match parse_envelope(&env, &my_public, &my_secret) {
+        let peer_transport_pk = session.peer_transport_pk(env.sender_public_key_hex.trim());
+        let open_transport = peer_transport_pk.as_ref().map(|peer_pk| DmOpenTransportCtx {
+            local_sk: session.dm_local_transport_sk(),
+            peer_pk,
+        });
+        let parsed = match parse_envelope_with_transport(
+            &env,
+            &session.identity,
+            open_transport,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 native_log::warn("stream", format!("drop frame from {peer}: {e}"));
@@ -429,8 +447,37 @@ async fn handle_inbound_stream(
             }
         };
         match parsed {
+            ParsedMsg::TransportKemHello {
+                sender_public_key_hex,
+                transport_pk,
+            } => {
+                let had_pk = session
+                    .peer_transport_pk(sender_public_key_hex.trim())
+                    .is_some();
+                session.store_peer_transport_pk(&sender_public_key_hex, transport_pk);
+                native_log::debug(
+                    "stream",
+                    format!("transport kem hello from {peer} pk stored"),
+                );
+                if !had_pk && writer_open_for_peer(&writers, peer) {
+                    emit_chat_ready_if_can_send(
+                        Arc::clone(&session),
+                        peer,
+                        Arc::clone(&writers),
+                        events_tx.clone(),
+                    );
+                }
+                continue;
+            }
             ParsedMsg::Text(t) => {
-                if !secp256k1_public_hex_matches_peer_id(&t.sender_public_key_hex, &peer) {
+                let roster_wire = session
+                    .dm_peer_for_libp2p(peer)
+                    .and_then(|d| d.public_key_hex);
+                if !sender_identity_matches_stream_peer(
+                    &t.sender_public_key_hex,
+                    &peer,
+                    roster_wire.as_deref(),
+                ) {
                     native_log::warn(
                         "stream",
                         format!("drop text from {peer}: signing key mismatch"),
@@ -551,7 +598,14 @@ async fn handle_inbound_stream(
             // - Our outbound outbox clears on peer `ack_received` or `ack_read` for our message id.
             // - `ack_read` on our outbound id → peer read; `ack_received` on inbound id → read-receipt confirm.
             ParsedMsg::Ack(a) => {
-                if !secp256k1_public_hex_matches_peer_id(&a.sender_public_key_hex, &peer) {
+                let roster_wire = session
+                    .dm_peer_for_libp2p(peer)
+                    .and_then(|d| d.public_key_hex);
+                if !sender_identity_matches_stream_peer(
+                    &a.sender_public_key_hex,
+                    &peer,
+                    roster_wire.as_deref(),
+                ) {
                     native_log::warn(
                         "stream",
                         format!("drop ack from {peer}: signing key mismatch"),
@@ -615,7 +669,7 @@ async fn handle_inbound_stream(
                 let kind = match a.kind {
                     MsgKind::AckReceived => "ack_received",
                     MsgKind::AckRead => "ack_read",
-                    MsgKind::Text | MsgKind::AckRequest => continue,
+                    MsgKind::Text | MsgKind::AckRequest | MsgKind::TransportKemHello => continue,
                 };
                 // Flow milestone at info (App-log visible): the peer confirmed our message — this is
                 // the sender-side tick transition (`ack_received` → delivered, `ack_read` → read).

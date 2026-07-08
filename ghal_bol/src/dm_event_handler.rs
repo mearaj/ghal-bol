@@ -83,7 +83,7 @@ fn conversation_key_from_event(ev: &Value) -> String {
     public_key_hex_from_event(ev)
 }
 
-/// Canonical transcript view key for poll/UI sync (66-hex pk when known).
+/// Canonical transcript view key for poll/UI sync (identity wire when known).
 pub fn transcript_poll_view_key(app_namespace: &str, ev: &Value) -> Option<String> {
     let kind = ev.get("kind")?.as_str()?;
     let raw = match kind {

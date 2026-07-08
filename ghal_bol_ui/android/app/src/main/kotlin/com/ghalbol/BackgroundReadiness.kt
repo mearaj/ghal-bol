@@ -1,6 +1,7 @@
 package com.ghalbol
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -19,11 +20,30 @@ object BackgroundReadiness {
     private const val TAG = "GhalBol"
     private const val PREFS = "ghal_bol_bg_readiness"
 
-    fun isBatteryOptimized(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+    /** `true` when the OS is aggressively blocking background work for this app. */
+    fun isBatteryOptimized(context: Context): Boolean = isBatteryRestrictionActive(context)
+
+    private fun isBatteryRestrictionActive(context: Context): Boolean {
         return try {
-            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
-            !pm.isIgnoringBatteryOptimizations(context.packageName)
+            when {
+                // Android 9+: per-app battery tier — only "Restricted" blocks background.
+                // "Optimized" and "Unrestricted" are fine; do not use isIgnoringBatteryOptimizations
+                // here (false on Android 12+ even when background usage is allowed).
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> {
+                    val am =
+                        context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                            ?: return false
+                    am.isBackgroundRestricted
+                }
+                // Android 6–8: legacy Doze whitelist.
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
+                    val pm =
+                        context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                            ?: return false
+                    !pm.isIgnoringBatteryOptimizations(context.packageName)
+                }
+                else -> false
+            }
         } catch (_: Throwable) {
             false
         }
@@ -31,8 +51,16 @@ object BackgroundReadiness {
 
     @Suppress("BatteryLife")
     fun requestBatteryOptimizationExemption(activity: Activity) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                activity.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", activity.packageName, null)
+                    },
+                )
+                return
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
             val pm = activity.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
             if (pm.isIgnoringBatteryOptimizations(activity.packageName)) return
             activity.startActivity(
@@ -107,7 +135,7 @@ object BackgroundReadiness {
 
     fun needsOemBackgroundStep(context: Context): Boolean {
         if (isOemBackgroundSatisfied(context)) return false
-        if (oemPrefs(context).getBoolean(oemAckKey(), false)) return false
+        if (bgPrefs(context).getBoolean(oemAckKey(), false)) return false
         return resolveOemBackgroundIntent(context) != null
     }
 
@@ -129,8 +157,10 @@ object BackgroundReadiness {
     }
 
     fun markOemBackgroundStepAcknowledged(context: Context) {
-        oemPrefs(context).edit().putBoolean(oemAckKey(), true).apply()
+        bgPrefs(context).edit().putBoolean(oemAckKey(), true).apply()
     }
+
+    private fun oemAckKey(): String = "oem_ack_${manufacturerKey()}"
 
     private fun resolveOemBackgroundIntent(context: Context): Intent? {
         val pkg = context.packageName
@@ -241,8 +271,6 @@ object BackgroundReadiness {
 
     private fun manufacturerKey(): String = Build.MANUFACTURER.lowercase().trim()
 
-    private fun oemAckKey(): String = "oem_ack_${manufacturerKey()}"
-
-    private fun oemPrefs(context: Context) =
+    private fun bgPrefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

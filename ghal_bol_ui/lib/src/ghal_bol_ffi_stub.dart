@@ -1,5 +1,7 @@
 import "dart:convert";
 
+import "package:ghal_bol_ui/identity_algorithm_choice.dart";
+
 import "ghal_bol_ffi_result.dart";
 
 void _ignorePassword(String _) {}
@@ -18,12 +20,27 @@ abstract final class GhalBolFfi {
   static GhalBolIdentityResult createOrUnlockIdentity({
     required String appNamespace,
     required String password,
+    String? identityAlgorithm,
   }) {
     _ignorePassword(password);
     return GhalBolIdentityResult(
       ok: false,
       error: "$loadErrorText (namespace=$appNamespace)",
     );
+  }
+
+  static List<IdentityAlgorithmOption> supportedIdentityAlgorithms() => const [];
+
+  static bool identityImportSecretValid({
+    required String algorithm,
+    required String secretHex,
+  }) {
+    final s = secretHex.trim();
+    if (s.isEmpty) return false;
+    if (algorithm == "secp256k1" && s.length == 64) {
+      return RegExp(r"^[0-9a-fA-F]+$").hasMatch(s);
+    }
+    return false;
   }
 
   static void lock() {}
@@ -64,15 +81,26 @@ abstract final class GhalBolFfi {
     required String appNamespace,
     required String password,
     required String secretKeyHex,
+    String? identityAlgorithm,
   }) {
     _ignorePassword(password);
     return GhalBolIdentityResult(ok: false, error: loadErrorText);
   }
 
-  static ({bool ok, String? secretKeyHex, String? error}) revealSecretKeyHex({
+  static ({
+    bool ok,
+    String? secretKeyHex,
+    String? identityAlgorithm,
+    String? error,
+  }) revealSecretKeyHex({
     required String appNamespace,
     required String password,
-  }) => (ok: false, secretKeyHex: null, error: loadErrorText);
+  }) => (
+    ok: false,
+    secretKeyHex: null,
+    identityAlgorithm: null,
+    error: loadErrorText,
+  );
 
   static ({bool ok, String? keystoreJson, String? error}) exportKeystoreJson({
     required String appNamespace,
@@ -97,16 +125,7 @@ abstract final class GhalBolFfi {
     "error": loadErrorText ?? "unavailable",
   };
 
-  static Map<String, dynamic> coordRegisterNow() => {"ok": false};
-
-  static Map<String, dynamic> coordLookupPeer({required String publicKeyHex}) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
-
   static bool get isP2pAvailable => false;
-
-  static bool get isConnectInviteCryptoAvailable => false;
 
   static bool verifyGhalBolConnectInviteJson(String _) => false;
 
@@ -114,20 +133,24 @@ abstract final class GhalBolFfi {
 
   static String? peerIdFromSigningPublicKeyHex(String pk) => peerIdFromPublicKeyHex(pk);
 
+  static Map<String, dynamic> identityParse(String wire) => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static bool identitySame(String? a, String? b) {
+    final pa = a?.trim().toLowerCase() ?? "";
+    final pb = b?.trim().toLowerCase() ?? "";
+    return pa.length == 66 && pa == pb;
+  }
+
+  static String? identityNormalize(String? wire) {
+    final s = wire?.trim().toLowerCase() ?? "";
+    if (s.length == 66 && RegExp(r"^[0-9a-f]+$").hasMatch(s)) return s;
+    return null;
+  }
+
   static String? publicKeyHexFromPeerId(String _) => null;
-
-  static Map<String, dynamic> sealUtf8ToX25519Hex({
-    required String recipientEncryptionPkHex,
-    required String plaintext,
-  }) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
-
-  static Map<String, dynamic> openSealedCipherHex(String _) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
 
   static Map<String, dynamic> p2pStartJson(Map<String, dynamic> config) => {
     "ok": false,
@@ -202,14 +225,6 @@ abstract final class GhalBolFfi {
     "error": loadErrorText ?? "unavailable",
   };
 
-  static Map<String, dynamic> callMediaKeyHex({
-    required String callId,
-    required String peerPublicKeyHex,
-  }) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
-
   static bool get isP2pRequeueAvailable => false;
 
   static Map<String, dynamic> p2pRequeueOutboundDm({
@@ -226,23 +241,6 @@ abstract final class GhalBolFfi {
   static Map<String, dynamic> p2pSetAppAckReadEnabled(bool enabled) => {"ok": true};
 
   static Map<String, dynamic> p2pSetAppUiVisible(bool visible) => {"ok": true, "visible": visible};
-
-  static Map<String, dynamic> sealUtf8ToPublicKeyHex({
-    required String recipientPublicKeyHex,
-    required String plaintext,
-  }) => sealUtf8ToX25519Hex(
-    recipientEncryptionPkHex: recipientPublicKeyHex,
-    plaintext: plaintext,
-  );
-
-  static Map<String, dynamic> p2pSendAckDm({
-    required String recipientPublicKeyHex,
-    required String refId,
-    required String ackKind,
-  }) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
 
   static Map<String, dynamic>? p2pPollEventMap() => null;
 
@@ -276,35 +274,18 @@ abstract final class GhalBolFfi {
 
   static String? transcriptResolvePath(String _) => null;
 
-  static List<Map<String, dynamic>> transcriptLoadMerged(String _, Map<String, dynamic> _) =>
-      [];
-
   static ({int revision, List<Map<String, dynamic>> lines}) transcriptLoadThreadView(
     String _,
     Map<String, dynamic> _,
   ) =>
       (revision: 0, lines: <Map<String, dynamic>>[]);
 
-  static bool transcriptSave(String _, String _, List<Map<String, dynamic>> _) => false;
+  static String? buildConnectInviteUri(Map<String, dynamic> params) =>
+      buildConnectInviteLinks(params)?.httpsUri;
 
-  static bool transcriptAppendIfNew(String _, String _, Map<String, dynamic> _) => false;
-
-  static bool transcriptPatchOutgoingDelivery(
-    String _, {
-    required String conversationKey,
-    required String messageId,
-    required String delivery,
-  }) =>
-      false;
-
-  static bool transcriptPatchInboundReadAckSent(
-    String _, {
-    required String conversationKey,
-    required String messageId,
-  }) =>
-      false;
-
-  static String? buildConnectInviteUri(Map<String, dynamic> _) => null;
+  static GhalBolNativeInviteUris? buildConnectInviteLinks(
+    Map<String, dynamic> params,
+  ) => null;
 
   static Map<String, dynamic>? parseConnectInviteWire(String _) => null;
 

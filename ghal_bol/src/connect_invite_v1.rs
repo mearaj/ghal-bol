@@ -8,7 +8,8 @@
 
 use serde_json::Value;
 
-use crate::public_key_util::secp256k1_public_key_from_hex;
+use crate::identity::{percent_decode_uri_component, percent_encode_uri_component, Identity};
+use crate::public_key_util::normalize_contact_identity_wire;
 
 const SHARE: &str = "ghal_bol_connect_v1";
 /// Sole wire format for new QR / links.
@@ -23,15 +24,9 @@ pub const CONNECT_PATH_SEGMENT: &str = "connect";
 
 const DEFAULT_TOPIC: &str = "ghal-bol-chat";
 
-fn hex66_from_field(label: &str, hex_s: &str) -> Result<(), String> {
-    let s = hex_s.trim();
-    if s.len() != 66 {
-        return Err(format!(
-            "{label}: expected 66 hex chars (compressed secp256k1)"
-        ));
-    }
-    hex::decode(s).map_err(|e| format!("{label}: hex: {e}"))?;
-    Ok(())
+fn identity_wire_from_field(label: &str, wire_s: &str) -> Result<String, String> {
+    Identity::parse(wire_s).map_err(|e| format!("{label}: {e}"))?;
+    normalize_contact_identity_wire(wire_s).map_err(|e| format!("{label}: {e}"))
 }
 
 fn field_nonempty_string(v: &Value, key: &str) -> bool {
@@ -77,8 +72,7 @@ fn verify_v2(v: &Value) -> Result<(), String> {
         .get("public_key_hex")
         .and_then(|x| x.as_str())
         .ok_or_else(|| "missing public_key_hex".to_string())?;
-    hex66_from_field("public_key_hex", pk_hex)?;
-    let _ = secp256k1_public_key_from_hex(pk_hex)?;
+    identity_wire_from_field("public_key_hex", pk_hex)?;
     if field_nonempty_string(v, "encryption_public_key_hex") {
         return Err("encryption_public_key_hex is not used (single secp256k1 key)".to_string());
     }
@@ -96,8 +90,7 @@ pub fn build_connect_invite_wire_map(
     public_key_hex: &str,
     peer_alias: Option<&str>,
 ) -> Result<Value, String> {
-    hex66_from_field("public_key_hex", public_key_hex)?;
-    let pk = public_key_hex.trim().to_lowercase();
+    let pk = identity_wire_from_field("public_key_hex", public_key_hex)?;
     let mut m = serde_json::json!({
         "ghalbol.share": SHARE,
         "format_version": CONNECT_INVITE_FORMAT_VERSION,
@@ -140,10 +133,10 @@ pub fn connect_invite_https_uri_from_wire_map(v: &Value) -> Result<String, Strin
     let pk = v
         .get("public_key_hex")
         .and_then(|x| x.as_str())
-        .ok_or_else(|| "missing public_key_hex".to_string())?
-        .trim()
-        .to_lowercase();
-    let mut url = format!("https://{CONNECT_HTTPS_HOST}/{CONNECT_PATH_SEGMENT}/{pk}");
+        .ok_or_else(|| "missing public_key_hex".to_string())?;
+    let pk = identity_wire_from_field("public_key_hex", pk)?;
+    let path_pk = percent_encode_uri_component(&pk);
+    let mut url = format!("https://{CONNECT_HTTPS_HOST}/{CONNECT_PATH_SEGMENT}/{path_pk}");
     if let Some(alias) = v.get("peer_alias").and_then(|x| x.as_str()) {
         let t = alias.trim();
         if !t.is_empty() {
@@ -155,16 +148,15 @@ pub fn connect_invite_https_uri_from_wire_map(v: &Value) -> Result<String, Strin
 }
 
 /// `ghalbol://connect/<public_key_hex>`
-#[cfg(test)]
 pub fn connect_invite_app_uri_from_wire_map(v: &Value) -> Result<String, String> {
     verify_ghal_bol_connect_invite_value(v)?;
     let pk = v
         .get("public_key_hex")
         .and_then(|x| x.as_str())
-        .ok_or_else(|| "missing public_key_hex".to_string())?
-        .trim()
-        .to_lowercase();
-    let mut url = format!("{CONNECT_APP_SCHEME}://{CONNECT_PATH_SEGMENT}/{pk}");
+        .ok_or_else(|| "missing public_key_hex".to_string())?;
+    let pk = identity_wire_from_field("public_key_hex", pk)?;
+    let path_pk = percent_encode_uri_component(&pk);
+    let mut url = format!("{CONNECT_APP_SCHEME}://{CONNECT_PATH_SEGMENT}/{path_pk}");
     if let Some(alias) = v.get("peer_alias").and_then(|x| x.as_str()) {
         let t = alias.trim();
         if !t.is_empty() {
@@ -215,9 +207,8 @@ fn percent_decode_query_component(s: &str) -> String {
 }
 
 fn parse_public_key_path_segment(seg: &str) -> Result<String, String> {
-    let seg = seg.trim().trim_end_matches('/');
-    hex66_from_field("public_key_hex", seg)?;
-    Ok(seg.to_lowercase())
+    let seg = percent_decode_uri_component(seg.trim().trim_end_matches('/'));
+    identity_wire_from_field("public_key_hex", &seg)
 }
 
 fn parse_path_style_invite(input: &str) -> Result<Value, String> {
@@ -276,6 +267,7 @@ pub fn verify_ghal_bol_connect_invite_value(v: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::create_keystore_v1;
+    use crate::create_keystore_v1_with_algorithm;
 
     #[test]
     fn v2_ok() {
@@ -333,5 +325,20 @@ mod tests {
         assert!(uri.starts_with("ghalbol://connect/"));
         let parsed = parse_connect_invite_uri(&uri).unwrap();
         verify_ghal_bol_connect_invite_value(&parsed).unwrap();
+    }
+
+    #[test]
+    fn ed25519_identity_https_uri_roundtrip() {
+        use crate::identity::IdentityAlgorithm;
+        let (_ks, id) =
+            create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::Ed25519, None).unwrap();
+        let wire_str = id.identity_wire();
+        let wire = build_connect_invite_wire_map("ghal-bol-chat", &wire_str, Some("Ada")).unwrap();
+        let uri = connect_invite_https_uri_from_wire_map(&wire).unwrap();
+        assert!(uri.contains("ed25519%3A"));
+        let parsed = parse_connect_invite_uri(&uri).unwrap();
+        verify_ghal_bol_connect_invite_value(&parsed).unwrap();
+        assert_eq!(parsed["public_key_hex"].as_str().unwrap(), wire_str);
+        assert_eq!(parsed["peer_alias"], "Ada");
     }
 }

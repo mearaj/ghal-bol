@@ -250,7 +250,7 @@ class CallController {
         }
         if (id != null &&
             id.isNotEmpty &&
-            pk.length == 66 &&
+            isValidPublicKeyHex(pk) &&
             phase == CallUiPhase.idle) {
           if (hintDisplayName != null && hintDisplayName.trim().isNotEmpty) {
             peerDisplayName = hintDisplayName.trim();
@@ -264,7 +264,7 @@ class CallController {
       final pk = r["peer_public_key_hex"]?.toString().trim().toLowerCase();
       final voice = r["voice_active"] == true;
       final video = r["video_active"] == true;
-      if (id == null || id.isEmpty || pk == null || pk.length != 66) return false;
+      if (id == null || id.isEmpty || pk == null || !isValidPublicKeyHex(pk)) return false;
       if (!voice && !video) return false;
 
       final cameraOn = r["camera_on"] == true;
@@ -1094,7 +1094,7 @@ class CallController {
       final activePk =
           r["peer_public_key_hex"]?.toString().trim().toLowerCase() ?? "";
       if (activeId.isEmpty || activeId != remoteCallId) return;
-      if (activePk.length == 66 && !publicKeysEqual(activePk, fromPk)) return;
+      if (isValidPublicKeyHex(activePk) && !publicKeysEqual(activePk, fromPk)) return;
       CallFlowLog.step("native_call_end_orphan_signal", {
         "call_id": activeId,
         "from": CallFlowLog.shortPk(fromPk),
@@ -1128,7 +1128,7 @@ class CallController {
       CallFlowLog.step("native_call_stop_window_close", {"call_id": activeId});
       callId = activeId;
       CallFlowLog.bindCall(activeId);
-      if (activePk != null && activePk.length == 66) {
+      if (activePk != null && isValidPublicKeyHex(activePk)) {
         peerPublicKeyHex = activePk;
       }
       _nativeVoiceActive = r["voice_active"] == true;

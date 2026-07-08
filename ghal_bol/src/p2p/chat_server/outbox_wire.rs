@@ -41,6 +41,7 @@ fn emit_chat_ready_if_can_send(
     let session2 = Arc::clone(&session);
     let writers2 = Arc::clone(&writers);
     tokio::spawn(async move {
+        maybe_send_transport_kem_hello(session2.as_ref(), peer, &writers2);
         // Burst before the ~1s periodic resync in this task: backlog must drain on stream-open
         // without waiting for upkeep (DESIGN.md — :p2p owns background delivery). Running periodic
         // resync first marks rows on_wire within OUTBOX_RESEND_INTERVAL_MS and the burst would
@@ -202,7 +203,9 @@ pub(crate) fn spawn_leave_read_ack_drain(
     control: stream::Control,
 ) {
     let cutoff = read_ack_cutoff_ms(session.as_ref(), left);
-    let pk_label = secp256k1_public_key_hex_from_peer_id(&left).unwrap_or_else(|| left.to_string());
+    let pk_label = session
+        .signing_pk_for_libp2p_peer(left)
+        .unwrap_or_else(|| left.to_string());
     native_log::info(
         "read_ack",
         format!(
@@ -222,6 +225,11 @@ fn is_transient_outbound_error(err: &str) -> bool {
         || e.contains("broken pipe")
         || e.contains("connection reset")
         || e.contains("stream closed")
+        || e.contains("transport kem not ready")
+}
+
+fn is_transport_kem_deferred(err: &str) -> bool {
+    err.to_lowercase().contains("transport kem not ready")
 }
 
 fn notify_outbound_on_wire(

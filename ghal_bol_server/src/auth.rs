@@ -1,13 +1,17 @@
-//! Challenge nonce issuance and secp256k1 signature verification.
+//! Challenge nonce issuance and per-algorithm registration signature verification.
 
 use crate::error::{ApiResult, ServerError};
+use crate::identity::{Identity, IdentityAlgorithm, normalize_identity_wire};
+use ed25519_dalek::{Signature as Ed25519Sig, Verifier, VerifyingKey};
+use p256::ecdsa::{
+    Signature as EcdsaSig, VerifyingKey as EcdsaVerifyingKey,
+    signature::Verifier as EcdsaVerifier,
+};
 use rand::Rng;
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-
-const PUBLIC_KEY_HEX_LEN: usize = 66;
 
 /// Pending registration challenge for one identity.
 #[derive(Clone, Debug)]
@@ -23,24 +27,23 @@ pub struct ChallengeStore {
 }
 
 impl ChallengeStore {
-    pub fn issue(&mut self, public_key_hex: &str, ttl: Duration) -> ApiResult<PendingChallenge> {
-        validate_public_key_hex(public_key_hex)?;
+    pub fn issue(&mut self, identity_wire: &str, ttl: Duration) -> ApiResult<PendingChallenge> {
+        let key = normalize_identity_wire(identity_wire)?;
         let mut nonce = [0u8; 32];
         rand::rng().fill_bytes(&mut nonce);
         let challenge = PendingChallenge {
             nonce,
             expires_at: Instant::now() + ttl,
         };
-        self.pending
-            .insert(public_key_hex.to_ascii_lowercase(), challenge.clone());
+        self.pending.insert(key, challenge.clone());
         Ok(challenge)
     }
 
-    pub fn take_valid(&mut self, public_key_hex: &str, nonce: &[u8; 32]) -> ApiResult<()> {
-        let key = public_key_hex.to_ascii_lowercase();
+    pub fn take_valid(&mut self, identity_wire: &str, nonce: &[u8; 32]) -> ApiResult<()> {
+        let key = normalize_identity_wire(identity_wire)?;
         let Some(ch) = self.pending.remove(&key) else {
             return Err(ServerError::Unauthorized(
-                "no pending challenge for this public key".into(),
+                "no pending challenge for this identity".into(),
             ));
         };
         if Instant::now() > ch.expires_at {
@@ -58,57 +61,80 @@ impl ChallengeStore {
     }
 }
 
-/// Canonical signed payload for endpoint registration.
-pub fn registration_message_digest(nonce: &[u8; 32], public_key_hex: &str) -> Message {
-    let body = format!(
+/// Canonical registration challenge bytes (all algorithms).
+pub fn registration_challenge_bytes(nonce: &[u8; 32], identity_wire: &str) -> Vec<u8> {
+    format!(
         "ghal_bol:register:v1\n{}\n{}",
         hex::encode(nonce),
-        public_key_hex.trim().to_ascii_lowercase()
-    );
-    let hash = Sha256::digest(body.as_bytes());
+        identity_wire.trim().to_ascii_lowercase()
+    )
+    .into_bytes()
+}
+
+/// secp256k1 digest of [`registration_challenge_bytes`] — legacy helper for coord_client.
+pub fn registration_message_digest(nonce: &[u8; 32], identity_wire: &str) -> Message {
+    let body = registration_challenge_bytes(nonce, identity_wire);
+    let hash = Sha256::digest(&body);
     Message::from_digest(hash.into())
 }
 
 pub fn verify_registration_signature(
-    public_key_hex: &str,
+    identity_wire: &str,
     nonce: &[u8; 32],
-    signature_der: &[u8],
+    signature: &[u8],
 ) -> ApiResult<()> {
-    let pk = parse_public_key_hex(public_key_hex)?;
-    let msg = registration_message_digest(nonce, public_key_hex);
-    let sig = Signature::from_der(signature_der)
-        .map_err(|e| ServerError::Unauthorized(format!("invalid signature: {e}")))?;
-    Secp256k1::verification_only()
-        .verify_ecdsa(msg, &sig, &pk)
-        .map_err(|e| ServerError::Unauthorized(format!("signature verify failed: {e}")))?;
-    Ok(())
-}
-
-pub fn validate_public_key_hex(hex_s: &str) -> ApiResult<()> {
-    parse_public_key_hex(hex_s)?;
-    Ok(())
-}
-
-fn parse_public_key_hex(hex_s: &str) -> ApiResult<PublicKey> {
-    let s = hex_s.trim();
-    if s.len() != PUBLIC_KEY_HEX_LEN {
-        return Err(ServerError::BadRequest(
-            "public_key_hex must be 66 hex chars (compressed secp256k1)".into(),
-        ));
+    let wire = normalize_identity_wire(identity_wire)?;
+    let id = Identity::parse(&wire)?;
+    let challenge = registration_challenge_bytes(nonce, &wire);
+    match id.algorithm {
+        IdentityAlgorithm::Secp256k1 => {
+            let pk = PublicKey::from_slice(&id.public_key)
+                .map_err(|e| ServerError::BadRequest(format!("secp256k1 public key: {e}")))?;
+            let msg = registration_message_digest(nonce, &wire);
+            let sig = Signature::from_der(signature)
+                .map_err(|e| ServerError::Unauthorized(format!("invalid signature: {e}")))?;
+            Secp256k1::verification_only()
+                .verify_ecdsa(msg, &sig, &pk)
+                .map_err(|e| ServerError::Unauthorized(format!("signature verify failed: {e}")))?;
+        }
+        IdentityAlgorithm::Ed25519 => {
+            let arr: [u8; 32] = id
+                .public_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| ServerError::BadRequest("ed25519 public key: invalid length".into()))?;
+            let vk = VerifyingKey::from_bytes(&arr)
+                .map_err(|e| ServerError::BadRequest(format!("ed25519 public key: {e}")))?;
+            let sig = Ed25519Sig::from_slice(signature)
+                .map_err(|e| ServerError::Unauthorized(format!("ed25519 signature: {e}")))?;
+            vk.verify(&challenge, &sig)
+                .map_err(|e| ServerError::Unauthorized(format!("ed25519 verify: {e}")))?;
+        }
+        IdentityAlgorithm::EcdsaP256 => {
+            let vk = EcdsaVerifyingKey::from_sec1_bytes(&id.public_key)
+                .map_err(|e| ServerError::BadRequest(format!("ecdsa-p256 public key: {e}")))?;
+            let sig = EcdsaSig::from_der(signature)
+                .or_else(|_| EcdsaSig::from_slice(signature))
+                .map_err(|e| ServerError::Unauthorized(format!("ecdsa-p256 signature: {e}")))?;
+            EcdsaVerifier::verify(&vk, &challenge, &sig)
+                .map_err(|e| ServerError::Unauthorized(format!("ecdsa-p256 verify: {e}")))?;
+        }
+        IdentityAlgorithm::MlDsa65 => {
+            crate::ml_dsa_identity::verify_message(&id.public_key, &challenge, signature)
+                .map_err(|e| ServerError::Unauthorized(e))?;
+        }
     }
-    let bytes = hex::decode(s).map_err(|e| ServerError::BadRequest(format!("hex decode: {e}")))?;
-    PublicKey::from_slice(&bytes)
-        .map_err(|e| ServerError::BadRequest(format!("secp256k1 public key: {e}")))
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::Secp256k1;
+    use ed25519_dalek::{Signer, SigningKey};
     use secp256k1::SecretKey;
 
     #[test]
-    fn roundtrip_sign_verify() {
+    fn secp256k1_roundtrip_sign_verify() {
         let secp = Secp256k1::new();
         let sk = SecretKey::from_byte_array([1u8; 32]).expect("test key");
         let pk_hex = hex::encode(sk.public_key(&secp).serialize());
@@ -116,5 +142,40 @@ mod tests {
         let msg = registration_message_digest(&nonce, &pk_hex);
         let sig = secp.sign_ecdsa(msg, &sk);
         verify_registration_signature(&pk_hex, &nonce, &sig.serialize_der()).unwrap();
+    }
+
+    #[test]
+    fn ed25519_roundtrip_sign_verify() {
+        let signing = SigningKey::from_bytes(&[2u8; 32]);
+        let wire = format!("ed25519:{}", hex::encode(signing.verifying_key().to_bytes()));
+        let nonce = [8u8; 32];
+        let challenge = registration_challenge_bytes(&nonce, &wire);
+        let sig = signing.sign(&challenge);
+        verify_registration_signature(&wire, &nonce, &sig.to_bytes()).unwrap();
+    }
+
+    #[test]
+    fn ml_dsa65_roundtrip_sign_verify() {
+        let seed = crate::ml_dsa_identity::generate_secret_seed();
+        let sk = crate::ml_dsa_identity::signing_key_from_seed_bytes(&seed).unwrap();
+        let pk = crate::ml_dsa_identity::public_key_bytes_from_seed(&seed).unwrap();
+        let wire = format!("ml-dsa-65:{}", hex::encode(&pk));
+        let nonce = [11u8; 32];
+        let challenge = registration_challenge_bytes(&nonce, &wire);
+        let sig = crate::ml_dsa_identity::sign_message(&sk, &challenge).unwrap();
+        verify_registration_signature(&wire, &nonce, &sig).unwrap();
+    }
+
+    #[test]
+    fn explicit_secp256k1_prefix_roundtrip() {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_byte_array([4u8; 32]).expect("test key");
+        let bare = hex::encode(sk.public_key(&secp).serialize());
+        let wire = format!("secp256k1:{bare}");
+        let normalized = normalize_identity_wire(&wire).unwrap();
+        let nonce = [5u8; 32];
+        let msg = registration_message_digest(&nonce, &normalized);
+        let sig = secp.sign_ecdsa(msg, &sk);
+        verify_registration_signature(&wire, &nonce, &sig.serialize_der()).unwrap();
     }
 }

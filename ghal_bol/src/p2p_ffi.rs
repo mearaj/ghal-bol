@@ -29,7 +29,7 @@ unsafe fn utf8(c: *const c_char, ctx: &'static str) -> Result<String, String> {
 }
 
 /// Start libp2p DM in a background thread. JSON config:
-/// `{ "bootstrap_peers": [], "dm_peers": [{ "public_key_hex": "<66-hex>" }] }`.
+/// `{ "bootstrap_peers": [], "dm_peers": [{ "public_key_hex": "<identity wire>" }] }`.
 ///
 /// Requires an unlocked identity session from [`crate::ghal_bol_ffi_create_or_unlock_identity`].
 #[unsafe(no_mangle)]
@@ -58,7 +58,7 @@ pub unsafe extern "C" fn ghal_bol_ffi_p2p_stop() {
     p2p_runtime::p2p_stop();
 }
 
-/// Send a signed, encrypted text DM to `recipient_public_key_hex` (66 hex chars).
+/// Send a signed, encrypted text DM to `recipient_public_key_hex` (valid identity wire).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_p2p_send_text_dm(
     recipient_public_key_hex_utf8: *const c_char,

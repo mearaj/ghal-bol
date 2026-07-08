@@ -39,7 +39,7 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 |---------|--------|
 | libp2p listen/dial, streams, outbox, ack send/retry | `chat_server.rs`, `p2p_runtime.rs` (in **:p2p** / daemon) |
 | Coord endpoint → dial helpers | `coord_runtime.rs`, `dm_transport/` |
-| Envelope crypto | `msg_v1.rs`, `secp256k1_seal.rs` |
+| Envelope crypto | `msg_v1.rs`, `transport_kem_v1.rs`, `offline_seal_v1.rs` (auxiliary FFI only) |
 | Apply `dm_message` → contacts + transcript | `dm_event_handler.rs` (on **`p2p_poll`** in the P2P process) |
 | Contacts / previews / unread | `contacts_v1.rs` (disk; UI reads via FFI) |
 | Transcript lines, `delivery`, `read_ack_sent`, `received_at_ms` | `dm_transcript_store.rs`, `dm_transcript_v1.rs` |
@@ -493,7 +493,7 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 **Solution:** After unlock, **`ChatHubScreen._bootstrapHub`** runs **`AndroidBackgroundReadiness.runIfNeeded`** **before** `P2pEventBridge.ensureStarted`. Steps run **one at a time**, each skipped when already satisfied:
 
 1. **Notifications** (Android 13+) — `POST_NOTIFICATIONS`; required for visible FGS notification
-2. **Battery optimization** — manifest **`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`** + system **`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`** when `PowerManager.isIgnoringBatteryOptimizations` is false
+2. **Battery restriction** — prompt only when `ActivityManager.isBackgroundRestricted()` is true (Android 9+); legacy Doze whitelist check on Android 6–8. Opens app battery settings — not the old “ignore optimizations” dialog on modern Android.
 3. **Unused-app pause** — when `PackageManager.isAutoRevokeWhitelisted` is false, open app settings to disable “Pause app activity if unused”
 4. **OEM background** — when `BackgroundReadiness` detects a resolvable manufacturer autostart/background settings activity and autostart is not already verified (Vivo: content-provider query when available; others: one-time settings shortcut after user opens OEM screen)
 

@@ -65,6 +65,9 @@ Future<void> showRevealPrivateKeyDialog(BuildContext context) async {
     _snack(context, r.error ?? "Wrong password or reveal failed");
     return;
   }
+  final algo = r.identityAlgorithm?.trim().isNotEmpty == true
+      ? r.identityAlgorithm!.trim()
+      : "secp256k1";
   await showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -75,7 +78,7 @@ Future<void> showRevealPrivateKeyDialog(BuildContext context) async {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              "Your Ghal Bol messaging key (secp256k1). Do not share this hex — "
+              "Your Ghal Bol messaging key ($algo). Do not share this hex — "
               "anyone with it controls your chat identity. "
               "If this key is also used for cryptocurrency, treat exposure as a wallet risk.",
               style: Theme.of(ctx).textTheme.bodySmall,

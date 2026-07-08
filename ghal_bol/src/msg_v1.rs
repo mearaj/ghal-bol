@@ -1,24 +1,40 @@
-//! Direct-message wire envelope (**`ghal_bol_msg_v2`**) — single secp256k1 identity per device.
+//! Direct-message wire envelope (**`ghal_bol_msg_v2`**) — identity signatures + transport ciphertext.
 //!
-//! One public key: libp2p PeerId, envelope signatures, and ciphertext sealing.
-//!
-//! **Delivery sync (`dm_delivery_sync.dart`):** recipient sends `ack_received` / `ack_read`;
-//! sender resends text until acked. `ack_request` is not used on the wire.
+//! Text bodies use **transport KEM v2** (`DM_CIPHER_TRANSPORT_V2`) after `TransportKemHello`.
+//! Identity keys sign envelopes only; payload confidentiality uses X25519 transport keys.
 
-use libp2p_identity::Keypair;
-use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use x25519_dalek::StaticSecret;
 
-use crate::public_key_util::secp256k1_public_key_from_hex;
-use crate::secp256k1_seal::{open_sealed_secp256k1, seal_to_secp256k1_public};
+use crate::identity::{same_contact_identity};
+use crate::identity_sign::verify_identity_signature;
+use crate::keystore_v1::DecryptedIdentity;
+use crate::public_key_util::normalize_contact_identity_wire;
+use crate::symmetric_seal::{open_symmetric, seal_symmetric};
+use crate::transport_kem_v1::{
+    DM_CIPHER_TRANSPORT_V2, derive_dm_transport_message_key, parse_transport_pubkey_hex,
+    transport_public_key_bytes,
+};
 
 pub const MSG_SHARE: &str = "ghal_bol_msg_v1";
 pub const MSG_FORMAT_VERSION: u64 = 2;
 pub const STREAM_PROTOCOL: &str = "/ghal-bol/msg/1.0.0";
 
-fn envelope_recipient_ok(env: &MsgEnvelope, my_public_key_hex: &str) -> bool {
-    env.recipient_public_key_hex.trim() == my_public_key_hex.trim()
+/// Optional transport KEM context for outbound DM text (`DM_CIPHER_TRANSPORT_V2`).
+pub struct DmSealTransportCtx<'a> {
+    pub local_sk: &'a StaticSecret,
+    pub peer_pk: &'a [u8; 32],
+}
+
+/// Optional transport KEM context for inbound DM text (`DM_CIPHER_TRANSPORT_V2`).
+pub struct DmOpenTransportCtx<'a> {
+    pub local_sk: &'a StaticSecret,
+    pub peer_pk: &'a [u8; 32],
+}
+
+fn envelope_recipient_ok(env: &MsgEnvelope, my_identity_wire: &str) -> bool {
+    same_contact_identity(env.recipient_public_key_hex.trim(), my_identity_wire)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +44,8 @@ pub enum MsgKind {
     AckReceived,
     AckRead,
     AckRequest,
+    /// Exchange per-node X25519 transport public keys (payload confidentiality KEM).
+    TransportKemHello,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,6 +67,9 @@ pub struct MsgEnvelope {
     pub ciphertext_hex: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_hex: Option<String>,
+    /// Sender's X25519 transport public key (`TransportKemHello` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_x25519_hex: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +94,10 @@ pub struct ParsedAck {
 pub enum ParsedMsg {
     Text(ParsedText),
     Ack(ParsedAck),
+    TransportKemHello {
+        sender_public_key_hex: String,
+        transport_pk: [u8; 32],
+    },
 }
 
 fn canonical_sign_bytes(env: &MsgEnvelope) -> Result<Vec<u8>, String> {
@@ -81,9 +106,9 @@ fn canonical_sign_bytes(env: &MsgEnvelope) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&clone).map_err(|e| format!("canonical json: {e}"))
 }
 
-pub fn sign_envelope(env: &mut MsgEnvelope, sender: &Keypair) -> Result<(), String> {
+pub fn sign_envelope(env: &mut MsgEnvelope, sender: &DecryptedIdentity) -> Result<(), String> {
     let bytes = canonical_sign_bytes(env)?;
-    let sig = sender.sign(&bytes).map_err(|e| format!("sign: {e}"))?;
+    let sig = sender.sign_message(&bytes)?;
     env.signature_hex = Some(hex::encode(sig));
     Ok(())
 }
@@ -100,32 +125,24 @@ pub fn verify_envelope(env: &MsgEnvelope) -> Result<(), String> {
         .as_deref()
         .ok_or_else(|| "missing signature_hex".to_string())?;
     let sig = hex::decode(sig_hex.trim()).map_err(|e| format!("signature hex: {e}"))?;
-    let sender_pk = secp256k1_public_key_from_hex(env.sender_public_key_hex.trim())?;
-    let libp2p_pk = libp2p_identity::PublicKey::from(sender_pk);
     let bytes = canonical_sign_bytes(env)?;
-    if !libp2p_pk.verify(&bytes, &sig) {
-        return Err("signature verification failed".to_string());
-    }
+    verify_identity_signature(env.sender_public_key_hex.trim(), &bytes, &sig)?;
     Ok(())
 }
 
 pub fn build_text_envelope(
     id: &str,
-    sender: &Keypair,
-    recipient_public_key_hex: &str,
+    sender: &DecryptedIdentity,
+    recipient_identity_wire: &str,
     text: &str,
     created_at_ms: i64,
+    transport: DmSealTransportCtx<'_>,
 ) -> Result<MsgEnvelope, String> {
-    let sender_pk = sender
-        .public()
-        .try_into_secp256k1()
-        .map_err(|e| format!("sender key: {e}"))?;
-    let sender_hex = crate::public_key_util::secp256k1_public_key_to_hex(&sender_pk);
-    let recipient = recipient_public_key_hex.trim();
-    let recipient_pk = secp256k1_public_key_from_hex(recipient)?;
+    let sender_hex = sender.identity_wire();
+    let recipient_wire = normalize_contact_identity_wire(recipient_identity_wire)?;
     let inner = serde_json::json!({ "text": text });
     let inner_bytes = serde_json::to_vec(&inner).map_err(|e| format!("inner json: {e}"))?;
-    let sealed = seal_to_secp256k1_public(&recipient_pk.to_bytes(), &inner_bytes)?;
+    let sealed = seal_text_ciphertext_outbound(sender, &recipient_wire, &inner_bytes, transport)?;
     let mut env = MsgEnvelope {
         wire_share: MSG_SHARE.to_string(),
         format_version: MSG_FORMAT_VERSION,
@@ -133,11 +150,41 @@ pub fn build_text_envelope(
         kind: MsgKind::Text,
         ref_id: None,
         sender_public_key_hex: sender_hex,
-        recipient_public_key_hex: recipient.to_string(),
+        recipient_public_key_hex: recipient_wire,
         created_at_ms,
         received_at_ms: None,
         ciphertext_hex: hex::encode(sealed),
         signature_hex: None,
+        transport_x25519_hex: None,
+    };
+    sign_envelope(&mut env, sender)?;
+    Ok(env)
+}
+
+/// Signed envelope advertising this node's X25519 transport public key to a contact.
+pub fn build_transport_kem_hello_envelope(
+    id: &str,
+    sender: &DecryptedIdentity,
+    recipient_identity_wire: &str,
+    local_transport_sk: &StaticSecret,
+    created_at_ms: i64,
+) -> Result<MsgEnvelope, String> {
+    let sender_hex = sender.identity_wire();
+    let recipient_wire = normalize_contact_identity_wire(recipient_identity_wire)?;
+    let pk = transport_public_key_bytes(local_transport_sk);
+    let mut env = MsgEnvelope {
+        wire_share: MSG_SHARE.to_string(),
+        format_version: MSG_FORMAT_VERSION,
+        id: id.to_string(),
+        kind: MsgKind::TransportKemHello,
+        ref_id: None,
+        sender_public_key_hex: sender_hex,
+        recipient_public_key_hex: recipient_wire,
+        created_at_ms,
+        received_at_ms: None,
+        ciphertext_hex: String::new(),
+        signature_hex: None,
+        transport_x25519_hex: Some(hex::encode(pk)),
     };
     sign_envelope(&mut env, sender)?;
     Ok(env)
@@ -147,7 +194,7 @@ pub fn build_ack_envelope(
     id: &str,
     ref_id: &str,
     kind: MsgKind,
-    sender: &Keypair,
+    sender: &DecryptedIdentity,
     recipient_public_key_hex: &str,
     created_at_ms: i64,
     received_at_ms: Option<i64>,
@@ -155,11 +202,7 @@ pub fn build_ack_envelope(
     if kind != MsgKind::AckReceived && kind != MsgKind::AckRead && kind != MsgKind::AckRequest {
         return Err("build_ack_envelope: kind must be ack".to_string());
     }
-    let sender_pk = sender
-        .public()
-        .try_into_secp256k1()
-        .map_err(|e| format!("sender key: {e}"))?;
-    let sender_hex = crate::public_key_util::secp256k1_public_key_to_hex(&sender_pk);
+    let sender_hex = sender.identity_wire();
     let mut env = MsgEnvelope {
         wire_share: MSG_SHARE.to_string(),
         format_version: MSG_FORMAT_VERSION,
@@ -167,7 +210,7 @@ pub fn build_ack_envelope(
         kind,
         ref_id: Some(ref_id.to_string()),
         sender_public_key_hex: sender_hex,
-        recipient_public_key_hex: recipient_public_key_hex.trim().to_string(),
+        recipient_public_key_hex: normalize_contact_identity_wire(recipient_public_key_hex)?,
         created_at_ms,
         received_at_ms: if kind == MsgKind::AckReceived {
             received_at_ms.filter(|t| *t > 0)
@@ -176,18 +219,19 @@ pub fn build_ack_envelope(
         },
         ciphertext_hex: String::new(),
         signature_hex: None,
+        transport_x25519_hex: None,
     };
     sign_envelope(&mut env, sender)?;
     Ok(env)
 }
 
-pub fn parse_envelope(
+pub fn parse_envelope_with_transport(
     env: &MsgEnvelope,
-    my_public_key_hex: &str,
-    my_secret: &SecretKey,
+    local: &DecryptedIdentity,
+    transport: Option<DmOpenTransportCtx<'_>>,
 ) -> Result<ParsedMsg, String> {
     verify_envelope(env)?;
-    if !envelope_recipient_ok(env, my_public_key_hex) {
+    if !envelope_recipient_ok(env, &local.identity_wire()) {
         return Err("envelope not addressed to this identity".to_string());
     }
     match env.kind {
@@ -197,7 +241,14 @@ pub fn parse_envelope(
             }
             let sealed = hex::decode(env.ciphertext_hex.trim())
                 .map_err(|e| format!("ciphertext hex: {e}"))?;
-            let plain = open_sealed_secp256k1(my_secret, &sealed)?;
+            let plain = open_text_ciphertext(
+                env.sender_public_key_hex.trim(),
+                &sealed,
+                transport.ok_or_else(|| {
+                    "transport kem required to decrypt dm text".to_string()
+                })?,
+                &local.identity_wire(),
+            )?;
             let v: Value =
                 serde_json::from_slice(&plain).map_err(|e| format!("inner json: {e}"))?;
             let text = v
@@ -226,7 +277,56 @@ pub fn parse_envelope(
                 received_at_ms: env.received_at_ms.filter(|t| *t > 0),
             }))
         }
+        MsgKind::TransportKemHello => {
+            let pk_hex = env
+                .transport_x25519_hex
+                .as_deref()
+                .ok_or_else(|| "transport kem hello missing transport_x25519_hex".to_string())?;
+            let transport_pk = parse_transport_pubkey_hex(pk_hex)?;
+            Ok(ParsedMsg::TransportKemHello {
+                sender_public_key_hex: env.sender_public_key_hex.trim().to_string(),
+                transport_pk,
+            })
+        }
     }
+}
+
+fn seal_text_ciphertext_outbound(
+    sender: &DecryptedIdentity,
+    recipient_wire: &str,
+    inner_bytes: &[u8],
+    transport: DmSealTransportCtx<'_>,
+) -> Result<Vec<u8>, String> {
+    let sender_wire = sender.identity_wire();
+    let key = derive_dm_transport_message_key(
+        transport.local_sk,
+        transport.peer_pk,
+        &sender_wire,
+        recipient_wire,
+    )?;
+    let sym = seal_symmetric(&key, inner_bytes)?;
+    let mut sealed = Vec::with_capacity(1 + sym.len());
+    sealed.push(DM_CIPHER_TRANSPORT_V2);
+    sealed.extend_from_slice(&sym);
+    Ok(sealed)
+}
+
+fn open_text_ciphertext(
+    sender_identity_wire: &str,
+    sealed: &[u8],
+    transport: DmOpenTransportCtx<'_>,
+    local_identity_wire: &str,
+) -> Result<Vec<u8>, String> {
+    if sealed.first() != Some(&DM_CIPHER_TRANSPORT_V2) {
+        return Err("dm text: expected transport kem v2 ciphertext prefix".to_string());
+    }
+    let key = derive_dm_transport_message_key(
+        transport.local_sk,
+        transport.peer_pk,
+        local_identity_wire,
+        sender_identity_wire,
+    )?;
+    open_symmetric(&key, &sealed[1..])
 }
 
 pub fn envelope_to_frame_bytes(env: &MsgEnvelope) -> Result<Vec<u8>, String> {
@@ -254,20 +354,45 @@ pub fn frame_bytes_to_envelope(frame: &[u8]) -> Result<MsgEnvelope, String> {
 mod tests {
     use super::*;
     use crate::create_keystore_v1;
+    use crate::transport_kem_v1::generate_transport_keypair;
+
+    fn transport_pair() -> (
+        x25519_dalek::StaticSecret,
+        [u8; 32],
+        x25519_dalek::StaticSecret,
+        [u8; 32],
+    ) {
+        let (sk_a, pk_a) = generate_transport_keypair();
+        let (sk_b, pk_b) = generate_transport_keypair();
+        (sk_a, pk_a, sk_b, pk_b)
+    }
 
     #[test]
     fn text_roundtrip_sign_and_open() {
         let (_ks_a, alice) = create_keystore_v1("pw", None).unwrap();
         let (_ks_b, bob) = create_keystore_v1("pw2", None).unwrap();
+        let (sk_a, pk_a, sk_b, pk_b) = transport_pair();
         let env = build_text_envelope(
             "msg-1",
-            alice.keypair(),
-            &bob.public_key_hex(),
+            &alice,
+            &bob.identity_wire(),
             "hello",
             1_700_000_000_000,
+            DmSealTransportCtx {
+                local_sk: &sk_a,
+                peer_pk: &pk_b,
+            },
         )
         .unwrap();
-        let parsed = parse_envelope(&env, &bob.public_key_hex(), bob.secp256k1_secret()).unwrap();
+        let parsed = parse_envelope_with_transport(
+            &env,
+            &bob,
+            Some(DmOpenTransportCtx {
+                local_sk: &sk_b,
+                peer_pk: &pk_a,
+            }),
+        )
+        .unwrap();
         match parsed {
             ParsedMsg::Text(t) => assert_eq!(t.text, "hello"),
             _ => panic!("expected text"),
@@ -282,20 +407,73 @@ mod tests {
             "ack-1",
             "msg-1",
             MsgKind::AckReceived,
-            bob.keypair(),
-            &alice.public_key_hex(),
+            &bob,
+            &alice.identity_wire(),
             1_700_000_000_100,
             Some(1_700_000_000_000),
         )
         .unwrap();
         verify_envelope(&env).unwrap();
-        let parsed = parse_envelope(&env, &alice.public_key_hex(), alice.secp256k1_secret()).unwrap();
+        let parsed = parse_envelope_with_transport(&env, &alice, None).unwrap();
         match parsed {
             ParsedMsg::Ack(a) => {
                 assert_eq!(a.ref_id, "msg-1");
                 assert_eq!(a.received_at_ms, Some(1_700_000_000_000));
             }
             _ => panic!("expected ack"),
+        }
+    }
+
+    #[test]
+    fn transport_kem_v2_roundtrip_after_hello() {
+        use crate::transport_kem_v1::{DM_CIPHER_TRANSPORT_V2, generate_transport_keypair};
+
+        let (_ks_a, alice) = create_keystore_v1("pw", None).unwrap();
+        let (_ks_b, bob) = create_keystore_v1("pw2", None).unwrap();
+        let (sk_a, pk_a) = generate_transport_keypair();
+        let (sk_b, pk_b) = generate_transport_keypair();
+
+        let hello = build_transport_kem_hello_envelope(
+            "tkem-1",
+            &alice,
+            &bob.identity_wire(),
+            &sk_a,
+            1,
+        )
+        .unwrap();
+        let parsed_hello = parse_envelope_with_transport(&hello, &bob, None).unwrap();
+        match parsed_hello {
+            ParsedMsg::TransportKemHello { transport_pk, .. } => assert_eq!(transport_pk, pk_a),
+            _ => panic!("expected transport hello"),
+        }
+
+        let open_b = DmOpenTransportCtx {
+            local_sk: &sk_b,
+            peer_pk: &pk_a,
+        };
+        let seal_a = DmSealTransportCtx {
+            local_sk: &sk_a,
+            peer_pk: &pk_b,
+        };
+
+        let env = build_text_envelope(
+            "tv2-1",
+            &alice,
+            &bob.identity_wire(),
+            "transport-v2",
+            3,
+            DmSealTransportCtx {
+                local_sk: &sk_a,
+                peer_pk: &pk_b,
+            },
+        )
+        .unwrap();
+        let sealed = hex::decode(&env.ciphertext_hex).unwrap();
+        assert_eq!(sealed.first(), Some(&DM_CIPHER_TRANSPORT_V2));
+        let parsed = parse_envelope_with_transport(&env, &bob, Some(open_b)).unwrap();
+        match parsed {
+            ParsedMsg::Text(t) => assert_eq!(t.text, "transport-v2"),
+            _ => panic!("expected text"),
         }
     }
 }

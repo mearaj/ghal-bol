@@ -52,7 +52,7 @@ fn coord_lookup_in_flight() -> &'static Mutex<HashSet<String>> {
 /// `notify_coord_lookup()`.
 fn request_coord_lookup(pk: &str) {
     let pk = pk.trim().to_string();
-    if pk.len() != 66 {
+    if !crate::contacts_v1::is_valid_public_key_hex(&pk) {
         return;
     }
     {
@@ -554,14 +554,11 @@ fn coord_lookup_dm_peer(
     public_key_hex: &str,
 ) {
     let pk = public_key_hex.trim();
-    if pk.len() != 66 {
+    if !crate::contacts_v1::is_valid_public_key_hex(&pk) {
         return;
     }
     let now_ms = chrono_now_ms();
-    let target = peer_id_from_secp256k1_public_key_hex(pk)
-        .ok()
-        .and_then(|s| s.parse::<PeerId>().ok());
-    let Some(target) = target else {
+    let Some(target) = session.libp2p_peer_for_identity_wire(pk) else {
         return;
     };
     let connected = swarm.is_connected(&target);
@@ -644,13 +641,10 @@ fn apply_coord_lookup_result(
     now_ms: i64,
 ) {
     let pk = pk.trim();
-    if pk.len() != 66 {
+    if !crate::contacts_v1::is_valid_public_key_hex(&pk) {
         return;
     }
-    let Some(target) = peer_id_from_secp256k1_public_key_hex(pk)
-        .ok()
-        .and_then(|s| s.parse::<PeerId>().ok())
-    else {
+    let Some(target) = session.libp2p_peer_for_identity_wire(pk) else {
         return;
     };
     match outcome {
@@ -794,11 +788,9 @@ fn run_dm_coord_lookup_pass(
     // window. Intent beats backoff (TRANSPORT.md § prime directive): do **not** skip an urgent peer
     // just because it was last seen "absent" — that is precisely the peer the user wants to reach.
     for pk in session.urgent_reconnect_pks(now_ms) {
-        if let Ok(derived) = peer_id_from_secp256k1_public_key_hex(&pk) {
-            if let Ok(peer) = derived.parse::<PeerId>() {
-                if coord_lookup_upkeep_satisfied(swarm, session, peer, &pk, now_ms) {
-                    continue;
-                }
+        if let Some(peer) = session.libp2p_peer_for_identity_wire(&pk) {
+            if coord_lookup_upkeep_satisfied(swarm, session, peer, &pk, now_ms) {
+                continue;
             }
         }
         coord_lookup_dm_peer(swarm, session, &pk);
@@ -811,10 +803,7 @@ fn run_dm_coord_lookup_pass(
             if session.is_pk_reconnect_urgent(&pk, now_ms) {
                 continue; // handled by the uncapped urgent loop above
             }
-            let Some(target) = peer_id_from_secp256k1_public_key_hex(&pk)
-                .ok()
-                .and_then(|s| s.parse::<PeerId>().ok())
-            else {
+            let Some(target) = session.libp2p_peer_for_identity_wire(&pk) else {
                 continue;
             };
             if coord_lookup_upkeep_satisfied(swarm, session, target, &pk, now_ms) {

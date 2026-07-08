@@ -5,7 +5,7 @@
 It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT traversal (transport helper; peers dial each other via `/p2p-circuit` multiaddrs registered on coord — not a message store). See [TRANSPORT.md](TRANSPORT.md) § "Ghal Bol relay".
 
 ```text
-Peer A / B  →  register / heartbeat  →  ghal_bol_server (SQLite)  →  GET /v1/peers/{hex}  →  dial /p2p-circuit
+Peer A / B  →  register / heartbeat  →  ghal_bol_server (SQLite)  →  GET /v1/peers/{[algo:]hex}  →  dial /p2p-circuit
                  └─ reserve circuit on relay ─→  GET /v1/relay  →  server upserts /p2p-circuit on coord
 ```
 
@@ -83,20 +83,39 @@ GHAL_BOL_COORD_URLS=["https://coord1.ghalbol.com:8443"]
 See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
 ## HTTP API (v1)
 
+### Identity wire (path + JSON `public_key_hex`)
+
+The **same identity wire** appears in JSON bodies (`public_key_hex`) and as the **lookup path segment**. **Algorithm prefix is optional only for `secp256k1`** (bare hex); `ed25519`, `ecdsa-p256`, `ml-dsa-65`, etc. **must** include `algorithm:`.
+
+```text
+GET /v1/peers/{[algo:]public_key_hex}
+```
+
+| Form | Meaning | Example lookup path |
+|------|---------|---------------------|
+| Bare hex (no `:`) | **Implicit `secp256k1`** | `/v1/peers/02a1b2…` |
+| `algorithm:hex` | Explicit algorithm | `/v1/peers/ed25519%3A9f86…` (`:` → `%3A`) |
+
+Server-side: `ghal_bol_server/src/identity.rs` → `normalize_identity_wire()` on **register**, **heartbeat**, **lookup**, relay `pk=` binding, and SQLite primary key. Explicit `secp256k1:…` normalizes to bare hex on store.
+
+Client-side: `ghal_bol/src/coord.rs` uses `normalize_contact_identity_wire()` (same parse rules). Lookup URL-encodes the wire (`ed25519:…` → `ed25519%3A…`).
+
+**Transport `endpoints[]`** (scheme/host/port or libp2p multiaddr) are dial addresses — **not** identity strings. They do not carry an algorithm prefix.
+
 | Method | Path |
 |--------|------|
 | GET | `/health` |
 | POST | `/v1/register/challenge` |
 | POST | `/v1/register` |
 | POST | `/v1/heartbeat` |
-| GET | `/v1/peers/{public_key_hex}` |
+| GET | `/v1/peers/{[algo:]public_key_hex}` | Path segment = identity wire (bare hex = implicit `secp256k1`; prefix `:` as `%3A`) |
 | GET | `/v1/peers` |
 | GET | `/v1/relay` |
 | GET | `/v1/relay?remap=true` | UPnP-dynamic relay only (not shipping on coord1): after client bootstrap TCP failure — remove stale WAN port, map fresh (bool query — **`true`/`false`**, not `1`/`0`; storm-throttled) |
 
-Register signature: `ghal_bol:register:v1` + nonce + pubkey (SHA-256 → secp256k1 ECDSA DER).
+Register signature: canonical bytes `ghal_bol:register:v1\n<nonce_hex>\n<identity_wire>` (identity wire lowercased), signed with the identity key — **secp256k1** ECDSA DER, **ed25519**, **ecdsa-p256** DER, or **ml-dsa-65** per algorithm (`ghal_bol_server/src/auth.rs`).
 
-**Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: **`tcp` / `quic` with globally routable IPv4** (the peer’s own inbound DM listen). **Rejected (400):** `/p2p-circuit`, RFC1918 LAN, CGNAT-only, relay bootstrap host:port from `GET /v1/relay`. The co-located relay **upserts** `/p2p-circuit` when the client’s reservation is accepted (identify `agent_version` `ghal_bol/<ver>;pk=<device_pubkey_hex>`). When the reservation ends, the server removes **only** the circuit row — public-TCP rows from `POST` stay. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
+**Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: **`tcp` / `quic` with globally routable IPv4** (the peer’s own inbound DM listen). **Rejected (400):** `/p2p-circuit`, RFC1918 LAN, CGNAT-only, relay bootstrap host:port from `GET /v1/relay`. The co-located relay **upserts** `/p2p-circuit` when the client’s reservation is accepted (identify `agent_version` `ghal_bol/<ver>;pk=<identity_wire>` — bare secp256k1 hex or `algorithm:hex`). When the reservation ends, the server removes **only** the circuit row — public-TCP rows from `POST` stay. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
 
 `GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` or empty `addrs` when `GHAL_BOL_RELAY_PUBLIC_HOST` / `GHAL_BOL_RELAY_PUBLIC_ADDRS` are unset or relay is disabled.
 

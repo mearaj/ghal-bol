@@ -81,12 +81,8 @@ class P2pEventBridge {
   bool isStreamReady(String peerOrPublicKeyHex) {
     final trimmed = peerOrPublicKeyHex.trim();
     if (trimmed.isEmpty) return false;
-    final lower = trimmed.toLowerCase();
-    if (lower.length == kSecp256k1PublicKeyHexLen &&
-        _streamReadyPeers.contains(lower)) {
-      return true;
-    }
-    if (isValidPublicKeyHex(trimmed) && _streamReadyPeers.contains(trimmed.toLowerCase())) {
+    if (isValidPublicKeyHex(trimmed) &&
+        _streamReadyPeers.contains(trimmed.toLowerCase())) {
       return true;
     }
     return false;

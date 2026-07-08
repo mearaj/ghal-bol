@@ -84,10 +84,7 @@ pub fn live_foreground_peer_pk() -> Option<ContactPk> {
 
 pub(crate) fn is_live_foreground_peer(peer: PeerId) -> bool {
     live_foreground_peer().is_some_and(|pk| {
-        peer_id_from_secp256k1_public_key_hex(&pk)
-            .ok()
-            .and_then(|s| s.parse::<PeerId>().ok())
-            .is_some_and(|p| p == peer)
+        super::libp2p_peer_for_contact_identity(&pk).is_some_and(|p| p == peer)
     })
 }
 
@@ -187,13 +184,9 @@ pub fn queue_read_ack_catchup(out_tx: &std::sync::mpsc::Sender<OutboundCmd>, pee
     {
         return;
     }
-    let Ok(pid) = peer_id_from_secp256k1_public_key_hex(&peer) else {
-        return;
-    };
-    let Ok(peer_id) = pid.parse::<PeerId>() else {
-        return;
-    };
-    let _ = out_tx.send(OutboundCmd::RunReadAckCatchup { peer_id });
+    let _ = out_tx.send(OutboundCmd::RunReadAckCatchup {
+        identity_wire: peer,
+    });
 }
 
 fn read_catchup_throttle_mx() -> &'static RwLock<HashMap<PeerId, i64>> {

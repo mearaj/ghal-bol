@@ -1,6 +1,5 @@
 pub(crate) struct SessionState {
     identity: crate::DecryptedIdentity,
-    my_public_key_hex: String,
     peers: RwLock<PeerTables>,
     connected: RwLock<HashSet<PeerId>>,
     /// Messages we sent that are not yet `ack_received` by the peer.
@@ -163,6 +162,12 @@ pub(crate) struct SessionState {
     /// Active native **video**-call sessions, keyed by `call_id`. Parallel to
     /// `call_media` (voice); a call may have both. See `docs/GHAL_BOL_VIDEO_NATIVE_V1.md`.
     call_video: Mutex<HashMap<String, CallVideoEntry>>,
+    /// Node-local X25519 secret for DM transport KEM (not identity key material).
+    dm_transport_local_sk: x25519_dalek::StaticSecret,
+    /// Peer identity wire → peer transport X25519 public key (`TransportKemHello`).
+    dm_peer_transport_pks: RwLock<HashMap<String, [u8; 32]>>,
+    /// Peer identity wires we successfully sent `TransportKemHello` toward.
+    dm_transport_hello_sent: RwLock<HashSet<String>>,
 }
 
 /// One active call's transport bridge state held in [`SessionState::call_media`].
@@ -197,7 +202,7 @@ impl PeerTables {
             if dm.has_send_keys() {
                 return true;
             }
-            secp256k1_public_key_hex_from_peer_id(peer).is_some()
+            crate::peer_id_util::identity_wire_from_peer_id(peer).is_some()
         });
     }
 }
@@ -212,7 +217,6 @@ impl SessionState {
         network_profile: crate::p2p::network_transport::LocalNetworkProfile,
         ghalbol_relay_state: Option<(PeerId, Vec<String>)>,
     ) -> Result<Self, ChatServerError> {
-        let my_public_key_hex = identity.public_key_hex();
         let mut tables = PeerTables {
             by_peer_id: HashMap::new(),
         };
@@ -221,14 +225,14 @@ impl SessionState {
                 .public_key_hex
                 .as_deref()
                 .map(str::trim)
-                .filter(|s| s.len() == 66)
+                .filter(|s| crate::contacts_v1::is_valid_public_key_hex(s))
             {
                 if let Ok(dm) = DmPeer::from_public_key_hex(pk.to_string()) {
                     tables.by_peer_id.insert(dm.peer_id, dm);
                     continue;
                 }
             }
-            if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&p.peer_id) {
+            if let Some(pk) = identity_wire_from_peer_id(&p.peer_id) {
                 tables.by_peer_id.insert(
                     p.peer_id,
                     DmPeer {
@@ -236,11 +240,13 @@ impl SessionState {
                         public_key_hex: Some(pk),
                     },
                 );
+            } else if p.public_key_hex.is_some() {
+                tables.by_peer_id.insert(p.peer_id, p.clone());
             } else {
                 native_log::debug(
                     "session",
                     format!(
-                        "skip dm peer {} at start: not secp256k1 identity (relay nodes are not contacts)",
+                        "skip dm peer {} at start: no identity wire and not an embedded-key peer id",
                         p.peer_id
                     ),
                 );
@@ -249,7 +255,6 @@ impl SessionState {
         tables.retain_invalid_dm_peer_ids();
         Ok(Self {
             identity,
-            my_public_key_hex,
             peers: RwLock::new(tables),
             connected: RwLock::new(HashSet::new()),
             outbox: RwLock::new(HashMap::new()),
@@ -327,6 +332,12 @@ impl SessionState {
             coord_lookup_info_log_ms: RwLock::new(HashMap::new()),
             call_media: Mutex::new(HashMap::new()),
             call_video: Mutex::new(HashMap::new()),
+            dm_transport_local_sk: {
+                let (sk, _) = crate::transport_kem_v1::generate_transport_keypair();
+                sk
+            },
+            dm_peer_transport_pks: RwLock::new(HashMap::new()),
+            dm_transport_hello_sent: RwLock::new(HashSet::new()),
         })
     }
 
@@ -788,13 +799,27 @@ impl SessionState {
             .any(|p| self.should_dial_libp2p_peer(*p) && !self.dm_peer_stream_up(*p))
     }
 
-    /// Signing public key for a connected libp2p peer — roster entry first, then derive from
-    /// secp256k1 `PeerId` (stream can open before `merge_discovered` fills the roster row).
+    /// Signing identity wire for a connected libp2p peer — roster entry first, then derive from
+    /// embedded-key PeerId (stream can open before roster merge fills the row).
     pub(crate) fn signing_pk_for_libp2p_peer(&self, peer: PeerId) -> Option<String> {
-        self.dm_peer_for_libp2p(peer)
+        if let Some(wire) = self
+            .dm_peer_for_libp2p(peer)
             .and_then(|d| d.public_key_hex.clone())
-            .filter(|pk| pk.len() == 66)
-            .or_else(|| secp256k1_public_key_hex_from_peer_id(&peer))
+            .filter(|pk| crate::contacts_v1::is_valid_public_key_hex(pk))
+        {
+            return Some(wire);
+        }
+        if let Some(wire) = identity_wire_from_peer_id(&peer) {
+            return Some(wire);
+        }
+        let tables = self.peers.read().ok()?;
+        crate::peer_id_util::identity_wire_matching_peer_id(
+            &peer,
+            tables
+                .by_peer_id
+                .values()
+                .filter_map(|dm| dm.public_key_hex.as_deref()),
+        )
     }
 
     pub(crate) fn peer_has_pending_outbox(&self, peer: PeerId) -> bool {
@@ -1197,7 +1222,7 @@ impl SessionState {
 
     fn should_coord_lookup_pk(&self, pk_hex: &str, now_ms: i64, min_interval_ms: i64) -> bool {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return false;
         }
         let handover_coord_degraded = wifi_lan_handover_active(self)
@@ -1246,7 +1271,7 @@ impl SessionState {
     /// "peer offline" backoff — if they are reachable now, we find them within seconds.
     fn should_coord_lookup_intent_pk(&self, pk_hex: &str, now_ms: i64, min_interval_ms: i64) -> bool {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return false;
         }
         let Ok(mut m) = self.last_coord_lookup_ms.write() else {
@@ -1273,7 +1298,7 @@ impl SessionState {
 
     fn note_coord_lookup_not_found(&self, pk_hex: &str, now_ms: i64) {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
         let Ok(mut m) = self.coord_lookup_backoff.write() else {
@@ -1302,7 +1327,7 @@ impl SessionState {
     /// Longer lookup backoff when coord HTTPS transport fails (throttle only — no dial cache).
     fn note_coord_lookup_http_unreachable(&self, pk_hex: &str, now_ms: i64) {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
         let Ok(mut m) = self.coord_lookup_backoff.write() else {
@@ -1327,7 +1352,7 @@ impl SessionState {
     /// Does not extend an active window (avoids perpetual urgent from repeated upkeep ticks).
     fn mark_dm_reconnect_urgent(&self, pk_hex: &str) {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
         // A fresh drop invalidates any prior "peer_not_on_server" backoff: the peer was just
@@ -1346,7 +1371,7 @@ impl SessionState {
     /// Force-refresh urgent window (disconnect, outbox restore at node_ready) even if still active.
     fn refresh_dm_reconnect_urgent(&self, pk_hex: &str) {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
         self.clear_coord_lookup_backoff(pk);
@@ -1371,7 +1396,7 @@ impl SessionState {
             if let Some(pk) = self
                 .dm_peer_for_libp2p(peer)
                 .and_then(|d| d.public_key_hex.clone())
-                .filter(|pk| pk.len() == 66)
+                .filter(|pk| crate::contacts_v1::is_valid_public_key_hex(pk))
             {
                 self.mark_dm_reconnect_urgent(&pk);
             }
@@ -1414,7 +1439,7 @@ impl SessionState {
 
     fn clear_coord_lookup_backoff(&self, pk_hex: &str) {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
         if let Ok(mut m) = self.coord_lookup_backoff.write() {
@@ -1685,7 +1710,7 @@ impl SessionState {
         cat: crate::p2p::connectivity_diag::CoordLookupCategory,
     ) {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
         if let Ok(mut m) = self.coord_lookup_last_category.write() {
@@ -1708,7 +1733,7 @@ impl SessionState {
         pk_hex: &str,
     ) -> Option<crate::p2p::connectivity_diag::CoordLookupCategory> {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return None;
         }
         self.coord_lookup_last_category
@@ -1741,7 +1766,7 @@ impl SessionState {
     /// Clear stale 404/backoff so the next upkeep tick can find a peer who just registered.
     fn clear_peer_coord_absent_state(&self, pk_hex: &str) {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
         self.clear_coord_lookup_backoff(pk);
@@ -1755,11 +1780,9 @@ impl SessionState {
     /// Self presence wake or handover — reachable contacts get urgent rediscovery; 404 ghosts get one backoff-cleared retry only.
     fn wake_all_dm_peers_rediscovery(&self, now_ms: i64) {
         for pk in self.dm_public_keys() {
-            if let Ok(derived) = peer_id_from_secp256k1_public_key_hex(&pk) {
-                if let Ok(peer) = derived.parse::<PeerId>() {
-                    if self.dm_peer_stream_up(peer) {
-                        continue;
-                    }
+            if let Ok(peer) = peer_id_from_identity_wire(&pk) {
+                if self.dm_peer_stream_up(peer) {
+                    continue;
                 }
             }
             if self.coord_lookup_category_for_pk(&pk)
@@ -1770,13 +1793,11 @@ impl SessionState {
             }
             self.clear_peer_coord_absent_state(&pk);
             self.refresh_dm_reconnect_urgent(&pk);
-            if let Ok(derived) = peer_id_from_secp256k1_public_key_hex(&pk) {
-                if let Ok(peer) = derived.parse::<PeerId>() {
-                    self.clear_lan_candidates_exhausted(peer);
-                    self.clear_lan_dial_in_flight(peer);
-                    if self.network_profile_snapshot().has_active_lan() {
-                        self.request_lan_listen_rediscovery(peer);
-                    }
+            if let Ok(peer) = peer_id_from_identity_wire(&pk) {
+                self.clear_lan_candidates_exhausted(peer);
+                self.clear_lan_dial_in_flight(peer);
+                if self.network_profile_snapshot().has_active_lan() {
+                    self.request_lan_listen_rediscovery(peer);
                 }
             }
         }
@@ -1814,7 +1835,7 @@ impl SessionState {
         min_interval_ms: i64,
     ) -> bool {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return true;
         }
         let Ok(mut m) = self.coord_lookup_info_log_ms.write() else {
@@ -2233,8 +2254,8 @@ impl SessionState {
         let Some(pk) = self
             .dm_peer_for_libp2p(peer)
             .and_then(|d| d.public_key_hex.clone())
-            .filter(|pk| pk.len() == 66)
-            .or_else(|| secp256k1_public_key_hex_from_peer_id(&peer))
+            .filter(|pk| crate::contacts_v1::is_valid_public_key_hex(pk))
+            .or_else(|| identity_wire_from_peer_id(&peer))
         else {
             return;
         };
@@ -2283,13 +2304,14 @@ impl SessionState {
     }
 
     fn has_pending_outbox_for_pk(&self, pk_hex: &str) -> bool {
-        let pk = pk_hex.trim().to_lowercase();
-        if pk.len() != 66 {
-            return false;
-        }
+        let pk = match crate::public_key_util::normalize_contact_identity_wire(pk_hex.trim()) {
+            Ok(w) => w,
+            Err(_) => return false,
+        };
         self.outbox.read().ok().is_some_and(|g| {
-            g.values()
-                .any(|p| p.recipient_public_key_hex.trim().eq_ignore_ascii_case(&pk))
+            g.values().any(|p| {
+                crate::public_key_util::same_contact_pk(p.recipient_public_key_hex.trim(), &pk)
+            })
         })
     }
 
@@ -2304,7 +2326,7 @@ impl SessionState {
     /// through to the bounded LRU **background** sweep instead (TRANSPORT.md § scale invariant).
     fn pending_outbox_eligible_for_wire(&self, pk_hex: &str, now_ms: i64) -> bool {
         let pk = pk_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return false;
         }
         if !self.has_pending_outbox_for_pk(pk) {
@@ -2442,22 +2464,27 @@ impl SessionState {
     }
 
     /// Target PeerId to open `/ghal-bol/msg/1.0.0` for this contact.
-    ///
-    /// Always derived from the 66-hex secp256k1 public key. A stale
-    /// `peer_id` stored beside the key must never override the cryptographic identity.
-    fn resolve_send_peer(&self, signing_pk_hex: &str) -> Option<PeerId> {
-        let pk = signing_pk_hex.trim();
-        if pk.len() != 66 {
-            return None;
-        }
-        let peer_id: PeerId = peer_id_from_secp256k1_public_key_hex(pk)
-            .ok()
-            .and_then(|s| s.parse().ok())?;
-        self.ensure_dm_peer(pk, peer_id);
-        Some(peer_id)
+    pub(crate) fn libp2p_peer_for_identity_wire(&self, signing_pk_hex: &str) -> Option<PeerId> {
+        self.resolve_send_peer(signing_pk_hex)
     }
 
-    /// Fill `public_key_hex` from libp2p PeerId when this network uses secp256k1 identities.
+    /// Target PeerId to open `/ghal-bol/msg/1.0.0` for this contact.
+    ///
+    /// Derived from the validated identity wire when embeddable; ml-dsa uses the registered
+    /// transport PeerId hint. A stale `peer_id` beside the key must never override crypto identity.
+    fn resolve_send_peer(&self, signing_pk_hex: &str) -> Option<PeerId> {
+        let pk = signing_pk_hex.trim();
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
+            return None;
+        }
+        if let Ok(peer_id) = peer_id_from_identity_wire(pk) {
+            self.ensure_dm_peer(pk, peer_id);
+            return Some(peer_id);
+        }
+        self.dm_peer(pk).map(|d| d.peer_id)
+    }
+
+    /// Fill identity wire from libp2p PeerId when PeerId embeds the transport key.
     fn ensure_dm_peer_from_libp2p(&self, peer: PeerId) -> bool {
         if self
             .dm_peer_for_libp2p(peer)
@@ -2465,8 +2492,7 @@ impl SessionState {
         {
             return true;
         }
-        let Some(pk) = secp256k1_public_key_hex_from_peer_id(&peer) else {
-            // Ed25519 relay peers must never become DM rows (no `/ghal-bol/msg/1.0.0`).
+        let Some(pk) = identity_wire_from_peer_id(&peer) else {
             return false;
         };
         self.ensure_dm_peer(&pk, peer);
@@ -2475,44 +2501,43 @@ impl SessionState {
 
     fn register_dm_peer_key(&self, peer_id_hint: Option<PeerId>, public_key_hex: &str) {
         let pk = public_key_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             if let Some(pid) = peer_id_hint {
                 self.ensure_dm_peer_from_libp2p(pid);
             }
             return;
         }
-        let Some(derived) = peer_id_from_secp256k1_public_key_hex(pk)
-            .ok()
-            .and_then(|s| s.parse::<PeerId>().ok())
-        else {
-            return;
-        };
-        if let Some(hint) = peer_id_hint {
-            if hint != derived {
+        let derived_peer = peer_id_from_identity_wire(pk).ok();
+        let peer_id = match (derived_peer, peer_id_hint) {
+            (Some(d), Some(h)) if d != h => {
                 native_log::warn(
                     "session",
-                    format!(
-                        "dm peer id corrected {hint} -> {derived} (public key is authoritative)"
-                    ),
+                    format!("dm peer id corrected {h} -> {d} (identity wire is authoritative)"),
                 );
+                d
             }
-        }
-        self.ensure_dm_peer(pk, derived);
+            (Some(d), _) => d,
+            (None, Some(h)) => h,
+            (None, None) => return,
+        };
+        self.ensure_dm_peer(pk, peer_id);
         self.purge_invalid_dm_peer_ids();
         refresh_outbox_peer_ids(self);
     }
 
     fn ensure_dm_peer(&self, public_key_hex: &str, libp2p_peer: PeerId) {
         let pk = public_key_hex.trim();
-        if pk.len() != 66 {
+        if !crate::contacts_v1::is_valid_public_key_hex(pk) {
             return;
         }
-        if !secp256k1_public_hex_matches_peer_id(pk, &libp2p_peer) {
-            native_log::warn(
-                "session",
-                format!("reject dm keys for {libp2p_peer}: public key does not match peer id"),
-            );
-            return;
+        if let Ok(derived) = peer_id_from_identity_wire(pk) {
+            if derived != libp2p_peer {
+                native_log::warn(
+                    "session",
+                    format!("reject dm keys for {libp2p_peer}: identity wire does not match peer id"),
+                );
+                return;
+            }
         }
         let mut tables = match self.peers.write() {
             Ok(g) => g,
@@ -2567,7 +2592,7 @@ impl SessionState {
 
     fn dm_peer_for_conversation_key(&self, key: &str) -> Option<DmPeer> {
         let key = key.trim();
-        if key.len() == 66 {
+        if crate::contacts_v1::is_valid_public_key_hex(key) {
             return self.dm_peer(key);
         }
         if let Ok(pid) = key.parse::<PeerId>() {
@@ -2580,7 +2605,7 @@ impl SessionState {
         if let Ok(mut g) = self.foreground_peer.write() {
             *g = peer;
         }
-        let pk = peer.and_then(|p| secp256k1_public_key_hex_from_peer_id(&p));
+        let pk = peer.and_then(|p| self.signing_pk_for_libp2p_peer(p));
         sync_foreground_peer_now(pk);
     }
 

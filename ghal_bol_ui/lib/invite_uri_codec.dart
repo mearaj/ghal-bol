@@ -1,4 +1,6 @@
-/// Shared with [`GhalBolConnectInvite`] / Rust `connect_invite_v1`.
+// Shared with [`GhalBolConnectInvite`] / Rust `connect_invite_v1`.
+import "package:ghal_bol_ui/ghal_bol_ffi.dart";
+
 const String kGhalBolConnectShareV1 = "ghal_bol_connect_v1";
 const int kConnectInviteFormatV2 = 2;
 
@@ -17,8 +19,9 @@ String encodeConnectInviteUri(Map<String, dynamic> wire) {
   if (pk == null) {
     throw ArgumentError("wire map missing valid public_key_hex");
   }
+  final pathPk = Uri.encodeComponent(pk);
+  final base = "https://$kGhalBolConnectHttpsHost/$kGhalBolConnectPathSegment/$pathPk";
   final alias = wire["peer_alias"]?.toString().trim();
-  final base = "https://$kGhalBolConnectHttpsHost/$kGhalBolConnectPathSegment/$pk";
   return _appendInviteQuery(base, alias: alias);
 }
 
@@ -28,8 +31,9 @@ String encodeConnectInviteAppUri(Map<String, dynamic> wire) {
   if (pk == null) {
     throw ArgumentError("wire map missing valid public_key_hex");
   }
+  final pathPk = Uri.encodeComponent(pk);
+  final base = "$kGhalBolConnectAppScheme://$kGhalBolConnectPathSegment/$pathPk";
   final alias = wire["peer_alias"]?.toString().trim();
-  final base = "$kGhalBolConnectAppScheme://$kGhalBolConnectPathSegment/$pk";
   return _appendInviteQuery(base, alias: alias);
 }
 
@@ -80,7 +84,9 @@ String? _pkFromPathRest(String rest) {
     r = r.substring(kGhalBolConnectPathSegment.length);
   }
   r = r.replaceAll("/", "").trim();
-  return _isHex66(r) ? r.toLowerCase() : null;
+  if (r.isEmpty) return null;
+  final decoded = Uri.decodeComponent(r);
+  return GhalBolFfi.identityNormalize(decoded);
 }
 
 String? _parseAliasQuery(String? query) {
@@ -106,8 +112,8 @@ Map<String, dynamic> _wireFromPk(String pk, {String? alias}) {
 }
 
 String? _publicKeyFromWire(Map<String, dynamic> wire) {
-  final pk = wire["public_key_hex"]?.toString().trim().toLowerCase() ?? "";
-  return _isHex66(pk) ? pk : null;
+  final pk = wire["public_key_hex"]?.toString().trim() ?? "";
+  return GhalBolFfi.identityNormalize(pk);
 }
 
 int? _formatVersion(Map<String, dynamic> v) {
@@ -122,20 +128,6 @@ bool _fieldNonempty(Map<String, dynamic> v, String key) {
   return s.isNotEmpty;
 }
 
-bool _isHex66(String hex) {
-  final s = hex.trim();
-  if (s.length != 66) return false;
-  if (!RegExp(r"^[0-9a-fA-F]+$").hasMatch(s)) return false;
-  try {
-    for (var i = 0; i < s.length; i += 2) {
-      int.parse(s.substring(i, i + 2), radix: 16);
-    }
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
 bool verifyConnectInviteWireMap(Map<String, dynamic> v) {
   if (v["ghalbol.share"]?.toString() != kGhalBolConnectShareV1) return false;
   if (_formatVersion(v) != kConnectInviteFormatV2) return false;
@@ -146,7 +138,7 @@ bool verifyConnectInviteWireMap(Map<String, dynamic> v) {
   if (v.containsKey("multiaddrs")) return false;
   if (_fieldNonempty(v, "coord_base_url")) return false;
   final pk = v["public_key_hex"]?.toString() ?? "";
-  return _isHex66(pk);
+  return GhalBolFfi.identityNormalize(pk.trim()) != null;
 }
 
 /// Canonical `https://ghalbol.com/connect/…` for a browser [Uri] (path + query).
@@ -188,13 +180,13 @@ String? extractConnectInviteUri(String? raw) {
   }
 
   final https = RegExp(
-    r"https?://(?:www\.)?ghalbol\.com/connect/[0-9a-fA-F]{66}[^\s]*",
+    r"https?://(?:www\.)?ghalbol\.com/connect/[^?\s]+",
     caseSensitive: false,
   ).firstMatch(t);
   if (https != null) return https.group(0);
 
   final app = RegExp(
-    r"ghalbol://connect/[0-9a-fA-F]{66}[^\s]*",
+    r"ghalbol://connect/[^?\s]+",
     caseSensitive: false,
   ).firstMatch(t);
   if (app != null) return app.group(0);

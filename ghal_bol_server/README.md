@@ -68,10 +68,10 @@ CGNAT/mobile peers rely on the relay row. Desktop peers with UPnP/public IP may 
 | Method | Path | Body |
 |--------|------|------|
 | GET | `/health` | — (`database: true` when SQLite answers) |
-| POST | `/v1/register/challenge` | `{ "public_key_hex": "<66 hex>" }` |
-| POST | `/v1/register` | `public_key_hex`, `nonce_hex`, `signature_hex`, `endpoints[]`, optional `ipv4` / `ipv6` / `transport_capabilities` |
-| POST | `/v1/heartbeat` | `{ "public_key_hex": "<66 hex>" }` |
-| GET | `/v1/peers/{public_key_hex}` | — |
+| POST | `/v1/register/challenge` | `{ "public_key_hex": "<identity wire>" }` |
+| POST | `/v1/register` | `public_key_hex` (identity wire), `nonce_hex`, `signature_hex`, `endpoints[]`, optional `ipv4` / `ipv6` / `transport_capabilities` |
+| POST | `/v1/heartbeat` | `{ "public_key_hex": "<identity wire>" }` |
+| GET | `/v1/peers/{[algo:]public_key_hex}` | Identity wire in path (URL-encode `:` as `%3A`) |
 | GET | `/v1/peers` | — online peers (heartbeat within TTL) |
 | GET | `/v1/relay` | — `{ enabled, peer_id, addrs }` for the co-located relay |
 

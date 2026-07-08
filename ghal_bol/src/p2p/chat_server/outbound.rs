@@ -91,23 +91,16 @@ async fn process_outbound_cmd(
             transcript_sync_outbound_tick(session.as_ref(), Path::new(path), ns.trim());
         }
         let pk = public_key_hex.trim();
-        if pk.len() == 66 {
-            if let Ok(derived) = peer_id_from_secp256k1_public_key_hex(pk) {
-                if let Ok(target) = derived.parse::<PeerId>() {
-                    if !dm_peer_chat_link_stable(
-                        swarm,
-                        session.as_ref(),
-                        target,
-                        Some(pk),
-                        chrono_now_ms(),
-                    ) {
-                        notify_coord_lookup();
-                    }
-                }
-            }
-        } else if let Some(pid) = *peer_id {
-            let now = chrono_now_ms();
-            if !dm_peer_chat_link_stable(swarm, session.as_ref(), pid, None, now) {
+        let target = (*peer_id).or_else(|| peer_id_from_identity_wire(pk).ok());
+        if let Some(target) = target {
+            let pk_opt = is_valid_public_key_hex(pk).then_some(pk);
+            if !dm_peer_chat_link_stable(
+                swarm,
+                session.as_ref(),
+                target,
+                pk_opt,
+                chrono_now_ms(),
+            ) {
                 notify_coord_lookup();
             }
         }
@@ -127,7 +120,7 @@ async fn process_outbound_cmd(
     } = &cmd
     {
         let pk = peer_public_key_hex.trim().to_string();
-        if pk.len() == 66 {
+        if is_valid_public_key_hex(&pk) {
             session.register_dm_peer_key(None, &pk);
             // Signaling may have connected already; upkeep owns connect — wake coord only.
             if let Some(peer) = session.resolve_send_peer(&pk) {
@@ -184,7 +177,7 @@ async fn process_outbound_cmd(
     } = &cmd
     {
         let pk = peer_public_key_hex.trim().to_string();
-        if pk.len() == 66 {
+        if is_valid_public_key_hex(&pk) {
             session.register_dm_peer_key(None, &pk);
             if let Some(peer) = session.resolve_send_peer(&pk) {
                 if !swarm.is_connected(&peer) {
@@ -291,8 +284,10 @@ async fn process_outbound_cmd(
         }
         return Ok(());
     }
-    if let OutboundCmd::RunReadAckCatchup { peer_id } = &cmd {
-        let peer = *peer_id;
+    if let OutboundCmd::RunReadAckCatchup { identity_wire } = &cmd {
+        let Some(peer) = session.libp2p_peer_for_identity_wire(identity_wire) else {
+            return Ok(());
+        };
         if !may_send_in_room_read_ack(session.as_ref(), peer) {
             native_log::debug(
                 "read_ack",
@@ -320,6 +315,7 @@ async fn process_outbound_cmd(
     }
     if let OutboundCmd::SetForegroundPeer {
         peer_id,
+        identity_wire,
         generation,
     } = &cmd
     {
@@ -333,18 +329,19 @@ async fn process_outbound_cmd(
             );
             return Ok(());
         }
-        let previous = session.current_foreground_peer().or_else(|| {
-            last_room_peer().and_then(|pk| {
-                peer_id_from_secp256k1_public_key_hex(&pk)
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-            })
+        let resolved_peer = peer_id.or_else(|| {
+            identity_wire
+                .as_deref()
+                .and_then(|w| session.libp2p_peer_for_identity_wire(w))
         });
-        let same_room_reenter = matches!((peer_id, previous), (Some(n), Some(p)) if *n == p);
+        let previous = session.current_foreground_peer().or_else(|| {
+            last_room_peer().and_then(|pk| session.libp2p_peer_for_identity_wire(&pk))
+        });
+        let same_room_reenter = matches!((resolved_peer, previous), (Some(n), Some(p)) if n == p);
         if let Some(left) = previous {
-            let leaving = match peer_id {
+            let leaving = match resolved_peer {
                 None => true,
-                Some(new) => *new != left,
+                Some(new) => new != left,
             };
             if leaving {
                 freeze_chat_room_for_peer(session.as_ref(), left);
@@ -356,15 +353,15 @@ async fn process_outbound_cmd(
                 );
             }
         }
-        session.set_foreground_peer(*peer_id);
-        if peer_id.is_none() {
+        session.set_foreground_peer(resolved_peer);
+        if resolved_peer.is_none() {
             clear_chat_room_session();
             if let Ok(mut last) = last_room_peer_mx().write() {
                 *last = None;
             }
             return Ok(());
         }
-        let peer = peer_id.unwrap();
+        let peer = resolved_peer.unwrap();
         if session.current_foreground_peer() != Some(peer) {
             native_log::debug(
                 "read_ack",
@@ -410,6 +407,7 @@ async fn process_outbound_cmd(
     }
 
     let mut sent_text_id: Option<String> = None;
+    let mut defer_text_send = false;
     let mut pending_call: Option<PendingCallSignal> = None;
     let (peer, frame, done) = match cmd {
         OutboundCmd::RegisterDmPeer { .. }
@@ -431,7 +429,7 @@ async fn process_outbound_cmd(
             signal_id,
         } => {
             let pk = recipient_public_key_hex.trim();
-            if pk.len() == 66 {
+            if crate::public_key_util::is_valid_contact_identity(pk) {
                 session.register_dm_peer_key(None, pk);
             }
             let peer = session
@@ -445,16 +443,6 @@ async fn process_outbound_cmd(
                 session.purge_pending_call_signals(&call_id);
             }
             on_local_call_signal_sent(&call_id, signal_kind);
-            let env = build_call_envelope(
-                &signal_id,
-                &call_id,
-                signal_kind,
-                session.identity.keypair(),
-                pk,
-                payload,
-                chrono_now_ms(),
-            )?;
-            let frame = call_envelope_to_frame_bytes(&env)?;
             native_log::info(
                 "call",
                 format!(
@@ -465,8 +453,9 @@ async fn process_outbound_cmd(
             );
             pending_call = Some(PendingCallSignal {
                 call_id: call_id.clone(),
+                signal_id: signal_id.clone(),
                 signal_kind,
-                frame,
+                payload,
                 peer_id: peer,
                 recipient_public_key_hex: pk.to_string(),
                 created_at_ms: chrono_now_ms(),
@@ -481,7 +470,7 @@ async fn process_outbound_cmd(
         } => {
             sent_text_id = Some(message_id.clone());
             let pk = recipient_public_key_hex.trim();
-            if pk.len() == 66 {
+            if is_valid_public_key_hex(pk) {
                 session.register_dm_peer_key(None, pk);
             }
             let peer = session.resolve_send_peer(pk).ok_or_else(|| {
@@ -499,7 +488,7 @@ async fn process_outbound_cmd(
                 // urgent window even for a peer last seen offline, so the next lookup pass finds
                 // them within seconds if they are reachable now. The 30s window bounds retries for a
                 // genuinely-offline contact, and `mark_dm_reconnect_urgent` no-ops if already armed.
-                if pk.len() == 66 {
+                if is_valid_public_key_hex(pk) {
                     session.mark_dm_reconnect_urgent(pk);
                 }
                 notify_coord_lookup();
@@ -522,8 +511,7 @@ async fn process_outbound_cmd(
                 first_on_wire_ms: 0,
                 on_wire: false,
             };
-            let frame_bytes = build_pending_outbound_frame(session.as_ref(), &pending)?;
-            session.track_outbound(pending);
+            session.track_outbound(pending.clone());
             if let Some(ns) = session
                 .app_namespace
                 .as_deref()
@@ -531,7 +519,7 @@ async fn process_outbound_cmd(
                 .filter(|s| !s.is_empty())
             {
                 let conv_key = recipient_public_key_hex.trim().to_string();
-                if conv_key.len() == 66 {
+                if is_valid_public_key_hex(&conv_key) {
                     let line = crate::dm_transcript_store::StoredChatLine {
                         local_id: message_id.clone(),
                         text: text.clone(),
@@ -564,6 +552,18 @@ async fn process_outbound_cmd(
                     );
                 }
             }
+            let frame_bytes = match build_pending_outbound_frame(session.as_ref(), &pending) {
+                Ok(f) => f,
+                Err(e) if is_transport_kem_deferred(&e) => {
+                    native_log::debug(
+                        "outbound",
+                        format!("send_text deferred msg_id={message_id}: {e}"),
+                    );
+                    defer_text_send = true;
+                    Vec::new()
+                }
+                Err(e) => return Err(e),
+            };
             native_log::info(
                 "outbound",
                 format!(
@@ -581,12 +581,12 @@ async fn process_outbound_cmd(
             let peer_id = session
                 .resolve_send_peer(&recipient_public_key_hex)
                 .ok_or_else(|| "unknown dm peer".to_string())?;
-            let env = build_ack_envelope(
-                &new_msg_id(),
-                &ref_id,
-                ack_kind,
-                session.identity.keypair(),
-                &recipient_public_key_hex,
+        let env = build_ack_envelope(
+            &new_msg_id(),
+            &ref_id,
+            ack_kind,
+            &session.identity,
+            &recipient_public_key_hex,
                 chrono_now_ms(),
                 None,
             )?;
@@ -619,7 +619,21 @@ async fn process_outbound_cmd(
             session.enqueue_pending_call_signal(call);
             return Ok(());
         }
-        let r = send_frame_to_peer(peer, call.frame, writers, Some(session.as_ref())).await;
+        let frame = match build_call_signal_frame(session.as_ref(), &call) {
+            Ok(f) => f,
+            Err(e) => {
+                native_log::debug(
+                    "call",
+                    format!(
+                        "call signal deferred peer={}: {e}",
+                        call.peer_id
+                    ),
+                );
+                session.requeue_pending_call_signal_front(call);
+                return Ok(());
+            }
+        };
+        let r = send_frame_to_peer(peer, frame, writers, Some(session.as_ref())).await;
         if r.is_ok() {
             native_log::info(
                 "call",
@@ -638,6 +652,37 @@ async fn process_outbound_cmd(
             }
         }
         return r;
+    }
+    if defer_text_send {
+        if !swarm.is_connected(&peer) {
+            if let Some(pk) = session
+                .dm_peer_for_libp2p(peer)
+                .and_then(|d| d.public_key_hex.clone())
+            {
+                session.mark_dm_reconnect_urgent(&pk);
+            }
+            connect_dm_peer_now(swarm, session.as_ref(), peer);
+            native_log::info(
+                "dial",
+                format!("outbound queued: transport kem pending, connecting {peer}"),
+            );
+        } else {
+            ensure_dm_stream_for_send(
+                peer,
+                Arc::clone(&session),
+                control.clone(),
+                Arc::clone(&writers),
+                events_tx.clone(),
+            )
+            .await;
+            if writer_open_for_peer(&writers, peer) {
+                maybe_send_transport_kem_hello(session.as_ref(), peer, &writers);
+            }
+        }
+        if let Some(done) = done {
+            let _ = done.send(Ok(()));
+        }
+        return Ok(());
     }
     if !swarm.is_connected(&peer) {
         if let Some(pk) = session
@@ -703,7 +748,7 @@ async fn process_outbound_cmd(
 
 fn pair_from_dm(session: &SessionState, dm: &DmPeer) -> Option<(PeerId, String)> {
     let pk = dm.public_key_hex.as_deref()?.trim().to_string();
-    if pk.len() != 66 {
+    if !crate::contacts_v1::is_valid_public_key_hex(&pk) {
         return None;
     }
     let peer_id = session.resolve_send_peer(&pk)?;
@@ -723,7 +768,9 @@ fn resolve_send_pair_for_row(
             continue;
         };
         let pk = dm.public_key_hex.as_deref().unwrap_or("").trim();
-        if ck == peer_id.to_string() || (pk.len() == 66 && ck == pk) {
+        if ck == peer_id.to_string()
+            || (is_valid_public_key_hex(pk) && crate::identity::same_contact_identity(ck, pk))
+        {
             return pair_from_dm(session, &dm);
         }
     }
@@ -752,14 +799,51 @@ fn build_pending_outbound_frame(
     } else {
         chrono_now_ms()
     };
+    let recipient_wire = crate::public_key_util::normalize_contact_identity_wire(recipient_pk)?;
+    let peer_transport_pk = session
+        .peer_transport_pk(&recipient_wire)
+        .ok_or_else(|| "transport kem not ready for peer".to_string())?;
+    let transport = DmSealTransportCtx {
+        local_sk: session.dm_local_transport_sk(),
+        peer_pk: &peer_transport_pk,
+    };
     let env = build_text_envelope(
         &p.message_id,
-        session.identity.keypair(),
-        recipient_pk,
+        &session.identity,
+        &recipient_wire,
         &p.text,
         ts,
+        transport,
     )?;
     envelope_to_frame_bytes(&env)
+}
+
+pub(crate) fn build_call_signal_frame(
+    session: &SessionState,
+    pending: &PendingCallSignal,
+) -> Result<Vec<u8>, String> {
+    use crate::call_sig_v1::{build_call_envelope, call_envelope_to_frame_bytes, CallSealTransportCtx};
+
+    let recipient_wire =
+        crate::public_key_util::normalize_contact_identity_wire(&pending.recipient_public_key_hex)?;
+    let peer_transport_pk = session
+        .peer_transport_pk(&recipient_wire)
+        .ok_or_else(|| "transport kem not ready for peer".to_string())?;
+    let transport = CallSealTransportCtx {
+        local_sk: session.dm_local_transport_sk(),
+        peer_pk: &peer_transport_pk,
+    };
+    let env = build_call_envelope(
+        &pending.signal_id,
+        &pending.call_id,
+        pending.signal_kind,
+        &session.identity,
+        &recipient_wire,
+        pending.payload.clone(),
+        pending.created_at_ms,
+        transport,
+    )?;
+    call_envelope_to_frame_bytes(&env)
 }
 
 fn merge_outbound_row_into_outbox(

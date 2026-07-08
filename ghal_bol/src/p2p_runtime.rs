@@ -7,8 +7,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dm_transport::DmDialAddr;
-use crate::peer_id_util::peer_id_from_secp256k1_public_key_hex;
-use crate::peer_id_util::secp256k1_public_key_hex_from_peer_id;
+use crate::p2p::chat_server::identity_wire_for_libp2p_peer;
 use libp2p::Multiaddr;
 use serde_json::Value;
 
@@ -17,11 +16,11 @@ use crate::call_state;
 use crate::dm_event_handler::{
     apply_p2p_event_json, clear_p2p_handler_context, active_app_namespace, set_p2p_handler_context,
 };
-use crate::contacts_v1::clear_unread;
+use crate::contacts_v1::{clear_unread, is_valid_public_key_hex};
 use crate::msg_v1::MsgKind;
 use crate::p2p::{
     DEFAULT_GOSSIP_TOPIC, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, native_log,
-    live_foreground_peer_for_catchup, queue_read_ack_catchup, run_gossip_chat_node_with_std_io,
+    live_foreground_peer_for_catchup, libp2p_peer_for_contact_identity, queue_read_ack_catchup, run_gossip_chat_node_with_std_io,
     set_drop_pending_call_invite_hook, sync_foreground_peer_now,
 };
 use crate::session_runtime::unlocked_identity_clone;
@@ -260,7 +259,7 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             "multiaddr": ma.to_string(),
         }),
         GossipChatEvent::PeerConnected(p) => {
-            let pk = secp256k1_public_key_hex_from_peer_id(&p).unwrap_or_else(|| p.to_string());
+            let pk = identity_wire_for_libp2p_peer(&p).unwrap_or_else(|| p.to_string());
             serde_json::json!({
                 "kind": "peer_connected",
                 "peer_id": p.to_string(),
@@ -268,7 +267,7 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             })
         }
         GossipChatEvent::PeerDisconnected(p) => {
-            let pk = secp256k1_public_key_hex_from_peer_id(&p).unwrap_or_else(|| p.to_string());
+            let pk = identity_wire_for_libp2p_peer(&p).unwrap_or_else(|| p.to_string());
             serde_json::json!({
                 "kind": "peer_disconnected",
                 "peer_id": p.to_string(),
@@ -277,7 +276,7 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
         }
         GossipChatEvent::DialFailed { peer, error } => serde_json::json!({
             "kind": "dial_failed",
-            "peer": peer.and_then(|p| secp256k1_public_key_hex_from_peer_id(&p)),
+            "peer": peer.and_then(|p| identity_wire_for_libp2p_peer(&p)),
             "error": error,
         }),
         GossipChatEvent::DmMessage {
@@ -314,7 +313,7 @@ pub fn gossip_event_json(ev: GossipChatEvent) -> Value {
             "public_key_hex": public_key_hex,
         }),
         GossipChatEvent::ChatReady { peer_id } => {
-            let pk = secp256k1_public_key_hex_from_peer_id(&peer_id)
+            let pk = identity_wire_for_libp2p_peer(&peer_id)
                 .unwrap_or_else(|| peer_id.to_string());
             serde_json::json!({
                 "kind": "chat_ready",
@@ -401,22 +400,39 @@ fn json_ok(v: Value) -> Value {
     v
 }
 
+fn recipient_identity_from_config(config: &Value) -> Option<String> {
+    config
+        .get("recipient_public_key_hex")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| is_valid_public_key_hex(s))
+        .map(str::to_string)
+}
+
 fn parse_dm_peers(v: &Value) -> Vec<DmPeer> {
     let mut out = Vec::new();
     let Some(arr) = v.get("dm_peers").and_then(|x| x.as_array()) else {
         return out;
     };
     for item in arr {
-        let Some(pk) = item
+        let pk = item
             .get("public_key_hex")
             .and_then(|x| x.as_str())
             .map(str::trim)
-            .filter(|s| s.len() == 66)
-        else {
-            continue;
-        };
-        if let Ok(dm) = DmPeer::from_public_key_hex(pk.to_string()) {
-            out.push(dm);
+            .filter(|s| crate::contacts_v1::is_valid_public_key_hex(s));
+        let peer_hint = item
+            .get("peer_id")
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse::<libp2p::identity::PeerId>().ok());
+        match (pk, peer_hint) {
+            (Some(pk), _) => {
+                if let Ok(dm) = DmPeer::from_public_key_hex(pk.to_string()) {
+                    out.push(dm);
+                } else if let Some(peer_id) = peer_hint {
+                    out.push(DmPeer::from_identity_wire_with_peer(pk.to_string(), peer_id));
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -486,6 +502,9 @@ pub fn p2p_start(config: &Value) -> Value {
         Ok(i) => i,
         Err(e) => return json_err(e),
     };
+    if !ident.p2p_ready() {
+        return json_err("identity cannot start p2p on this build");
+    }
 
     let mut gossip_cfg = match GossipChatConfig::from_unlocked_identity(topic, &ident) {
         Ok(c) => c,
@@ -523,7 +542,7 @@ pub fn p2p_start(config: &Value) -> Value {
         }
         for dm in &gossip_cfg.dm_peers {
             let pk = dm.public_key_hex.as_deref().unwrap_or("").trim();
-            if pk.len() != 66 {
+            if !crate::contacts_v1::is_valid_public_key_hex(pk) {
                 continue;
             }
             let _ = p2p_register_dm_peer(pk);
@@ -668,16 +687,11 @@ pub fn p2p_stop() {
 }
 
 /// Voice-call signaling. JSON:
-/// `{ "recipient_public_key_hex": "<66-hex>", "call_id": "...", "signal": "invite|...", "payload": {} }`
+/// `{ "recipient_public_key_hex": "<identity wire>", "call_id": "...", "signal": "invite|...", "payload": {} }`
 pub fn p2p_call_signal(config: &Value) -> Value {
-    let recipient = match config
-        .get("recipient_public_key_hex")
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| s.len() == 66)
-    {
-        Some(s) => s.to_string(),
-        None => return json_err("recipient_public_key_hex required (66 hex)"),
+    let recipient = match recipient_identity_from_config(config) {
+        Some(s) => s,
+        None => return json_err("recipient_public_key_hex required (valid identity wire)"),
     };
     let call_id = match config
         .get("call_id")
@@ -763,14 +777,9 @@ pub fn p2p_call_media(config: &Value) -> Value {
 
     let cmd = match action {
         "start" => {
-            let recipient = match config
-                .get("recipient_public_key_hex")
-                .and_then(|x| x.as_str())
-                .map(str::trim)
-                .filter(|s| s.len() == 66)
-            {
-                Some(s) => s.to_string(),
-                None => return json_err("recipient_public_key_hex required (66 hex)"),
+            let recipient = match recipient_identity_from_config(config) {
+                Some(s) => s,
+                None => return json_err("recipient_public_key_hex required (valid identity wire)"),
             };
             OutboundCmd::CallMediaStart {
                 call_id: call_id.clone(),
@@ -923,14 +932,9 @@ pub fn p2p_call_video(config: &Value) -> Value {
 
     let cmd = match action {
         "start" => {
-            let recipient = match config
-                .get("recipient_public_key_hex")
-                .and_then(|x| x.as_str())
-                .map(str::trim)
-                .filter(|s| s.len() == 66)
-            {
-                Some(s) => s.to_string(),
-                None => return json_err("recipient_public_key_hex required (66 hex)"),
+            let recipient = match recipient_identity_from_config(config) {
+                Some(s) => s,
+                None => return json_err("recipient_public_key_hex required (valid identity wire)"),
             };
             let camera_enabled = config
                 .get("camera_enabled")
@@ -1305,7 +1309,7 @@ pub fn p2p_register_dm_peer(public_key_hex: &str) -> Value {
     // That burst causes repeated coord lookups + dial churn and can destabilize the DM stream.
     // Keep it idempotent: enqueue at most once per peer per short window.
     let now = now_ms();
-    if pk_trim.len() == 66 {
+    if is_valid_public_key_hex(pk_trim) {
         if let Ok(mut m) = register_dm_peer_throttle_mx().write() {
             if let Some(last) = m.get(pk_trim).copied() {
                 if now.saturating_sub(last) < 1_200 {
@@ -1366,7 +1370,9 @@ pub fn p2p_set_app_ui_visible(visible: bool) -> Value {
 /// Close order: room `None` → foreground leave drain → read gate off.
 /// Open order: ui visible + room set → read gate on → foreground peer (enter catch-up).
 pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) -> Value {
-    let room = room_public_key_hex.map(str::trim).filter(|s| s.len() == 66);
+    let room = room_public_key_hex
+        .map(str::trim)
+        .filter(|s| is_valid_public_key_hex(s));
     if ui_session_snapshot_unchanged(ui_visible, room) {
         return json_ok(serde_json::json!({
             "ok": true,
@@ -1510,7 +1516,7 @@ fn native_log_should_forward_to_ui(line: &native_log::NativeLogLine) -> bool {
 fn queue_read_catchup_for_room(room: Option<&str>) {
     let Some(peer_pk) = room
         .map(str::trim)
-        .filter(|s| s.len() == 66)
+        .filter(|s| is_valid_public_key_hex(s))
         .map(str::to_string)
     else {
         return;
@@ -1525,7 +1531,7 @@ fn queue_read_catchup_for_room(room: Option<&str>) {
 fn foreground_room_unchanged(public_key_hex: Option<&str>) -> bool {
     let want = public_key_hex
         .map(str::trim)
-        .filter(|s| s.len() == 66)
+        .filter(|s| is_valid_public_key_hex(s))
         .map(str::to_lowercase);
     match (want, live_foreground_peer_for_catchup()) {
         (None, None) => true,
@@ -1568,15 +1574,12 @@ pub fn p2p_set_foreground_peer(public_key_hex: Option<&str>) -> Value {
             }
         }
     }
-    let peer_id = pk.as_ref().and_then(|hex| {
-        peer_id_from_secp256k1_public_key_hex(hex)
-            .ok()
-            .and_then(|s| s.parse().ok())
-    });
+    let peer_id = pk.as_ref().and_then(|hex| libp2p_peer_for_contact_identity(hex));
     let generation = crate::p2p::chat_server::bump_foreground_peer_cmd_gen();
     if out_tx
         .send(OutboundCmd::SetForegroundPeer {
             peer_id,
+            identity_wire: pk.clone(),
             generation,
         })
         .is_err()

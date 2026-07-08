@@ -194,8 +194,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   String? get _callPeerPkHex {
     final pk = widget.activeContact?.publicKeyHex ?? widget.publicKeyHex;
-    final t = pk?.trim() ?? "";
-    return t.length == 66 ? t.toLowerCase() : null;
+    final wire = resolvePublicKeyHex(storedHex: pk);
+    return wire != null && isValidPublicKeyHex(wire) ? wire : null;
   }
 
   String _callPeerDisplayName() {
@@ -1579,14 +1579,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Same source as QR screen: native store alias + public key.
   Future<String?> _resolveInviteUriForShare() async {
-    final pk = widget.publicKeyHex?.trim().toLowerCase() ?? "";
-    if (!isValidPublicKeyHex(pk)) return null;
+    final wire = resolvePublicKeyHex(storedHex: widget.publicKeyHex);
+    if (wire == null || !isValidPublicKeyHex(wire)) return null;
     final alias = _effectiveCustomAlias ??
         await IdentityAliasStore.read(
           appNamespace: _resolvedAppNamespace,
-          publicKeyHex: pk,
+          publicKeyHex: wire,
         );
-    return buildGhalBolInviteUri(publicKeyHex: pk, peerAlias: alias);
+    return buildGhalBolInviteUri(
+      publicKeyHex: wire,
+      identityWire: wire,
+      peerAlias: alias,
+    );
   }
 
   void _refreshInviteUri() {

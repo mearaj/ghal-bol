@@ -9,13 +9,15 @@ mod db;
 mod endpoint_expand;
 mod error;
 mod godaddy_ddns;
+mod identity;
+pub mod ml_dsa_identity;
 mod presence;
 mod relay_live;
 mod relay_nat;
 pub mod relay;
 mod routes;
 
-pub use auth::registration_message_digest;
+pub use auth::{registration_challenge_bytes, registration_message_digest};
 pub use config::ServerConfig;
 pub use error::ServerError;
 pub use presence::{PeerEndpoint, PeerRecord, PresenceStore};

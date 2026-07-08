@@ -49,7 +49,7 @@ fn chat_behaviour(
 ) -> ChatBehaviour {
     let local_peer_id = key.public().to_peer_id();
     let pk = crate::session_runtime::unlocked_identity_clone()
-        .map(|i| i.public_key_hex())
+        .map(|i| i.identity_wire())
         .unwrap_or_default();
     let identify_cfg =
         libp2p::identify::Config::new_with_signed_peer_record("/ghal-bol/1.0.0".to_string(), key)

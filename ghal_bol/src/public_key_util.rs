@@ -1,30 +1,38 @@
-//! secp256k1 public key hex — sole wire/contact identity.
+//! Contact identity wire + secp256k1 transport helpers.
 
 use libp2p_identity::{PeerId, PublicKey};
 
-/// Parse 66-hex-char compressed secp256k1 public key.
+use crate::identity::{normalize_identity_wire, same_contact_identity, Identity};
+
+/// Parse compressed secp256k1 public key hex (legacy invite/seal helpers).
 pub fn secp256k1_public_key_from_hex(
     hex_s: &str,
 ) -> Result<libp2p_identity::secp256k1::PublicKey, String> {
     let s = hex_s.trim();
-    if s.len() != 66 {
-        return Err("public_key_hex: expected 66 hex chars (compressed secp256k1)".to_string());
-    }
     let v = hex::decode(s).map_err(|e| format!("public_key_hex: hex: {e}"))?;
     libp2p_identity::secp256k1::PublicKey::try_from_bytes(&v)
         .map_err(|e| format!("public_key_hex: secp256k1: {e}"))
 }
 
 /// Hex-encode libp2p secp256k1 public key bytes (33-byte compressed).
+#[cfg(test)]
 pub fn secp256k1_public_key_to_hex(pk: &libp2p_identity::secp256k1::PublicKey) -> String {
     hex::encode(pk.to_bytes())
 }
 
-/// Whether two normalized public key hex strings denote the same contact.
+/// Whether two identity wire strings denote the same contact.
 pub fn same_contact_pk(a: &str, b: &str) -> bool {
-    let a = a.trim().to_ascii_lowercase();
-    let b = b.trim().to_ascii_lowercase();
-    a.len() == 66 && a == b
+    same_contact_identity(a, b)
+}
+
+/// Parse and normalize contact identity wire (`[algo:]hex`).
+pub fn normalize_contact_identity_wire(s: &str) -> Result<String, String> {
+    normalize_identity_wire(s)
+}
+
+/// True when `s` is a valid contact identity wire string.
+pub fn is_valid_contact_identity(s: &str) -> bool {
+    Identity::parse(s).is_ok()
 }
 
 /// Load legacy `contacts_v1` rows that only stored `libp2p_peer_id` (pre–pk-only migration).
@@ -41,15 +49,7 @@ pub fn legacy_libp2p_peer_id_str_from_public_key_hex(hex_s: &str) -> Option<Stri
 }
 
 fn legacy_public_key_from_peer_id(peer: &PeerId) -> Option<String> {
-    use multihash::Multihash;
-    const MULTIHASH_IDENTITY_CODE: u64 = 0;
-    let mh: &Multihash<64> = peer.as_ref();
-    if mh.code() != MULTIHASH_IDENTITY_CODE {
-        return None;
-    }
-    let pk = PublicKey::try_decode_protobuf(mh.digest()).ok()?;
-    let secp = pk.try_into_secp256k1().ok()?;
-    Some(secp256k1_public_key_to_hex(&secp))
+    crate::peer_id_util::identity_wire_from_peer_id(peer)
 }
 
 #[cfg(test)]

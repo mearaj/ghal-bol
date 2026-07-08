@@ -29,7 +29,8 @@ struct RelayLiveInner {
 
 impl RelayLiveRegistry {
     pub fn note_peer_pk(&self, peer_id: PeerId, pk: String) {
-        let pk = pk.to_ascii_lowercase();
+        let pk = crate::identity::normalize_identity_wire(&pk)
+            .unwrap_or_else(|_| pk.trim().to_ascii_lowercase());
         if let Ok(mut g) = self.inner.lock() {
             g.peer_keys.insert(peer_id, pk.clone());
             g.pk_peers.insert(pk, peer_id);
@@ -115,7 +116,8 @@ impl RelayLiveRegistry {
     }
 
     pub fn pk_has_live_relay_circuit(&self, pk: &str) -> bool {
-        let pk = pk.to_ascii_lowercase();
+        let pk = crate::identity::normalize_identity_wire(pk)
+            .unwrap_or_else(|_| pk.trim().to_ascii_lowercase());
         let Ok(g) = self.inner.lock() else {
             return false;
         };

@@ -3,7 +3,7 @@ import "dart:convert";
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 import "identity_display_name.dart";
 import "invite_uri_codec.dart";
-import "public_key_hex.dart" show isValidPublicKeyHex;
+import "public_key_hex.dart" show isValidPublicKeyHex, resolvePublicKeyHex;
 
 export "invite_uri_codec.dart"
     show
@@ -34,9 +34,9 @@ final class GhalBolConnectInvite {
   bool get hasFullKeys => hasPublicKey;
 
   Map<String, dynamic> toWireMap() {
-    final pk = publicKeyHex.trim().toLowerCase();
+    final pk = resolvePublicKeyHex(storedHex: publicKeyHex) ?? "";
     if (!isValidPublicKeyHex(pk)) {
-      throw StateError("invite requires a 66-char secp256k1 public_key_hex");
+      throw StateError("invite requires a valid identity public_key_hex");
     }
     return {
       "ghalbol.share": kGhalBolShareConnectV1,
@@ -48,9 +48,17 @@ final class GhalBolConnectInvite {
     };
   }
 
-  String toInviteUri() => encodeConnectInviteUri(toWireMap());
+  String toInviteUri() {
+    final built = GhalBolFfi.buildConnectInviteLinks(toWireMap());
+    if (built != null) return built.httpsUri;
+    return encodeConnectInviteUri(toWireMap());
+  }
 
-  String toInviteAppUri() => encodeConnectInviteAppUri(toWireMap());
+  String toInviteAppUri() {
+    final built = GhalBolFfi.buildConnectInviteLinks(toWireMap());
+    if (built != null) return built.appUri;
+    return encodeConnectInviteAppUri(toWireMap());
+  }
 
   static GhalBolConnectInvite? tryParseInviteUri(String input) {
     final trimmed = normalizeInviteInput(input);
@@ -88,7 +96,7 @@ final class GhalBolConnectInvite {
     if (map["ghalbol.share"]?.toString() != kGhalBolShareConnectV1) return null;
     if (_formatVersion(map) != kInviteFormatVersionWire) return null;
     final pkRaw = map["public_key_hex"]?.toString().trim() ?? "";
-    final pk = pkRaw.toLowerCase();
+    final pk = resolvePublicKeyHex(storedHex: pkRaw) ?? "";
     if (!isValidPublicKeyHex(pk)) return null;
     final pid = GhalBolFfi.peerIdFromPublicKeyHex(pk) ?? "";
     return GhalBolConnectInvite(

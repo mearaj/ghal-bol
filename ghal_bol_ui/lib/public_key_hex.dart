@@ -1,23 +1,18 @@
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 
-/// Compressed secp256k1 public key on the wire (33 bytes → 66 hex chars).
-const int kSecp256k1PublicKeyHexLen = 66;
+/// Contact identity wire helpers — validation via native `Identity::parse` (all algorithms).
 
 bool isValidPublicKeyHex(String? hex) {
   final s = hex?.trim() ?? "";
-  if (s.length != kSecp256k1PublicKeyHexLen) return false;
-  return RegExp(r"^[0-9a-fA-F]+$").hasMatch(s);
+  if (s.isEmpty) return false;
+  return GhalBolFfi.identityParse(s)["ok"] == true;
 }
 
-bool publicKeysEqual(String? a, String? b) {
-  final pa = a?.trim().toLowerCase() ?? "";
-  final pb = b?.trim().toLowerCase() ?? "";
-  return isValidPublicKeyHex(pa) && pa == pb;
-}
+bool publicKeysEqual(String? a, String? b) => GhalBolFfi.identitySame(a, b);
 
 /// libp2p PeerId string for transport only (derived from signing public key).
 String? libp2pPeerIdFromPublicKeyHex(String? publicKeyHex) {
-  final pk = publicKeyHex?.trim().toLowerCase() ?? "";
+  final pk = GhalBolFfi.identityNormalize(publicKeyHex) ?? "";
   if (!isValidPublicKeyHex(pk)) return null;
   return GhalBolFfi.peerIdFromPublicKeyHex(pk);
 }
@@ -33,31 +28,55 @@ bool libp2pWireMatchesContactPublicKey({
   return derived != null && derived == wire;
 }
 
-/// Resolve a 66-hex key from storage (authoritative).
-String? resolvePublicKeyHex({String? storedHex}) {
-  final stored = storedHex?.trim().toLowerCase() ?? "";
-  if (isValidPublicKeyHex(stored)) return stored;
+/// Preferred contact identity wire from unlock/session or storage field.
+String? identityWireFromSession({
+  String? identityWire,
+  String? publicKeyHex,
+  String? identityAlgorithm,
+}) {
+  for (final candidate in <String?>[
+    identityWire,
+    publicKeyHex,
+    _prefixedIdentityWire(publicKeyHex, identityAlgorithm),
+  ]) {
+    final wire = resolvePublicKeyHex(storedHex: candidate);
+    if (wire != null && isValidPublicKeyHex(wire)) return wire;
+  }
   return null;
 }
+
+String? _prefixedIdentityWire(String? publicKeyHex, String? identityAlgorithm) {
+  final pk = publicKeyHex?.trim() ?? "";
+  final algo = identityAlgorithm?.trim() ?? "";
+  if (pk.isEmpty || algo.isEmpty || algo == "secp256k1") return null;
+  if (pk.contains(":")) return null;
+  return "$algo:$pk";
+}
+
+/// Resolve identity wire from storage (authoritative).
+String? resolvePublicKeyHex({String? storedHex}) =>
+    GhalBolFfi.identityNormalize(storedHex);
 
 /// Contact / roster / foreground identity from a native poll event — **public key only**.
 String contactPublicKeyHexFromEvent(Map<String, dynamic> ev) {
   for (final key in <String>["sender_public_key_hex", "public_key_hex"]) {
-    final s = ev[key]?.toString().trim().toLowerCase() ?? "";
-    if (isValidPublicKeyHex(s)) return s;
+    final s = ev[key]?.toString().trim() ?? "";
+    final norm = GhalBolFfi.identityNormalize(s);
+    if (norm != null && norm.isNotEmpty) return norm;
   }
   return "";
 }
 
 /// Contact key for stream-ready / call gating from a connect event.
-/// Resolves libp2p `peer_id` → 66-hex when the poll JSON only carried wire id.
+/// Resolves libp2p `peer_id` → identity wire when the poll JSON only carried wire id.
 String streamContactKeyFromEvent(Map<String, dynamic> ev) {
   final pk = contactPublicKeyHexFromEvent(ev);
-  if (isValidPublicKeyHex(pk)) return pk.toLowerCase();
+  if (isValidPublicKeyHex(pk)) return pk;
   final wire = libp2pWirePeerIdFromEvent(ev);
   if (wire.isEmpty) return "";
-  final resolved = GhalBolFfi.publicKeyHexFromPeerId(wire)?.trim().toLowerCase() ?? "";
-  if (isValidPublicKeyHex(resolved)) return resolved;
+  final resolved = GhalBolFfi.publicKeyHexFromPeerId(wire)?.trim() ?? "";
+  final norm = GhalBolFfi.identityNormalize(resolved);
+  if (norm != null && norm.isNotEmpty) return norm;
   return "";
 }
 

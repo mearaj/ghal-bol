@@ -55,7 +55,7 @@ pub unsafe extern "C" fn ghal_bol_ffi_coord_set_base_url(
     run()
 }
 
-/// Lookup peer endpoints: `{ "public_key_hex": "<66-hex>" }`.
+/// Lookup peer endpoints: `{ "public_key_hex": "<identity wire>" }` (bare hex = implicit secp256k1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_coord_lookup_peer(
     config_json_utf8: *const c_char,
@@ -74,10 +74,14 @@ pub unsafe extern "C" fn ghal_bol_ffi_coord_lookup_peer(
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .trim();
-        if pk.len() != 66 {
-            return json_err("public_key_hex required (66 hex)");
+        if pk.is_empty() {
+            return json_err("public_key_hex required");
         }
-        json_value(coord_runtime::coord_lookup_peer_json(pk))
+        let pk = match crate::public_key_util::normalize_contact_identity_wire(pk) {
+            Ok(w) => w,
+            Err(e) => return json_err(e),
+        };
+        json_value(coord_runtime::coord_lookup_peer_json(&pk))
     };
     run()
 }

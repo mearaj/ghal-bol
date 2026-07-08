@@ -14,12 +14,14 @@ class ShareInviteScreen extends StatefulWidget {
   const ShareInviteScreen({
     super.key,
     required this.publicKeyHex,
+    this.identityWire,
     required this.appNamespace,
     required this.readListenReady,
     required this.onParentRefresh,
   });
 
   final String publicKeyHex;
+  final String? identityWire;
   final String appNamespace;
   final bool Function() readListenReady;
   final VoidCallback onParentRefresh;
@@ -42,14 +44,21 @@ class _ShareInviteScreenState extends State<ShareInviteScreen> {
   Future<void> _reloadUri() async {
     setState(() => _loadingUri = true);
     widget.onParentRefresh();
-    final pk = widget.publicKeyHex.trim().toLowerCase();
+    final wire = identityWireFromSession(
+      identityWire: widget.identityWire,
+      publicKeyHex: widget.publicKeyHex,
+    );
     String? uri;
-    if (isValidPublicKeyHex(pk)) {
+    if (wire != null && isValidPublicKeyHex(wire)) {
       final alias = await IdentityAliasStore.read(
         appNamespace: widget.appNamespace,
-        publicKeyHex: pk,
+        publicKeyHex: widget.publicKeyHex.trim(),
       );
-      uri = buildGhalBolInviteUri(publicKeyHex: pk, peerAlias: alias);
+      uri = buildGhalBolInviteUri(
+        publicKeyHex: widget.publicKeyHex.trim(),
+        identityWire: wire,
+        peerAlias: alias,
+      );
     }
     if (!mounted) return;
     setState(() {

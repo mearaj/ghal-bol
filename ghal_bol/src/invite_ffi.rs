@@ -1,4 +1,4 @@
-//! FFI: **`ghal_bol_connect_v1`** invite verification + secp256k1 sealed payloads.
+//! FFI: **`ghal_bol_connect_v1`** invite verification + offline auxiliary seal.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -7,14 +7,15 @@ use serde_json::Value;
 
 use crate::c_ffi::ffi_unlocked_identity_clone;
 use crate::connect_invite_v1::{
-    build_connect_invite_wire_map, connect_invite_uri_from_wire_map, parse_connect_invite_uri,
+    build_connect_invite_wire_map, connect_invite_app_uri_from_wire_map,
+    connect_invite_uri_from_wire_map, parse_connect_invite_uri,
     verify_ghal_bol_connect_invite_value,
 };
+use crate::offline_seal_v1::{open_sealed_secp256k1, seal_to_secp256k1_public};
 use crate::public_key_util::{
     legacy_libp2p_peer_id_str_from_public_key_hex, legacy_public_key_from_peer_id_str,
     secp256k1_public_key_from_hex,
 };
-use crate::secp256k1_seal::{open_sealed_secp256k1, seal_to_secp256k1_public};
 
 fn json_ok(v: serde_json::Value) -> *mut c_char {
     CString::new(v.to_string())
@@ -60,7 +61,7 @@ pub unsafe extern "C" fn ghal_bol_ffi_verify_ghal_bol_connect_invite(
     run()
 }
 
-/// Extract 66-hex secp256k1 public key embedded in a libp2p identity PeerId.
+/// Extract identity wire embedded in an inline libp2p identity PeerId (secp256k1 / ed25519 only).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_public_key_hex_from_peer_id(
     peer_id_utf8: *const c_char,
@@ -105,7 +106,7 @@ pub unsafe extern "C" fn ghal_bol_ffi_peer_id_from_public_key_hex(
     run()
 }
 
-/// Seal UTF-8 plaintext to a recipient secp256k1 public key (66 hex chars).
+/// Seal UTF-8 plaintext to a recipient identity public key (legacy secp256k1 invite path).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_seal_utf8_to_public_key_hex(
     recipient_public_key_hex_utf8: *const c_char,
@@ -163,14 +164,20 @@ pub unsafe extern "C" fn ghal_bol_ffi_build_connect_invite_uri(
             Ok(w) => w,
             Err(e) => return json_err(e),
         };
-        match connect_invite_uri_from_wire_map(&wire) {
-            Ok(uri) => json_ok(serde_json::json!({
-                "ok": true,
-                "uri": uri,
-                "wire": wire,
-            })),
-            Err(e) => json_err(e),
-        }
+        let uri = match connect_invite_uri_from_wire_map(&wire) {
+            Ok(u) => u,
+            Err(e) => return json_err(e),
+        };
+        let app_uri = match connect_invite_app_uri_from_wire_map(&wire) {
+            Ok(u) => u,
+            Err(e) => return json_err(e),
+        };
+        json_ok(serde_json::json!({
+            "ok": true,
+            "uri": uri,
+            "app_uri": app_uri,
+            "wire": wire,
+        }))
     };
     run()
 }

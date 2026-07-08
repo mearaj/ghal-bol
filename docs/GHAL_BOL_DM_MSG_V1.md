@@ -1,6 +1,6 @@
 # Direct messages — `ghal_bol_msg_v1`
 
-Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/1.0.0`**. **Gossipsub is not used.** Messages are **signed JSON envelopes** with **secp256k1-sealed** text bodies. Transport details: [TRANSPORT.md](TRANSPORT.md).
+Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/1.0.0`**. **Gossipsub is not used.** Messages are **signed JSON envelopes** (`format_version`: **2**) with **algorithm-specific identity signatures** and **transport-layer ciphertext** for text bodies. See [MULTI_ALGO.md](MULTI_ALGO.md). Transport details: [TRANSPORT.md](TRANSPORT.md).
 
 **Design overview** (layers, chat-room rules, asymmetric contacts): see **[DESIGN.md](DESIGN.md)** first.
 
@@ -18,16 +18,17 @@ Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/
 
 | Key | Use |
 |-----|-----|
-| **secp256k1** (compressed, **66 hex**) | libp2p **PeerId**, envelope **signatures**, and message **encryption** (single key per device) |
+| **Identity key** (e.g. secp256k1 compressed, **66 hex**) | libp2p **PeerId** (secp256k1), envelope **signatures** |
+| **Transport key** (X25519, per DM stream) | Message **encryption** for text bodies (`DM_CIPHER_TRANSPORT_V2`) |
 
-**PeerId** is derived from the secp256k1 public key (`ghal_bol::peer_id_util`). The keystore holds one logical identity; there is no separate “encryption key” on the wire.
+**PeerId** is derived from the secp256k1 public key (`ghal_bol::peer_id_util`). The keystore holds one logical identity; DM payload confidentiality uses **transport KEM keys** exchanged via `transport_kem_hello`, not the identity private key.
 
 **Trust on the wire:** libp2p **Noise** proves the remote party owns the connection’s **PeerId**. App-layer frames must additionally satisfy:
 
 - Valid **secp256k1** signature on the envelope.
 - `sender_public_key_hex` must **derive to** the libp2p **PeerId** on that stream (binding check in `chat_server.rs`).
 
-Remote keys are known from the **connect invite** (`public_key_hex`) and/or derived from the remote libp2p **PeerId** (secp256k1 identity). There is **no** separate `peer_hello` handshake — after connect the node opens `/ghal-bol/msg/1.0.0` and speaks `ghal_bol_msg_v1` frames (sign + seal) directly.
+Remote keys are known from the **connect invite** (`public_key_hex`) and/or derived from the remote libp2p **PeerId** (secp256k1 identity). After connect the node opens `/ghal-bol/msg/1.0.0`, exchanges `transport_kem_hello`, then speaks signed `ghal_bol_msg_v1` text frames.
 
 ## Envelope (`ghal_bol_msg_v1`)
 
@@ -36,10 +37,11 @@ Common fields:
 | Field | Notes |
 |-------|-------|
 | `id` | Opaque message id; used for acks and dedupe |
-| `kind` | `text` \| `ack_received` \| `ack_read` (`ack_request` reserved — **never sent**) |
-| `sender_public_key_hex` | Sender secp256k1 public key (**66 hex**) |
-| `recipient_public_key_hex` | Recipient secp256k1 public key (**66 hex**) |
-| `ciphertext_hex` | Sealed inner `{"text":"…"}` for `kind: text`; empty for acks |
+| `kind` | `text` \| `ack_received` \| `ack_read` \| `transport_kem_hello` (`ack_request` reserved — **never sent**) |
+| `sender_public_key_hex` | Sender identity wire (bare secp256k1 hex or `algo:hex`) |
+| `recipient_public_key_hex` | Recipient identity wire |
+| `ciphertext_hex` | Sealed inner `{"text":"…"}` for `kind: text`; empty for acks and `transport_kem_hello` |
+| `transport_x25519_hex` | On **`transport_kem_hello` only:** this node's X25519 transport public key (64 hex chars) |
 | `created_at_ms` | Unix milliseconds (frame construction time) |
 | `received_at_ms` | On **`ack_received` only:** when the recipient **first** accepted the referenced text (`ref_id`). Recipient authority; **stable on duplicate text retries**; omitted on `ack_read`. |
 | `signature_hex` | Signature over canonical JSON (all fields except `signature_hex`) |
@@ -47,7 +49,13 @@ Common fields:
 
 ### Text encryption
 
-Inner JSON `{"text":"…"}` is sealed with `ghal_bol::secp256k1_seal` (ephemeral secp256k1 ECDH + SHA-256 + AES-256-GCM). Wire blob: `u32_le(ephemeral_len) || ephemeral_pubkey || nonce (12) || ciphertext+tag`.
+Inner JSON `{"text":"…"}` is AES-256-GCM via `ghal_bol::symmetric_seal`. After hex decode, ciphertext **must** begin with prefix **`0x03`** (**transport KEM v2**):
+
+| Prefix | Path | When |
+|--------|------|------|
+| `0x03` | **Transport KEM v2** — X25519 ECDH + HKDF(`ghal_bol_dm_transport_v2` + sorted identity wire pair) | After both peers exchanged `transport_kem_hello` on the DM stream |
+
+**Transport hello:** on stream open each node sends one signed `transport_kem_hello` frame advertising `transport_x25519_hex`. Outbound text is queued until the peer's transport key is known. Payload confidentiality is decoupled from identity **private** keys (identity wires still bind HKDF `info`).
 
 ## Delivery, read state, and sync
 
@@ -258,7 +266,7 @@ Transcripts survive app restarts; **network delivery** and **read-ack retries** 
 | Area | Path |
 |------|------|
 | Stream + outbox + read acks | `ghal_bol/src/p2p/chat_server.rs` |
-| Envelope crypto | `ghal_bol/src/msg_v1.rs`, `ghal_bol/src/secp256k1_seal.rs` |
+| Envelope crypto | `ghal_bol/src/msg_v1.rs`, `ghal_bol/src/transport_kem_v1.rs`, `ghal_bol/src/p2p/chat_server/dm_transport_kem.rs` |
 | Transcript helpers | `ghal_bol/src/dm_transcript_v1.rs` |
 | Invite verify | `ghal_bol/src/connect_invite_v1.rs` |
 | P2P runtime + FFI shim | `ghal_bol/src/p2p_runtime.rs`, `p2p_ffi.rs` |
