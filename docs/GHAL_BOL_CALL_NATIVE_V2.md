@@ -15,7 +15,7 @@ Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (la
 | **Golden rule #1** | `ghal_bol` (Rust) owns product logic — capture, codec, transport, jitter, and E2E live in Rust (`call_media/`). |
 | **We already have the link** | libp2p provides encrypted connections (TCP/QUIC + Noise + relay + coord). Calls reuse that link via `/ghal-bol/call/1.0.0`. |
 | **No new servers** | Direct when possible; coord/relay only as fallback — same as chat. |
-| **One E2E story** | `derive_call_media_keys_from_identity` (secp256k1) + per-frame AES-GCM seal. |
+| **One E2E story** | `derive_call_media_keys_from_transport` + per-frame AES-GCM seal (transport KEM after `TransportKemHello`). |
 
 **Why not MoQ.** Media-over-QUIC broadcast protocols target one-to-many fan-out, not 1:1 interactive calls. Not used here.
 
@@ -26,7 +26,7 @@ Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (la
 | Piece | Implementation |
 |-------|----------------|
 | **Signaling** | `call_sig_v1.rs`, `call_state.rs`, `call_ffi.rs` over the DM stream |
-| **Media key** | `call_media_key.rs` (`derive_call_media_keys_from_identity`) |
+| **Media key** | `call_media_key.rs` (`derive_call_media_keys_from_transport`) |
 | **Media engine** | Rust: capture → APM → Opus → seal → transport → jitter → decode → playback |
 | **Media transport** | `/ghal-bol/call/1.0.0` on the existing libp2p peer connection |
 | **Flutter** | `call_controller.dart`, `call_screen.dart`, `call_ringtone.dart` — UI + FFI control only |
@@ -47,7 +47,7 @@ Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (la
 │  call_media (NEW)           — pipeline + jitter + session lifecycle      │
 │    capture → APM(AEC/NS/AGC) → Opus enc → seal → SEND                    │
 │    RECV → unseal → jitter buffer → Opus dec(PLC) → mix → playback        │
-│  call media keys            — derive_call_media_keys_from_identity       │
+│  call media keys            — derive_call_media_keys_from_transport       │
 │  chat_server.rs             — the peer connection + a media substream    │
 │                               (/ghal-bol/call/1.0.0) or QUIC datagrams   │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -132,12 +132,12 @@ Control/signaling stays on the reliable DM stream either way.
 
 ## End-to-end encryption
 
-- Media key = existing `derive_call_media_keys_from_identity(call_id, my_secret,
-  peer_pubkey)` — the same secp256k1 identity as chat (golden rule #7).
+- Media key = `derive_call_media_keys_from_transport(call_id, transport_kem)` — same
+  `TransportKemHello` session keys as DM text and call signaling (golden rule #7).
 - **Option A:** the libp2p stream is already Noise-encrypted peer-to-peer; we add
-  a thin per-frame seal with the identity media key so a relay/path never sees
+  a thin per-frame seal with the transport media key so a relay/path never sees
   plaintext (defense in depth, matches chat's seal-then-transport model).
-- **Option B:** datagrams are sealed with the identity media key (QUIC TLS also
+- **Option B:** datagrams are sealed with the transport media key (QUIC TLS also
   wraps them); key never on the wire.
 - Connect-time: media keys derive in parallel with device open; failure to derive
   must **not** silently drop to plaintext — fail the call's E2E or surface it

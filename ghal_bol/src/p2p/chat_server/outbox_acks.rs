@@ -318,7 +318,7 @@ async fn send_ack_frame(
         &new_msg_id(),
         ref_id,
         kind,
-        session.identity.keypair(),
+        &session.identity,
         recipient_signing,
         chrono_now_ms(),
         received_at_ms,
@@ -576,9 +576,20 @@ async fn flush_pending_call_signals(
         let signal_kind = call.signal_kind;
         let call_id_log = call.call_id.clone();
         let recipient_pk = call.recipient_public_key_hex.clone();
+        let frame = match build_call_signal_frame(session.as_ref(), &call) {
+            Ok(f) => f,
+            Err(e) => {
+                native_log::debug(
+                    "call",
+                    format!("call signal flush deferred peer={peer_id}: {e}"),
+                );
+                session.requeue_pending_call_signal_front(call);
+                continue;
+            }
+        };
         match send_frame_to_peer(
             peer_id,
-            call.frame.clone(),
+            frame,
             Arc::clone(&writers),
             Some(session.as_ref()),
         )

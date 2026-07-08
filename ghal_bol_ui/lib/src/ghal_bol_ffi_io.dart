@@ -4,6 +4,7 @@ import "dart:io";
 
 import "package:ffi/ffi.dart";
 import "package:ghal_bol_ui/app_log.dart";
+import "package:ghal_bol_ui/identity_algorithm_choice.dart";
 import "package:ghal_bol_ui/native_build_hint.dart";
 import "package:ghal_bol_ui/p2p_event_log.dart";
 import "package:ghal_bol_ui/public_key_hex.dart";
@@ -72,6 +73,11 @@ typedef _NativeThreeStringsToPtr =
     Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c);
 typedef _NativeThreeStringsToPtrDart =
     Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c);
+
+typedef _NativeFourStringsToPtr =
+    Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c, Pointer<Utf8> d);
+typedef _NativeFourStringsToPtrDart =
+    Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c, Pointer<Utf8> d);
 /// FFI surface for **`libghal_bol`** / **`ghal_bol.dll`** (Rust crate **`ghal_bol`**).
 abstract final class GhalBolFfi {
   static DynamicLibrary? _lib;
@@ -81,7 +87,6 @@ abstract final class GhalBolFfi {
   static _NativeTwoStringsToPtrDart? _p2pSendTextDm;
   static _NativeThreeStringsToPtrDart? _p2pRequeueOutboundDm;
   static _NativeTwoStringsToPtrDart? _p2pRegisterDmPeer;
-  static _NativeThreeStringsToPtrDart? _p2pSendAckDm;
   static _NativePtrToPtrDart? _p2pCallSignal;
   static _NativePtrToPtrDart? _p2pCallMedia;
   static _NativePtrToPtrDart? _p2pCallStatus;
@@ -92,25 +97,26 @@ abstract final class GhalBolFfi {
   static _NativePtrToPtrDart? _p2pCallVideoFrame;
   static _NativePtrToPtrDart? _p2pCallVideoTexture;
   static _NativePtrToPtrDart? _p2pCallVideoPushCameraFrame;
-  static _NativePtrToPtrDart? _callMediaKeyHex;
   static _NativePtrToPtrDart? _p2pSetForegroundPeer;
   static Pointer<Utf8> Function(int)? _p2pSetAppAckReadEnabled;
   static Pointer<Utf8> Function(int)? _p2pSetAppUiVisible;
   static _NativePollPtrDart? _p2pPollEvent;
   static _NativePollPtrDart? _p2pIsRunning;
   static _NativePtrToPtrDart? _coordSetBaseUrl;
-  static _NativePtrToPtrDart? _coordLookupPeer;
-  static _NativePollPtrDart? _coordRegisterNow;
   static _NativePtrToPtrDart? _verifyGhalBolConnectInvite;
   static _NativePtrToPtrDart? _peerIdFromSigningPk;
   static _NativePtrToPtrDart? _publicKeyHexFromPeerId;
-  static _NativeTwoPtrToPtrDart? _sealUtf8ToX25519Hex;
-  static _NativePtrToPtrDart? _openSealedCipherHex;
+  static _NativePtrToPtrDart? _identityParse;
+  static _NativePtrToPtrDart? _identitySame;
+  static _NativePtrToPtrDart? _identityNormalize;
+  static _NativeThreeStringsToPtrDart? _createOrUnlockIdentity;
+  static _NativeFourStringsToPtrDart? _importIdentityFromSecretHex;
+  static _NativePollPtrDart? _identitySupportedAlgorithms;
+  static _NativePtrToPtrDart? _identityValidateImportSecret;
   static _NativePtrToPtrDart? _keystoreExistsQuery;
   static _NativeTwoStringsToPtrDart? _peerDisplayAliasGet;
   static _NativeThreeStringsToPtrDart? _peerDisplayAliasSet;
   static _NativeTwoStringsToPtrDart? _deleteKeystore;
-  static _NativeThreeStringsToPtrDart? _importIdentityFromSecretHex;
   static _NativeTwoStringsToPtrDart? _revealSecretKeyHex;
   static _NativePtrToPtrDart? _exportKeystoreJson;
   static _NativeThreeStringsToPtrDart? _importKeystoreJson;
@@ -127,10 +133,6 @@ abstract final class GhalBolFfi {
   static _NativePollPtrDart? _daemonSocketPath;
   static _NativePtrToPtrDart? _transcriptResolvePath;
   static _NativeTwoPtrToPtrDart? _transcriptLoadMerged;
-  static _NativeTwoPtrToPtrDart? _transcriptSave;
-  static _NativeTwoPtrToPtrDart? _transcriptAppend;
-  static _NativeTwoPtrToPtrDart? _transcriptPatchDelivery;
-  static _NativeTwoPtrToPtrDart? _transcriptPatchReadAck;
   static _NativePtrToPtrDart? _buildConnectInviteUri;
   static _NativePtrToPtrDart? _parseConnectInviteUri;
   static _NativePollPtrDart? _networkSnapshot;
@@ -150,10 +152,14 @@ abstract final class GhalBolFfi {
       _stringFree = lib.lookupFunction<_NativeStringFree, _NativeStringFreeDart>(
         "ghal_bol_ffi_string_free",
       );
-      lib.lookupFunction<
-        _NativeTwoStringsToPtr,
-        Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>)
-      >("ghal_bol_ffi_create_or_unlock_identity");
+      try {
+        _createOrUnlockIdentity = lib.lookupFunction<
+          _NativeThreeStringsToPtr,
+          _NativeThreeStringsToPtrDart
+        >("ghal_bol_ffi_create_or_unlock_identity");
+      } catch (_) {
+        _createOrUnlockIdentity = null;
+      }
       try {
         _p2pStart = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
           "ghal_bol_ffi_p2p_start",
@@ -171,9 +177,6 @@ abstract final class GhalBolFfi {
         }
         _p2pRegisterDmPeer = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
           "ghal_bol_ffi_p2p_register_dm_peer",
-        );
-        _p2pSendAckDm = lib.lookupFunction<_NativeThreeStringsToPtr, _NativeThreeStringsToPtrDart>(
-          "ghal_bol_ffi_p2p_send_ack_dm",
         );
         try {
           _p2pCallSignal = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
@@ -247,13 +250,6 @@ abstract final class GhalBolFfi {
           _p2pCallVideoPushCameraFrame = null;
         }
         try {
-          _callMediaKeyHex = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_ffi_call_media_key_hex",
-          );
-        } catch (_) {
-          _callMediaKeyHex = null;
-        }
-        try {
           _p2pSetForegroundPeer = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
             "ghal_bol_ffi_p2p_set_foreground_peer",
           );
@@ -285,7 +281,6 @@ abstract final class GhalBolFfi {
         _p2pSendTextDm = null;
         _p2pRequeueOutboundDm = null;
         _p2pRegisterDmPeer = null;
-        _p2pSendAckDm = null;
         _p2pCallSignal = null;
         _p2pCallMedia = null;
         _p2pCallVideo = null;
@@ -306,31 +301,15 @@ abstract final class GhalBolFfi {
         _coordSetBaseUrl = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
           "ghal_bol_ffi_coord_set_base_url",
         );
-        _coordLookupPeer = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_ffi_coord_lookup_peer",
-        );
-        _coordRegisterNow = lib.lookupFunction<_NativePollPtr, _NativePollPtrDart>(
-          "ghal_bol_ffi_coord_register_now",
-        );
       } catch (_) {
         _coordSetBaseUrl = null;
-        _coordLookupPeer = null;
-        _coordRegisterNow = null;
       }
       try {
         _verifyGhalBolConnectInvite = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
           "ghal_bol_ffi_verify_ghal_bol_connect_invite",
         );
-        _sealUtf8ToX25519Hex = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-          "ghal_bol_ffi_seal_utf8_to_public_key_hex",
-        );
-        _openSealedCipherHex = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_ffi_open_sealed_cipher_hex",
-        );
       } catch (_) {
         _verifyGhalBolConnectInvite = null;
-        _sealUtf8ToX25519Hex = null;
-        _openSealedCipherHex = null;
       }
       try {
         _peerIdFromSigningPk = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
@@ -339,9 +318,29 @@ abstract final class GhalBolFfi {
         _publicKeyHexFromPeerId = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
           "ghal_bol_ffi_public_key_hex_from_peer_id",
         );
+        _identityParse = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+          "ghal_bol_ffi_identity_parse",
+        );
+        _identitySame = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+          "ghal_bol_ffi_identity_same",
+        );
+        _identityNormalize = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+          "ghal_bol_ffi_identity_normalize",
+        );
+        _identitySupportedAlgorithms = lib.lookupFunction<_NativePollPtr, _NativePollPtrDart>(
+          "ghal_bol_ffi_identity_supported_algorithms",
+        );
+        _identityValidateImportSecret = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+          "ghal_bol_ffi_identity_validate_import_secret",
+        );
       } catch (_) {
         _peerIdFromSigningPk = null;
         _publicKeyHexFromPeerId = null;
+        _identityParse = null;
+        _identitySame = null;
+        _identityNormalize = null;
+        _identitySupportedAlgorithms = null;
+        _identityValidateImportSecret = null;
       }
       try {
         _keystoreExistsQuery = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
@@ -370,7 +369,7 @@ abstract final class GhalBolFfi {
       }
       try {
         _importIdentityFromSecretHex =
-            lib.lookupFunction<_NativeThreeStringsToPtr, _NativeThreeStringsToPtrDart>(
+            lib.lookupFunction<_NativeFourStringsToPtr, _NativeFourStringsToPtrDart>(
               "ghal_bol_ffi_import_identity_from_secret_hex",
             );
         _revealSecretKeyHex = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
@@ -417,7 +416,6 @@ abstract final class GhalBolFfi {
       _p2pSendTextDm = null;
       _p2pRequeueOutboundDm = null;
       _p2pRegisterDmPeer = null;
-      _p2pSendAckDm = null;
       _p2pCallSignal = null;
       _p2pCallMedia = null;
       _p2pCallVideo = null;
@@ -428,8 +426,6 @@ abstract final class GhalBolFfi {
       _verifyGhalBolConnectInvite = null;
       _peerIdFromSigningPk = null;
       _publicKeyHexFromPeerId = null;
-      _sealUtf8ToX25519Hex = null;
-      _openSealedCipherHex = null;
       _keystoreExistsQuery = null;
       _peerDisplayAliasGet = null;
       _peerDisplayAliasSet = null;
@@ -517,11 +513,13 @@ abstract final class GhalBolFfi {
   static GhalBolIdentityResult createOrUnlockIdentity({
     required String appNamespace,
     required String password,
+    String? identityAlgorithm,
   }) {
     AppLog.instance.i("Identity", "create_or_unlock start namespace=$appNamespace");
     _ensure();
-    final lib = _lib;
-    if (lib == null) {
+    final create = _createOrUnlockIdentity;
+    final free = _stringFree;
+    if (create == null || free == null) {
       AppLog.instance.e("Identity", "create_or_unlock: native library unavailable");
       return GhalBolIdentityResult(
         ok: false,
@@ -529,21 +527,18 @@ abstract final class GhalBolFfi {
       );
     }
 
-    final create = lib.lookupFunction<
-      _NativeTwoStringsToPtr,
-      Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>)
-    >("ghal_bol_ffi_create_or_unlock_identity");
-
     final a = appNamespace.toNativeUtf8();
     final b = password.toNativeUtf8();
+    final algo = (identityAlgorithm ?? "").trim().toNativeUtf8();
     try {
-      final outPtr = create(a, b);
+      final outPtr = create(a, b, algo);
       final r = _parseRustJsonPayload(outPtr);
       _logIdentityResult("create_or_unlock", r);
       return r;
     } finally {
       calloc.free(a);
       calloc.free(b);
+      calloc.free(algo);
     }
   }
 
@@ -603,11 +598,12 @@ abstract final class GhalBolFfi {
     }
   }
 
-  /// First-time setup: import 64-hex secp256k1 secret with app password.
+  /// First-time setup: import secret hex with app password.
   static GhalBolIdentityResult importIdentityFromSecretHex({
     required String appNamespace,
     required String password,
     required String secretKeyHex,
+    String? identityAlgorithm,
   }) {
     AppLog.instance.w("Identity", "import_secret_hex start");
     _ensure();
@@ -621,37 +617,135 @@ abstract final class GhalBolFfi {
     final a = appNamespace.toNativeUtf8();
     final b = password.toNativeUtf8();
     final c = secretKeyHex.trim().toNativeUtf8();
+    final algo = (identityAlgorithm ?? "").trim().toNativeUtf8();
     try {
-      return _parseRustJsonPayload(f(a, b, c));
+      return _parseRustJsonPayload(f(a, b, c, algo));
     } finally {
       calloc.free(a);
       calloc.free(b);
       calloc.free(c);
+      calloc.free(algo);
     }
   }
 
-  /// Verify app password and return 64-hex secret (sensitive).
-  static ({bool ok, String? secretKeyHex, String? error}) revealSecretKeyHex({
+  /// Algorithms available for first-time identity creation (from native).
+  static List<IdentityAlgorithmOption> supportedIdentityAlgorithms() {
+    _ensure();
+    final f = _identitySupportedAlgorithms;
+    final free = _stringFree;
+    if (f == null || free == null) return const [];
+    try {
+      final out = f();
+      if (out == nullptr || out.address == 0) return const [];
+      try {
+        final raw = jsonDecode(out.toDartString());
+        if (raw is! Map || raw["ok"] != true) return const [];
+        final list = raw["algorithms"];
+        if (list is! List) return const [];
+        final outList = <IdentityAlgorithmOption>[];
+        for (final item in list) {
+          if (item is! Map) continue;
+          final id = item["id"]?.toString().trim() ?? "";
+          if (id.isEmpty) continue;
+          outList.add(
+            IdentityAlgorithmOption(
+              wireId: id,
+              description: item["description"]?.toString().trim() ?? id,
+              importSecretHint:
+                  item["import_secret_hint"]?.toString().trim() ??
+                  "Secret key hex",
+              p2pReady: item["p2p_ready"] == true,
+              isDefault: item["default"] == true,
+            ),
+          );
+        }
+        return outList;
+      } finally {
+        free(out);
+      }
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Native-only import secret shape check (algorithm + hex) before keystore write.
+  static bool identityImportSecretValid({
+    required String algorithm,
+    required String secretHex,
+  }) {
+    _ensure();
+    final f = _identityValidateImportSecret;
+    final free = _stringFree;
+    final s = secretHex.trim();
+    if (s.isEmpty) return false;
+    if (f == null || free == null) return false;
+    final cfg = jsonEncode({
+      "algorithm": algorithm.trim(),
+      "secret_hex": s,
+    }).toNativeUtf8();
+    try {
+      final out = f(cfg);
+      if (out == nullptr || out.address == 0) return false;
+      try {
+        final raw = jsonDecode(out.toDartString());
+        return raw is Map && raw["ok"] == true;
+      } catch (_) {
+        return false;
+      } finally {
+        free(out);
+      }
+    } finally {
+      calloc.free(cfg);
+    }
+  }
+
+  /// Verify app password and return secret hex (sensitive) + algorithm when available.
+  static ({
+    bool ok,
+    String? secretKeyHex,
+    String? identityAlgorithm,
+    String? error,
+  }) revealSecretKeyHex({
     required String appNamespace,
     required String password,
   }) {
     _ensure();
     final f = _revealSecretKeyHex;
     if (f == null) {
-      return (ok: false, secretKeyHex: null, error: "Reveal key is not available in this native build.");
+      return (
+        ok: false,
+        secretKeyHex: null,
+        identityAlgorithm: null,
+        error: "Reveal key is not available in this native build.",
+      );
     }
     final a = appNamespace.toNativeUtf8();
     final b = password.toNativeUtf8();
     try {
       final map = _parseRustJsonMap(f(a, b));
       if (map["ok"] != true) {
-        return (ok: false, secretKeyHex: null, error: map["error"]?.toString() ?? "reveal failed");
+        return (
+          ok: false,
+          secretKeyHex: null,
+          identityAlgorithm: null,
+          error: map["error"]?.toString() ?? "reveal failed",
+        );
       }
       final hex = map["secret_key_hex"]?.toString().trim() ?? "";
-      if (hex.length != 64) {
-        return (ok: false, secretKeyHex: null, error: "invalid secret from native");
+      if (hex.isEmpty || !RegExp(r"^[0-9a-fA-F]+$").hasMatch(hex)) {
+        return (
+          ok: false,
+          secretKeyHex: null,
+          identityAlgorithm: null,
+          error: "invalid secret from native",
+        );
       }
-      return (ok: true, secretKeyHex: hex.toLowerCase(), error: null);
+      return (
+        ok: true,
+        secretKeyHex: hex.toLowerCase(),
+        identityAlgorithm: map["identity_algorithm"]?.toString(),
+        error: null,
+      );
     } finally {
       calloc.free(a);
       calloc.free(b);
@@ -868,8 +962,7 @@ abstract final class GhalBolFfi {
     return GhalBolIdentityResult.fromPayload(map);
   }
 
-  static bool get isCoordAvailable =>
-      _loaded && _coordSetBaseUrl != null && _coordLookupPeer != null;
+  static bool get isCoordAvailable => _loaded && _coordSetBaseUrl != null;
 
   static Map<String, dynamic> coordSetBaseUrls({
     required List<String> baseUrls,
@@ -893,53 +986,19 @@ abstract final class GhalBolFfi {
     }
   }
 
-  static Map<String, dynamic> coordLookupPeer({required String publicKeyHex}) {
-    _ensure();
-    final f = _coordLookupPeer;
-    final free = _stringFree;
-    if (f == null || free == null) {
-      return {"ok": false, "error": "coord not available in this build"};
-    }
-    final j = jsonEncode({"public_key_hex": publicKeyHex});
-    final p = j.toNativeUtf8();
-    try {
-      return _parseSmallJson(f(p), free);
-    } finally {
-      calloc.free(p);
-    }
-  }
-
-  static Map<String, dynamic> coordRegisterNow() {
-    _ensure();
-    final f = _coordRegisterNow;
-    final free = _stringFree;
-    if (f == null || free == null) {
-      return {"ok": false, "error": "coord register not available in this build"};
-    }
-    return _parseSmallJson(f(), free);
-  }
-
   /// Whether gossip P2P symbols were found in the native library.
   static bool get isP2pAvailable =>
       _loaded &&
       _p2pStart != null &&
       _p2pStop != null &&
       _p2pSendTextDm != null &&
-      _p2pSendAckDm != null &&
       _p2pPollEvent != null;
 
   /// Restores unacked outbound rows into the native outbox (same `message_id`).
   static bool get isP2pRequeueAvailable => isP2pAvailable && _p2pRequeueOutboundDm != null;
 
-  /// Invite verification + X25519 sealed payloads (rebuild native if missing). Signing FFI is optional.
-  static bool get isConnectInviteCryptoAvailable =>
-      _loaded &&
-      _verifyGhalBolConnectInvite != null &&
-      _sealUtf8ToX25519Hex != null &&
-      _openSealedCipherHex != null;
-
   /// Start libp2p stream DM in a background thread. `config` is JSON, e.g.
-  /// `{ "bootstrap_peers": [], "dm_peers": [{ "public_key_hex": "<66-hex>" }] }`.
+  /// `{ "bootstrap_peers": [], "dm_peers": [{ "public_key_hex": "<identity-wire>" }] }`.
   static Map<String, dynamic> p2pStartJson(Map<String, dynamic> config) {
     final dm = config["dm_peers"];
     AppLog.instance.json("P2P", "p2p_start", {
@@ -1301,55 +1360,6 @@ abstract final class GhalBolFfi {
     }
   }
 
-  static Map<String, dynamic> callMediaKeyHex({
-    required String callId,
-    required String peerPublicKeyHex,
-  }) {
-    _ensure();
-    final derive = _callMediaKeyHex;
-    final free = _stringFree;
-    if (derive == null || free == null) {
-      return {
-        "ok": false,
-        "error": "call media key not available (rebuild native lib)",
-      };
-    }
-    final j = jsonEncode({
-      "call_id": callId,
-      "peer_public_key_hex": peerPublicKeyHex,
-    });
-    final p = j.toNativeUtf8();
-    try {
-      return _parseSmallJson(derive(p), free);
-    } finally {
-      calloc.free(p);
-    }
-  }
-
-  static Map<String, dynamic> p2pSendAckDm({
-    required String recipientPublicKeyHex,
-    required String refId,
-    required String ackKind,
-  }) {
-    _ensure();
-    final send = _p2pSendAckDm;
-    final free = _stringFree;
-    if (send == null || free == null) {
-      return {"ok": false, "error": "P2P not available"};
-    }
-    final a = recipientPublicKeyHex.toNativeUtf8();
-    final b = refId.toNativeUtf8();
-    final c = ackKind.toNativeUtf8();
-    try {
-      final out = send(a, b, c);
-      return _parseSmallJson(out, free);
-    } finally {
-      calloc.free(a);
-      calloc.free(b);
-      calloc.free(c);
-    }
-  }
-
   static bool verifyGhalBolConnectInviteJson(String inviteJson) {
     AppLog.instance.d("Invite", "verify invite json len=${inviteJson.length}");
     _ensure();
@@ -1368,7 +1378,7 @@ abstract final class GhalBolFfi {
     }
   }
 
-  /// Libp2p PeerId string from 66-hex compressed secp256k1 public key.
+  /// Libp2p PeerId string derived from a contact identity wire (transport only).
   static String? peerIdFromPublicKeyHex(String publicKeyHex) {
     _ensure();
     final f = _peerIdFromSigningPk;
@@ -1399,7 +1409,104 @@ abstract final class GhalBolFfi {
   static String? peerIdFromSigningPublicKeyHex(String signingPublicKeyHex) =>
       peerIdFromPublicKeyHex(signingPublicKeyHex);
 
-  /// 66-hex secp256k1 public key embedded in a libp2p identity PeerId (format-3 QR).
+  /// Parse contact identity wire via native `Identity::parse`.
+  static Map<String, dynamic> identityParse(String wire) {
+    _ensure();
+    final f = _identityParse;
+    final free = _stringFree;
+    if (f == null || free == null) {
+      return _stubIdentityParse(wire);
+    }
+    final p = wire.trim().toNativeUtf8();
+    try {
+      final out = f(p);
+      if (out == nullptr || out.address == 0) {
+        return {"ok": false, "error": "native null"};
+      }
+      try {
+        final raw = jsonDecode(out.toDartString());
+        if (raw is Map<String, dynamic>) return raw;
+        if (raw is Map) return Map<String, dynamic>.from(raw);
+        return {"ok": false, "error": "bad json"};
+      } finally {
+        free(out);
+      }
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> _stubIdentityParse(String wire) {
+    final s = wire.trim();
+    // Web/bootstrap builds without native identity FFI: accept bare secp256k1 hex only.
+    if (RegExp(r"^[0-9a-fA-F]{66}$").hasMatch(s)) {
+      final pk = s.toLowerCase();
+      return {"ok": true, "wire": pk, "algorithm": "secp256k1", "public_key_hex": pk};
+    }
+    return {"ok": false, "error": "identity ffi unavailable"};
+  }
+
+  /// Whether two identity wires denote the same contact.
+  static bool identitySame(String? a, String? b) {
+    _ensure();
+    final f = _identitySame;
+    final free = _stringFree;
+    final pa = a?.trim() ?? "";
+    final pb = b?.trim() ?? "";
+    if (pa.isEmpty || pb.isEmpty) return false;
+    if (f == null || free == null) {
+      final ra = identityParse(pa);
+      final rb = identityParse(pb);
+      return ra["ok"] == true && rb["ok"] == true && ra["wire"] == rb["wire"];
+    }
+    final cfg = jsonEncode({"a": pa, "b": pb}).toNativeUtf8();
+    try {
+      final out = f(cfg);
+      if (out == nullptr || out.address == 0) return false;
+      try {
+        final raw = jsonDecode(out.toDartString());
+        return raw is Map && raw["ok"] == true && raw["same"] == true;
+      } catch (_) {
+        return false;
+      } finally {
+        free(out);
+      }
+    } finally {
+      calloc.free(cfg);
+    }
+  }
+
+  /// Normalize identity wire to canonical form.
+  static String? identityNormalize(String? wire) {
+    final s = wire?.trim() ?? "";
+    if (s.isEmpty) return null;
+    _ensure();
+    final f = _identityNormalize;
+    final free = _stringFree;
+    if (f == null || free == null) {
+      final r = identityParse(s);
+      return r["ok"] == true ? r["wire"]?.toString() : null;
+    }
+    final p = s.toNativeUtf8();
+    try {
+      final out = f(p);
+      if (out == nullptr || out.address == 0) return null;
+      try {
+        final raw = jsonDecode(out.toDartString());
+        if (raw is Map && raw["ok"] == true) {
+          final w = raw["wire"]?.toString();
+          if (w != null && w.isNotEmpty) return w;
+        }
+        return null;
+      } finally {
+        free(out);
+      }
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  /// Identity wire embedded in an inline libp2p identity PeerId (legacy QR / migration).
   static String? publicKeyHexFromPeerId(String peerId) {
     _ensure();
     final f = _publicKeyHexFromPeerId;
@@ -1421,53 +1528,6 @@ abstract final class GhalBolFfi {
       } finally {
         free(out);
       }
-    } finally {
-      calloc.free(p);
-    }
-  }
-
-  /// Seal UTF-8 to a recipient secp256k1 public key (66 hex). Native symbol name is historical.
-  static Map<String, dynamic> sealUtf8ToPublicKeyHex({
-    required String recipientPublicKeyHex,
-    required String plaintext,
-  }) =>
-      sealUtf8ToX25519Hex(
-        recipientEncryptionPkHex: recipientPublicKeyHex,
-        plaintext: plaintext,
-      );
-
-  static Map<String, dynamic> sealUtf8ToX25519Hex({
-    required String recipientEncryptionPkHex,
-    required String plaintext,
-  }) {
-    _ensure();
-    final seal = _sealUtf8ToX25519Hex;
-    final free = _stringFree;
-    if (seal == null || free == null) {
-      return {"ok": false, "error": "seal symbol missing"};
-    }
-    final a = recipientEncryptionPkHex.toNativeUtf8();
-    final b = plaintext.toNativeUtf8();
-    try {
-      final out = seal(a, b);
-      return _parseSmallJson(out, free);
-    } finally {
-      calloc.free(a);
-      calloc.free(b);
-    }
-  }
-
-  static Map<String, dynamic> openSealedCipherHex(String cipherHex) {
-    _ensure();
-    final open = _openSealedCipherHex;
-    final free = _stringFree;
-    if (open == null || free == null) {
-      return {"ok": false, "error": "open_sealed symbol missing"};
-    }
-    final p = cipherHex.toNativeUtf8();
-    try {
-      final out = open(p);
-      return _parseSmallJson(out, free);
     } finally {
       calloc.free(p);
     }
@@ -1538,10 +1598,6 @@ abstract final class GhalBolFfi {
     _daemonSocketPath = null;
     _transcriptResolvePath = null;
     _transcriptLoadMerged = null;
-    _transcriptSave = null;
-    _transcriptAppend = null;
-    _transcriptPatchDelivery = null;
-    _transcriptPatchReadAck = null;
     _buildConnectInviteUri = null;
     _parseConnectInviteUri = null;
   }
@@ -1607,26 +1663,6 @@ abstract final class GhalBolFfi {
     try {
       _transcriptLoadMerged = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
         "ghal_bol_ffi_transcript_load_merged",
-      );
-    } catch (_) {}
-    try {
-      _transcriptSave = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_ffi_transcript_save",
-      );
-    } catch (_) {}
-    try {
-      _transcriptAppend = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_ffi_transcript_append_if_new",
-      );
-    } catch (_) {}
-    try {
-      _transcriptPatchDelivery = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_ffi_transcript_patch_outgoing_delivery",
-      );
-    } catch (_) {}
-    try {
-      _transcriptPatchReadAck = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_ffi_transcript_patch_inbound_read_ack_sent",
       );
     } catch (_) {}
     try {
@@ -1775,14 +1811,6 @@ abstract final class GhalBolFfi {
     return r["path"]?.toString();
   }
 
-  static List<Map<String, dynamic>> transcriptLoadMerged(
-    String appNamespace,
-    Map<String, dynamic> query,
-  ) {
-    final view = transcriptLoadThreadView(appNamespace, query);
-    return view.lines;
-  }
-
   static ({int revision, List<Map<String, dynamic>> lines}) transcriptLoadThreadView(
     String appNamespace,
     Map<String, dynamic> query,
@@ -1800,64 +1828,20 @@ abstract final class GhalBolFfi {
     return (revision: revision, lines: lines);
   }
 
-  static bool transcriptSave(
-    String appNamespace,
-    String conversationKey,
-    List<Map<String, dynamic>> lines,
-  ) =>
-      _callJson2Ptr(
-        _transcriptSave,
-        appNamespace,
-        jsonEncode({"conversation_key": conversationKey, "lines": lines}),
-      )["ok"] ==
-      true;
-
-  static bool transcriptAppendIfNew(
-    String appNamespace,
-    String conversationKey,
-    Map<String, dynamic> line,
-  ) =>
-      _callJson2Ptr(
-        _transcriptAppend,
-        appNamespace,
-        jsonEncode({"conversation_key": conversationKey, "line": line}),
-      )["ok"] ==
-      true;
-
-  static bool transcriptPatchOutgoingDelivery(
-    String appNamespace, {
-    required String conversationKey,
-    required String messageId,
-    required String delivery,
-  }) =>
-      _callJson2Ptr(
-        _transcriptPatchDelivery,
-        appNamespace,
-        jsonEncode({
-          "conversation_key": conversationKey,
-          "message_id": messageId,
-          "delivery": delivery,
-        }),
-      )["ok"] ==
-      true;
-
-  static bool transcriptPatchInboundReadAckSent(
-    String appNamespace, {
-    required String conversationKey,
-    required String messageId,
-  }) =>
-      _callJson2Ptr(
-        _transcriptPatchReadAck,
-        appNamespace,
-        jsonEncode({"conversation_key": conversationKey, "message_id": messageId}),
-      )["ok"] ==
-      true;
-
   static String? buildConnectInviteUri(Map<String, dynamic> params) {
+    return buildConnectInviteLinks(params)?.httpsUri;
+  }
+
+  static GhalBolNativeInviteUris? buildConnectInviteLinks(
+    Map<String, dynamic> params,
+  ) {
     if (_buildConnectInviteUri == null) return null;
     final r = _callJsonPtr(_buildConnectInviteUri, jsonEncode(params));
     if (r["ok"] != true) return null;
-    return r["uri"]?.toString();
+    final https = r["uri"]?.toString();
+    final app = r["app_uri"]?.toString();
+    if (https == null || https.isEmpty || app == null || app.isEmpty) return null;
+    return GhalBolNativeInviteUris(httpsUri: https, appUri: app);
   }
 
   static Map<String, dynamic>? parseConnectInviteWire(String uri) {

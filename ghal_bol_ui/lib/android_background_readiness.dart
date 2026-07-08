@@ -11,13 +11,18 @@ enum _ReadinessChoice { later, open }
 /// Sequential Android onboarding for permissions/settings needed while the screen is off.
 ///
 /// Skips steps already satisfied. Never shows two prompts at once.
+///
+/// Onboarding dialogs run when OS checks show a step is still required.
 class AndroidBackgroundReadiness {
   AndroidBackgroundReadiness._();
+
+  static const bool _onboardingDialogsEnabled = true;
 
   static bool _flowInFlight = false;
 
   static Future<void> runIfNeeded(BuildContext context) async {
     if (!Platform.isAndroid) return;
+    if (!_onboardingDialogsEnabled) return;
     if (_flowInFlight) return;
     if (!context.mounted) return;
 
@@ -47,15 +52,19 @@ class AndroidBackgroundReadiness {
   static Future<void> _runBatteryStep(BuildContext context) async {
     if (!await isBatteryOptimized()) return;
     if (!context.mounted) return;
-    AppLog.instance.flow("Background", "battery optimization active — prompting");
+    // Re-check immediately before showing the dialog (OS state may have changed).
+    if (!await isBatteryOptimized()) return;
+    if (!context.mounted) return;
+    AppLog.instance.flow("Background", "battery restricted — prompting");
     final choice = await _prompt(
       context,
       title: "Allow background messaging",
       body:
-          "Android battery optimization can stop Ghal Bol from receiving messages "
-          "when the screen is off.\n\n"
-          "On the next screen, choose Allow so messaging stays reliable.",
-      openLabel: "Allow",
+          "Android is restricting Ghal Bol from running in the background, which can "
+          "stop messages when the screen is off.\n\n"
+          "On the next screen, open Battery and choose Optimized or Unrestricted "
+          "(not Restricted).",
+      openLabel: "Open settings",
     );
     if (choice != _ReadinessChoice.open || !context.mounted) return;
     await requestBatteryOptimizationExemption();

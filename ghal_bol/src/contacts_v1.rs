@@ -12,7 +12,10 @@ use thiserror::Error;
 use crate::app_paths::{contacts_v1_path, storage_config_for_namespace};
 use crate::dm_transport::normalize_contact_pk;
 use crate::flow_log::{self, short_hex};
-use crate::public_key_util::{legacy_public_key_from_peer_id_str, secp256k1_public_key_from_hex};
+use crate::identity::Identity;
+use crate::public_key_util::{
+    legacy_public_key_from_peer_id_str, normalize_contact_identity_wire,
+};
 use crate::storage::KeystoreStorageError;
 
 static CHANGE_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -143,7 +146,7 @@ impl SavedContact {
 }
 
 pub fn is_valid_public_key_hex(hex_s: &str) -> bool {
-    secp256k1_public_key_from_hex(hex_s).is_ok()
+    Identity::parse(hex_s).is_ok()
 }
 
 #[derive(Debug, Error)]
@@ -249,17 +252,40 @@ fn with_store<T>(
 }
 
 fn index_of(list: &[SavedContact], contact: &SavedContact) -> Option<usize> {
-    let pk = contact.public_key_hex.trim();
-    if is_valid_public_key_hex(pk) {
-        return list.iter().position(|c| c.public_key_hex == pk);
+    if !contact.has_public_key() {
+        return None;
     }
-    None
+    let target = Identity::parse(contact.public_key_hex.trim()).ok()?;
+    list.iter().position(|c| {
+        Identity::parse(c.public_key_hex.trim())
+            .ok()
+            .is_some_and(|id| id == target)
+    })
 }
 
 pub fn list_contacts(app_namespace: &str) -> Result<Vec<SavedContact>, ContactsError> {
     let cfg = storage_config_for_namespace(app_namespace);
     let path = contacts_v1_path(&cfg)?;
-    let all = read_all(&path)?;
+    let mut all = read_all(&path)?;
+    let mut dirty = false;
+    {
+        let list = all.entry(app_namespace.to_string()).or_default();
+        for c in list.iter_mut() {
+            if !c.has_public_key() {
+                continue;
+            }
+            if let Ok(norm) = normalize_contact_identity_wire(c.public_key_hex.trim()) {
+                if norm != c.public_key_hex {
+                    c.public_key_hex = norm;
+                    dirty = true;
+                }
+            }
+        }
+    }
+    if dirty {
+        write_all(&path, &all)?;
+        bump_change();
+    }
     let mut list = all.get(app_namespace).cloned().unwrap_or_default();
     list.sort_by(|a, b| {
         let ta = a
@@ -281,13 +307,17 @@ pub fn find_by_public_key(
     app_namespace: &str,
     public_key_hex: &str,
 ) -> Result<Option<SavedContact>, ContactsError> {
-    let pk = public_key_hex.trim().to_lowercase();
-    if !is_valid_public_key_hex(&pk) {
-        return Ok(None);
-    }
+    let target = match Identity::parse(public_key_hex.trim()) {
+        Ok(id) => id,
+        Err(_) => return Ok(None),
+    };
     Ok(list_contacts(app_namespace)?
         .into_iter()
-        .find(|c| c.public_key_hex == pk))
+        .find(|c| {
+            Identity::parse(c.public_key_hex.trim())
+                .ok()
+                .is_some_and(|id| id == target)
+        }))
 }
 
 /// Lookup by public key hex, or legacy libp2p PeerId string on disk (migrated to pk).
@@ -322,7 +352,8 @@ pub fn upsert_contact(
             contact.clone()
         };
         let pk_norm = if contact.has_public_key() {
-            contact.public_key_hex.trim().to_lowercase()
+            normalize_contact_identity_wire(contact.public_key_hex.trim())
+                .map_err(|e| ContactsError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?
         } else {
             base.public_key_hex.clone()
         };
@@ -644,10 +675,12 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::create_keystore_v1_with_algorithm;
+    use crate::identity::IdentityAlgorithm;
     use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
     use tempfile::TempDir;
 
-    /// Guest-scanned host public key (66-hex secp256k1) — never the local identity under test.
+    /// Guest-scanned host identity wire — never the local identity under test.
     const REMOTE_PK: &str = "02f229f167ac2337144dbeba4392a6300c8fe97fb061efdb4f81ec9f29dec76936";
 
     #[test]
@@ -744,6 +777,38 @@ mod tests {
 
         let c = set_contact_trust(ns, REMOTE_PK, None, Some(true)).unwrap();
         assert!(c.is_blocked);
+    }
+
+    #[test]
+    fn upsert_and_find_ed25519_prefixed_identity() {
+        let td = TempDir::new().unwrap();
+        let ns = "dev.contacts.ed25519";
+        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
+        let (_remote_ks, remote) =
+            create_keystore_v1_with_algorithm("pw2", IdentityAlgorithm::Ed25519, None).unwrap();
+        let wire = remote.identity_wire();
+
+        upsert_contact(
+            ns,
+            SavedContact {
+                public_key_hex: wire.clone(),
+                display_alias: Some("Ed peer".to_string()),
+                last_message_preview: None,
+                last_message_at_ms: None,
+                unread_count: 0,
+                created_at_ms: None,
+                updated_at_ms: None,
+                is_known: true,
+                is_blocked: false,
+                chat_room_exit_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        let found = find_by_public_key(ns, &wire).unwrap().unwrap();
+        assert_eq!(found.public_key_hex, wire);
+        assert_eq!(found.display_alias.as_deref(), Some("Ed peer"));
     }
 
     #[test]

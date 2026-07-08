@@ -7,7 +7,7 @@ pub fn show(peer_public_key_hex: &str, _call_id: &str) {
     }
     let name = short_display_name(peer_public_key_hex);
     let pk = peer_public_key_hex.trim().to_string();
-    if pk.len() != 66 {
+    if !crate::contacts_v1::is_valid_public_key_hex(&pk) {
         return;
     }
     if let Err(e) = show_jni(&name, &pk) {

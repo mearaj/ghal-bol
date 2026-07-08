@@ -1,5 +1,5 @@
-//! Per-frame AES-256-GCM seal/unseal for call media, keyed by the identity media
-//! key (`call_media_key::derive_call_media_keys_from_identity`).
+//! Per-frame AES-GCM seal using the call media transport key
+//! Per-frame AES-GCM seal for call media (`call_media_key::derive_call_media_keys_from_transport`).
 //!
 //! Both peers share the **same** `frame_key`, so a per-direction byte is mixed
 //! into the nonce to guarantee nonce uniqueness across the two senders (GCM

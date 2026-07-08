@@ -60,9 +60,13 @@ pub const DEFAULT_JITTER_MAX: usize = 16;
 
 /// True when the local identity sorts lexicographically lower than the peer —
 /// used to pick opposite crypto directions on the two sides (see [`crypto`]).
-pub fn local_is_a(local_public_key_hex: &str, peer_public_key_hex: &str) -> bool {
-    local_public_key_hex.trim().to_ascii_lowercase()
-        < peer_public_key_hex.trim().to_ascii_lowercase()
+pub fn local_is_a(local_identity_wire: &str, peer_identity_wire: &str) -> bool {
+    use crate::public_key_util::normalize_contact_identity_wire;
+    let a = normalize_contact_identity_wire(local_identity_wire)
+        .unwrap_or_else(|_| local_identity_wire.trim().to_ascii_lowercase());
+    let b = normalize_contact_identity_wire(peer_identity_wire)
+        .unwrap_or_else(|_| peer_identity_wire.trim().to_ascii_lowercase());
+    a < b
 }
 
 /// The voice engine for one active call. Not internally locked — the owner drives

@@ -100,14 +100,27 @@ pub unsafe extern "C" fn ghal_bol_ffi_configure_android_data_directory(path_utf8
     let _ = run();
 }
 
+fn parse_optional_identity_algorithm(
+    c: *const c_char,
+) -> Result<Option<crate::IdentityAlgorithm>, String> {
+    if c.is_null() {
+        return Ok(None);
+    }
+    let s = unsafe { utf8_trace(c, "identity_algorithm") }?;
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    crate::IdentityAlgorithm::from_wire_id(s.trim()).map(Some)
+}
+
 /// Create keystore + identity if missing, otherwise unlock existing. Password is UTF-8.
-/// Returns UTF-8 JSON `{ ok, public_key_hex?, libp2p_peer_id?, error? }`.
-///
-/// Successful unlock installs an in-memory session for future FFI calls (until [`ghal_bol_ffi_lock`]).
+/// [identity_algorithm_utf8] is optional (null or empty → implicit secp256k1 on **create** only).
+/// Returns UTF-8 JSON `{ ok, public_key_hex?, identity_wire?, identity_algorithm?, libp2p_peer_id?, p2p_ready?, error? }`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_create_or_unlock_identity(
     app_namespace_utf8: *const c_char,
     password_utf8: *const c_char,
+    identity_algorithm_utf8: *const c_char,
 ) -> *mut c_char {
     let run = || -> *mut c_char {
         let ns = match unsafe { utf8_trace(app_namespace_utf8, "app_namespace") } {
@@ -118,11 +131,16 @@ pub unsafe extern "C" fn ghal_bol_ffi_create_or_unlock_identity(
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
+        let create_algorithm = match parse_optional_identity_algorithm(identity_algorithm_utf8)
+        {
+            Ok(v) => v,
+            Err(e) => return json_err(e),
+        };
 
         let cfg = resolved_storage_config(&ns);
 
         let unlocked = panic::catch_unwind(AssertUnwindSafe(|| {
-            crate::create_or_unlock_identity_v1(&cfg, &password)
+            crate::create_or_unlock_identity_v1_with_algorithm(&cfg, &password, create_algorithm)
         }));
         match unlocked {
             Ok(Ok(ident)) => install_identity_session(&ns, ident),
@@ -136,6 +154,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_create_or_unlock_identity(
 
 fn install_identity_session(ns: &str, ident: crate::DecryptedIdentity) -> *mut c_char {
     let pk = ident.public_key_hex();
+    let wire = ident.identity_wire();
+    let algorithm = ident.algorithm().wire_id();
+    let p2p_ready = ident.p2p_ready();
     let libp2p_peer_id = ident
         .to_libp2p_keypair()
         .ok()
@@ -148,16 +169,21 @@ fn install_identity_session(ns: &str, ident: crate::DecryptedIdentity) -> *mut c
         "ok": true,
         "app_namespace": ns,
         "public_key_hex": pk,
+        "identity_wire": wire,
+        "identity_algorithm": algorithm,
+        "p2p_ready": p2p_ready,
         "libp2p_peer_id": libp2p_peer_id,
     }))
 }
 
-/// First-time import: 64-hex secp256k1 secret + app password. Fails if keystore already exists.
+/// First-time import: secret hex + app password. Fails if keystore already exists.
+/// [identity_algorithm_utf8] optional (null/empty → secp256k1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghal_bol_ffi_import_identity_from_secret_hex(
     app_namespace_utf8: *const c_char,
     password_utf8: *const c_char,
     secret_key_hex_utf8: *const c_char,
+    identity_algorithm_utf8: *const c_char,
 ) -> *mut c_char {
     let run = || -> *mut c_char {
         let ns = match unsafe { utf8_trace(app_namespace_utf8, "app_namespace") } {
@@ -172,9 +198,20 @@ pub unsafe extern "C" fn ghal_bol_ffi_import_identity_from_secret_hex(
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
+        let algorithm = match parse_optional_identity_algorithm(identity_algorithm_utf8)
+        {
+            Ok(Some(a)) => a,
+            Ok(None) => crate::IdentityAlgorithm::Secp256k1,
+            Err(e) => return json_err(e),
+        };
         let cfg = resolved_storage_config(&ns);
         let unlocked = panic::catch_unwind(AssertUnwindSafe(|| {
-            crate::import_identity_from_secret_hex_v1(&cfg, &password, &secret_hex)
+            crate::import_identity_from_secret_hex_v1_with_algorithm(
+                &cfg,
+                &password,
+                &secret_hex,
+                algorithm,
+            )
         }));
         match unlocked {
             Ok(Ok(ident)) => install_identity_session(&ns, ident),
@@ -202,9 +239,10 @@ pub unsafe extern "C" fn ghal_bol_ffi_reveal_secret_key_hex(
         };
         let cfg = resolved_storage_config(&ns);
         match crate::reveal_secret_key_hex_v1(&cfg, &password) {
-            Ok(hex) => json_ok(serde_json::json!({
+            Ok((hex, algo)) => json_ok(serde_json::json!({
                 "ok": true,
                 "secret_key_hex": hex,
+                "identity_algorithm": algo.wire_id(),
             })),
             Err(e) => json_err(format!("{e}")),
         }

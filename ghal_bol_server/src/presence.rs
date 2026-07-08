@@ -3,6 +3,7 @@
 use crate::db;
 use crate::error::{ApiResult, ServerError};
 use crate::endpoint_expand;
+use crate::identity::normalize_identity_wire;
 use crate::relay_live::RelayLiveRegistry;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -97,7 +98,7 @@ impl PresenceStore {
         ipv6: Option<String>,
         ipv4: Option<String>,
     ) -> Result<PeerRecord, ServerError> {
-        let key = public_key_hex.to_ascii_lowercase();
+        let key = normalize_identity_wire(&public_key_hex)?;
         let relay_keep: Vec<PeerEndpoint> = self
             .get_stored(&key)
             .ok()
@@ -134,7 +135,7 @@ impl PresenceStore {
         ipv6: Option<String>,
         ipv4: Option<String>,
     ) -> Result<PeerRecord, ServerError> {
-        let key = public_key_hex.to_ascii_lowercase();
+        let key = normalize_identity_wire(&public_key_hex)?;
         let endpoints = self.filter_wan_presence_endpoints(endpoints);
         let now_ms = unix_ms_now();
         let endpoints_json = serde_json::to_string(&endpoints)
@@ -166,7 +167,7 @@ impl PresenceStore {
     }
 
     pub fn heartbeat(&self, public_key_hex: &str) -> ApiResult<PeerRecord> {
-        let key = public_key_hex.to_ascii_lowercase();
+        let key = normalize_identity_wire(&public_key_hex)?;
         let now_ms = unix_ms_now();
         let conn = self.conn.lock().map_err(lock_err)?;
         let n = conn.execute(
@@ -183,7 +184,7 @@ impl PresenceStore {
     }
 
     pub fn get(&self, public_key_hex: &str, ttl: Duration) -> ApiResult<PeerRecord> {
-        let key = public_key_hex.to_ascii_lowercase();
+        let key = normalize_identity_wire(&public_key_hex)?;
         let cutoff = heartbeat_cutoff_ms(ttl);
         let conn = self.conn.lock().map_err(lock_err)?;
         match self.fetch_one(&conn, &key, cutoff) {
@@ -197,7 +198,7 @@ impl PresenceStore {
 
     /// Fetch a peer record without TTL filtering (relay-driven presence updates).
     pub fn get_stored(&self, public_key_hex: &str) -> ApiResult<PeerRecord> {
-        let key = public_key_hex.to_ascii_lowercase();
+        let key = normalize_identity_wire(&public_key_hex)?;
         let conn = self.conn.lock().map_err(lock_err)?;
         self.fetch_one(&conn, &key, 0)
     }
@@ -208,7 +209,7 @@ impl PresenceStore {
         public_key_hex: &str,
         circuit_ma: String,
     ) -> Result<PeerRecord, ServerError> {
-        let key = public_key_hex.to_ascii_lowercase();
+        let key = normalize_identity_wire(&public_key_hex)?;
         let mut endpoints = self
             .get_stored(&key)
             .map(|r| r.endpoints)
@@ -226,7 +227,7 @@ impl PresenceStore {
 
     /// Remove relay circuit endpoints; delete the row when nothing remains.
     pub fn remove_relay_circuit(&self, public_key_hex: &str) -> Result<bool, ServerError> {
-        let key = public_key_hex.to_ascii_lowercase();
+        let key = normalize_identity_wire(&public_key_hex)?;
         let record = match self.get_stored(&key) {
             Ok(r) => r,
             Err(ServerError::NotFound(_)) => return Ok(false),
@@ -447,11 +448,17 @@ mod tests {
         assert!(is_wan_dialable_endpoint(&peer, &bootstraps));
     }
 
+    fn test_secp_pk_hex(seed: u8) -> String {
+        let sk = secp256k1::SecretKey::from_byte_array([seed; 32]).expect("test key");
+        let secp = secp256k1::Secp256k1::new();
+        hex::encode(sk.public_key(&secp).serialize())
+    }
+
     #[test]
     fn merge_register_strips_client_relay_bootstrap_tcp() {
         let store = PresenceStore::open_in_memory().expect("db");
         store.set_relay_bootstrap_addrs(&["/ip4/159.223.110.159/tcp/28048".to_string()]);
-        let pk = "aa".repeat(32);
+        let pk = test_secp_pk_hex(11);
         let circuit = PeerEndpoint {
             scheme: "libp2p".into(),
             host: "/ip4/159.223.110.159/tcp/28048/p2p/12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk"
@@ -485,7 +492,7 @@ mod tests {
     #[test]
     fn relay_circuit_upsert_expands_dns6() {
         let store = PresenceStore::open_in_memory().expect("db");
-        let pk = "bb".repeat(32);
+        let pk = test_secp_pk_hex(12);
         let dns6 = "/dns6/coord.ghalbol.com/tcp/4002/p2p/12D3KooW/p2p-circuit/p2p/16Uiu2HAm5zdGNzac9hYfCNQZTnANbxWytcMty9twy7u942fT7MCk";
         store
             .upsert_relay_circuit(&pk, dns6.into())

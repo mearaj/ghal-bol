@@ -548,11 +548,18 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     });
   }
 
+  String? _localIdentityWire() => identityWireFromSession(
+        identityWire: _s.identityWire,
+        publicKeyHex: _s.publicKeyHex,
+        identityAlgorithm: _s.identityAlgorithm,
+      );
+
   String? _computeInviteUri() {
-    final pk = _s.publicKeyHex?.trim() ?? "";
-    if (!isValidPublicKeyHex(pk)) return null;
+    final wire = _localIdentityWire();
+    if (wire == null || !isValidPublicKeyHex(wire)) return null;
     return buildGhalBolInviteUri(
-      publicKeyHex: pk,
+      publicKeyHex: wire,
+      identityWire: wire,
       peerAlias: _storedCustomAlias,
     );
   }
@@ -562,12 +569,13 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     await _loadStoredAlias();
     P2pEventBridge.instance.drainNow();
     if (!mounted) return;
-    final pk = _s.publicKeyHex?.trim() ?? "";
-    if (!isValidPublicKeyHex(pk)) return;
+    final wire = _localIdentityWire();
+    if (wire == null || !isValidPublicKeyHex(wire)) return;
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder: (_) => ShareInviteScreen(
-          publicKeyHex: pk,
+          publicKeyHex: wire,
+          identityWire: wire,
           appNamespace: _appNs,
           readListenReady: () => P2pEventBridge.instance.isNodeReady,
           onParentRefresh: () {
@@ -907,23 +915,23 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   Future<void> _loadStoredAlias() async {
-    final pk = _s.publicKeyHex?.trim();
-    if (!isValidPublicKeyHex(pk)) return;
+    final wire = _localIdentityWire();
+    if (wire == null || !isValidPublicKeyHex(wire)) return;
     final v = await IdentityAliasStore.read(
       appNamespace: _s.appNamespace ?? kGhalBolAppNamespace,
-      publicKeyHex: pk!,
+      publicKeyHex: wire,
     );
     if (!mounted) return;
     setState(() => _storedCustomAlias = v);
   }
 
   Future<void> _copyPublicKey(BuildContext context) async {
-    final pk = _s.publicKeyHex?.trim() ?? "";
-    if (!isValidPublicKeyHex(pk)) return;
-    await Clipboard.setData(ClipboardData(text: pk));
+    final wire = _localIdentityWire();
+    if (wire == null || !isValidPublicKeyHex(wire)) return;
+    await Clipboard.setData(ClipboardData(text: wire));
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Public key copied (66 hex).")),
+      const SnackBar(content: Text("Identity public key copied")),
     );
   }
 
@@ -1278,8 +1286,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   Widget _identityBody(BuildContext context) {
-    final peer = _s.publicKeyHex ?? "—";
-    final pk = _s.publicKeyHex ?? "—";
+    final wire = _localIdentityWire() ?? "—";
+    final peer = _s.libp2pPeerId ?? "—";
+    final algo = _s.identityAlgorithm?.trim().isNotEmpty == true
+        ? _s.identityAlgorithm!.trim()
+        : "secp256k1";
     final ns = _s.appNamespace ?? "—";
     final colorScheme = Theme.of(context).colorScheme;
 
@@ -1336,18 +1347,26 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                       Text("Your identity", style: Theme.of(context).textTheme.titleLarge),
                       const SizedBox(height: 8),
                       Text(
-                        "QR and invitation links encode only your secp256k1 public key (66 hex) — not IP addresses. "
-                        "After they add you, the app finds you via the public DHT, same Wi‑Fi (mDNS), or when you connect to them.",
+                        "QR and invitation links encode your identity public key — not IP addresses. "
+                        "secp256k1 identities use bare hex; other algorithms include an algorithm prefix. "
+                        "After they add you, the app finds you via coordination, same Wi‑Fi (mDNS), or when you connect to them.",
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: colorScheme.onSurfaceVariant,
                             ),
                       ),
                       const SizedBox(height: 12),
                       SelectableText("Namespace: $ns", style: Theme.of(context).textTheme.bodySmall),
+                      const SizedBox(height: 8),
+                      SelectableText("Algorithm: $algo", style: Theme.of(context).textTheme.bodySmall),
                       const SizedBox(height: 12),
-                      SelectableText("Public key (share this):\n$pk", style: Theme.of(context).textTheme.bodyMedium),
-                      const SizedBox(height: 12),
-                      SelectableText("libp2p PeerId (derived):\n$peer", style: Theme.of(context).textTheme.bodySmall),
+                      SelectableText("Identity (share this):\n$wire", style: Theme.of(context).textTheme.bodyMedium),
+                      if (_s.libp2pPeerId != null && _s.libp2pPeerId!.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        SelectableText(
+                          "libp2p PeerId (derived):\n$peer",
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
                       if (GhalBolFfi.isIdentityKeyManagementAvailable) ...[
                         const Divider(height: 28),
                         Text("Backup & private key", style: Theme.of(context).textTheme.titleSmall),
@@ -1378,12 +1397,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                               ),
                         ),
                       ],
-                      if ((_s.publicKeyHex?.trim().length ?? 0) == 66 &&
-                          isValidPublicKeyHex(_s.publicKeyHex)) ...[
+                      if (wire != "—" && isValidPublicKeyHex(wire)) ...[
                         const Divider(height: 28),
                         IdentityAliasForm(
                           appNamespace: _s.appNamespace ?? kGhalBolAppNamespace,
-                          publicKeyHex: _s.publicKeyHex!.trim(),
+                          publicKeyHex: wire,
                           onSaved: (v) {
                             setState(() {
                               _storedCustomAlias = v;
@@ -1541,16 +1559,16 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   Widget _chatBody() {
-    // Prefer 66-hex public key; legacy libp2p PeerId strings must not be validated as hex.
-    final localPk = resolvePublicKeyHex(storedHex: _s.publicKeyHex);
-    final localId = isValidPublicKeyHex(localPk) ? localPk! : "";
-    if (localId.isEmpty) {
-      return const Center(
+    final localId = _localIdentityWire()?.trim() ?? "";
+    if (!isValidPublicKeyHex(localId)) {
+      return Center(
         child: Padding(
-          padding: EdgeInsets.all(24),
+          padding: const EdgeInsets.all(24),
           child: Text(
-            "Missing identity — lock and unlock again.",
+            "Could not load your identity for chat.\n"
+            "Go back to unlock and try again.",
             textAlign: TextAlign.center,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
           ),
         ),
       );
@@ -1561,7 +1579,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     return ChatScreen(
       key: ValueKey("hub-chat-$convKey"),
       libp2pPeerId: localId,
-      publicKeyHex: isValidPublicKeyHex(localPk) ? localPk : _s.publicKeyHex,
+      publicKeyHex: localId,
       appNamespace: _appNs,
       localPeerAlias: _storedCustomAlias,
       aliasNonce: _aliasSaveNonce,

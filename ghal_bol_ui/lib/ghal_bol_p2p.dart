@@ -141,9 +141,9 @@ abstract final class GhalBolP2p {
     required bool uiVisible,
     String? roomPublicKeyHex,
   }) async {
-    final pk = roomPublicKeyHex?.trim().toLowerCase() ?? "";
+    final pk = resolvePublicKeyHex(storedHex: roomPublicKeyHex) ?? "";
     final params = <String, dynamic>{"ui_visible": uiVisible};
-    if (pk.length == kSecp256k1PublicKeyHexLen) {
+    if (isValidPublicKeyHex(pk)) {
       params["room_public_key_hex"] = pk;
     }
     if (usesDaemon) {
@@ -153,18 +153,34 @@ abstract final class GhalBolP2p {
         ensureDaemon: true,
       );
     }
-    await setAppUiVisible(uiVisible);
-    if (pk.length != kSecp256k1PublicKeyHexLen) {
-      await setForegroundPeer(null);
-      return setAppAckReadEnabled(false);
+    return _inProcessSyncUiSession(uiVisible: uiVisible, pk: pk);
+  }
+
+  static Future<Map<String, dynamic>> _inProcessSyncUiSession({
+    required bool uiVisible,
+    required String pk,
+  }) async {
+    await _inProcessSetAppUiVisible(uiVisible);
+    if (!isValidPublicKeyHex(pk)) {
+      await _inProcessSetForegroundPeer(null);
+      return _inProcessSetAppAckReadEnabled(false);
     }
     if (uiVisible) {
-      await setAppAckReadEnabled(true);
-      return setForegroundPeer(pk);
+      await _inProcessSetAppAckReadEnabled(true);
+      return _inProcessSetForegroundPeer(pk);
     }
-    await setAppAckReadEnabled(false);
+    await _inProcessSetAppAckReadEnabled(false);
     return {"ok": true, "ui_visible": uiVisible, "read_receipts": false};
   }
+
+  static Future<Map<String, dynamic>> _inProcessSetAppAckReadEnabled(bool enabled) async =>
+      GhalBolFfi.p2pSetAppAckReadEnabled(enabled);
+
+  static Future<Map<String, dynamic>> _inProcessSetAppUiVisible(bool visible) async =>
+      GhalBolFfi.p2pSetAppUiVisible(visible);
+
+  static Future<Map<String, dynamic>> _inProcessSetForegroundPeer(String? publicKeyHex) async =>
+      GhalBolFfi.p2pSetForegroundPeer(publicKeyHex);
 
   /// Re-run in-room `ack_read` catch-up without re-issuing foreground room enter (Linux nudge).
   static Future<Map<String, dynamic>> nudgeReadCatchup() async {
@@ -175,44 +191,6 @@ abstract final class GhalBolP2p {
       );
     }
     return {"ok": true};
-  }
-
-  /// **Integrators:** use [GhalBolUiSession] / [syncUiSession] only — not this RPC.
-  @Deprecated("Use GhalBolUiSession or syncUiSession")
-  static Future<Map<String, dynamic>> setAppAckReadEnabled(bool enabled) async {
-    if (usesDaemon) {
-      return GhalBolDaemonClient.instance.callState(
-        DaemonMethod.p2pSetAppAckReadEnabled,
-        params: {"enabled": enabled},
-        ensureDaemon: true,
-      );
-    }
-    return GhalBolFfi.p2pSetAppAckReadEnabled(enabled);
-  }
-
-  @Deprecated("Use GhalBolUiSession.setVisible or syncUiSession")
-  static Future<Map<String, dynamic>> setAppUiVisible(bool visible) async {
-    if (usesDaemon) {
-      return GhalBolDaemonClient.instance.callState(
-        DaemonMethod.p2pSetAppUiVisible,
-        params: {"visible": visible},
-        ensureDaemon: true,
-      );
-    }
-    return GhalBolFfi.p2pSetAppUiVisible(visible);
-  }
-
-  @Deprecated("Use GhalBolUiSession.setRoom or syncUiSession")
-  static Future<Map<String, dynamic>> setForegroundPeer(String? publicKeyHex) async {
-    if (usesDaemon) {
-      final pk = publicKeyHex?.trim() ?? "";
-      return GhalBolDaemonClient.instance.callState(
-        DaemonMethod.p2pSetForegroundPeer,
-        params: pk.isEmpty ? {} : {"public_key_hex": pk},
-        ensureDaemon: true,
-      );
-    }
-    return GhalBolFfi.p2pSetForegroundPeer(publicKeyHex);
   }
 
   /// Voice/video call signaling (`invite`, `accept`, `sdp_offer`, `ice`, `video_on`, …).
@@ -386,20 +364,6 @@ abstract final class GhalBolP2p {
     return GhalBolFfi.transcriptLoadThreadView(appNamespace, params);
   }
 
-  /// Read-only transcript merge via background `:p2p` (same process that writes on poll).
-  static Future<List<Map<String, dynamic>>> transcriptLoadMerged({
-    required String appNamespace,
-    required List<String> conversationKeys,
-    String? matchInboundFromPeerId,
-  }) async {
-    final view = await transcriptLoadThreadView(
-      appNamespace: appNamespace,
-      conversationKeys: conversationKeys,
-      matchInboundFromPeerId: matchInboundFromPeerId,
-    );
-    return view.lines;
-  }
-
   /// Native **video** control plane (H.264 over `/ghal-bol/call-video/1.0.0`).
   static Future<Map<String, dynamic>> callVideo(Map<String, dynamic> config) async {
     if (usesDaemon) {
@@ -520,28 +484,6 @@ abstract final class GhalBolP2p {
       );
     }
     return GhalBolFfi.p2pCallVideoFrame(config);
-  }
-
-  static Future<Map<String, dynamic>> sendAckDm({
-    required String recipientPublicKeyHex,
-    required String refId,
-    required String ackKind,
-  }) async {
-    if (usesDaemon) {
-      return GhalBolDaemonClient.instance.call(
-        DaemonMethod.p2pSendAckDm,
-        params: {
-          "recipient_public_key_hex": recipientPublicKeyHex,
-          "ref_id": refId,
-          "ack_kind": ackKind,
-        },
-      );
-    }
-    return GhalBolFfi.p2pSendAckDm(
-      recipientPublicKeyHex: recipientPublicKeyHex,
-      refId: refId,
-      ackKind: ackKind,
-    );
   }
 
   static Map<String, dynamic>? _normalizePollEvent(Object? ev) {

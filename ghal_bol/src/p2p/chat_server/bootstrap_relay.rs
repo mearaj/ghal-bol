@@ -1489,7 +1489,7 @@ fn apply_peer_left_local_lan(
     if let Some(pk) = session
         .dm_peer_for_libp2p(peer)
         .and_then(|d| d.public_key_hex.clone())
-        .filter(|pk| pk.len() == 66)
+        .filter(|pk| crate::contacts_v1::is_valid_public_key_hex(pk))
     {
         apply_wan_coord_effects(
             &crate::wan_coord::on_peer_off_local_lan(&pk),

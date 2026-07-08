@@ -751,30 +751,6 @@ pub(crate) fn rank_dm_dial_addrs_for_peer(
     }
 }
 
-/// When a routable public IP is present, skip RFC1918 LAN (coord often lists both).
-/// LAN + relay only: keep both — try direct TCP before relay circuit.
-#[cfg(test)]
-pub(crate) fn filter_wan_preferred_dm_dial_addrs(addrs: Vec<Multiaddr>) -> Vec<Multiaddr> {
-    let sorted = sort_dm_dial_addrs(addrs);
-    let has_routable_public = sorted.iter().any(|ma| {
-        if is_relay_circuit_multiaddr(ma) {
-            return false;
-        }
-        ipv4_from_ma_str(&ma.to_string()).is_some_and(|ip| !ip.is_private() && !ip.is_loopback())
-    });
-    if has_routable_public {
-        return sorted
-            .into_iter()
-            .filter(|ma| {
-                ipv4_from_ma_str(&ma.to_string())
-                    .map(|ip| !ip.is_private())
-                    .unwrap_or(true)
-            })
-            .collect();
-    }
-    sorted
-}
-
 /// Host:port keys (`159.223.110.159:28048`) from `GET /v1/relay` base multiaddrs.
 pub(crate) fn relay_bootstrap_tcp_keys(addrs: &[String]) -> HashSet<String> {
     let mut out = HashSet::new();

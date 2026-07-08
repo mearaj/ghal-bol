@@ -19,12 +19,21 @@ pub struct DmPeer {
 
 impl DmPeer {
     pub fn from_public_key_hex(public_key_hex: String) -> Result<Self, String> {
-        let pid_str = peer_id_from_secp256k1_public_key_hex(&public_key_hex)?;
-        let peer_id: PeerId = pid_str.parse().map_err(|e| format!("peer id parse: {e}"))?;
+        let wire =
+            crate::public_key_util::normalize_contact_identity_wire(public_key_hex.trim())?;
+        let peer_id = crate::peer_id_util::peer_id_from_identity_wire(&wire)?;
         Ok(Self {
             peer_id,
-            public_key_hex: Some(public_key_hex),
+            public_key_hex: Some(wire),
         })
+    }
+
+    /// Bind identity wire to a known libp2p peer (ml-dsa-65 / coord-resolved peers).
+    pub fn from_identity_wire_with_peer(identity_wire: String, peer_id: PeerId) -> Self {
+        Self {
+            peer_id,
+            public_key_hex: Some(identity_wire),
+        }
     }
 
     pub fn peer_id_only(peer_id: PeerId) -> Self {
@@ -35,7 +44,9 @@ impl DmPeer {
     }
 
     pub fn has_send_keys(&self) -> bool {
-        self.public_key_hex.as_ref().is_some_and(|s| s.len() == 66)
+        self.public_key_hex
+            .as_deref()
+            .is_some_and(crate::contacts_v1::is_valid_public_key_hex)
     }
 }
 
@@ -194,11 +205,13 @@ pub enum OutboundCmd {
     /// UI opened a chat with this contact (or closed when `None`).
     SetForegroundPeer {
         peer_id: Option<PeerId>,
+        /// Contact identity wire — used to resolve transport PeerId (ml-dsa-65).
+        identity_wire: Option<String>,
         /// Monotonic id — drop stale close/open when Flutter/Daemon RPCs reorder on the outbound queue.
         generation: u64,
     },
     /// Hub enabled read receipts after foreground was already set.
-    RunReadAckCatchup { peer_id: PeerId },
+    RunReadAckCatchup { identity_wire: String },
     /// Dial invite/coord bootstrap addrs on a running node.
     DialBootstrapPeers { addrs: Vec<Multiaddr> },
     /// Outbound voice-call signaling (`ghal_bol_call_v1`).
@@ -295,8 +308,9 @@ pub(crate) struct PendingDeliveryAck {
 #[derive(Clone)]
 pub(crate) struct PendingCallSignal {
     call_id: String,
+    signal_id: String,
     signal_kind: CallSigKind,
-    frame: Vec<u8>,
+    payload: serde_json::Value,
     peer_id: PeerId,
     recipient_public_key_hex: String,
     created_at_ms: i64,

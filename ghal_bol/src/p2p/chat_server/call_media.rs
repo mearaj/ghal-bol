@@ -1,5 +1,24 @@
 const CALL_MEDIA_MAX_FRAME: usize = 64 * 1024;
 
+fn derive_call_media_keys_for_peer(
+    session: &SessionState,
+    peer_identity_wire: &str,
+    call_id: &str,
+) -> Result<crate::call_media_key::CallMediaKeys, String> {
+    let peer_wire =
+        crate::public_key_util::normalize_contact_identity_wire(peer_identity_wire)?;
+    let peer_transport_pk = session
+        .peer_transport_pk(&peer_wire)
+        .ok_or_else(|| "call media: transport kem not ready for peer".to_string())?;
+    crate::call_media_key::derive_call_media_keys_from_transport(
+        session.dm_local_transport_sk(),
+        &peer_transport_pk,
+        &session.identity.identity_wire(),
+        &peer_wire,
+        call_id,
+    )
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CallStreamHeader {
     call_id: String,
@@ -56,8 +75,8 @@ async fn start_call_media(
     events_tx: Option<std::sync::mpsc::Sender<GossipChatEvent>>,
 ) -> Result<(), String> {
     let pk = peer_public_key_hex.trim().to_string();
-    if pk.len() != 66 {
-        return Err("call media: peer public key must be 66 hex chars".to_string());
+    if !crate::public_key_util::is_valid_contact_identity(&pk) {
+        return Err("call media: invalid peer identity".to_string());
     }
     if session.call_media_active(&call_id) {
         crate::p2p::call_active::on_voice_start(&call_id, &pk);
@@ -67,12 +86,9 @@ async fn start_call_media(
     let peer = session
         .resolve_send_peer(&pk)
         .ok_or_else(|| "call media: unknown contact".to_string())?;
-    let keys = crate::call_media_key::derive_call_media_keys_from_identity(
-        &session.identity,
-        &pk,
-        &call_id,
-    )?;
-    let local_is_a = crate::call_media::local_is_a(&session.my_public_key_hex, &pk);
+    let keys = derive_call_media_keys_for_peer(session.as_ref(), &pk, &call_id)?;
+    let local_is_a =
+        crate::call_media::local_is_a(&session.identity.identity_wire(), &pk);
     let engine = crate::call_media::MediaEngine::new_opus(&keys.frame_key, local_is_a)?;
 
     #[cfg(target_os = "android")]
@@ -260,8 +276,8 @@ async fn start_call_video(
     };
 
     let pk = peer_public_key_hex.trim().to_string();
-    if pk.len() != 66 {
-        return Err("call video: peer public key must be 66 hex chars".to_string());
+    if !crate::public_key_util::is_valid_contact_identity(&pk) {
+        return Err("call video: invalid peer identity".to_string());
     }
     if session.call_video_active(&call_id) {
         if camera_enabled {
@@ -279,12 +295,9 @@ async fn start_call_video(
     // Distinct key from the audio stream (different HKDF salt via a `:video` suffix),
     // so audio and video never share a (key, nonce) space. Both peers derive the same.
     let video_key_id = format!("{call_id}:video");
-    let keys = crate::call_media_key::derive_call_media_keys_from_identity(
-        &session.identity,
-        &pk,
-        &video_key_id,
-    )?;
-    let local_is_a = crate::call_media::local_is_a(&session.my_public_key_hex, &pk);
+    let keys = derive_call_media_keys_for_peer(session.as_ref(), &pk, &video_key_id)?;
+    let local_is_a =
+        crate::call_media::local_is_a(&session.identity.identity_wire(), &pk);
     // 16 KiB chunks: well under the 64 KiB substream frame cap, fewer writes per frame.
     let engine = VideoEngine::with_params(
         &keys.frame_key,

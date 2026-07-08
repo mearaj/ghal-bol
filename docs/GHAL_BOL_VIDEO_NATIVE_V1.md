@@ -21,7 +21,7 @@ transport as native voice.
 |-----------|-----------------------|
 | **Rust owns media** (golden rule #1) | Capture→encode→seal→transport→jitter→decode happen in Rust; Flutter does camera-permission UI, the local/remote render surface, and toggle buttons via FFI. |
 | **Reuse the link** | Video frames ride the **same libp2p connection** as chat + voice (a media substream), so we inherit NAT traversal, relay `/p2p-circuit` fallback, Noise, coord discovery, urgent-reconnect, keepalive, and the **LAN-shift** work in `chat_server.rs`. |
-| **One E2E story** (golden rule #7) | Video frames are sealed with the existing identity media key (`derive_call_media_keys_from_identity`). Per-frame AES-GCM; key never on the wire. |
+| **One E2E story** (golden rule #7) | Video frames are sealed with the transport media key (`derive_call_media_keys_from_transport`). Per-frame AES-GCM; key never on the wire. |
 | **No new servers** | Direct when possible; relay (coord/libp2p) only as fallback — identical to chat and voice. |
 | **Truthful UI** | "Video connected" only when decoded frames actually flow (mirrors voice + DESIGN.md truthful-status rule). |
 
@@ -34,7 +34,7 @@ transport as native voice.
 | Piece | Native voice today | Native video (this doc) |
 |-------|--------------------|-------------------------|
 | **Signaling** (`invite`/`accept`/`hangup`, `call_id`, phases) | `call_sig_v1.rs`, `call_state.rs` over the DM stream | **Reuse.** Add `video_engine: native_v1` negotiation; `video_on`/`video_off` + `key_request` (keyframe) signals. |
-| **Identity media key** | `call_media_key.rs` `derive_call_media_keys_from_identity` | **Reuse**, with a distinct HKDF `info` for the video stream (key separation from audio — see § E2E). |
+| **Identity media key** | `call_media_key.rs` `derive_call_media_keys_from_transport` | **Reuse**, with a distinct HKDF `info` for the video stream (key separation from audio — see § E2E). |
 | **Per-frame crypto** | `call_media/crypto.rs` `MediaCrypto` (AES-256-GCM, `dir‖counter‖ct`) | **Reuse the construction**; separate `MediaCrypto` instance/counter per media kind so audio and video never share a nonce space. |
 | **Transport** | `/ghal-bol/call/1.0.0` substream (`chat_server.rs`) | **New `/ghal-bol/call-video/1.0.0` substream** on the **same** connection (parallel to audio so a large video frame never head-of-line-blocks a 20 ms audio packet). Same two-streams-per-call (TX open / RX accept) + length-prefix framing + drop-oldest backpressure. |
 | **Session lifecycle** | `call_media/session.rs`, `MediaControls`, `OutboundCmd::CallMedia*` | **Extend** `MediaControls` with camera on/off + a `VideoCodec` path; add `OutboundCmd::CallVideoStart/Stop/SetCameraEnabled`. |
@@ -63,7 +63,7 @@ transport as native voice.
 │    camera capture → scale → encode(keyframe/delta) → seal → SEND          │
 │    RECV → unseal → reorder/jitter(keyframe-aware) → decode → render       │
 │    A/V sync via MediaFrame.ts vs the audio clock                          │
-│  call media keys            — derive_call_media_keys_from_identity        │
+│  call media keys            — derive_call_media_keys_from_transport        │
 │  chat_server.rs             — the peer connection + /ghal-bol/call-video  │
 │                               substream (parallel to audio + DM)          │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -184,11 +184,10 @@ A 1:1 link still needs basic congestion control or video will bufferbloat the au
 
 ## End-to-end encryption
 
-- Video key derives from the **same** `derive_call_media_keys_from_identity(call_id,
-  my_secret, peer_pubkey)` as voice/chat (golden rule #7), but with a **distinct HKDF
-  `info`** (e.g. `ghal_bol_call_video_v1`) so the video stream key ≠ audio stream key
-  — separate keys + separate `MediaCrypto` counters guarantee no AES-GCM nonce reuse
-  across the two media kinds.
+- Video key derives from **`derive_call_media_keys_from_transport(call_id, transport_kem)`**
+  as voice/chat (golden rule #7), but with a **distinct HKDF `info`** (e.g. `call_id:video`)
+  so the video stream key ≠ audio stream key — separate keys + separate `MediaCrypto`
+  counters guarantee no AES-GCM nonce reuse across the two media kinds.
 - Each chunk is sealed with `MediaCrypto` (`dir‖counter‖ciphertext`) before it hits the
   substream; the substream is also Noise-encrypted peer-to-peer (defense in depth — a
   relay on the path never sees plaintext). Key never on the wire.

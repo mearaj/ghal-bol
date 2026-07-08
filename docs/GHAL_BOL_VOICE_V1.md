@@ -80,17 +80,18 @@ Video pipeline, textures, and call end: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_V
 
 | Layer | What it protects |
 |-------|------------------|
-| **DM signaling** (`ghal_bol_call_v1`) | Invite, accept, video_on/off — sealed to peer secp256k1 + signed. |
+| **DM signaling** (`ghal_bol_call_v1`) | Invite, accept, video_on/off — transport KEM seal (`CALL_CIPHER_TRANSPORT_V2`) + identity signature. |
 | **libp2p transport** | Noise on connections and substreams. |
-| **Per-frame seal** | Opus / video chunks sealed with `derive_call_media_keys_from_identity` before substream write. |
+| **Per-frame seal** | Opus / video chunks sealed with `derive_call_media_keys_from_transport` before substream write. |
 
 **Key derivation (both peers, same result):**
 
+After `TransportKemHello` on the DM stream, both peers hold transport X25519 keys. Call media derives:
+
 ```text
-ikm = SHA256( ECDH(my_identity_secret, peer_public_key_66hex) )
-pair = sort_lowercase(local_pubkey_66hex, peer_pubkey_66hex) concatenated
-media_key     = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_v1" || pair)
-ratchet_salt  = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_ratchet_v1" || pair)
+ikm = transport ECDH(local_transport_sk, peer_transport_pk)
+media_key     = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_transport_v2")
+ratchet_salt  = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_ratchet_transport_v2")
 ```
 
 Video uses a distinct HKDF `info` (e.g. `ghal_bol_call_video_v1`) — see [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).

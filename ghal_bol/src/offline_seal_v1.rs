@@ -1,13 +1,15 @@
-//! DM encryption: ephemeral secp256k1 ECDH + SHA-256 + AES-256-GCM.
+//! Offline encrypt-to-identity (no active transport session).
 //!
-//! Wire: `u32_le(ephemeral_pubkey_len) || ephemeral_pubkey || nonce || ciphertext+tag`
-//! (nonce is zero-filled to `AES_GCM_NONCE_LEN`).
+//! Used by invite/auxiliary FFI only. **secp256k1 recipients** — ephemeral secp256k1 ECDH
+//! per message (identity pubkey is the KEM target). Wire prefix `OFFLINE_CIPHER_SECP256K1_V1`.
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use rand_core::{OsRng, RngCore};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
+
+pub const OFFLINE_CIPHER_SECP256K1_V1: u8 = 0x10;
 
 const AES_GCM_NONCE_LEN: usize = 12;
 
@@ -22,7 +24,7 @@ fn aes_key_from_shared(shared: &[u8; 32]) -> Key<Aes256Gcm> {
     *Key::<Aes256Gcm>::from_slice(&digest)
 }
 
-/// Seal `plaintext` to a libp2p secp256k1 public key (33-byte compressed).
+/// Seal `plaintext` to a secp256k1 public key (33-byte compressed).
 pub fn seal_to_secp256k1_public(recipient_pk: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let secp = Secp256k1::new();
     let recipient =
@@ -38,16 +40,23 @@ pub fn seal_to_secp256k1_public(recipient_pk: &[u8], plaintext: &[u8]) -> Result
     let ct = cipher
         .encrypt(Nonce::from_slice(&nonce), plaintext)
         .map_err(|_| "aes-gcm encrypt failed".to_string())?;
-    let mut out = Vec::with_capacity(4 + ephemeral_bytes.len() + nonce.len() + ct.len());
-    out.extend_from_slice(&(ephemeral_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&ephemeral_bytes);
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ct);
+    let mut body = Vec::with_capacity(4 + ephemeral_bytes.len() + nonce.len() + ct.len());
+    body.extend_from_slice(&(ephemeral_bytes.len() as u32).to_le_bytes());
+    body.extend_from_slice(&ephemeral_bytes);
+    body.extend_from_slice(&nonce);
+    body.extend_from_slice(&ct);
+    let mut out = Vec::with_capacity(1 + body.len());
+    out.push(OFFLINE_CIPHER_SECP256K1_V1);
+    out.extend_from_slice(&body);
     Ok(out)
 }
 
-/// Open a blob sealed with [`seal_to_secp256k1_public`].
+/// Open offline seal (`OFFLINE_CIPHER_SECP256K1_V1` only).
 pub fn open_sealed_secp256k1(recipient_sk: &SecretKey, sealed: &[u8]) -> Result<Vec<u8>, String> {
+    if sealed.first() != Some(&OFFLINE_CIPHER_SECP256K1_V1) {
+        return Err("offline seal: unsupported cipher prefix".to_string());
+    }
+    let sealed = &sealed[1..];
     if sealed.len() < 4 + 33 + AES_GCM_NONCE_LEN + 16 {
         return Err("sealed blob too short".to_string());
     }
@@ -83,6 +92,7 @@ mod tests {
         let sk = random_secret_key().unwrap();
         let pk = sk.public_key(&secp).serialize();
         let sealed = seal_to_secp256k1_public(&pk, b"hello ghal-bol").unwrap();
+        assert_eq!(sealed.first(), Some(&OFFLINE_CIPHER_SECP256K1_V1));
         let plain = open_sealed_secp256k1(&sk, &sealed).unwrap();
         assert_eq!(plain, b"hello ghal-bol");
     }

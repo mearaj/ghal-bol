@@ -57,7 +57,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                "Paste the other person’s secp256k1 public key (66 hex chars) from their invitation.",
+                "Paste the other person’s identity public key from their invitation "
+                "(bare secp256k1 hex or prefixed form such as ed25519:…).",
               ),
               const SizedBox(height: 12),
               TextField(
@@ -92,14 +93,15 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (go != true || !mounted) return;
     if (!isValidPublicKeyHex(pk)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Public key must be 66 hex characters.")),
+        const SnackBar(content: Text("Invalid identity public key.")),
       );
       return;
     }
+    final wire = resolvePublicKeyHex(storedHex: pk) ?? pk;
     await ContactStore.upsertContact(
       appNamespace: widget.appNamespace,
       contact: SavedContact(
-        publicKeyHex: pk.toLowerCase(),
+        publicKeyHex: wire,
         displayAlias: alias,
         createdAtMs: DateTime.now().millisecondsSinceEpoch,
         updatedAtMs: DateTime.now().millisecondsSinceEpoch,

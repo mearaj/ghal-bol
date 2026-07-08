@@ -1,4 +1,3 @@
-import "app_log.dart";
 import "ghal_bol_ffi.dart";
 import "ghal_bol_p2p.dart";
 
@@ -80,7 +79,7 @@ class TranscriptThreadView {
 /// Local transcript — persisted in **`ghal_bol`**.
 ///
 /// **Daemon platforms (Android/Linux):** `:p2p` / `ghal_bol_daemon` owns all
-/// transcript **writes** on poll; UI loads read-only via [GhalBolP2p.transcriptLoadMerged].
+/// transcript **writes** on poll; UI loads read-only via [GhalBolP2p.transcriptLoadThreadView].
 class ChatTranscriptStore {
   ChatTranscriptStore._();
 
@@ -201,15 +200,6 @@ class ChatTranscriptStore {
     required StoredChatLine line,
   }) async {
     if (_backgroundOwnsWrites) return;
-    final ok = GhalBolFfi.transcriptAppendIfNew(
-      appNamespace,
-      conversationKey,
-      line.toJson(),
-    );
-    AppLog.instance.flow(
-      "Transcript",
-      "append conv=$conversationKey mid=${line.messageId} outgoing=${line.outgoing} ok=$ok",
-    );
   }
 
   static Future<void> patchInboundReadAckSent({
@@ -218,11 +208,6 @@ class ChatTranscriptStore {
     required String messageId,
   }) async {
     if (_backgroundOwnsWrites) return;
-    GhalBolFfi.transcriptPatchInboundReadAckSent(
-      appNamespace,
-      conversationKey: conversationKey,
-      messageId: messageId,
-    );
   }
 
   static Future<void> patchOutgoingDelivery({
@@ -232,12 +217,6 @@ class ChatTranscriptStore {
     required String delivery,
   }) async {
     if (_backgroundOwnsWrites) return;
-    GhalBolFfi.transcriptPatchOutgoingDelivery(
-      appNamespace,
-      conversationKey: conversationKey,
-      messageId: messageId,
-      delivery: delivery,
-    );
   }
 
   static Future<void> repairCorruptOutgoingDeliveryOnce({required String appNamespace}) async {}
@@ -248,15 +227,6 @@ class ChatTranscriptStore {
     required List<StoredChatLine> lines,
   }) async {
     if (_backgroundOwnsWrites) return;
-    GhalBolFfi.transcriptSave(
-      appNamespace,
-      conversationKey,
-      lines.map((e) => e.toJson()).toList(),
-    );
-    invalidateThreadCache(
-      appNamespace: appNamespace,
-      conversationKeys: {conversationKey},
-    );
   }
 
   static Future<List<StoredChatLine>> trySalvageQuarantinedThread({

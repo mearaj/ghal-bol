@@ -1,8 +1,10 @@
 //! HTTP client for [`ghal_bol_server`](../../ghal_bol_server) coordination API (Tier 1).
 
-use secp256k1::{Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
+use crate::coord_register_auth::sign_coord_registration;
+use crate::keystore_v1::DecryptedIdentity;
+use crate::public_key_util::normalize_contact_identity_wire;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoordEndpoint {
@@ -20,16 +22,6 @@ pub struct CoordPeerRecord {
     pub ipv6: Option<String>,
     pub ipv4: Option<String>,
     pub last_heartbeat_unix_ms: i64,
-}
-
-fn registration_message_digest(nonce: &[u8; 32], public_key_hex: &str) -> secp256k1::Message {
-    let body = format!(
-        "ghal_bol:register:v1\n{}\n{}",
-        hex::encode(nonce),
-        public_key_hex.trim().to_ascii_lowercase()
-    );
-    let hash = Sha256::digest(body.as_bytes());
-    secp256k1::Message::from_digest(hash.into())
 }
 
 pub struct CoordHttpClient {
@@ -87,18 +79,17 @@ impl CoordHttpClient {
 
     pub fn register(
         &self,
-        secret: &SecretKey,
-        public_key_hex: &str,
+        ident: &DecryptedIdentity,
         endpoints: &[CoordEndpoint],
         ipv4: Option<&str>,
         ipv6: Option<&str>,
     ) -> Result<CoordPeerRecord, String> {
-        let pk = public_key_hex.trim().to_ascii_lowercase();
+        let wire = normalize_contact_identity_wire(&ident.identity_wire())?;
         let ch_url = format!("{}/v1/register/challenge", self.base);
         let ch: serde_json::Value = self
             .send_with_transport_retry(|http| {
                 self.with_headers(http.post(&ch_url))
-                    .json(&serde_json::json!({ "public_key_hex": pk }))
+                    .json(&serde_json::json!({ "public_key_hex": wire }))
             })?
             .json()
             .map_err(|e| e.to_string())?;
@@ -106,16 +97,15 @@ impl CoordHttpClient {
         let mut nonce = [0u8; 32];
         nonce.copy_from_slice(&hex::decode(nonce_hex).map_err(|e| e.to_string())?);
 
-        let secp = Secp256k1::new();
-        let msg = registration_message_digest(&nonce, &pk);
-        let sig = secp.sign_ecdsa(msg, secret);
+        let sig = sign_coord_registration(ident, &nonce, &wire)?;
+        let sig_hex = hex::encode(sig);
 
         let reg_url = format!("{}/v1/register", self.base);
         let resp = self.send_with_transport_retry(|http| {
             self.with_headers(http.post(&reg_url)).json(&serde_json::json!({
-                "public_key_hex": pk,
+                "public_key_hex": wire,
                 "nonce_hex": nonce_hex,
-                "signature_hex": hex::encode(sig.serialize_der()),
+                "signature_hex": sig_hex,
                 "endpoints": endpoints,
                 "ipv4": ipv4,
                 "ipv6": ipv6,
@@ -133,12 +123,12 @@ impl CoordHttpClient {
         serde_json::from_value(v["peer"].clone()).map_err(|e| e.to_string())
     }
 
-    pub fn heartbeat(&self, public_key_hex: &str) -> Result<CoordPeerRecord, String> {
-        let pk = public_key_hex.trim().to_ascii_lowercase();
+    pub fn heartbeat(&self, identity_wire: &str) -> Result<CoordPeerRecord, String> {
+        let wire = normalize_contact_identity_wire(identity_wire)?;
         let url = format!("{}/v1/heartbeat", self.base);
         let resp = self.send_with_transport_retry(|http| {
             self.with_headers(http.post(&url))
-                .json(&serde_json::json!({ "public_key_hex": pk }))
+                .json(&serde_json::json!({ "public_key_hex": wire }))
         })?;
         if !resp.status().is_success() {
             return Err(format!("heartbeat HTTP {}", resp.status()));
@@ -191,9 +181,10 @@ impl CoordHttpClient {
         Ok((peer_id, addrs))
     }
 
-    pub fn lookup(&self, public_key_hex: &str) -> Result<CoordPeerRecord, String> {
-        let pk = public_key_hex.trim().to_ascii_lowercase();
-        let url = format!("{}/v1/peers/{}", self.base, pk);
+    pub fn lookup(&self, identity_wire: &str) -> Result<CoordPeerRecord, String> {
+        let pk = normalize_contact_identity_wire(identity_wire)?;
+        let encoded = crate::identity::percent_encode_uri_component(&pk);
+        let url = format!("{}/v1/peers/{}", self.base, encoded);
         let resp = self.send_with_transport_retry(|http| self.with_headers(http.get(&url)))?;
         let status = resp.status();
         let body = resp.text().map_err(|e| e.to_string())?;

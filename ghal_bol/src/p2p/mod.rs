@@ -11,8 +11,8 @@ pub mod network_transport;
 
 pub use chat_server::{
     ChatServerError, DEFAULT_GOSSIP_TOPIC, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd,
-    last_room_peer, live_foreground_peer_for_catchup, live_foreground_peer_pk,
-    notify_dm_presence_wake, notify_network_change, notify_relay_refresh, queue_read_ack_catchup,
-    run_gossip_chat_node_with_std_io, set_app_ack_read_enabled, set_app_ui_visible,
-    set_drop_pending_call_invite_hook, sync_foreground_peer_now,
+    last_room_peer, libp2p_peer_for_contact_identity, live_foreground_peer_for_catchup,
+    live_foreground_peer_pk, notify_dm_presence_wake, notify_network_change, notify_relay_refresh,
+    queue_read_ack_catchup, run_gossip_chat_node_with_std_io, set_app_ack_read_enabled,
+    set_app_ui_visible, set_drop_pending_call_invite_hook, sync_foreground_peer_now,
 };

@@ -75,16 +75,16 @@ Same `ghal_bol_msg_v1` envelope as text. Add `MsgKind::Voice` in `msg_v1.rs` (wi
 - **`duration_ms`** — for UI waveform/duration label; also stored on transcript row.
 - Version inner schema with a `"voice_msg_version": 1` field if future codecs are added.
 
-### Encryption (identical to text)
+### Encryption (same as DM text — transport KEM)
 
 1. `serde_json` inner bytes  
-2. `seal_to_secp256k1_public(recipient_pk, inner_bytes)` — [secp256k1_seal.rs](../ghal_bol/src/secp256k1_seal.rs)  
+2. Seal with **transport KEM v2** (`DM_CIPHER_TRANSPORT_V2`) after `TransportKemHello` — same path as text DM (`transport_kem_v1.rs`, `msg_v1.rs`)  
 3. Hex-encode → `ciphertext_hex`  
 4. Sign envelope with sender device key  
 
-Decrypt: verify signature → open seal → parse inner JSON → decode Opus → play.
+Decrypt: verify signature → open transport seal → parse inner JSON → decode Opus → play.
 
-**Do not** use `derive_call_media_keys_from_identity` for voice notes.
+**Do not** use `derive_call_media_keys_from_transport` for voice notes — that is for live call media substreams only.
 
 ---
 
@@ -222,4 +222,4 @@ Hub `ingestP2pEvent`: treat `voice` like `text` for `syncTranscriptView(force: t
 - Text wire: [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)
 - Calls (out of scope): [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md)
 - Frame limit: `ghal_bol/src/p2p/chat_server/frames.rs` (`4 * 1024 * 1024`)
-- Seal: `ghal_bol/src/secp256k1_seal.rs`, `ghal_bol/src/msg_v1.rs`
+- Seal: `ghal_bol/src/transport_kem_v1.rs`, `ghal_bol/src/msg_v1.rs`

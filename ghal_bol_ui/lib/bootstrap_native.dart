@@ -13,6 +13,7 @@ import "ghal_bol_background.dart";
 import "ghal_bol_constants.dart";
 import "ghal_bol_daemon.dart";
 import "ghal_bol_host_init.dart";
+import "identity_algorithm_choice.dart";
 import "identity_alias_form.dart";
 import "identity_alias_store.dart";
 import "identity_key_management.dart";
@@ -228,13 +229,33 @@ class _IdentityScreenState extends State<IdentityScreen> {
   bool _busy = false;
   bool? _keystoreOnDisk;
   bool _obscurePassword = true;
-  /// When no keystore: `true` = generate new key; `false` = import 64-hex secret.
+  /// When no keystore: `true` = generate new key; `false` = import secret.
   bool _createNewIdentity = true;
+  List<IdentityAlgorithmOption> _algorithmOptions = IdentityAlgorithms.supported();
+  String _selectedAlgorithmWireId = IdentityAlgorithms.defaultWireId;
+
+  IdentityAlgorithmOption get _selectedAlgorithm =>
+      IdentityAlgorithms.byWireId(_selectedAlgorithmWireId) ??
+      IdentityAlgorithms.defaultOption();
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshKeystoreOnDisk());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshKeystoreOnDisk();
+      _loadAlgorithmOptions();
+    });
+  }
+
+  void _loadAlgorithmOptions() {
+    if (!mounted) return;
+    final options = IdentityAlgorithms.supported();
+    setState(() {
+      _algorithmOptions = options;
+      if (!options.any((o) => o.wireId == _selectedAlgorithmWireId)) {
+        _selectedAlgorithmWireId = IdentityAlgorithms.defaultOption().wireId;
+      }
+    });
   }
 
   void _refreshKeystoreOnDisk() {
@@ -269,23 +290,42 @@ class _IdentityScreenState extends State<IdentityScreen> {
     required String ns,
     required String password,
   }) async {
+    final createAlgo =
+        _keystoreOnDisk == false ? _selectedAlgorithmWireId : null;
     if (_keystoreOnDisk == false &&
         !_createNewIdentity &&
         GhalBolFfi.isIdentityKeyManagementAvailable) {
       final sk = normalizeSecretKeyHex(_secretKeyCtrl.text);
-      if (!isValidSecretKeyHex(sk)) {
-        return const GhalBolIdentityResult(
+      if (!GhalBolFfi.identityImportSecretValid(
+        algorithm: _selectedAlgorithmWireId,
+        secretHex: sk,
+      )) {
+        return GhalBolIdentityResult(
           ok: false,
-          error: "Private key must be 64 hex characters (32-byte secp256k1 secret).",
+          error:
+              "Private key is not valid for ${_selectedAlgorithm.label} "
+              "(${_selectedAlgorithm.importSecretHint}).",
         );
       }
       return GhalBolFfi.importIdentityFromSecretHex(
         appNamespace: ns,
         password: password,
         secretKeyHex: sk,
+        identityAlgorithm: _selectedAlgorithmWireId,
       );
     }
-    return GhalBolFfi.createOrUnlockIdentity(appNamespace: ns, password: password);
+    return GhalBolFfi.createOrUnlockIdentity(
+      appNamespace: ns,
+      password: password,
+      identityAlgorithm: createAlgo,
+    );
+  }
+
+  Future<bool> _enterAppIfP2pReady({
+    required GhalBolIdentityResult r,
+    required bool firstTimeSetup,
+  }) async {
+    return r.ok;
   }
 
   static const String _firstTimeRetryHint = IdentitySetupCopy.firstTimeRetryHint;
@@ -469,20 +509,7 @@ class _IdentityScreenState extends State<IdentityScreen> {
           return;
         }
         SessionFlowLog.step("ffi_unlock_ok", {"pk": SessionFlowLog.shortPk(ffi.publicKeyHex)});
-        SessionCredentials.store(appNamespace: ns, password: password);
-        r = GhalBolIdentityResult(
-          ok: true,
-          publicKeyHex: ffi.publicKeyHex,
-          libp2pPeerId: ffi.libp2pPeerId,
-          appNamespace: ns,
-        );
-        SessionFlowLog.daemon("daemon_unlock_background");
-        unawaited(_finishDaemonUnlockAfterLogin(
-          ns: ns,
-          password: password,
-          ffiPublicKeyHex: ffi.publicKeyHex,
-          firstTimeSetup: firstTimeSetup,
-        ));
+        r = ffi;
       } else {
         SessionFlowLog.step("ffi_unlock_start", {"daemon": "false"});
         r = await _unlockOrImportIdentity(ns: ns, password: password);
@@ -496,31 +523,91 @@ class _IdentityScreenState extends State<IdentityScreen> {
           SessionFlowLog.issue("ffi_unlock_failed", detail: r.error);
         }
       }
-      if (mounted) {
-        if (r.ok) {
-          if (!GhalBolDaemon.isSupported || widget.onUnlockedSession == null) {
-            SessionCredentials.store(appNamespace: ns, password: password);
-          }
-          SessionFlowLog.step("session_unlocked", {
-            "pk": SessionFlowLog.shortPk(r.publicKeyHex),
-            "peer_id": r.libp2pPeerId ?? "?",
-          });
-        }
-        if (r.ok && widget.onUnlockedSession != null) {
-          SessionFlowLog.step("enter_app");
-          widget.onUnlockedSession!(r);
-        } else {
-          setState(() {
-            _last = r;
-            if (r.ok) {
-              _keystoreOnDisk = true;
-            }
-          });
-        }
+      if (!mounted) return;
+      if (!r.ok) {
+        setState(() => _last = r);
+        return;
+      }
+      if (!await _enterAppIfP2pReady(r: r, firstTimeSetup: firstTimeSetup)) {
+        return;
+      }
+      if (GhalBolDaemon.isSupported && widget.onUnlockedSession != null) {
+        SessionCredentials.store(appNamespace: ns, password: password);
+        SessionFlowLog.daemon("daemon_unlock_background");
+        unawaited(_finishDaemonUnlockAfterLogin(
+          ns: ns,
+          password: password,
+          ffiPublicKeyHex: r.publicKeyHex,
+          firstTimeSetup: firstTimeSetup,
+        ));
+      } else {
+        SessionCredentials.store(appNamespace: ns, password: password);
+      }
+      SessionFlowLog.step("session_unlocked", {
+        "pk": SessionFlowLog.shortPk(r.publicKeyHex),
+        "peer_id": r.libp2pPeerId ?? "?",
+      });
+      if (widget.onUnlockedSession != null) {
+        SessionFlowLog.step("enter_app");
+        widget.onUnlockedSession!(r);
+      } else {
+        setState(() {
+          _last = r;
+          _keystoreOnDisk = true;
+        });
       }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Widget _buildAlgorithmPicker(BuildContext context) {
+    if (_algorithmOptions.isEmpty) return const SizedBox.shrink();
+    final selected = _selectedAlgorithm;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          IdentitySetupCopy.identityAlgorithmTitle,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        const SizedBox(height: 6),
+        InputDecorator(
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: _selectedAlgorithmWireId,
+              isExpanded: true,
+              items: [
+                for (final o in _algorithmOptions)
+                  DropdownMenuItem(
+                    value: o.wireId,
+                    child: Text(
+                      o.isDefault ? "${o.label} (default)" : o.label,
+                    ),
+                  ),
+              ],
+              onChanged: _busy
+                  ? null
+                  : (v) {
+                      if (v == null) return;
+                      setState(() => _selectedAlgorithmWireId = v);
+                    },
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          selected.description,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.outline,
+              ),
+        ),
+      ],
+    );
   }
 
   Future<void> _logout() async {
@@ -660,15 +747,17 @@ class _IdentityScreenState extends State<IdentityScreen> {
                           : (s) => setState(() => _createNewIdentity = s.first),
                     ),
                     const SizedBox(height: 12),
+                    _buildAlgorithmPicker(context),
+                    const SizedBox(height: 12),
                   ],
                   if (!widget.uiLockResume && loaded && _keystoreOnDisk == false && !_createNewIdentity) ...[
                     TextField(
                       controller: _secretKeyCtrl,
                       maxLines: 2,
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                        labelText: "Private key (64 hex)",
-                        hintText: "Any valid secp256k1 secret — wallet keys not recommended",
+                      decoration: InputDecoration(
+                        border: const OutlineInputBorder(),
+                        labelText: "Private key (hex)",
+                        hintText: _selectedAlgorithm.importSecretHint,
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -807,21 +896,26 @@ class _IdentityScreenState extends State<IdentityScreen> {
           const SizedBox(height: 8),
           SelectableText("libp2p PeerId:\n$peer", maxLines: 8),
           const SizedBox(height: 8),
-          SelectableText("secp256k1 public key:\n$pk", maxLines: 4),
-          if ((r.publicKeyHex?.trim().length ?? 0) == 66 &&
-              (r.libp2pPeerId != null && r.libp2pPeerId!.isNotEmpty)) ...[
+          SelectableText(
+            r.identityAlgorithm != null && r.identityAlgorithm != "secp256k1"
+                ? "Identity (${r.identityAlgorithm}):\n$pk"
+                : "Public key:\n$pk",
+            maxLines: 8,
+          ),
+          if (r.p2pReady == true) ...[
             const SizedBox(height: 12),
             TextButton.icon(
               onPressed: () async {
-                final pk = r.publicKeyHex?.trim() ?? "";
-                if (!isValidPublicKeyHex(pk)) return;
+                final wire = (r.identityWire ?? r.publicKeyHex ?? "").trim();
+                if (!isValidPublicKeyHex(wire)) return;
                 final ns = r.appNamespace ?? kGhalBolAppNamespace;
                 final alias = await IdentityAliasStore.read(
                   appNamespace: ns,
-                  publicKeyHex: pk,
+                  publicKeyHex: r.publicKeyHex?.trim() ?? wire,
                 );
                 final uri = buildGhalBolInviteUri(
-                  publicKeyHex: pk,
+                  publicKeyHex: r.publicKeyHex?.trim() ?? wire,
+                  identityWire: wire,
                   peerAlias: alias,
                 );
                 if (uri == null) return;

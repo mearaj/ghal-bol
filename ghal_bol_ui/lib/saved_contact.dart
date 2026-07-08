@@ -4,7 +4,7 @@ import "ghalbol_connect_invite.dart";
 import "identity_display_name.dart";
 import "public_key_hex.dart";
 
-/// A peer you can message, keyed by **public_key_hex** (66-char secp256k1).
+/// A peer you can message, keyed by **identity wire** (`[algo:]hex` per MULTI_ALGO.md).
 class SavedContact {
   const SavedContact({
     this.publicKeyHex = "",

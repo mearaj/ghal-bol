@@ -35,7 +35,7 @@ Future<void> cancelUnlockNotification() async {
   } catch (_) {}
 }
 
-/// Android 6+: `true` when Doze / App Standby still applies (not on the ignore list).
+/// Android: `true` when aggressive background battery restrictions apply (user should act).
 Future<bool> isBatteryOptimized() async {
   if (!Platform.isAndroid) return false;
   try {

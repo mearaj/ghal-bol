@@ -1,17 +1,35 @@
 //! Voice-call **signaling** envelopes on the DM stream (`ghal_bol_call_v1`).
 //!
-//! Media (WebRTC / Opus) is phase 2; this module is sign, seal, parse only.
+//! Payload ciphertext uses **transport KEM v2** (`CALL_CIPHER_TRANSPORT_V2`) after
+//! `TransportKemHello` on the DM stream. Identity keys sign envelopes only.
 
-use libp2p_identity::Keypair;
-use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use x25519_dalek::StaticSecret;
 
-use crate::public_key_util::secp256k1_public_key_from_hex;
-use crate::secp256k1_seal::{open_sealed_secp256k1, seal_to_secp256k1_public};
+use crate::identity::same_contact_identity;
+use crate::identity_sign::verify_identity_signature;
+use crate::keystore_v1::DecryptedIdentity;
+use crate::public_key_util::normalize_contact_identity_wire;
+use crate::symmetric_seal::{open_symmetric, seal_symmetric};
+use crate::transport_kem_v1::{
+    CALL_CIPHER_TRANSPORT_V2, derive_call_sig_transport_message_key,
+};
 
 pub const CALL_SHARE: &str = "ghal_bol_call_v1";
 pub const CALL_FORMAT_VERSION: u64 = 1;
+
+/// Transport KEM context for outbound call signaling.
+pub struct CallSealTransportCtx<'a> {
+    pub local_sk: &'a StaticSecret,
+    pub peer_pk: &'a [u8; 32],
+}
+
+/// Transport KEM context for inbound call signaling.
+pub struct CallOpenTransportCtx<'a> {
+    pub local_sk: &'a StaticSecret,
+    pub peer_pk: &'a [u8; 32],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,9 +41,7 @@ pub enum CallSigKind {
     SdpOffer,
     SdpAnswer,
     Ice,
-    /// In-call request to enable video (followed by SDP renegotiation).
     VideoOn,
-    /// Disable video; audio continues.
     VideoOff,
 }
 
@@ -60,7 +76,6 @@ impl CallSigKind {
     }
 }
 
-/// Same JSON shape as [`MsgEnvelope`] but different `ghalbol.share` / `kind` enum.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CallSigEnvelope {
     #[serde(rename = "ghalbol.share")]
@@ -88,8 +103,8 @@ pub struct ParsedCallSignal {
     pub payload: Value,
 }
 
-fn envelope_recipient_ok(env: &CallSigEnvelope, my_public_key_hex: &str) -> bool {
-    env.recipient_public_key_hex.trim() == my_public_key_hex.trim()
+fn envelope_recipient_ok(env: &CallSigEnvelope, my_identity_wire: &str) -> bool {
+    same_contact_identity(env.recipient_public_key_hex.trim(), my_identity_wire)
 }
 
 fn canonical_sign_bytes(env: &CallSigEnvelope) -> Result<Vec<u8>, String> {
@@ -98,9 +113,9 @@ fn canonical_sign_bytes(env: &CallSigEnvelope) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&clone).map_err(|e| format!("canonical json: {e}"))
 }
 
-pub fn sign_call_envelope(env: &mut CallSigEnvelope, sender: &Keypair) -> Result<(), String> {
+pub fn sign_call_envelope(env: &mut CallSigEnvelope, sender: &DecryptedIdentity) -> Result<(), String> {
     let bytes = canonical_sign_bytes(env)?;
-    let sig = sender.sign(&bytes).map_err(|e| format!("sign: {e}"))?;
+    let sig = sender.sign_message(&bytes)?;
     env.signature_hex = Some(hex::encode(sig));
     Ok(())
 }
@@ -117,12 +132,8 @@ pub fn verify_call_envelope(env: &CallSigEnvelope) -> Result<(), String> {
         .as_deref()
         .ok_or_else(|| "missing signature_hex".to_string())?;
     let sig = hex::decode(sig_hex.trim()).map_err(|e| format!("signature hex: {e}"))?;
-    let sender_pk = secp256k1_public_key_from_hex(env.sender_public_key_hex.trim())?;
-    let libp2p_pk = libp2p_identity::PublicKey::from(sender_pk);
     let bytes = canonical_sign_bytes(env)?;
-    if !libp2p_pk.verify(&bytes, &sig) {
-        return Err("signature verification failed".to_string());
-    }
+    verify_identity_signature(env.sender_public_key_hex.trim(), &bytes, &sig)?;
     Ok(())
 }
 
@@ -158,32 +169,24 @@ pub fn build_call_envelope(
     id: &str,
     call_id: &str,
     kind: CallSigKind,
-    sender: &Keypair,
-    recipient_public_key_hex: &str,
+    sender: &DecryptedIdentity,
+    recipient_identity_wire: &str,
     payload: Value,
     created_at_ms: i64,
+    transport: CallSealTransportCtx<'_>,
 ) -> Result<CallSigEnvelope, String> {
-    let sender_pk = sender
-        .public()
-        .try_into_secp256k1()
-        .map_err(|e| format!("sender key: {e}"))?;
-    let sender_hex = crate::public_key_util::secp256k1_public_key_to_hex(&sender_pk);
-    let recipient = recipient_public_key_hex.trim();
-    let recipient_pk = secp256k1_public_key_from_hex(recipient)?;
+    let sender_wire = sender.identity_wire();
+    let recipient_wire = normalize_contact_identity_wire(recipient_identity_wire)?;
     let inner_bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec());
-    let sealed = if inner_bytes == b"{}" {
-        seal_to_secp256k1_public(&recipient_pk.to_bytes(), b"{}")?
-    } else {
-        seal_to_secp256k1_public(&recipient_pk.to_bytes(), &inner_bytes)?
-    };
+    let sealed = seal_call_payload_outbound(sender, &recipient_wire, &inner_bytes, transport)?;
     let mut env = CallSigEnvelope {
         wire_share: CALL_SHARE.to_string(),
         format_version: CALL_FORMAT_VERSION,
         id: id.to_string(),
         kind,
         ref_id: Some(call_id.to_string()),
-        sender_public_key_hex: sender_hex,
-        recipient_public_key_hex: recipient.to_string(),
+        sender_public_key_hex: sender_wire,
+        recipient_public_key_hex: recipient_wire,
         created_at_ms,
         ciphertext_hex: hex::encode(sealed),
         signature_hex: None,
@@ -192,13 +195,13 @@ pub fn build_call_envelope(
     Ok(env)
 }
 
-pub fn parse_call_envelope(
+pub fn parse_call_envelope_with_transport(
     env: &CallSigEnvelope,
-    my_public_key_hex: &str,
-    my_secret: &SecretKey,
+    local: &DecryptedIdentity,
+    transport: Option<CallOpenTransportCtx<'_>>,
 ) -> Result<ParsedCallSignal, String> {
     verify_call_envelope(env)?;
-    if !envelope_recipient_ok(env, my_public_key_hex) {
+    if !envelope_recipient_ok(env, &local.identity_wire()) {
         return Err("call envelope not addressed to this identity".to_string());
     }
     let call_id = env
@@ -213,7 +216,12 @@ pub fn parse_call_envelope(
     } else {
         let sealed =
             hex::decode(env.ciphertext_hex.trim()).map_err(|e| format!("ciphertext hex: {e}"))?;
-        let plain = open_sealed_secp256k1(my_secret, &sealed)?;
+        let plain = open_call_payload_ciphertext(
+            local,
+            env.sender_public_key_hex.trim(),
+            &sealed,
+            transport,
+        )?;
         if plain.is_empty() {
             Value::Object(Default::default())
         } else {
@@ -230,6 +238,52 @@ pub fn parse_call_envelope(
     })
 }
 
+fn seal_call_payload_outbound(
+    sender: &DecryptedIdentity,
+    recipient_wire: &str,
+    inner_bytes: &[u8],
+    transport: CallSealTransportCtx<'_>,
+) -> Result<Vec<u8>, String> {
+    if inner_bytes == b"{}" {
+        return Ok(Vec::new());
+    }
+    let key = derive_call_sig_transport_message_key(
+        transport.local_sk,
+        transport.peer_pk,
+        &sender.identity_wire(),
+        recipient_wire,
+    )?;
+    let sym = seal_symmetric(&key, inner_bytes)?;
+    let mut sealed = Vec::with_capacity(1 + sym.len());
+    sealed.push(CALL_CIPHER_TRANSPORT_V2);
+    sealed.extend_from_slice(&sym);
+    Ok(sealed)
+}
+
+fn open_call_payload_ciphertext(
+    local: &DecryptedIdentity,
+    sender_identity_wire: &str,
+    sealed: &[u8],
+    transport: Option<CallOpenTransportCtx<'_>>,
+) -> Result<Vec<u8>, String> {
+    if sealed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if sealed.first() != Some(&CALL_CIPHER_TRANSPORT_V2) {
+        return Err("call ciphertext: unsupported cipher prefix".to_string());
+    }
+    let transport = transport.ok_or_else(|| {
+        "call decrypt: transport kem context required for ciphertext".to_string()
+    })?;
+    let key = derive_call_sig_transport_message_key(
+        transport.local_sk,
+        transport.peer_pk,
+        &local.identity_wire(),
+        sender_identity_wire,
+    )?;
+    open_symmetric(&key, &sealed[1..])
+}
+
 pub fn call_envelope_to_frame_bytes(env: &CallSigEnvelope) -> Result<Vec<u8>, String> {
     let json = serde_json::to_vec(env).map_err(|e| format!("encode call envelope: {e}"))?;
     let len = u32::try_from(json.len()).map_err(|_| "call envelope too large".to_string())?;
@@ -243,28 +297,80 @@ pub fn call_envelope_to_frame_bytes(env: &CallSigEnvelope) -> Result<Vec<u8>, St
 mod tests {
     use super::*;
     use crate::create_keystore_v1;
+    use crate::transport_kem_v1::generate_transport_keypair;
+
+    fn transport_pair() -> (StaticSecret, [u8; 32], StaticSecret, [u8; 32]) {
+        let (sk_a, pk_a) = generate_transport_keypair();
+        let (sk_b, pk_b) = generate_transport_keypair();
+        (sk_a, pk_a, sk_b, pk_b)
+    }
 
     #[test]
     fn call_invite_roundtrip() {
         let (_ks_a, alice) = create_keystore_v1("pw", None).unwrap();
         let (_ks_b, bob) = create_keystore_v1("pw2", None).unwrap();
+        let (sk_a, pk_a, sk_b, pk_b) = transport_pair();
         let env = build_call_envelope(
             "sig-1",
             "call-abc",
             CallSigKind::Invite,
-            alice.keypair(),
-            &bob.public_key_hex(),
+            &alice,
+            &bob.identity_wire(),
             serde_json::json!({ "sdp": "v=0" }),
             1_700_000_000_000,
+            CallSealTransportCtx {
+                local_sk: &sk_a,
+                peer_pk: &pk_b,
+            },
         )
         .unwrap();
         let frame = call_envelope_to_frame_bytes(&env).unwrap();
         assert_eq!(frame_wire_share(&frame).unwrap(), CALL_SHARE);
         let env2 = call_envelope_from_frame(&frame).unwrap();
-        let parsed =
-            parse_call_envelope(&env2, &bob.public_key_hex(), bob.secp256k1_secret()).unwrap();
+        let parsed = parse_call_envelope_with_transport(
+            &env2,
+            &bob,
+            Some(CallOpenTransportCtx {
+                local_sk: &sk_b,
+                peer_pk: &pk_a,
+            }),
+        )
+        .unwrap();
         assert_eq!(parsed.call_id, "call-abc");
         assert_eq!(parsed.kind, CallSigKind::Invite);
         assert_eq!(parsed.payload["sdp"], "v=0");
+    }
+
+    #[test]
+    fn outbound_call_uses_transport_cipher() {
+        let (_ks_a, alice) = create_keystore_v1("pw", None).unwrap();
+        let (_ks_b, bob) = create_keystore_v1("pw2", None).unwrap();
+        let (sk_a, pk_a, sk_b, pk_b) = transport_pair();
+        let env = build_call_envelope(
+            "sig-2",
+            "call-x",
+            CallSigKind::Accept,
+            &alice,
+            &bob.identity_wire(),
+            serde_json::json!({ "ok": true }),
+            2,
+            CallSealTransportCtx {
+                local_sk: &sk_a,
+                peer_pk: &pk_b,
+            },
+        )
+        .unwrap();
+        let sealed = hex::decode(&env.ciphertext_hex).unwrap();
+        assert_eq!(sealed.first(), Some(&CALL_CIPHER_TRANSPORT_V2));
+        let parsed = parse_call_envelope_with_transport(
+            &env,
+            &bob,
+            Some(CallOpenTransportCtx {
+                local_sk: &sk_b,
+                peer_pk: &pk_a,
+            }),
+        )
+        .unwrap();
+        assert_eq!(parsed.payload["ok"], true);
     }
 }

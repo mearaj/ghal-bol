@@ -13,6 +13,7 @@ bool isTransientP2pLinkError(String raw) {
   if (r.contains("open_stream")) return true;
   if (r.contains("wait until connected")) return true;
   if (r.contains("try send again shortly")) return true;
+  if (r.contains("transport kem not ready")) return true;
   if (r.contains("stream opening")) return true;
   if (r.contains("dialpeercondition")) return true;
   if (r.contains("no addresses")) return true;

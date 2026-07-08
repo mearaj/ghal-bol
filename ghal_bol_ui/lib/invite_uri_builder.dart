@@ -13,12 +13,13 @@ class GhalBolInviteLinks {
   final String appUri;
 }
 
-/// Format-2 invite URIs: **public key** and optional **peer alias** on both links.
+/// Format-2 invite URIs: **identity wire** and optional **peer alias** on both links.
 GhalBolInviteLinks? buildGhalBolInviteLinks({
   required String publicKeyHex,
   String? peerAlias,
+  String? identityWire,
 }) {
-  final pk = publicKeyHex.trim().toLowerCase();
+  final pk = (identityWire ?? publicKeyHex).trim();
   if (!isValidPublicKeyHex(pk)) return null;
   final inv = GhalBolConnectInvite(
     topic: kDefaultGossipTopic,
@@ -35,12 +36,22 @@ GhalBolInviteLinks? buildGhalBolInviteLinks({
 String? buildGhalBolInviteUri({
   required String publicKeyHex,
   String? peerAlias,
+  String? identityWire,
 }) =>
-    buildGhalBolInviteLinks(publicKeyHex: publicKeyHex, peerAlias: peerAlias)?.httpsUri;
+    buildGhalBolInviteLinks(
+      publicKeyHex: publicKeyHex,
+      peerAlias: peerAlias,
+      identityWire: identityWire,
+    )?.httpsUri;
 
 /// `ghalbol://connect/…`
 String? buildGhalBolInviteAppUri({
   required String publicKeyHex,
   String? peerAlias,
+  String? identityWire,
 }) =>
-    buildGhalBolInviteLinks(publicKeyHex: publicKeyHex, peerAlias: peerAlias)?.appUri;
+    buildGhalBolInviteLinks(
+      publicKeyHex: publicKeyHex,
+      peerAlias: peerAlias,
+      identityWire: identityWire,
+    )?.appUri;

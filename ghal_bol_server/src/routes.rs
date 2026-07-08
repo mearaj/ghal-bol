@@ -1,5 +1,6 @@
 use crate::AppState;
 use crate::auth::{ChallengeStore, verify_registration_signature};
+use crate::identity::{normalize_identity_wire, percent_decode_uri_component};
 use crate::error::{ApiResult, ServerError};
 use crate::presence::{PeerEndpoint, PeerRecord};
 use axum::extract::{Path, Query, State};
@@ -29,7 +30,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .route("/v1/register/challenge", post(register_challenge))
         .route("/v1/register", post(register))
         .route("/v1/heartbeat", post(heartbeat))
-        .route("/v1/peers/{public_key_hex}", get(get_peer))
+        .route("/v1/peers/{identity_wire}", get(get_peer))
         .route("/v1/peers", get(list_peers))
         .with_state(state)
 }
@@ -141,7 +142,7 @@ async fn register_challenge(
     let mut ch = state.challenges.lock().await;
     ch.purge_expired();
     let pending = ch.issue(&req.public_key_hex, state.app.config.challenge_ttl)?;
-    let pk = req.public_key_hex.trim().to_ascii_lowercase();
+    let pk = normalize_identity_wire(&req.public_key_hex)?;
     Ok(Json(ChallengeResponse {
         public_key_hex: pk,
         nonce_hex: hex::encode(pending.nonce),
@@ -172,7 +173,7 @@ async fn register(
     State(state): State<Arc<RouteState>>,
     Json(req): Json<RegisterRequest>,
 ) -> ApiResult<Json<RegisterResponse>> {
-    let pk = req.public_key_hex.trim().to_ascii_lowercase();
+    let pk = normalize_identity_wire(&req.public_key_hex)?;
     let nonce: [u8; 32] = decode_fixed_32(&req.nonce_hex, "nonce_hex")?;
     let sig = hex::decode(req.signature_hex.trim())
         .map_err(|e| ServerError::BadRequest(format!("signature_hex: {e}")))?;
@@ -223,7 +224,7 @@ async fn heartbeat(
     Json(req): Json<HeartbeatRequest>,
 ) -> ApiResult<Json<HeartbeatResponse>> {
     let store = Arc::clone(&state.app.presence);
-    let pk = req.public_key_hex.clone();
+    let pk = normalize_identity_wire(&req.public_key_hex)?;
     let peer = tokio::task::spawn_blocking(move || store.heartbeat(&pk))
         .await
         .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;
@@ -233,11 +234,12 @@ async fn heartbeat(
 
 async fn get_peer(
     State(state): State<Arc<RouteState>>,
-    Path(public_key_hex): Path<String>,
+    Path(identity_wire): Path<String>,
 ) -> ApiResult<Json<PeerRecord>> {
     let store = Arc::clone(&state.app.presence);
     let ttl = state.app.config.presence_ttl;
-    let pk = public_key_hex.clone();
+    let decoded = percent_decode_uri_component(&identity_wire);
+    let pk = normalize_identity_wire(&decoded)?;
     let peer = tokio::task::spawn_blocking(move || store.get(&pk, ttl))
         .await
         .map_err(|e| ServerError::Internal(format!("task join: {e}")))??;

@@ -121,10 +121,7 @@ pub(crate) fn tick_chat_room_session_if_active(session: &SessionState) {
     if !app_ui_visible() || !app_ack_read_enabled() {
         return;
     }
-    let Ok(pid) = peer_id_from_secp256k1_public_key_hex(&fg_pk) else {
-        return;
-    };
-    let Ok(peer_id) = pid.parse::<PeerId>() else {
+    let Some(peer_id) = super::libp2p_peer_for_contact_identity(&fg_pk) else {
         return;
     };
     if !is_live_foreground_peer(peer_id) {

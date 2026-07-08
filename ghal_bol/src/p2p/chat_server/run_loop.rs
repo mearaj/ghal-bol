@@ -97,6 +97,8 @@ pub async fn run_gossip_chat_node_with_std_io(
         net.clone(),
         ghalbol_relay_initial,
     )?);
+    register_active_session(&session);
+    let _active_session_guard = active_session_guard();
     native_log::info(
         "p2p",
         format!(
@@ -565,7 +567,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                         }
                         native_log::info("swarm", format!("dm peer connected {pid}"));
                         session.note_connected(pid);
-                        if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&pid) {
+                        if let Some(pk) = session.signing_pk_for_libp2p_peer(pid) {
                             session.clear_dm_reconnect_urgent(&pk);
                         }
                         session.clear_relay_circuit_dial_backoff(pid);
@@ -601,7 +603,7 @@ pub async fn run_gossip_chat_node_with_std_io(
                                 // Do not tear down an active call here — brief relay/direct churn
                                 // and coord blips recover in seconds; hangup signals end calls.
                                 let _ = events_tx.send(GossipChatEvent::PeerDisconnected(*peer_id));
-                                if let Some(pk) = secp256k1_public_key_hex_from_peer_id(peer_id) {
+                                if let Some(pk) = session.signing_pk_for_libp2p_peer(*peer_id) {
                                     session.refresh_dm_reconnect_urgent(&pk);
                                 }
                                 recover_dm_peer_after_disconnect(session.as_ref(), *peer_id);

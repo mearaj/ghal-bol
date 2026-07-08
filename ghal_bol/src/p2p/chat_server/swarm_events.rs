@@ -352,7 +352,7 @@ fn handle_swarm_event(
                 return;
             }
             if session.is_dm_contact(peer_id) {
-                if let Some(pk) = secp256k1_public_key_hex_from_peer_id(&peer_id) {
+                if let Some(pk) = session.signing_pk_for_libp2p_peer(peer_id) {
                     session.clear_peer_coord_absent_state(&pk);
                     session.clear_dm_reconnect_urgent(&pk);
                 }

@@ -77,7 +77,7 @@ fn lookup_backoff_map() -> &'static Mutex<HashMap<String, CoordLookupBackoff>> {
 /// Keep FFI/Dart `coord_lookup_peer` backoff aligned with `:p2p` session backoff.
 pub fn clear_coord_lookup_backoff_for_pk(public_key_hex: &str) {
     let pk = public_key_hex.trim();
-    if pk.len() != 66 {
+    if !crate::contacts_v1::is_valid_public_key_hex(pk) {
         return;
     }
     if let Ok(mut m) = lookup_backoff_map().lock() {
@@ -88,7 +88,7 @@ pub fn clear_coord_lookup_backoff_for_pk(public_key_hex: &str) {
 /// Mirror `:p2p` `note_coord_lookup_not_found` so duplicate Dart lookups do not fight native upkeep.
 pub fn sync_coord_lookup_peer_not_found(public_key_hex: &str, step_ms: u64, now_ms: i64) {
     let pk = public_key_hex.trim();
-    if pk.len() != 66 {
+    if !crate::contacts_v1::is_valid_public_key_hex(pk) {
         return;
     }
     let step = step_ms.clamp(500, 5_000);
@@ -364,7 +364,7 @@ fn schedule_check_relay_presence_once_impl() {
                 let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
                     return true;
                 };
-                if refresh_relay_presence_from_coord(&ident.public_key_hex()) {
+                if refresh_relay_presence_from_coord(&ident.identity_wire()) {
                     return true;
                 }
                 if crate::wan_coord::local_relay_circuit_listening()
@@ -417,7 +417,7 @@ pub fn try_restore_relay_presence_from_coord() -> bool {
     let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
         return false;
     };
-    refresh_relay_presence_from_coord(&ident.public_key_hex())
+    refresh_relay_presence_from_coord(&ident.identity_wire())
 }
 
 /// GET /v1/peers/self — authoritative whether the relay server still has our circuit.
@@ -1083,7 +1083,7 @@ pub fn ensure_coord_presence_polling() {
     let Ok(ident) = crate::session_runtime::unlocked_identity_clone() else {
         return;
     };
-    start_heartbeat_loop(ident.public_key_hex());
+    start_heartbeat_loop(ident.identity_wire());
 }
 
 /// Drain pending register work and sync endpoint snapshot.
@@ -1211,10 +1211,10 @@ fn endpoints_for_coord_register(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
 
 fn try_register_on_server(
     base: &str,
-    secret: &secp256k1::SecretKey,
-    pk: &str,
+    ident: &crate::DecryptedIdentity,
     endpoints: &[CoordEndpoint],
 ) -> Result<(), String> {
+    let wire = ident.identity_wire();
     let ipv4 = endpoints
         .iter()
         .filter(|e| e.scheme == "tcp" && !e.host.contains(':'))
@@ -1228,9 +1228,9 @@ fn try_register_on_server(
         .map(|e| e.host.as_str())
         .map(str::to_string);
     let client = client_for(base)?;
-    client.register(secret, pk, endpoints, ipv4.as_deref(), ipv6.as_deref())?;
+    client.register(ident, endpoints, ipv4.as_deref(), ipv6.as_deref())?;
     client
-        .lookup(pk)
+        .lookup(&wire)
         .map_err(|e| format!("register HTTP ok but GET /v1/peers failed: {e}"))?;
     Ok(())
 }
@@ -1243,8 +1243,7 @@ fn try_register_presence() -> Result<(), String> {
         Ok(i) => i,
         Err(_) => return Err("identity not unlocked".into()),
     };
-    let pk = ident.public_key_hex();
-    let secret = ident.secp256k1_secret().clone();
+    let wire = ident.identity_wire();
     let endpoints = endpoints_for_coord_register(
         coord_globals()
             .endpoints
@@ -1275,7 +1274,7 @@ fn try_register_presence() -> Result<(), String> {
     let mut registered = HashSet::new();
     let mut last_err = String::new();
     for base in &urls {
-        match try_register_on_server(base, &secret, &pk, &endpoints) {
+        match try_register_on_server(base, &ident, &endpoints) {
             Ok(()) => {
                 any_ok = true;
                 registered.insert(base.clone());
@@ -1284,7 +1283,7 @@ fn try_register_presence() -> Result<(), String> {
                     format!(
                         "registered on {base} — {} endpoint(s) for {} [{}]",
                         endpoints.len(),
-                        &pk[..8.min(pk.len())],
+                        &wire[..wire.len().min(16)],
                         ep_summary
                     ),
                 );
@@ -1316,7 +1315,7 @@ fn try_register_presence() -> Result<(), String> {
     COORD_REGISTERED.store(true, Ordering::Relaxed);
     COORD_CONSEC_FAILS.store(0, Ordering::Relaxed);
     COORD_LAST_OK_MS.store(unix_ms_now(), Ordering::Relaxed);
-    start_heartbeat_loop(pk);
+    start_heartbeat_loop(wire);
     // We are visible on coord — known peers should lookup/dial us; we lookup them on next upkeep.
     crate::p2p::notify_dm_presence_wake();
     Ok(())

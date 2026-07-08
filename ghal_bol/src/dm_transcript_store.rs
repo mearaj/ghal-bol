@@ -37,7 +37,7 @@ fn revision_storage_key(app_namespace: &str, view_key: &str) -> String {
     )
 }
 
-/// Canonical UI view key for a thread — prefer 66-hex public key when the contact is known.
+/// Canonical UI view key for a thread — prefer contact identity wire when known.
 pub fn transcript_view_key(app_namespace: &str, conversation_key: &str) -> String {
     let k = conversation_key.trim();
     if k.is_empty() {
