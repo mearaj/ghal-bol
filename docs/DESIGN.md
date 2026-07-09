@@ -316,6 +316,7 @@ mark_read_ack_confirmed(X)
 | Acks arrive via `ingestP2pEvent` | Do not also full-merge transcript on every `previewChangeCount` for the open room |
 | Delivery ticks | Debounced `mergeTranscriptFromNative(deliveryOnly: true)` on ack polls — not one FFI reload per retry |
 | Never send acks from Dart | Poll refreshes UI only |
+| Identity tab text widgets | `_identityBody`: plain **`Text`** only — no `SelectableText` / `SelectionArea` under hub `IndexedStack`. Dialog `TextEditingController`s owned by **`StatefulWidget` dialog `State`** — never dispose in caller after `showDialog` (§ [Identity tab regression guard](DESIGN.md#identity-tab--show-private-key-dialog-stack--regression-guard); pattern: `invite_paste_dialog.dart`) |
 
 ### Linux desktop — layout sync and read gate
 
@@ -793,6 +794,50 @@ On daemon platforms the hub mounts one [`ChatScreen`](../ghal_bol_ui/lib/chat_sc
 3. `initState` loads transcript when `hubThreadKey` is set even if `activeContact` is briefly null.
 
 **Symptom if broken:** `transcript reload skipped conv=solo` or `conv=solo rows=0` while a room is open; sending in chat A empties chat B on next open; log shows `Contacts list` then missing `transcript reload conv=<pk> rows=N` for the selected peer.
+
+### Identity tab — Show private key dialog stack — regression guard
+
+The Identity tab (`_identityBody` in [`chat_hub_screen.dart`](../ghal_bol_ui/lib/chat_hub_screen.dart)) stays **mounted** in an **`IndexedStack`** while the user is on Chats or More. Dialog chains from that tab (**Show private key**, **Export backup**, import backup) stack `showDialog` on top of widgets that must not hold active text-selection dependents.
+
+**Symptom (debug builds):** Identity → **Show private key** → password → close → red screen:
+
+```text
+A TextEditingController was used after being disposed.
+TextField: …/identity_key_management.dart
+```
+
+Often followed by cascade errors (`_dependents.isEmpty`, dirty widget, deactivated ancestor). See `ghal_bol_ui/flutter_android.log` for a captured trace.
+
+**Root causes (both required fixes):**
+
+1. **Primary — `TextEditingController` dispose race:** `promptAppPassword` (and similar dialogs) created a controller in the caller, passed it to `showDialog`, then called `ctrl.dispose()` immediately when `await showDialog` returned. The dialog route is still animating closed and the `TextField` rebuilds against a disposed controller. **Fix:** controller owned by a **`StatefulWidget` dialog**; dispose only in `State.dispose()` (canonical: [`invite_paste_dialog.dart`](../ghal_bol_ui/lib/invite_paste_dialog.dart), [`identity_key_management.dart`](../ghal_bol_ui/lib/identity_key_management.dart) `_AppPasswordDialog`).
+2. **Secondary — selection widgets under `IndexedStack`:** `SelectableText` / `SelectionArea` on the Identity tab can worsen teardown when dialogs stack. Use plain **`Text`** + copy buttons on `_identityBody`.
+
+**History:**
+
+| When | What broke it | Partial fix | Full fix |
+|------|----------------|-------------|----------|
+| 2026-07 (ml-dsa) | ~4k-char public wire + `SelectionArea` + `SelectableText` | Removed `SelectionArea` only | — |
+| 2026-07 (multi-algo) | `SelectableText` reintroduced on identity body | Plain `Text` on identity fields | — |
+| 2026-07-09 (Android log) | `TextEditingController` disposed after `showDialog` in `promptAppPassword` | — | Stateful password/import/delete dialogs |
+
+ml-dsa public key size made selection issues easy to hit; **secp256k1 still crashed** until the controller lifecycle was fixed.
+
+**Do not reintroduce:**
+
+- `TextEditingController` created in the **caller** of `showDialog` and disposed right after `await showDialog` returns.
+- `SelectableText` or `SelectionArea` on the Identity tab body (`namespace`, `algorithm`, identity wire, PeerId).
+- `SelectableText` in the private-key **result** dialog (use `Text` + **Copy**).
+- Inline private-key reveal on the Identity tab instead of the documented dialog flow ([IDENTITY.md](IDENTITY.md) § Private key visibility).
+
+**Required contract:**
+
+1. [`identity_key_management.dart`](../ghal_bol_ui/lib/identity_key_management.dart): `_AppPasswordDialog`, `_ImportKeystoreBackupDialog`, `promptDeleteIdentityPassword` — controllers disposed in `State.dispose()` only.
+2. [`chat_hub_screen.dart`](../ghal_bol_ui/lib/chat_hub_screen.dart) `_identityBody`: plain **`Text`** for identity fields; copy via **Copy public key** / invitation actions.
+3. **`dismissTextSelectionForDialog(context)`** before identity-tab dialog chains.
+4. Product flow unchanged: **Show private key** → warning → app password → dialog with hex + copy.
+
+**Manual test (debug build):** Identity tab → **Show private key** → enter password → **Close** — no red screen; log must not show `TextEditingController was used after being disposed`. Repeat for **Export backup** and **Delete identity**.
 
 ## P2P lifecycle
 

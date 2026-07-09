@@ -620,44 +620,13 @@ class _IdentityScreenState extends State<IdentityScreen> {
 
   Future<void> _offerDeleteIdentityFromUnlockScreen(BuildContext context) async {
     if (!GhalBolFfi.isDeleteKeystoreAvailable) return;
-    final passCtrl = TextEditingController();
-    final go = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Delete identity?"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              "Removes encrypted keys and saved display names from this device. "
-              "Enter the same password you use to unlock.",
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: passCtrl,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: "Password",
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text("Delete"),
-          ),
-        ],
-      ),
+    final pw = await promptDeleteIdentityPassword(
+      context,
+      body:
+          "Removes encrypted keys and saved display names from this device. "
+          "Enter the same password you use to unlock.",
     );
-    final pw = passCtrl.text.trim();
-    passCtrl.dispose();
-    if (!context.mounted || go != true || pw.isEmpty) return;
+    if (!context.mounted || pw == null) return;
     setState(() => _busy = true);
     try {
       await GhalBolBackground.stopForLogout();

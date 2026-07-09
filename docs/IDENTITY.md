@@ -101,6 +101,15 @@ This limits exposure from casual device access or shoulder surfing.
 2. App password prompt
 3. On success: display 64-hex secret + copy (with warning)
 
+**UI contract (do not regress):** The reveal flow stays **dialog-based** (steps above). Do not move the secret inline on the Identity tab.
+
+The Identity tab is kept alive in an **`IndexedStack`**. Two Flutter pitfalls stack with **Show private key** / export / delete dialogs:
+
+1. **`TextEditingController` dispose race** — disposing a controller in the caller immediately after `await showDialog` while the dialog `TextField` is still tearing down (`TextEditingController was used after being disposed` in `flutter_android.log`). Use a **`StatefulWidget` dialog**; dispose only in `State.dispose()` ([`invite_paste_dialog.dart`](../ghal_bol_ui/lib/invite_paste_dialog.dart)).
+2. **`SelectableText` / `SelectionArea`** on the tab body — can cascade into `_dependents.isEmpty` on dialog pop. Use plain **`Text`** + copy buttons.
+
+**Required:** [`identity_key_management.dart`](../ghal_bol_ui/lib/identity_key_management.dart) `_AppPasswordDialog`; plain `Text` on `_identityBody`; `dismissTextSelectionForDialog` before dialog chains. Full spec: [DESIGN.md § Identity tab regression guard](DESIGN.md#identity-tab--show-private-key-dialog-stack--regression-guard).
+
 ---
 
 ## Export and import

@@ -1352,8 +1352,8 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
-                // No SelectionArea here: large prefixed identity wires + SelectableText
-                // break Flutter selection when password dialogs pop.
+                // Plain Text only — SelectableText/SelectionArea here regresses with
+                // Show private key dialogs (DESIGN.md § Identity tab regression guard).
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1368,14 +1368,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                             ),
                       ),
                       const SizedBox(height: 12),
-                      SelectableText("Namespace: $ns", style: Theme.of(context).textTheme.bodySmall),
+                      Text("Namespace: $ns", style: Theme.of(context).textTheme.bodySmall),
                       const SizedBox(height: 8),
-                      SelectableText("Algorithm: $algo", style: Theme.of(context).textTheme.bodySmall),
+                      Text("Algorithm: $algo", style: Theme.of(context).textTheme.bodySmall),
                       const SizedBox(height: 12),
-                      SelectableText("Identity (share this):\n$wire", style: Theme.of(context).textTheme.bodyMedium),
+                      Text("Identity (share this):\n$wire", style: Theme.of(context).textTheme.bodyMedium),
                       if (_s.libp2pPeerId != null && _s.libp2pPeerId!.isNotEmpty) ...[
                         const SizedBox(height: 12),
-                        SelectableText(
+                        Text(
                           "libp2p PeerId (derived):\n$peer",
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
@@ -1519,44 +1519,13 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       );
       return;
     }
-    final passCtrl = TextEditingController();
-    final go = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Delete identity?"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              "Stops chat and removes encrypted keys plus display-name preferences from this device. "
-              "Enter your unlock password.",
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: passCtrl,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: "Password",
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text("Delete"),
-          ),
-        ],
-      ),
+    final pw = await promptDeleteIdentityPassword(
+      context,
+      body:
+          "Stops chat and removes encrypted keys plus display-name preferences from this device. "
+          "Enter your unlock password.",
     );
-    final pw = passCtrl.text.trim();
-    passCtrl.dispose();
-    if (!context.mounted || go != true || pw.isEmpty) return;
+    if (!context.mounted || pw == null) return;
     await GhalBolBackground.stopForLogout();
     final ns = _s.appNamespace ?? kGhalBolAppNamespace;
     final r = GhalBolFfi.deleteKeystoreVerified(appNamespace: ns, password: pw);

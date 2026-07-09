@@ -6,34 +6,212 @@ import "ghal_bol_constants.dart";
 import "ghal_bol_ffi.dart";
 import "identity_setup_copy.dart";
 
+/// Dismiss focus before stacking dialogs over the Identity tab.
+void dismissTextSelectionForDialog(BuildContext context) {
+  FocusManager.instance.primaryFocus?.unfocus();
+}
+
 /// Prompt for unlock password; returns trimmed text or null if cancelled.
-Future<String?> promptAppPassword(BuildContext context, {required String title}) async {
-  final ctrl = TextEditingController();
-  final go = await showDialog<bool>(
+Future<String?> promptAppPassword(BuildContext context, {required String title}) {
+  dismissTextSelectionForDialog(context);
+  return showDialog<String?>(
     context: context,
     barrierDismissible: false,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
+    builder: (ctx) => _AppPasswordDialog(title: title),
+  );
+}
+
+/// Controller owned by [State] — never dispose outside the dialog route (see DESIGN.md).
+class _AppPasswordDialog extends StatefulWidget {
+  const _AppPasswordDialog({required this.title});
+
+  final String title;
+
+  @override
+  State<_AppPasswordDialog> createState() => _AppPasswordDialogState();
+}
+
+class _AppPasswordDialogState extends State<_AppPasswordDialog> {
+  final _ctrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final pw = _ctrl.text.trim();
+    if (pw.isEmpty) return;
+    Navigator.pop(context, pw);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
       content: TextField(
-        controller: ctrl,
+        controller: _ctrl,
         obscureText: true,
         autofocus: true,
         decoration: const InputDecoration(
           labelText: "App password",
           border: OutlineInputBorder(),
         ),
-        onSubmitted: (_) => Navigator.pop(ctx, true),
+        onSubmitted: (_) => _submit(),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
-        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Continue")),
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        FilledButton(onPressed: _submit, child: const Text("Continue")),
       ],
-    ),
+    );
+  }
+}
+
+class _ImportKeystoreBackupResult {
+  const _ImportKeystoreBackupResult({required this.json, required this.password});
+
+  final String json;
+  final String password;
+}
+
+class _ImportKeystoreBackupDialog extends StatefulWidget {
+  const _ImportKeystoreBackupDialog();
+
+  @override
+  State<_ImportKeystoreBackupDialog> createState() => _ImportKeystoreBackupDialogState();
+}
+
+class _ImportKeystoreBackupDialogState extends State<_ImportKeystoreBackupDialog> {
+  final _jsonCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _jsonCtrl.dispose();
+    _passCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final json = _jsonCtrl.text.trim();
+    final pw = _passCtrl.text;
+    if (json.isEmpty || pw.isEmpty) return;
+    Navigator.pop(context, _ImportKeystoreBackupResult(json: json, password: pw));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text("Import keystore backup"),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              "${IdentitySetupCopy.importPrivateKeyWarningBody}\n\n"
+              "Paste encrypted Ghal Bol keystore backup JSON. Works when no identity exists on this device "
+              "(delete existing identity first).",
+              style: TextStyle(color: Theme.of(context).colorScheme.onSurface, fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _jsonCtrl,
+              maxLines: 6,
+              decoration: const InputDecoration(
+                labelText: "Keystore JSON",
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _passCtrl,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: "App password for this backup",
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        FilledButton(onPressed: _submit, child: const Text("Import")),
+      ],
+    );
+  }
+}
+
+/// Delete-identity confirmation with password — same controller lifecycle as [_AppPasswordDialog].
+Future<String?> promptDeleteIdentityPassword(
+  BuildContext context, {
+  required String body,
+}) {
+  dismissTextSelectionForDialog(context);
+  return showDialog<String?>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => _DeleteIdentityPasswordDialog(body: body),
   );
-  final pw = ctrl.text;
-  ctrl.dispose();
-  if (!context.mounted || go != true || pw.isEmpty) return null;
-  return pw;
+}
+
+class _DeleteIdentityPasswordDialog extends StatefulWidget {
+  const _DeleteIdentityPasswordDialog({required this.body});
+
+  final String body;
+
+  @override
+  State<_DeleteIdentityPasswordDialog> createState() => _DeleteIdentityPasswordDialogState();
+}
+
+class _DeleteIdentityPasswordDialogState extends State<_DeleteIdentityPasswordDialog> {
+  final _ctrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final pw = _ctrl.text.trim();
+    if (pw.isEmpty) return;
+    Navigator.pop(context, pw);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final error = Theme.of(context).colorScheme.error;
+    return AlertDialog(
+      title: const Text("Delete identity?"),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(widget.body),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _ctrl,
+            obscureText: true,
+            decoration: const InputDecoration(
+              labelText: "Password",
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: error),
+          onPressed: _submit,
+          child: const Text("Delete"),
+        ),
+      ],
+    );
+  }
 }
 
 Future<void> showRevealPrivateKeyDialog(BuildContext context) async {
@@ -41,6 +219,7 @@ Future<void> showRevealPrivateKeyDialog(BuildContext context) async {
     _snack(context, "Rebuild native library to enable key reveal.");
     return;
   }
+  dismissTextSelectionForDialog(context);
   final proceed = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -84,7 +263,10 @@ Future<void> showRevealPrivateKeyDialog(BuildContext context) async {
               style: Theme.of(ctx).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
-            SelectableText(r.secretKeyHex!, style: const TextStyle(fontFamily: "monospace", fontSize: 12)),
+            Text(
+              r.secretKeyHex!,
+              style: const TextStyle(fontFamily: "monospace", fontSize: 12),
+            ),
           ],
         ),
       ),
@@ -107,6 +289,7 @@ Future<void> exportKeystoreBackup(BuildContext context) async {
     _snack(context, "Rebuild native library to enable export.");
     return;
   }
+  dismissTextSelectionForDialog(context);
   final proceed = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -145,60 +328,18 @@ Future<void> importKeystoreBackup(BuildContext context, {required void Function(
     _snack(context, "Rebuild native library to enable import.");
     return;
   }
-  final jsonCtrl = TextEditingController();
-  final passCtrl = TextEditingController();
-  final go = await showDialog<bool>(
+  dismissTextSelectionForDialog(context);
+  final payload = await showDialog<_ImportKeystoreBackupResult>(
     context: context,
     barrierDismissible: false,
-    builder: (ctx) => AlertDialog(
-      title: const Text("Import keystore backup"),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              "${IdentitySetupCopy.importPrivateKeyWarningBody}\n\n"
-              "Paste encrypted Ghal Bol keystore backup JSON. Works when no identity exists on this device "
-              "(delete existing identity first).",
-              style: TextStyle(color: Theme.of(ctx).colorScheme.onSurface, fontSize: 13),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: jsonCtrl,
-              maxLines: 6,
-              decoration: const InputDecoration(
-                labelText: "Keystore JSON",
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: passCtrl,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: "App password for this backup",
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
-        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Import")),
-      ],
-    ),
+    builder: (ctx) => const _ImportKeystoreBackupDialog(),
   );
-  final json = jsonCtrl.text.trim();
-  final pw = passCtrl.text;
-  jsonCtrl.dispose();
-  passCtrl.dispose();
-  if (!context.mounted || go != true || json.isEmpty || pw.isEmpty) return;
+  if (!context.mounted || payload == null) return;
 
   final r = GhalBolFfi.importKeystoreJson(
     appNamespace: kGhalBolAppNamespace,
-    password: pw,
-    keystoreJson: json,
+    password: payload.password,
+    keystoreJson: payload.json,
   );
   if (!context.mounted) return;
   if (!r.ok) {

@@ -6,6 +6,8 @@ Thin UI over **`ghal_bol`** (Rust): unlock, hub, chat, QR invites, calls, delive
 
 **Hub transcript thread id:** pass `hubThreadKey: _selectedConversationKey` into `ChatScreen` — not `activeContact` alone (roster row flickers null on reload and caused cross-room history loss; see [DESIGN.md § Hub chat — stable thread id](../docs/DESIGN.md#hub-chat--stable-thread-id-hubthreadkey--regression-guard)).
 
+**Identity tab — Show private key:** no `SelectableText` / `SelectionArea` on `_identityBody`; dialog `TextEditingController`s owned by `StatefulWidget` dialog `State` (see `invite_paste_dialog.dart`); `dismissTextSelectionForDialog` before chains — [DESIGN.md § Identity tab regression guard](../docs/DESIGN.md#identity-tab--show-private-key-dialog-stack--regression-guard). Android trace: `ghal_bol_ui/flutter_android.log`.
+
 | Target | Entry | P2P |
 |--------|--------|-----|
 | Android | `bootstrap_native.dart` | `:p2p` process + JNI |
