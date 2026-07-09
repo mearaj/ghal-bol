@@ -10,7 +10,6 @@ mod endpoint_expand;
 mod error;
 mod godaddy_ddns;
 mod identity;
-pub mod ml_dsa_identity;
 mod presence;
 mod relay_live;
 mod relay_nat;

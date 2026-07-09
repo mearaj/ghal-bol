@@ -8,8 +8,7 @@ abstract final class IdentitySetupCopy {
   static const String identityAlgorithmTitle = "Identity algorithm";
 
   static const String identityAlgorithmHint =
-      "All listed algorithms support P2P chat, calls, and coord on this build. "
-      "ml-dsa-65 uses your PQ signing key for identity and a companion transport key for libp2p.";
+      "All listed algorithms support P2P chat, calls, and coord on this build.";
 
   static const String importPrivateKeyWarningTitle =
       "Cryptocurrency wallet keys are not recommended";

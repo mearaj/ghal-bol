@@ -14,8 +14,6 @@ pub enum IdentityAlgorithm {
     Ed25519,
     #[serde(rename = "ecdsa-p256")]
     EcdsaP256,
-    #[serde(rename = "ml-dsa-65")]
-    MlDsa65,
 }
 
 impl IdentityAlgorithm {
@@ -29,7 +27,6 @@ impl IdentityAlgorithm {
             Self::Secp256k1 => "secp256k1",
             Self::Ed25519 => "ed25519",
             Self::EcdsaP256 => "ecdsa-p256",
-            Self::MlDsa65 => "ml-dsa-65",
         }
     }
 
@@ -38,7 +35,6 @@ impl IdentityAlgorithm {
             "secp256k1" => Ok(Self::Secp256k1),
             "ed25519" => Ok(Self::Ed25519),
             "ecdsa-p256" => Ok(Self::EcdsaP256),
-            "ml-dsa-65" => Ok(Self::MlDsa65),
             other => Err(format!("unknown identity algorithm: {other}")),
         }
     }
@@ -57,7 +53,6 @@ impl IdentityAlgorithm {
             IdentityAlgorithm::Secp256k1,
             IdentityAlgorithm::Ed25519,
             IdentityAlgorithm::EcdsaP256,
-            IdentityAlgorithm::MlDsa65,
         ]
     }
 
@@ -78,9 +73,6 @@ impl IdentityAlgorithm {
             Self::EcdsaP256 => {
                 "NIST P-256 identity — full chat, calls, and P2P on this build."
             }
-            Self::MlDsa65 => {
-                "Post-quantum ML-DSA-65 signatures with a companion libp2p transport key for P2P."
-            }
         }
     }
 
@@ -89,7 +81,6 @@ impl IdentityAlgorithm {
         match self {
             Self::Secp256k1 | Self::Ed25519 => "32-byte secret as 64 hex characters",
             Self::EcdsaP256 => "P-256 secret as even-length hex",
-            Self::MlDsa65 => "32-byte seed as 64 hex characters",
         }
     }
 }
@@ -170,7 +161,6 @@ pub fn validate_public_key(algorithm: IdentityAlgorithm, public_key: &[u8]) -> R
                 .map_err(|e| format!("ecdsa-p256 public key: {e}"))?;
             Ok(())
         }
-        IdentityAlgorithm::MlDsa65 => crate::ml_dsa_identity::validate_public_key_bytes(public_key),
     }
 }
 
@@ -204,7 +194,6 @@ pub fn public_key_from_secret(
                 .map_err(|e| format!("ecdsa-p256 secret: {e}"))?;
             Ok(sk.verifying_key().to_encoded_point(false).as_bytes().to_vec())
         }
-        IdentityAlgorithm::MlDsa65 => crate::ml_dsa_identity::public_key_bytes_from_seed(secret),
     }
 }
 
@@ -220,7 +209,6 @@ pub fn generate_secret(algorithm: IdentityAlgorithm) -> Result<Vec<u8>, String> 
             let sk = p256::ecdsa::SigningKey::random(&mut OsRng);
             Ok(sk.to_bytes().to_vec())
         }
-        IdentityAlgorithm::MlDsa65 => Ok(crate::ml_dsa_identity::generate_secret_seed().to_vec()),
     }
 }
 
@@ -329,12 +317,8 @@ mod tests {
     }
 
     #[test]
-    fn ml_dsa65_wire_roundtrip() {
-        let (_ks, id) =
-            crate::create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::MlDsa65, None).unwrap();
-        let wire = id.identity_wire();
-        assert!(wire.starts_with("ml-dsa-65:"));
-        let parsed = Identity::parse(&wire).unwrap();
-        assert_eq!(parsed.to_wire(), wire);
+    fn ml_dsa65_wire_rejects() {
+        assert!(Identity::parse("ml-dsa-65:deadbeef").is_err());
+        assert!(IdentityAlgorithm::from_wire_id("ml-dsa-65").is_err());
     }
 }

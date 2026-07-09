@@ -85,7 +85,7 @@ See [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md).
 
 ### Identity wire (path + JSON `public_key_hex`)
 
-The **same identity wire** appears in JSON bodies (`public_key_hex`) and as the **lookup path segment**. **Algorithm prefix is optional only for `secp256k1`** (bare hex); `ed25519`, `ecdsa-p256`, `ml-dsa-65`, etc. **must** include `algorithm:`.
+The **same identity wire** appears in JSON bodies (`public_key_hex`) and as the **lookup path segment**. **Algorithm prefix is optional only for `secp256k1`** (bare hex); `ed25519`, `ecdsa-p256`, etc. **must** include `algorithm:`.
 
 ```text
 GET /v1/peers/{[algo:]public_key_hex}
@@ -113,7 +113,7 @@ Client-side: `ghal_bol/src/coord.rs` uses `normalize_contact_identity_wire()` (s
 | GET | `/v1/relay` |
 | GET | `/v1/relay?remap=true` | UPnP-dynamic relay only (not shipping on coord1): after client bootstrap TCP failure — remove stale WAN port, map fresh (bool query — **`true`/`false`**, not `1`/`0`; storm-throttled) |
 
-Register signature: canonical bytes `ghal_bol:register:v1\n<nonce_hex>\n<identity_wire>` (identity wire lowercased), signed with the identity key — **secp256k1** ECDSA DER, **ed25519**, **ecdsa-p256** DER, or **ml-dsa-65** per algorithm (`ghal_bol_server/src/auth.rs`).
+Register signature: canonical bytes `ghal_bol:register:v1\n<nonce_hex>\n<identity_wire>` (identity wire lowercased), signed with the identity key — **secp256k1** ECDSA DER, **ed25519**, or **ecdsa-p256** DER per algorithm (`ghal_bol_server/src/auth.rs`).
 
 **Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: **`tcp` / `quic` with globally routable IPv4** (the peer’s own inbound DM listen). **Rejected (400):** `/p2p-circuit`, RFC1918 LAN, CGNAT-only, relay bootstrap host:port from `GET /v1/relay`. The co-located relay **upserts** `/p2p-circuit` when the client’s reservation is accepted (identify `agent_version` `ghal_bol/<ver>;pk=<identity_wire>` — bare secp256k1 hex or `algorithm:hex`). When the reservation ends, the server removes **only** the circuit row — public-TCP rows from `POST` stay. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
 

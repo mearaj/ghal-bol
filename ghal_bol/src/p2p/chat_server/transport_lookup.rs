@@ -45,7 +45,7 @@ pub fn transport_kem_for_peer(
     Some((StaticSecret::from(seed), peer_pk))
 }
 
-/// Resolve libp2p `PeerId` for a contact identity wire (embeddable algos, or registered ml-dsa row).
+/// Resolve libp2p `PeerId` for a contact identity wire (embeddable algos, or registered row).
 pub fn libp2p_peer_for_contact_identity(identity_wire: &str) -> Option<PeerId> {
     let wire = crate::public_key_util::normalize_contact_identity_wire(identity_wire).ok()?;
     if let Ok(peer) = crate::peer_id_util::peer_id_from_identity_wire(&wire) {

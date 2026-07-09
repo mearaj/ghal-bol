@@ -2,7 +2,7 @@
 
 use libp2p::identity::PeerId;
 use libp2p::multihash::Multihash;
-use libp2p_identity::{ecdsa, ed25519, secp256k1, Keypair, PublicKey};
+use libp2p_identity::{ecdsa, ed25519, secp256k1, PublicKey};
 
 use crate::identity::{Identity, IdentityAlgorithm};
 
@@ -33,13 +33,10 @@ pub fn libp2p_public_key_from_identity(
                 .map_err(|e| format!("ecdsa-p256 public key: {e}"))?;
             Ok(PublicKey::from(ec))
         }
-        IdentityAlgorithm::MlDsa65 => Err(
-            "ml-dsa-65 product identity uses a separate libp2p transport key".to_string(),
-        ),
     }
 }
 
-/// Identity wire → libp2p `PeerId` when the algorithm embeds in PeerId (not ml-dsa-65).
+/// Identity wire → libp2p `PeerId` when the algorithm embeds in PeerId.
 pub fn peer_id_from_identity_wire(wire: &str) -> Result<PeerId, String> {
     let id = Identity::parse(wire)?;
     let pk = libp2p_public_key_from_identity(id.algorithm, &id.public_key)?;
@@ -98,7 +95,7 @@ fn wire_from_inline_identity_multihash(digest: &[u8]) -> Option<String> {
 
 /// Find a contact identity wire whose derived libp2p PeerId matches `peer`.
 ///
-/// Required for ecdsa-p256 (SHA-256 PeerId) and ml-dsa transport PeerIds.
+/// Required for ecdsa-p256 (SHA-256 PeerId).
 pub fn identity_wire_matching_peer_id<'a>(
     peer: &PeerId,
     candidates: impl IntoIterator<Item = &'a str>,
@@ -119,18 +116,6 @@ pub fn identity_wire_matching_peer_id<'a>(
 #[cfg(test)]
 pub fn peer_id_uses_hashed_public_key(peer: &PeerId) -> bool {
     peer.as_ref().code() == MULTIHASH_SHA256_CODE
-}
-
-/// Deterministic libp2p transport key for ml-dsa-65 product identity (ed25519 Noise).
-pub fn ml_dsa_transport_keypair_from_seed(seed: &[u8]) -> Result<Keypair, String> {
-    use sha2::Sha256;
-    let hk = hkdf::Hkdf::<Sha256>::new(None, seed);
-    let mut ed_seed = [0u8; 32];
-    hk.expand(b"ghal_bol_ml_dsa_libp2p_transport_v1", &mut ed_seed)
-        .map_err(|e| format!("ml-dsa transport hkdf: {e}"))?;
-    let secret = ed25519::SecretKey::try_from_bytes(&mut ed_seed)
-        .map_err(|e| format!("ml-dsa transport ed25519 secret: {e}"))?;
-    Ok(Keypair::from(ed25519::Keypair::from(secret)))
 }
 
 #[cfg(test)]
@@ -176,17 +161,6 @@ mod tests {
         assert_eq!(
             identity_wire_matching_peer_id(&peer, [wire.as_str()]).as_deref(),
             Some(wire.as_str())
-        );
-    }
-
-    #[test]
-    fn ml_dsa_transport_keypair_deterministic() {
-        let seed = [7u8; 32];
-        let a = ml_dsa_transport_keypair_from_seed(&seed).unwrap();
-        let b = ml_dsa_transport_keypair_from_seed(&seed).unwrap();
-        assert_eq!(
-            a.public().to_peer_id().to_string(),
-            b.public().to_peer_id().to_string()
         );
     }
 }

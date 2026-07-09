@@ -34,12 +34,6 @@ impl DecryptedIdentity {
                 let sig: EcdsaSig = EcdsaSigner::sign(signing, msg);
                 Ok(sig.to_bytes().to_vec())
             }
-            IdentityAlgorithm::MlDsa65 => {
-                let signing = self
-                    .ml_dsa65_signing_key()
-                    .ok_or_else(|| "ml-dsa-65 signing key unavailable".to_string())?;
-                crate::ml_dsa_identity::sign_message(signing, msg)
-            }
         }
     }
 }
@@ -85,9 +79,6 @@ pub fn verify_identity_signature(
                 .map_err(|e| format!("ecdsa-p256 verify: {e}"))?;
             Ok(())
         }
-        IdentityAlgorithm::MlDsa65 => {
-            crate::ml_dsa_identity::verify_message(&id.public_key, msg, signature)
-        }
     }
 }
 
@@ -114,12 +105,4 @@ mod tests {
         verify_identity_signature(&id.identity_wire(), msg, &sig).unwrap();
     }
 
-    #[test]
-    fn ml_dsa65_sign_verify_roundtrip() {
-        let (_ks, id) =
-            create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::MlDsa65, None).unwrap();
-        let msg = b"ghal_bol envelope canonical";
-        let sig = id.sign_message(msg).unwrap();
-        verify_identity_signature(&id.identity_wire(), msg, &sig).unwrap();
-    }
 }

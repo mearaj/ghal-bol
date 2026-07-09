@@ -1285,12 +1285,24 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     );
   }
 
+  /// Session unlock may omit [GhalBolIdentityResult.identityAlgorithm]; parse wire per MULTI_ALGO.md.
+  String _resolvedIdentityAlgorithmLabel(String wire) {
+    final fromSession = _s.identityAlgorithm?.trim();
+    if (fromSession != null && fromSession.isNotEmpty) return fromSession;
+    if (wire != "—") {
+      final parsed = GhalBolFfi.identityParse(wire);
+      if (parsed["ok"] == true) {
+        final a = parsed["algorithm"]?.toString().trim();
+        if (a != null && a.isNotEmpty) return a;
+      }
+    }
+    return "secp256k1";
+  }
+
   Widget _identityBody(BuildContext context) {
     final wire = _localIdentityWire() ?? "—";
     final peer = _s.libp2pPeerId ?? "—";
-    final algo = _s.identityAlgorithm?.trim().isNotEmpty == true
-        ? _s.identityAlgorithm!.trim()
-        : "secp256k1";
+    final algo = _resolvedIdentityAlgorithmLabel(wire);
     final ns = _s.appNamespace ?? "—";
     final colorScheme = Theme.of(context).colorScheme;
 
@@ -1340,8 +1352,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
-                child: SelectionArea(
-                  child: Column(
+                // No SelectionArea here: large prefixed identity wires + SelectableText
+                // break Flutter selection when password dialogs pop.
+                child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text("Your identity", style: Theme.of(context).textTheme.titleLarge),
@@ -1411,7 +1424,6 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                         ),
                       ],
                     ],
-                  ),
                 ),
               ),
             ),

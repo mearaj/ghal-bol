@@ -119,10 +119,6 @@ pub fn verify_registration_signature(
             EcdsaVerifier::verify(&vk, &challenge, &sig)
                 .map_err(|e| ServerError::Unauthorized(format!("ecdsa-p256 verify: {e}")))?;
         }
-        IdentityAlgorithm::MlDsa65 => {
-            crate::ml_dsa_identity::verify_message(&id.public_key, &challenge, signature)
-                .map_err(|e| ServerError::Unauthorized(e))?;
-        }
     }
     Ok(())
 }
@@ -152,18 +148,6 @@ mod tests {
         let challenge = registration_challenge_bytes(&nonce, &wire);
         let sig = signing.sign(&challenge);
         verify_registration_signature(&wire, &nonce, &sig.to_bytes()).unwrap();
-    }
-
-    #[test]
-    fn ml_dsa65_roundtrip_sign_verify() {
-        let seed = crate::ml_dsa_identity::generate_secret_seed();
-        let sk = crate::ml_dsa_identity::signing_key_from_seed_bytes(&seed).unwrap();
-        let pk = crate::ml_dsa_identity::public_key_bytes_from_seed(&seed).unwrap();
-        let wire = format!("ml-dsa-65:{}", hex::encode(&pk));
-        let nonce = [11u8; 32];
-        let challenge = registration_challenge_bytes(&nonce, &wire);
-        let sig = crate::ml_dsa_identity::sign_message(&sk, &challenge).unwrap();
-        verify_registration_signature(&wire, &nonce, &sig).unwrap();
     }
 
     #[test]

@@ -69,7 +69,6 @@ mod identity_ffi;
 mod identity_sign;
 mod invite_ffi;
 mod keystore_v1;
-mod ml_dsa_identity;
 #[cfg(target_os = "linux")]
 mod linux_desktop_launch;
 #[cfg(target_os = "linux")]

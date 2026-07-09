@@ -7,11 +7,9 @@ use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
-use ml_dsa::{MlDsa65, SigningKey};
 use zeroize::Zeroize;
 
 use crate::identity::{self, Identity, IdentityAlgorithm};
-use crate::ml_dsa_identity;
 
 const KEYSTORE_V1_AAD_PREFIX: &[u8] = b"ghal_bol.keystore.v1";
 
@@ -77,10 +75,6 @@ enum IdentityKeyMaterial {
     },
     EcdsaP256 {
         signing: p256::ecdsa::SigningKey,
-    },
-    MlDsa65 {
-        signing: SigningKey<MlDsa65>,
-        transport_keypair: Keypair,
     },
 }
 
@@ -150,9 +144,6 @@ impl DecryptedIdentity {
                     .map_err(|e| Libp2pIdentityError::SecretKey(format!("{e}")))?;
                 Ok(Keypair::from(libp2p_identity::ecdsa::Keypair::from(sk)))
             }
-            IdentityKeyMaterial::MlDsa65 {
-                transport_keypair, ..
-            } => Ok(transport_keypair.clone()),
         }
     }
 
@@ -171,13 +162,6 @@ impl DecryptedIdentity {
     pub(crate) fn ecdsa_p256_signing_key(&self) -> Option<&p256::ecdsa::SigningKey> {
         match &self.material {
             IdentityKeyMaterial::EcdsaP256 { signing } => Some(signing),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn ml_dsa65_signing_key(&self) -> Option<&SigningKey<MlDsa65>> {
-        match &self.material {
-            IdentityKeyMaterial::MlDsa65 { signing, .. } => Some(signing),
             _ => None,
         }
     }
@@ -277,18 +261,6 @@ fn decrypted_from_secret(
                 .map_err(|_| KeystoreError::Invalid("invalid ecdsa-p256 secret"))?;
             IdentityKeyMaterial::EcdsaP256 { signing }
         }
-        IdentityAlgorithm::MlDsa65 => {
-            let signing = ml_dsa_identity::signing_key_from_seed_bytes(secret)
-                .map_err(|e| KeystoreError::InvalidMsg(e))?;
-            let transport_keypair =
-                crate::peer_id_util::ml_dsa_transport_keypair_from_seed(secret).map_err(|e| {
-                    KeystoreError::InvalidMsg(e)
-                })?;
-            IdentityKeyMaterial::MlDsa65 {
-                signing,
-                transport_keypair,
-            }
-        }
     };
     Ok(DecryptedIdentity {
         algorithm,
@@ -387,15 +359,6 @@ pub fn parse_secret_bytes_for_algorithm(
             p256::ecdsa::SigningKey::from_slice(&bytes)
                 .map_err(|_| KeystoreError::Invalid("invalid ecdsa-p256 secret"))?;
         }
-        IdentityAlgorithm::MlDsa65 => {
-            if bytes.len() != ml_dsa_identity::SEED_LEN {
-                return Err(KeystoreError::Invalid(
-                    "ml-dsa-65 seed must be 32 bytes (64 hex chars)",
-                ));
-            }
-            ml_dsa_identity::signing_key_from_seed_bytes(&bytes)
-                .map_err(|_| KeystoreError::Invalid("invalid ml-dsa-65 seed"))?;
-        }
     }
     Ok(bytes)
 }
@@ -455,9 +418,6 @@ pub fn secret_key_hex_from_identity(id: &DecryptedIdentity) -> String {
         IdentityKeyMaterial::Secp256k1 { secret, .. } => hex::encode(secret.secret_bytes()),
         IdentityKeyMaterial::Ed25519 { signing } => hex::encode(signing.to_bytes()),
         IdentityKeyMaterial::EcdsaP256 { signing } => hex::encode(signing.to_bytes()),
-        IdentityKeyMaterial::MlDsa65 { signing, .. } => {
-            hex::encode(signing.to_seed().as_slice())
-        }
     }
 }
 
@@ -562,20 +522,6 @@ mod tests {
         assert_eq!(id.algorithm(), IdentityAlgorithm::Ed25519);
         assert_eq!(id.public_key_hex(), id2.public_key_hex());
         assert!(id.identity_wire().starts_with("ed25519:"));
-    }
-
-    #[test]
-    fn ml_dsa65_roundtrip() {
-        let (ks, id) =
-            create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::MlDsa65, None).unwrap();
-        assert_eq!(
-            ks.identity_algorithm.as_deref(),
-            Some("ml-dsa-65")
-        );
-        let id2 = unlock_keystore_v1("pw", &ks).unwrap();
-        assert_eq!(id.algorithm(), IdentityAlgorithm::MlDsa65);
-        assert_eq!(id.public_key_bytes(), id2.public_key_bytes());
-        assert!(id.identity_wire().starts_with("ml-dsa-65:"));
     }
 
     #[test]

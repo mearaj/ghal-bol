@@ -28,7 +28,7 @@ impl DmPeer {
         })
     }
 
-    /// Bind identity wire to a known libp2p peer (ml-dsa-65 / coord-resolved peers).
+    /// Bind identity wire to a known libp2p peer (coord-resolved peers when needed).
     pub fn from_identity_wire_with_peer(identity_wire: String, peer_id: PeerId) -> Self {
         Self {
             peer_id,
@@ -205,7 +205,7 @@ pub enum OutboundCmd {
     /// UI opened a chat with this contact (or closed when `None`).
     SetForegroundPeer {
         peer_id: Option<PeerId>,
-        /// Contact identity wire — used to resolve transport PeerId (ml-dsa-65).
+        /// Contact identity wire — used to resolve transport PeerId.
         identity_wire: Option<String>,
         /// Monotonic id — drop stale close/open when Flutter/Daemon RPCs reorder on the outbound queue.
         generation: u64,

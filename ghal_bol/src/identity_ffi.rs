@@ -149,10 +149,9 @@ pub unsafe extern "C" fn ghal_bol_ffi_identity_normalize(
 #[cfg(test)]
 mod identity_ffi_tests {
     use super::*;
-    use crate::identity::IdentityAlgorithm;
 
     #[test]
-    fn supported_algorithms_include_ml_dsa65() {
+    fn supported_algorithms_are_secp_ed25519_ecdsa_p256() {
         let raw = unsafe {
             let ptr = ghal_bol_ffi_identity_supported_algorithms();
             let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
@@ -166,23 +165,15 @@ mod identity_ffi_tests {
             .iter()
             .filter_map(|a| a.get("id").and_then(|x| x.as_str()))
             .collect();
-        assert!(ids.contains(&"ml-dsa-65"));
-        let ml = algos
-            .iter()
-            .find(|a| a["id"] == "ml-dsa-65")
-            .unwrap();
-        assert_eq!(ml["p2p_ready"], true);
+        assert_eq!(ids, vec!["secp256k1", "ed25519", "ecdsa-p256"]);
+        assert!(!ids.contains(&"ml-dsa-65"));
     }
 
     #[test]
-    fn validate_import_secret_ml_dsa_seed() {
-        let (_ks, id) =
-            crate::create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::MlDsa65, None)
-                .unwrap();
-        let seed_hex = crate::secret_key_hex_from_identity(&id);
+    fn validate_import_secret_rejects_ml_dsa65() {
         let cfg = serde_json::json!({
             "algorithm": "ml-dsa-65",
-            "secret_hex": seed_hex,
+            "secret_hex": "00".repeat(64),
         });
         let cfg_s = CString::new(cfg.to_string()).unwrap();
         let raw = unsafe {
@@ -192,6 +183,6 @@ mod identity_ffi_tests {
             s
         };
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["ok"], true);
+        assert_ne!(v["ok"], true);
     }
 }

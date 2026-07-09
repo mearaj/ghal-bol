@@ -2470,7 +2470,7 @@ impl SessionState {
 
     /// Target PeerId to open `/ghal-bol/msg/1.0.0` for this contact.
     ///
-    /// Derived from the validated identity wire when embeddable; ml-dsa uses the registered
+    /// Derived from the validated identity wire when embeddable; otherwise uses the registered
     /// transport PeerId hint. A stale `peer_id` beside the key must never override crypto identity.
     fn resolve_send_peer(&self, signing_pk_hex: &str) -> Option<PeerId> {
         let pk = signing_pk_hex.trim();

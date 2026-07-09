@@ -11,7 +11,6 @@ pub enum IdentityAlgorithm {
     Secp256k1,
     Ed25519,
     EcdsaP256,
-    MlDsa65,
 }
 
 impl IdentityAlgorithm {
@@ -20,7 +19,6 @@ impl IdentityAlgorithm {
             "secp256k1" => Ok(Self::Secp256k1),
             "ed25519" => Ok(Self::Ed25519),
             "ecdsa-p256" => Ok(Self::EcdsaP256),
-            "ml-dsa-65" => Ok(Self::MlDsa65),
             other => Err(ServerError::BadRequest(format!(
                 "unknown identity algorithm: {other}"
             ))),
@@ -32,7 +30,6 @@ impl IdentityAlgorithm {
             Self::Secp256k1 => "secp256k1",
             Self::Ed25519 => "ed25519",
             Self::EcdsaP256 => "ecdsa-p256",
-            Self::MlDsa65 => "ml-dsa-65",
         }
     }
 }
@@ -127,11 +124,6 @@ fn validate_public_key(algorithm: IdentityAlgorithm, public_key: &[u8]) -> Resul
                 ServerError::BadRequest(format!("ecdsa-p256 public key: {e}"))
             })?;
         }
-        IdentityAlgorithm::MlDsa65 => {
-            crate::ml_dsa_identity::validate_public_key_bytes(public_key).map_err(|e| {
-                ServerError::BadRequest(e)
-            })?;
-        }
     }
     Ok(())
 }
@@ -159,5 +151,10 @@ mod tests {
         let id = Identity::parse(wire).unwrap();
         assert_eq!(normalize_identity_wire(wire).unwrap(), wire);
         assert_eq!(id.algorithm, IdentityAlgorithm::Ed25519);
+    }
+
+    #[test]
+    fn ml_dsa65_wire_rejects() {
+        assert!(Identity::parse("ml-dsa-65:deadbeef").is_err());
     }
 }

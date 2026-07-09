@@ -1,6 +1,6 @@
 # Multi-algorithm identity
 
-**Status:** Phase 1–5 **client complete** for `secp256k1`, `ed25519`, `ecdsa-p256`, and **`ml-dsa-65`** (PQ signing + companion libp2p transport key). **P2P chat/calls** run for **all four** algorithms. **DM text**, **call signaling**, and **call audio/video** use **transport KEM v2** after `TransportKemHello`.
+**Status:** Phase 1–5 **client complete** for `secp256k1`, `ed25519`, and `ecdsa-p256`. **P2P chat/calls** run for **all three** algorithms. **DM text**, **call signaling**, and **call audio/video** use **transport KEM v2** after `TransportKemHello`.
 
 **Canonical user-facing overview:** [IDENTITY.md](IDENTITY.md). **This document** is the technical spec for multi-algorithm identity, the identity vs transport/E2E split, and what is implemented vs planned.
 
@@ -12,7 +12,7 @@ Ghal Bol identities are **cryptographic public keys**. The **`algorithm:` prefix
 
 **Goals:**
 
-- Support multiple public-key algorithms (`secp256k1`, `ed25519`, `ecdsa-p256`, `ml-dsa-65`, …) without free-form algorithm strings.
+- Support multiple public-key algorithms (`secp256k1`, `ed25519`, `ecdsa-p256`, …) without free-form algorithm strings.
 - **Implicit `secp256k1`:** identity strings with **no** `algorithm:` prefix are defined to use **`secp256k1`** (bare hex = secp256k1 public key).
 - **Separate identity from transport/E2E:** the identity key is for discovery and connectivity lookup; message and media confidentiality use **session transport keys** (same general approach as call media today — HKDF + symmetric AES-GCM).
 - Stay **transport-agnostic** at the identity layer: validation and storage live in `ghal_bol` with per-algorithm crypto crates. The current P2P stack may use libp2p internally; that is **not** an identity dependency and is not guaranteed long-term.
@@ -50,7 +50,7 @@ Identity := [ algorithm ":" ] public_key_hex
 secp256k1:02a1b2…            # valid — explicit secp256k1
 ed25519:9f86d081…            # valid — ed25519
 ecdsa-p256:02…               # valid — ecdsa-p256
-ml-dsa-65:7c2a…              # valid — ml-dsa-65 (when implemented)
+ml-dsa-65:7c2a…              # invalid — unknown algorithm prefix (removed: ~4k-char public wire breaks QR/invites/UI)
 rsa2048:deadbeef…            # invalid — unknown algorithm prefix
 ed25519:02a1b2…              # invalid — if hex fails ed25519 codec
 ```
@@ -92,7 +92,6 @@ Stable wire constants (kebab-case). Unknown ids → reject when a prefix is pres
 | `secp256k1` | **Shipping** | **Implicit default** when prefix omitted. Identity, envelope signing, coord registration/lookup, libp2p PeerId derivation. |
 | `ed25519` | **Shipping** | Identity, signing, coord, libp2p PeerId derivation, full P2P. |
 | `ecdsa-p256` | **Shipping** | Identity, signing, coord, libp2p PeerId derivation, full P2P. |
-| `ml-dsa-65` | **Shipping** | Post-quantum **signatures** (ML-DSA-65). Companion ed25519 libp2p transport key; full P2P via transport KEM. |
 
 Implement validation with **standard crypto libraries per algorithm** in `ghal_bol` — **not** `libp2p-identity`.
 
@@ -163,11 +162,10 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Item | Status |
 |------|--------|
 | Implicit `secp256k1` bare-hex identity (contacts, invites, coord, DM envelopes) | **Implemented** |
-| `Identity` parse/format/validate (`identity.rs`) | **Implemented** (all four algorithms) |
+| `Identity` parse/format/validate (`identity.rs`) | **Implemented** (all three algorithms) |
 | Keystore `identity_algorithm` optional field (absent → secp256k1) | **Implemented** |
 | Keystore create/unlock secp256k1 (implicit — field omitted on disk) | **Implemented** |
 | Keystore create/unlock ed25519 / ecdsa-p256 | **Implemented** |
-| Keystore create/unlock `ml-dsa-65` | **Implemented** (32-byte seed) |
 | Per-algorithm public key validate/encode (standalone crypto crates) | **Implemented** (`secp256k1` via `secp256k1` crate; `ed25519`/`ecdsa-p256` via Dalek/P-256) |
 | Invites / contacts / coord keyed by full `Identity` string (incl. algo prefix) | **Implemented** (`connect_invite_v1`, `contacts_v1`, `coord.rs` URL-encode) |
 | FFI `ghal_bol_ffi_identity_*` + Dart `GhalBolFfi.identityParse` | **Implemented** |
@@ -175,17 +173,19 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | DM outbound / inbound text | **Transport v2 only** — requires exchanged hello before send; decrypt `0x03` only |
 | Call signaling transport keys | **Implemented** — `CALL_CIPHER_TRANSPORT_V2` (`0x04`) after `TransportKemHello` (`call_sig_v1.rs`, `transport_kem_v1.rs`) |
 | Call media transport binding | **Implemented** — `derive_call_media_keys_from_transport` (`call_media_key.rs`) |
-| Envelope signatures per identity algorithm | **Implemented** (`identity_sign.rs` — all four algorithms) |
+| Envelope signatures per identity algorithm | **Implemented** (`identity_sign.rs` — all three algorithms) |
 | UI: identity algorithm picker at create | **Implemented** (metadata + validation via `ghal_bol_ffi_identity_*`) |
 | UI: QR with prefixed identity | **Implemented** — Rust + FFI; hub/share/chat/bootstrap use `identityWire` |
 | Reveal private key shows algorithm | **Implemented** (`reveal_secret_key_hex` + UI) |
 | Migration tooling for existing stores | **Implemented** — `list_contacts` normalizes identity wires on read/write |
-| Coord register challenge + signature verify | **Implemented** — all four algorithms (`ghal_bol_server/auth.rs`, client `coord_register_auth.rs`) |
-| Coord agent `pk=` binding | **Implemented** — identify `agent_version` parses full identity wire (all four algorithms) via `agent_pk.rs` |
+| Coord register challenge + signature verify | **Implemented** — all three algorithms (`ghal_bol_server/auth.rs`, client `coord_register_auth.rs`) |
+| Coord agent `pk=` binding | **Implemented** — identify `agent_version` parses full identity wire (all three algorithms) via `agent_pk.rs` |
 
 **Explicitly not required for the identity layer:** libp2p multi-key identity, PeerId derivation per algorithm, libp2p feature flags for identity.
 
-**P2P chat/calls** run for **all four** identity algorithms (`p2p_ready` for each). **ml-dsa-65** uses a deterministic companion ed25519 libp2p transport key derived from the PQ seed.
+**P2P chat/calls** run for **all three** identity algorithms (`p2p_ready` for each).
+
+**Removed algorithms:** `ml-dsa-65` was dropped — ML-DSA-65 public keys are ~3900 hex chars (~2700 base58), which breaks QR invites, connect URIs, and identity UI. Wires with `ml-dsa-65:` prefix are rejected at parse time. Existing keystores with that algorithm must be deleted and recreated with a supported algorithm.
 
 ---
 
@@ -220,8 +220,7 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 
 - **Golden rule 7 (E2E):** Payloads remain end-to-end encrypted; target path uses **transport session keys**, not sealing to identity pubkey.
 - **Signatures:** Identity key authenticates sender on envelopes; transport keys protect confidentiality.
-- **`ml-dsa-65`:** Signing/auth only; PQ does not replace transport-layer confidentiality.
-- **Unknown algorithm prefix** when `:` is present → hard reject. Only **missing** prefix implies `secp256k1`.
+- **Unknown algorithm prefix** when `:` is present → hard reject. Only **missing** prefix implies `secp256k1`. Includes removed ids such as `ml-dsa-65`.
 - **Do not conflate** today’s libp2p transport internals (PeerId, Noise) with this identity spec.
 
 ---
