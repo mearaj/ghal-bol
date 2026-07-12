@@ -6,11 +6,24 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 
 ## Goals
 
-- **Direct peer-to-peer** text between people who already know each other (QR / link handoff).
-- **No server-side chat history** — each device keeps its own transcript.
+- **End-to-end encrypted text** between contacts — **WAN** via [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) (temporary mailbox); **LAN** via libp2p mDNS/direct TCP when both peers share a LAN.
+- **Voice/video calls** via libp2p (WAN relay + LAN) — realtime P2P sessions; see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
+- **No server-side chat history** — each device keeps its own transcript; delivery server stores ciphertext only until recipient ack (then deletes payload).
 - **Recipient-authority** delivery and read state — the sender does not invent ticks.
-- **Resilience** — sender retries **text** until acked; recipient retries **acks** until the stream accepts them.
-- **Thin UI** — Flutter handles navigation and rendering; **`ghal_bol`** owns crypto, **libp2p** transport, outbox, **all ack send/retry**, and persistence. Flutter **polls** only to refresh UI from native stores.
+- **Resilience** — WAN text survives recipient offline periods; LAN/call paths use libp2p upkeep.
+- **Thin UI** — Flutter handles navigation and rendering; **`ghal_bol_core`** owns crypto, delivery client, libp2p (LAN + calls), and persistence.
+
+### Why pure P2P WAN text was dropped
+
+Early designs routed **all** text over libp2p (coord + relay). That failed the product requirement that **a message must reach a peer even when they are offline or on mobile data behind CGNAT**:
+
+- Both sides had to be online simultaneously for relay DM streams to deliver text.
+- Outbox/resync over WAN was fragile during handover and did not behave like a mailbox.
+- Thousands of stale contacts could starve coord lookup for reachable peers.
+
+**WAN text** now uses the delivery server (E2E ciphertext only — same identity keys as chat). **libp2p** remains for **LAN text** (optional fast path when `contact_has_lan_p2p_text_path`) and **all call media/signaling**. Privacy principle unchanged: servers assist availability; only sender and recipient decrypt.
+
+Set `GHAL_BOL_DELIVERY_URL` in app env for WAN text. Without it, text works **LAN-only** via libp2p.
 
 ## Layer split
 
@@ -33,11 +46,12 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
          shared on-disk stores (contacts_v1.json, chat_transcript_v1.json)
 ```
 
-**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `libghal_bol.so` for identity and store I/O over FFI. Both processes must use the **same** data directory and `app_namespace`. One **namespace root** per build holds keystore, prefs, and `ghal_bol/` (contacts, transcript): Linux `~/.local/share/com.ghalbol.debug/` (debug) or `~/.local/share/com.ghalbol/` (release); Android `{app_flutter}/com.ghalbol.debug/` (debug) or `{app_flutter}/` (release). See [IDENTITY.md](IDENTITY.md).
+**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_core_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `lib_ghal_bol_core.so` for identity and store I/O over FFI. Both processes must use the **same** data directory and `app_namespace`. One **namespace root** per build holds keystore, prefs, and `ghal_bol/` (contacts, transcript): Linux `~/.local/share/com.ghalbol.debug/` (debug) or `~/.local/share/com.ghalbol/` (release); Android `{app_flutter}/com.ghalbol.debug/` (debug) or `{app_flutter}/` (release). See [IDENTITY.md](IDENTITY.md).
 
 | Concern | Owner |
 |---------|--------|
-| libp2p listen/dial, streams, outbox, ack send/retry | `chat_server.rs`, `p2p_runtime.rs` (in **:p2p** / daemon) |
+| libp2p listen/dial, LAN text streams, call streams, LAN outbox/acks | `chat_server.rs`, `p2p_runtime.rs` (in **:p2p** / daemon) |
+| WAN text mailbox (upload, push, acks) | `delivery_runtime.rs`, `delivery_client.rs` |
 | Coord endpoint → dial helpers | `coord_runtime.rs`, `dm_transport/` |
 | Envelope crypto | `msg_v1.rs`, `transport_kem_v1.rs`, `offline_seal_v1.rs` (auxiliary FFI only) |
 | Apply `dm_message` → contacts + transcript | `dm_event_handler.rs` (on **`p2p_poll`** in the P2P process) |
@@ -65,7 +79,8 @@ This document is the **single design reference** for how Ghal Bol is meant to wo
 
 | Channel | E2E mechanism | Keys |
 |---------|----------------|------|
-| **Text DM** | `ghal_bol_msg_v1` sealed inner JSON | Ephemeral ECDH + AES-GCM to recipient pubkey; signed envelope |
+| Text DM (WAN) | `ghal_bol_delivery` + `delivery_msg_v1` | E2E envelope; server stores ciphertext only |
+| Text DM (LAN) | `ghal_bol_msg_v1` on libp2p stream | Ephemeral ECDH + AES-GCM; P2P acks |
 | **Call signaling** (invite, video_on/off, …) | `ghal_bol_call_v1` | Same seal + signature on DM stream |
 | **Call media** (audio + in-call video) | Per-frame AES-GCM seal on libp2p substreams | `call_media_key.rs`: ECDH(local secret, peer `public_key_hex`) + HKDF(`call_id`, both pubkeys); see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md), [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) |
 
@@ -102,7 +117,22 @@ Users must **never** see delivery or read ticks that the local device has not ea
 - Emitting a poll/UI event for every wire ack retry when transcript did not change.
 - Merging duplicate transcript rows in Dart that hide missing native acks.
 
-**Right:** show exactly what is in the native transcript after poll/FFI merge, with monotonic-only updates (pending → delivered → read). All LAN and WAN paths write to the **same** transcript store ([Unified message state (E)](#unified-message-state-e--single-source-of-truth-2026-06-17)); `read` never downgrades to `delivered` when duplicate acks arrive on different paths.
+**Right:** show exactly what is in the native transcript after poll/FFI merge, with monotonic-only updates. All LAN and WAN paths write to the **same** transcript store ([Unified message state (E)](#unified-message-state-e--single-source-of-truth-2026-06-17)); `read` never downgrades to `delivered` when duplicate acks arrive on different paths.
+
+### Delivery mode — outbound ticks (WAN text)
+
+When **`GHAL_BOL_DELIVERY_URL`** is set, chat text does **not** use libp2p `ack_received` / `ack_read`. Outbound ticks follow [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) § “Outbound ticks”:
+
+| UI | Transcript | Meaning |
+|----|------------|---------|
+| Clock / no tick | `pending` | Not confirmed on server |
+| Single black ✓ | `sent` | Server accepted upload |
+| Double black ✓✓ | `delivered` | Recipient got the message |
+| Double blue ✓✓ | `read` | Recipient read in open room |
+
+**Authority:** `sent` comes from **server** `message.upload.ok` (not sender self-promotion on tap-send). `delivered` and `read` come from **recipient** signals relayed by the server (`inbox.ack`, `inbox.read`). Flutter maps transcript `delivery` in `chat_screen.dart` — never promotes ticks in Dart.
+
+**P2P DM (no delivery URL):** unchanged — `pending` → single black at `delivered` (`ack_received`) → double blue at `read` (`ack_read`). Voice/video/call signaling stay on libp2p regardless.
 
 ## Message state — intent and how Ghal Bol implements it
 
@@ -418,7 +448,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Legacy transcript note:** Rows written while the loose confirm loop was active may still show `read_ack_sent: true` without the peer ever getting a blue tick. **New** messages after this fix follow the normative confirm loop. Repairing old rows is optional data hygiene, not required for new chat.
 
-**Code:** `ghal_bol/src/p2p/chat_server/chat_room_session.rs`, `outbox_acks.rs` (`dispatch_read_ack_pass`, `seed_read_acks_for_peer_from_transcript`), `frames.rs`, `ghal_bol/src/dm_event_handler.rs` (`inbound_transcript_lookup_keys`, `apply_inbound_ack`). Tests: `apply_inbound_text_poll_replay_peer_id_bucket_no_double_unread`, `msg_v1::ack_received_includes_received_at_ms_in_signature`.
+**Code:** `ghal_bol_core/src/p2p/chat_server/chat_room_session.rs`, `outbox_acks.rs` (`dispatch_read_ack_pass`, `seed_read_acks_for_peer_from_transcript`), `frames.rs`, `ghal_bol_core/src/dm_event_handler.rs` (`inbound_transcript_lookup_keys`, `apply_inbound_ack`). Tests: `apply_inbound_text_poll_replay_peer_id_bucket_no_double_unread`, `msg_v1::ack_received_includes_received_at_ms_in_signature`.
 
 #### Fixed 2026-06-29 — single tick after peer read, transcript order, background outbox
 
@@ -467,7 +497,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 1. **Device boots** → `BootReceiver.onReceive()` checks `hasKeystore()` (looks for `keystore_v1.json` under `NativeStorage.dataRoot`). If found, starts `GhalBolP2pService` via `startForegroundService`.
 2. **Service starts** → `onStartCommand` runs normal setup (wake lock, multicast lock, daemon thread, connectivity callbacks), then calls `postUnlockNotificationIfNeeded()`.
-3. **Unlock notification** → posted on `ghalbol_unlock` channel (`IMPORTANCE_HIGH` for heads-up) with `PendingIntent` to `MainActivity`. Title: "Ghal Bol", body: "Enter your password to start receiving messages". `setAutoCancel(true)`.
+3. **Unlock notification** → posted on `ghal_bol_unlock` channel (`IMPORTANCE_HIGH` for heads-up) with `PendingIntent` to `MainActivity`. Title: "Ghal Bol", body: "Enter your password to start receiving messages". `setAutoCancel(true)`.
 4. **User taps notification** (or opens app manually) → `MainActivity` starts → Flutter shows `IdentityScreen` → user enters password → FFI unlock + daemon unlock RPC → P2P starts.
 5. **Notification dismissed** → `cancelUnlockNotification()` called from `chat_hub_screen.dart` on hub bootstrap, and from `GhalBolP2pService` on logout stop.
 
@@ -512,7 +542,7 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 
 #### Linux desktop — daemon auto-start and unlock notification
 
-**Problem:** After a system reboot or fresh login, `ghal_bol_daemon` is not running. The user must manually open the app to start receiving messages.
+**Problem:** After a system reboot or fresh login, `ghal_bol_core_daemon` is not running. The user must manually open the app to start receiving messages.
 
 **Solution:** XDG autostart entry + daemon-side unlock notification (same UX as the Android flow).
 
@@ -526,13 +556,13 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 
 4. **User sees unlock screen** → enters password → daemon gets the `unlock` RPC → P2P starts (stale `unlock_wake` cleared on successful unlock).
 
-5. **Grace period prevents false wakes:** Flutter touches `$XDG_RUNTIME_DIR/ghalbol/ui_present` as soon as the shell starts. During grace the daemon also records if the UI was ever present — if the user opened the app and closed it without unlocking, the end-of-grace auto-wake is **skipped** (they already engaged; not nagged again). If the app is still open at grace end, auto-wake is also skipped. **One auto-wake per daemon start** when the user never opened the app. Dismissing the fallback notification does **not** re-open the app; only tapping **Open** does. **Does not** call `GhalBolUiSession`, change read gates, or auto-unlock.
+5. **Grace period prevents false wakes:** Flutter touches `$XDG_RUNTIME_DIR/ghal_bol/ui_present` as soon as the shell starts. During grace the daemon also records if the UI was ever present — if the user opened the app and closed it without unlocking, the end-of-grace auto-wake is **skipped** (they already engaged; not nagged again). If the app is still open at grace end, auto-wake is also skipped. **One auto-wake per daemon start** when the user never opened the app. Dismissing the fallback notification does **not** re-open the app; only tapping **Open** does. **Does not** call `GhalBolUiSession`, change read gates, or auto-unlock.
 
 **Namespace detection (portable):** On unlock, Flutter writes `Environment=GHAL_BOL_APP_NAMESPACE=…` into the XDG autostart desktop entry. The daemon resolves the GTK application id via `GHAL_BOL_APP_NAMESPACE` when set, else release (`com.ghalbol`) or debug (`com.ghalbol.debug`) keystore on disk.
 
 **Systemd alternative:** `scripts/ghal-bol-daemon.user.service` is still available for users who prefer `systemctl --user enable`. The daemon unlock wake works the same way regardless of how it was started.
 
-**Code:** `linux_desktop_launch.rs`, `app_paths::detect_keystore_app_namespace`, `daemon/paths.rs` (`unlock_wake`), `ghal_bol_daemon.rs` (`spawn_unlock_reminder`), `p2p_event_bridge.dart` (`startLinuxWakePollIfNeeded`), `ghal_bol_daemon_client_io.dart` (`installLinuxAutostart`), `bootstrap_native.dart` (early wake poll).
+**Code:** `linux_desktop_launch.rs`, `app_paths::detect_keystore_app_namespace`, `daemon/paths.rs` (`unlock_wake`), `ghal_bol_core_daemon.rs` (`spawn_unlock_reminder`), `p2p_event_bridge.dart` (`startLinuxWakePollIfNeeded`), `ghal_bol_core_daemon_client_io.dart` (`installLinuxAutostart`), `bootstrap_native.dart` (early wake poll).
 
 ### Regression symptoms (treat as bugs)
 
@@ -583,11 +613,11 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 
 ## UI integrator contract (daemon-owned)
 
-**Authority:** The background node (`ghal_bol_daemon` on Linux, Android `:p2p` / `GhalBolP2pService`) owns product behaviour — P2P, outbox, ack policy, transcript merge on poll, network truth, coord/WAN recovery, call teardown when the UI session ends. **`ghal_bol_ui` is reference integrator #1**, not the spec — any app may replace it using the same contract. See **[DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md)** (precompiled daemon + SDK, multi-integrator isolation).
+**Authority:** The background node (`ghal_bol_core_daemon` on Linux, Android `:p2p` / `GhalBolP2pService`) owns product behaviour — P2P, outbox, ack policy, transcript merge on poll, network truth, coord/WAN recovery, call teardown when the UI session ends. **`ghal_bol_ui` is reference integrator #1**, not the spec — any app may replace it using the same contract. See **[DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md)** (precompiled daemon + SDK, multi-integrator isolation).
 
-Integrators must speak only the contract in [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs) (Rust) and [`daemon_client_api.dart`](../ghal_bol_ui/lib/daemon_client_api.dart) (Dart mirror). Rust integrators use `ghal_bol::daemon::{IntegratorConfig, DaemonClient}`. Do not invent parallel policy in the UI (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
+Integrators must speak only the contract in [`DaemonMethod`](../ghal_bol_core/src/daemon/client_api.rs) (Rust) and [`daemon_client_api.dart`](../ghal_bol_ui/lib/daemon_client_api.dart) (Dart mirror). Rust integrators use `ghal_bol_core::daemon::{IntegratorConfig, DaemonClient}`. Do not invent parallel policy in the UI (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
 
-**Wire:** Newline-delimited JSON on the Unix socket: `{ "id", "method", "params" }` → `{ "id", "result" }` or `{ "id", "error" }`. Method names are stable literals from [`DaemonMethod`](../ghal_bol/src/daemon/client_api.rs).
+**Wire:** Newline-delimited JSON on the Unix socket: `{ "id", "method", "params" }` → `{ "id", "result" }` or `{ "id", "error" }`. Method names are stable literals from [`DaemonMethod`](../ghal_bol_core/src/daemon/client_api.rs).
 
 ### UI → daemon (JSON-RPC methods)
 
@@ -625,7 +655,7 @@ Full enum: `DaemonMethod::ALL` in `client_api.rs` (36 methods). New RPCs **must*
 
 Common kinds: `DaemonPollEventKind` in `client_api.rs`.
 
-**Runtime wake files** (`$XDG_RUNTIME_DIR/ghalbol/` on Linux; Android equivalent under app files):
+**Runtime wake files** (`$XDG_RUNTIME_DIR/ghal_bol/` on Linux; Android equivalent under app files):
 
 | File | `UiWakeKind` | Daemon writes when | Integrator action |
 |------|--------------|-------------------|-------------------|
@@ -640,7 +670,7 @@ Common kinds: `DaemonPollEventKind` in `client_api.rs`.
 - **Linux inactive** → integrator must **not** call `setVisible(false)` while chat room open (read ticks) — see § UI session contract.
 - **Android inactive** → `setVisible(false)` — no new read receipts while room stays in stack.
 
-**Dual surface on Linux:** Keystore/contacts may use in-process FFI in the UI process while P2P runs in `ghal_bol_daemon`. Both share the same data dir after unlock; integrators must not duplicate P2P policy in FFI-only code paths on daemon platforms.
+**Dual surface on Linux:** Keystore/contacts may use in-process FFI in the UI process while P2P runs in `ghal_bol_core_daemon`. Both share the same data dir after unlock; integrators must not duplicate P2P policy in FFI-only code paths on daemon platforms.
 
 ### Multiple integrators on one device
 
@@ -650,7 +680,7 @@ Each integrator app uses its own **`app_namespace`** (keystore/data dir) and **n
 
 ## UI session contract (integrator app ↔ native P2P)
 
-**Scope:** `ghal_bol` (and `:p2p` / daemon) — **not** `ghal_bol_server`. The coord server never knows whether the UI is foreground; it only stores dialable endpoints. Any app integrating `ghal_bol` must drive this contract.
+**Scope:** `ghal_bol` (and `:p2p` / daemon) — **not** `ghal_bol_coord`. The coord server never knows whether the UI is foreground; it only stores dialable endpoints. Any app integrating `ghal_bol` must drive this contract.
 
 **Problem this solves:** Read receipts, foreground peer, and “app visible” were three separate RPC flags (`set_app_ack_read_enabled`, `set_foreground_peer`, `set_app_ui_visible`). They could drift (P2P recover re-enabled read without visibility; Android `inactive` left read on; defaults were `ack_read=true`). That caused **regressions** — wrong blue ticks, leave drain broken, or ack storms when one flag was fixed in isolation.
 
@@ -892,9 +922,10 @@ Peer A                          Peer B
 | Outbound queue | Rust `:p2p` | in-memory outbox + `dm_transcript_v1` pending rows |
 | Transcript lines | Rust **E** | `dm_transcript_store.rs` → `chat_transcript_v1.json` |
 | Inbound text | Rust **E** | `append_if_new` — dedupe by `message_id` |
-| Outbound delivery ticks | Rust **E** | `patch_outgoing_delivery` — **monotonic** rank: `sent` < `delivered` < `read` |
+| Outbound delivery ticks | Rust **E** | `patch_outgoing_delivery` — **monotonic** rank: `pending` < `sent` < `delivered` < `read` (delivery mode uses all four; P2P DM skips `sent`) |
 | Inbound read-ack sent flag | Rust **E** | `patch_inbound_read_ack_sent_for_thread` |
-| Ack send/retry | Rust | `chat_server.rs` — not Flutter |
+| Ack send/retry (P2P DM) | Rust `chat_server.rs` | `ack_received` / `ack_read` on `/ghal-bol/msg/1.0.0` — not Flutter |
+| Read ack send/retry (delivery mode) | Rust `delivery_read_acks.rs` | `inbox.read` when read gate open; leave backlog via frozen `chat_room_exit_at_ms` |
 | Wire mux | Rust | **One** live `/ghal-bol/msg/1.0.0` stream per contact when possible; frames from either link feed the same handler |
 
 **Merge rules (invariant):**
@@ -930,11 +961,11 @@ If sends stay `queued` / `not connected yet`, the break is in the **native chain
 
 ### Background listener (`:p2p` / daemon)
 
-**Android:** `GhalBolP2pService` in process **`:p2p`** (foreground + multicast lock). JSON-RPC on `filesDir/.../ghalbol/p2p.sock`. Same `configure_android_data_directory` path as Flutter (`getApplicationDocumentsDirectory`).
+**Android:** `GhalBolP2pService` in process **`:p2p`** (foreground + multicast lock). JSON-RPC on `filesDir/.../ghal_bol/p2p.sock`. Same `configure_android_data_directory` path as Flutter (`getApplicationDocumentsDirectory`).
 
 **Android screen off:** FGS + wake lock are necessary but not always sufficient. Hub unlock runs **`AndroidBackgroundReadiness`** (battery optimization, unused-app pause, OEM autostart) **before** P2P start — see § “Fixed 2026-07-05 — Android background readiness”.
 
-**Linux desktop:** **`ghal_bol_daemon`** under `libexec/`. Socket: `$XDG_RUNTIME_DIR/ghalbol/<app_namespace>/p2p.sock` (`GHAL_BOL_APP_NAMESPACE` on spawn). Override with `GHAL_BOL_DAEMON_SOCKET` / `GHAL_BOL_RUNTIME_DIR`. See [DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md).
+**Linux desktop:** **`ghal_bol_core_daemon`** under `libexec/`. Socket: `$XDG_RUNTIME_DIR/ghal_bol/<app_namespace>/p2p.sock` (`GHAL_BOL_APP_NAMESPACE` on spawn). Override with `GHAL_BOL_DAEMON_SOCKET` / `GHAL_BOL_RUNTIME_DIR`. See [DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md).
 
 **Both:**
 
@@ -944,7 +975,7 @@ If sends stay `queued` / `not connected yet`, the break is in the **native chain
 - Hub pause / leave room: clear **conversation** foreground (`setForegroundConversation`) for read-ack policy — not the Android foreground service.
 - Logout / delete identity: `p2p_stop` + lock.
 
-**Do not** run `scripts/sync_ghal_bol_native_for_flutter.sh` while the Linux app holds an open daemon socket (stops `ghal_bol_daemon` → `Broken pipe`). Android native rebuild uses `pack_android_workspace_jni_libs.sh` only.
+**Do not** run `scripts/sync_ghal_bol_native_for_flutter.sh` while the Linux app holds an open daemon socket (stops `ghal_bol_core_daemon` → `Broken pipe`). Android native rebuild uses `pack_android_workspace_jni_libs.sh` only.
 
 ### First identity create → P2P bootstrap (code path only)
 
@@ -999,7 +1030,7 @@ When two contacts are both online the link must stay **steady** and recover inst
 | Layer | Linux desktop | Android |
 |-------|---------------|---------|
 | **UI** | Flutter main process | Flutter main process |
-| **P2P + calls** | `ghal_bol_daemon` (`libexec/`) | `:p2p` (`GhalBolP2pService`) |
+| **P2P + calls** | `ghal_bol_core_daemon` (`libexec/`) | `:p2p` (`GhalBolP2pService`) |
 | **Survives UI exit?** | **Yes** — daemon keeps libp2p for DM/acks | **Yes** — `:p2p` keeps libp2p for DM/acks |
 | **Must end call when UI gone?** | **Yes** | **Yes** |
 
@@ -1024,7 +1055,7 @@ Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p
 ### Incoming call while UI hidden (Linux)
 
 - OS notification is shown by **daemon** (`incoming_call_notify.rs`), not only GTK in Flutter.
-- Tap must **present** the window: D-Bus `Application.Activate` + **`incoming_call_wake`** file under `$XDG_RUNTIME_DIR/ghalbol/`.
+- Tap must **present** the window: D-Bus `Application.Activate` + **`incoming_call_wake`** file under `$XDG_RUNTIME_DIR/ghal_bol/`.
 - Flutter poll bridge **consumes** the wake file (`p2p_take_incoming_call_wake`) and calls `CallIncomingAlert.presentWindow()` + `CallController.onAppForeground()`.
 
 ### Regression checklist (manual — two devices)
@@ -1201,11 +1232,11 @@ Transcript survives restart; native re-seeds outbox and read-ack queues from dis
 | Design (this file) | `docs/DESIGN.md` |
 | DM wire + acks | `docs/GHAL_BOL_DM_MSG_V1.md` |
 | URI / QR | `docs/GHAL_BOL_URI_SCHEME.md` |
-| Stream node + ack send | `ghal_bol/src/p2p/chat_server.rs` |
-| P2P FFI + poll | `ghal_bol/src/p2p_runtime.rs`, `p2p_ffi.rs` |
-| Daemon RPC | `ghal_bol/src/daemon/server.rs` |
-| Event → stores | `ghal_bol/src/dm_event_handler.rs` |
-| Contacts / transcript | `ghal_bol/src/contacts_v1.rs`, `dm_transcript_store.rs` |
+| Stream node + ack send | `ghal_bol_core/src/p2p/chat_server.rs` |
+| P2P FFI + poll | `ghal_bol_core/src/p2p_runtime.rs`, `p2p_ffi.rs` |
+| Daemon RPC | `ghal_bol_core/src/daemon/server.rs` |
+| Event → stores | `ghal_bol_core/src/dm_event_handler.rs` |
+| Contacts / transcript | `ghal_bol_core/src/contacts_v1.rs`, `dm_transcript_store.rs` |
 | Hub / foreground | `ghal_bol_ui/lib/chat_hub_screen.dart` |
 | Chat UI (display) | `ghal_bol_ui/lib/chat_screen.dart` |
 | P2P start / dm_peers | `ghal_bol_ui/lib/p2p_network_coordinator.dart` |

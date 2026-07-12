@@ -56,6 +56,21 @@ String? shortUserP2pError(String raw) {
   if (r.contains("own device")) {
     return "This is your own device.";
   }
+  if (r.contains("ws connect") ||
+      r.contains("ws closed") ||
+      r.contains("ws read") ||
+      r.contains("ws send") ||
+      r.contains("ws auth") ||
+      r.contains("delivery error") ||
+      r.contains("ghal_bol_delivery_url")) {
+    if (r.contains("404")) {
+      return "Message service unavailable. Try again in a moment.";
+    }
+    if (r.contains("timeout") || r.contains("timed out")) {
+      return "Message service is slow to respond. Try again.";
+    }
+    return "Couldn't send your message. Check internet and try again.";
+  }
 
   var s = trimmed;
   for (final prefix in <String>[

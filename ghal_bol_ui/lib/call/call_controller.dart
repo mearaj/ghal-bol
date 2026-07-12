@@ -1012,7 +1012,7 @@ class CallController {
       final err = r["error"]?.toString() ?? "Could not start audio";
       CallFlowLog.issue(
         "native_voice_failed",
-        check: "native lib rebuilt (ghal_bol_ffi_p2p_call_media); daemon synced",
+        check: "native lib rebuilt (ghal_bol_core_ffi_p2p_call_media); daemon synced",
         detail: err,
       );
       statusMessage = "Audio error — $err";
@@ -1054,7 +1054,7 @@ class CallController {
       final err = r["error"]?.toString() ?? "Could not start video";
       CallFlowLog.issue(
         "native_video_failed",
-        check: "native lib rebuilt (ghal_bol_ffi_p2p_call_video); daemon synced",
+        check: "native lib rebuilt (ghal_bol_core_ffi_p2p_call_video); daemon synced",
         detail: err,
       );
       return;
@@ -1380,7 +1380,7 @@ class CallController {
     // Android: full-screen notification is posted from `:p2p` when the invite arrives.
 
     if (defaultTargetPlatform == TargetPlatform.linux) {
-      // Visible: in-app ring only. Hidden: `incoming_call_notify` in ghal_bol_daemon.
+      // Visible: in-app ring only. Hidden: `incoming_call_notify` in ghal_bol_core_daemon.
       return;
     }
 

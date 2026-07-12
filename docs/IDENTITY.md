@@ -21,7 +21,7 @@ The system does not require phone numbers, email addresses, or centralized accou
 
 - Public identity: bare secp256k1 hex (66 chars) or prefixed form per [MULTI_ALGO.md](MULTI_ALGO.md)
 - Private export: 64 hex chars for secp256k1 devices (other algorithms: raw secret hex via native reveal)
-- On disk: `keystore_v1.json` — Argon2id + ChaCha20-Poly1305 (`ghal_bol/src/keystore_v1.rs`)
+- On disk: `keystore_v1.json` — Argon2id + ChaCha20-Poly1305 (`ghal_bol_core/src/keystore_v1.rs`)
   - Optional `identity_algorithm` field (`secp256k1`, `ed25519`, `ecdsa-p256`, …). **Omitted or empty → implicit `secp256k1`** (definition — same rule as wire identity).
   - New non-secp256k1 keystores set `identity_algorithm` explicitly.
 
@@ -34,12 +34,21 @@ Storage root — one namespace directory per build; keystore, prefs, and `ghal_b
 
 Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v1.json`, `ghal_bol/chat_transcript_v1.json`. Debug vs release on Android are separate package ids (`com.ghalbol.debug` vs `com.ghalbol`), so separate `app_flutter` trees.
 
+### Global alias vs local alias
+
+| Field | Where | Purpose |
+|-------|--------|---------|
+| **`global_alias`** | Connect invite wire v3 (`format_version: 3`) | Peer-chosen name shared on the wire when pairing; not unique; may seed a new contact |
+| **`display_alias`** | `contacts_v1.json` per device | Local roster label only; never sent as authoritative identity |
+
+Coord and delivery servers identify peers by **identity wire** (public key), not alias. See [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
+
 **Linux — do not confuse app data with the local coord server:**
 
 | Path | Owner | Contents |
 |------|-------|----------|
 | `~/.local/share/com.ghalbol.debug/` | Debug **app** (`flutter run`) | Keystore, contacts, transcript for debug builds |
-| `~/.local/share/com.ghalbol.coord/ghalbol_server/` | **Coord server** (home or GCP) | `coord.db`, `relay_ed25519.key` |
+| `~/.local/share/com.ghal_bol.coord/ghal_bol_coord/` | **Coord server** (home or GCP) | `coord.db`, `relay_ed25519.key` |
 
 The debug app does **not** write identity or chat stores to `com.ghalbol/` unless you run a release build. There is no automatic migration between debug and release namespaces — re-pair or import identity when switching builds.
 
@@ -74,7 +83,7 @@ Use cases: device migration, multi-device setup, recovery from a **Ghal Bol** ba
 
 If a keystore already exists, import fails until the user **deletes identity** on that device.
 
-**Failed first-time setup:** If create or import fails after the user chose an app password, the app removes any partial `keystore_v1.json` (`ghal_bol_ffi_reset_first_time_identity`) so they can pick a **new password** and try again. The P2P daemon is not allowed to create a keystore before the UI finishes first-time setup (that would block password retry).
+**Failed first-time setup:** If create or import fails after the user chose an app password, the app removes any partial `keystore_v1.json` (`ghal_bol_core_ffi_reset_first_time_identity`) so they can pick a **new password** and try again. The P2P daemon is not allowed to create a keystore before the UI finishes first-time setup (that would block password retry).
 
 ### Cryptocurrency wallet keys (not recommended)
 
@@ -153,12 +162,12 @@ Servers assist presence and endpoint discovery; they do not issue or own messagi
 
 | Action | UI | Native FFI |
 |--------|-----|------------|
-| Create / unlock | Unlock screen | `ghal_bol_ffi_create_or_unlock_identity` |
-| Import hex secret | Unlock → Import key | `ghal_bol_ffi_import_identity_from_secret_hex` |
-| Import keystore file | Unlock → Import backup | `ghal_bol_ffi_import_keystore_json` |
-| Reveal private key | Identity → Show private key | `ghal_bol_ffi_reveal_secret_key_hex` |
-| Export backup | Identity → Export backup | `ghal_bol_ffi_export_keystore_json` |
-| Delete identity | Unlock / More | `ghal_bol_ffi_delete_keystore` |
+| Create / unlock | Unlock screen | `ghal_bol_core_ffi_create_or_unlock_identity` |
+| Import hex secret | Unlock → Import key | `ghal_bol_core_ffi_import_identity_from_secret_hex` |
+| Import keystore file | Unlock → Import backup | `ghal_bol_core_ffi_import_keystore_json` |
+| Reveal private key | Identity → Show private key | `ghal_bol_core_ffi_reveal_secret_key_hex` |
+| Export backup | Identity → Export backup | `ghal_bol_core_ffi_export_keystore_json` |
+| Delete identity | Unlock / More | `ghal_bol_core_ffi_delete_keystore` |
 
 Rebuild native after API changes: `sync_ghal_bol_native_for_flutter.sh` (desktop) or `pack_android_workspace_jni_libs.sh` (Android). See [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Local dev stack.
 
@@ -172,7 +181,7 @@ Rebuild native after API changes: `sync_ghal_bol_native_for_flutter.sh` (desktop
 
 **Secure local storage (today)** — Password-derived key encrypts the identity blob on disk. **Planned:** tighter integration with Android Keystore / iOS Keychain or Secure Enclave for key material wrapping.
 
-**Minimal trust** — `ghal_bol_server` sees registration metadata (public key, endpoints, heartbeats), not private keys or transcript bodies.
+**Minimal trust** — `ghal_bol_coord` sees registration metadata (public key, endpoints, heartbeats), not private keys or transcript bodies.
 
 **Logging** — `AppLog` redacts `private_key_hex` and similar fields in RPC traces.
 

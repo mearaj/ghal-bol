@@ -1,6 +1,6 @@
 import "package:ghal_bol_ui/ghal_bol_ffi.dart";
 
-import "ghalbol_connect_invite.dart";
+import "ghal_bol_connect_invite.dart";
 import "identity_display_name.dart";
 import "public_key_hex.dart";
 

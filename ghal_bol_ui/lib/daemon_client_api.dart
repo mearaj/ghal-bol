@@ -1,7 +1,7 @@
-/// Canonical **daemon ↔ UI integrator** wire names (mirror of `ghal_bol::daemon::client_api`).
+/// Canonical **daemon ↔ UI integrator** wire names (mirror of `ghal_bol_core::daemon::client_api`).
 ///
 /// Host UI must use these constants for JSON-RPC `"method"` fields — do not invent new
-/// method strings outside this file. Product behaviour lives in Rust (`ghal_bol_daemon` / `:p2p`).
+/// method strings outside this file. Product behaviour lives in Rust (`ghal_bol_core_daemon` / `:p2p`).
 abstract final class DaemonMethod {
   static const ping = "ping";
   static const unlock = "unlock";
@@ -39,8 +39,13 @@ abstract final class DaemonMethod {
   static const coordSetBaseUrl = "coord_set_base_url";
   static const coordLookupPeer = "coord_lookup_peer";
   static const coordRegisterNow = "coord_register_now";
+  static const deliveryConnectionStatus = "delivery_connection_status";
+  static const deliveryQuotaStatus = "delivery_quota_status";
+  static const deliveryMailboxList = "delivery_mailbox_list";
+  static const deliveryExtendTtl = "delivery_extend_ttl";
+  static const deliveryResendMessage = "delivery_resend_message";
 
-  /// Keep in sync with `DaemonMethod::ALL` in `ghal_bol/src/daemon/client_api.rs`.
+  /// Keep in sync with `DaemonMethod::ALL` in `ghal_bol_core/src/daemon/client_api.rs`.
   /// Parity: `./scripts/check_daemon_sdk_parity.sh`.
   static const all = <String>[
     ping,
@@ -79,10 +84,15 @@ abstract final class DaemonMethod {
     coordSetBaseUrl,
     coordLookupPeer,
     coordRegisterNow,
+    deliveryConnectionStatus,
+    deliveryQuotaStatus,
+    deliveryMailboxList,
+    deliveryExtendTtl,
+    deliveryResendMessage,
   ];
 }
 
-/// Daemon-initiated wake markers under `$XDG_RUNTIME_DIR/ghalbol/`.
+/// Daemon-initiated wake markers under `$XDG_RUNTIME_DIR/ghal_bol/`.
 abstract final class UiWakeKind {
   static const unlockMarker = "unlock_wake";
   static const incomingCallMarker = "incoming_call_wake";
@@ -102,7 +112,7 @@ abstract final class DaemonPollEventKind {
   static const chatReady = "chat_ready";
 }
 
-/// Integrator path helpers — must match `ghal_bol/src/daemon/paths.rs`.
+/// Integrator path helpers — must match `ghal_bol_core/src/daemon/paths.rs`.
 /// See `docs/DAEMON_INTEGRATOR.md`.
 abstract final class DaemonIntegratorConfig {
   static String sanitizeAppNamespaceSegment(String appNamespace) {
@@ -130,15 +140,15 @@ abstract final class DaemonIntegratorConfig {
     return isAlphaNum || ch == "." || ch == "-" || ch == "_";
   }
 
-  /// `$XDG_RUNTIME_DIR/ghalbol/<namespace>/` (or `/tmp/ghalbol/...` when [xdgRuntimeDir] null).
+  /// `$XDG_RUNTIME_DIR/ghal_bol/<namespace>/` (or `/tmp/ghal_bol/...` when [xdgRuntimeDir] null).
   static String runtimeDirForAppNamespace(
     String appNamespace, {
     String? xdgRuntimeDir,
   }) {
     final runtime = xdgRuntimeDir?.trim();
     final base = runtime != null && runtime.isNotEmpty
-        ? "$runtime/ghalbol"
-        : "/tmp/ghalbol";
+        ? "$runtime/ghal_bol"
+        : "/tmp/ghal_bol";
     return "$base/${sanitizeAppNamespaceSegment(appNamespace)}";
   }
 

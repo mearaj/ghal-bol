@@ -1,0 +1,19 @@
+# User systemd unit — no root. Installed by install_delivery_home.sh to ~/.config/systemd/user/
+
+[Unit]
+Description=Ghal Bol delivery server (delivery.ghalbol.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=REPLACE_DELIVERY_BIN
+Environment=GHAL_BOL_DELIVERY_LISTEN=REPLACE_GHAL_BOL_DELIVERY_LISTEN
+Environment=GHAL_BOL_DELIVERY_DATA_DIR=/home/REPLACE_DELIVERY_USER/.local/share/com.ghal_bol.delivery/ghal_bol_delivery
+Environment=RUST_LOG=info
+Environment=GHAL_BOL_DDNS_CREDENTIALS=REPLACE_GHAL_BOL_DDNS_CREDENTIALS
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

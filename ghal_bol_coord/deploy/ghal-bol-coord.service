@@ -1,0 +1,35 @@
+# Systemd unit for production VM (coord.ghalbol.com).
+#
+# Install on the server:
+#   sudo cp ghal_bol_coord/deploy/ghal-bol-coord.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ghal-bol-coord
+#
+# Edit User, ExecStart, GHAL_BOL_COORD_DB (replace REPLACE_VM_USER) before enabling.
+
+[Unit]
+Description=Ghal Bol coordination server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_VM_USER
+Group=REPLACE_VM_USER
+WorkingDirectory=/home/REPLACE_VM_USER
+ExecStart=/home/REPLACE_VM_USER/ghal_bol_coord
+Environment=GHAL_BOL_COORD_LISTEN=REPLACE_GHAL_BOL_COORD_LISTEN
+Environment=GHAL_BOL_COORD_DB=/home/REPLACE_VM_USER/.local/share/com.ghal_bol.coord/ghal_bol_coord
+Environment=RUST_LOG=info
+# libp2p Circuit Relay v2 (NAT traversal). HTTP stays on loopback behind nginx, but the relay
+# is a RAW TCP port that clients dial directly — open it in the cloud firewall (e.g. GCP ingress
+# tcp:4002) and point GHAL_BOL_RELAY_PUBLIC_HOST at the public DNS that resolves to this VM.
+Environment=GHAL_BOL_RELAY_LISTEN=REPLACE_GHAL_BOL_RELAY_LISTEN
+Environment=GHAL_BOL_RELAY_PUBLIC_HOST=REPLACE_GHAL_BOL_RELAY_PUBLIC_HOST
+Environment=GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES=REPLACE_GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES
+Environment=GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER=REPLACE_GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

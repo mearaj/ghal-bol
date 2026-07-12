@@ -129,14 +129,14 @@ foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
 endforeach(bundled_library)
 
 # Rust FFI: run **`scripts/sync_ghal_bol_native_for_flutter.sh`** from repo root, then rebuild.
-set(_GHAL_BOL_FFI_SO "${CMAKE_CURRENT_SOURCE_DIR}/native/lib/libghal_bol.so")
+set(_GHAL_BOL_FFI_SO "${CMAKE_CURRENT_SOURCE_DIR}/native/lib/lib_ghal_bol_core.so")
 if(EXISTS "${_GHAL_BOL_FFI_SO}")
   install(FILES "${_GHAL_BOL_FFI_SO}"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
 
-set(_GHAL_BOL_DAEMON "${CMAKE_CURRENT_SOURCE_DIR}/native/libexec/ghal_bol_daemon")
+set(_GHAL_BOL_DAEMON "${CMAKE_CURRENT_SOURCE_DIR}/native/libexec/ghal_bol_core_daemon")
 if(EXISTS "${_GHAL_BOL_DAEMON}")
   install(PROGRAMS "${_GHAL_BOL_DAEMON}"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/libexec"

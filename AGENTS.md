@@ -20,20 +20,15 @@
 
 ## Golden rules
 
-0. **Prime directive — instant connect at any roster size.** Whenever two peers have *any*
-   technically reachable path (LAN, relay circuit, future transport), they must **connect within a
-   few seconds** and a message flows. A user may have **thousands of stale contacts** (offline /
-   never-registered / `404`); **handling them must never delay a reachable peer** or flood coord.
-   Lookups are split urgent/priority (active intent — uncapped) vs LRU background sweep (capped:
-   `COORD_BACKGROUND_LOOKUPS_PER_TICK`) in `run_dm_coord_lookup_pass`. If any throttle/backoff/grace
-   is ever in tension with this, **the directive wins.** Canonical: [TRANSPORT.md](docs/TRANSPORT.md)
-   § “The prime directive — instant connect at any roster size” (+ acceptance criteria).
-1. **`ghal_bol` (Rust) owns all product logic** — crypto, keystore, libp2p, outbox, **ack send/retry**, contacts, transcripts, invite codec, call signaling. Implement behaviour here and expose **`ghal_bol_ffi_*`** (or daemon JSON-RPC on Linux/Android `:p2p`).
-2. **`ghal_bol_ui` (Flutter) is a thin shell** — screens, navigation, hub layout, QR scan/share UI, composer, rendering delivery ticks from native state. **Do not re-implement ack policy, outbox, or transcript merge in Dart.** Session signals: **`GhalBolUiSession` only** (`setVisible` + `setRoom` → `p2p_sync_ui_session`) — never deprecated `setAppAckReadEnabled` / `setForegroundPeer` / `setAppUiVisible` from product code. **Do not** HTTP coord lookup, coord register ticks, or `dial_bootstrap_peers` from Dart — `sync_contacts` / `register_dm_peer` only; WAN recovery, coord register/lookup/dial, and LAN-vs-WAN routing run in **`chat_server.rs`** / **`coord_runtime.rs`** (see override rules below). **Daemon ↔ UI:** precompiled `ghal_bol_daemon` + contract in **`ghal_bol::daemon`** (Rust) and **`ghal_bol_ui/lib/daemon_client_api.dart`** (Dart mirror) — declare new RPCs in `client_api.rs` + Dart mirror only; run `./scripts/check_daemon_sdk_parity.sh`; see **`docs/DAEMON_INTEGRATOR.md`**.
+0. **Prime directive — instant connect at any roster size (calls + LAN text).** Whenever two peers have *any*
+   technically reachable libp2p path (LAN, relay circuit for **calls**), they must **connect within a
+   few seconds**. **WAN text** uses `ghal_bol_delivery` — not libp2p outbox. Coord/relay upkeep serves **calls** and LAN paths, not WAN DM text when `GHAL_BOL_DELIVERY_URL` is set. See `text_transport.rs` and [DESIGN.md](docs/DESIGN.md) § “Why pure P2P WAN text was dropped”.
+1. **`ghal_bol_core` (Rust) owns all product logic** — crypto, keystore, **WAN text** (`delivery_runtime`), **LAN text + calls** (libp2p), contacts, transcripts, invite codec. WAN text: delivery upload/acks; LAN text: outbox/acks on libp2p; calls: signaling + media on libp2p. Expose **`ghal_bol_core_ffi_*`** (or daemon JSON-RPC on Linux/Android `:p2p`).
+2. **`ghal_bol_ui` (Flutter) is a thin shell** — screens, navigation, hub layout, QR scan/share UI, composer, rendering delivery ticks from native state. **Do not re-implement ack policy, outbox, or transcript merge in Dart.** Session signals: **`GhalBolUiSession` only** (`setVisible` + `setRoom` → `p2p_sync_ui_session`) — never deprecated `setAppAckReadEnabled` / `setForegroundPeer` / `setAppUiVisible` from product code. **Do not** HTTP coord lookup, coord register ticks, or `dial_bootstrap_peers` from Dart — `sync_contacts` / `register_dm_peer` only; WAN recovery, coord register/lookup/dial, and LAN-vs-WAN routing run in **`chat_server.rs`** / **`coord_runtime.rs`** (see override rules below). **Daemon ↔ UI:** precompiled `ghal_bol_core_daemon` + contract in **`ghal_bol_core::daemon`** (Rust) and **`ghal_bol_ui/lib/daemon_client_api.dart`** (Dart mirror) — declare new RPCs in `client_api.rs` + Dart mirror only; run `./scripts/check_daemon_sdk_parity.sh`; see **`docs/DAEMON_INTEGRATOR.md`**.
 3. **`docs/DESIGN.md` is canonical** for architecture; **`docs/TRANSPORT.md`** for libp2p transport and connectivity policy. Wire detail: `docs/GHAL_BOL_DM_MSG_V1.md`. Invites: `docs/GHAL_BOL_URI_SCHEME.md`. If code and agent-editable docs disagree, **fix both in the same change**.
 4. **Guest scans host QR** — guest stores host `public_key_hex` and dials. **Host may have zero contacts** until first inbound. **Never** require mutual QR or “both sides need each other’s key from QR”.
 5. **Do not `p2p_stop` / restart libp2p on every contact change** — use `register_dm_peer` / `sync_contacts` hot-register only.
-6. **Do not run `scripts/sync_ghal_bol_native_for_flutter.sh` while the Linux app is running** — it stops `ghal_bol_daemon` and causes `Broken pipe` on the UI socket. **Android:** rebuild with `pack_android_workspace_jni_libs.sh` — **default must ship all four standard ABIs** (`armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64`) for Play, emulators, and 32-bit ARM devices; `PACK_ANDROID_ARM64_ONLY=1` is a dev fast-path only (host `cargo-ndk`; no adb).
+6. **Do not run `scripts/sync_ghal_bol_native_for_flutter.sh` while the Linux app is running** — it stops `ghal_bol_core_daemon` and causes `Broken pipe` on the UI socket. **Android:** rebuild with `pack_android_workspace_jni_libs.sh` — **default must ship all four standard ABIs** (`armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64`) for Play, emulators, and 32-bit ARM devices; `PACK_ANDROID_ARM64_ONLY=1` is a dev fast-path only (host `cargo-ndk`; no adb).
 7. **E2E for all peer-key traffic** — Any product communication between two contacts must use **end-to-end** crypto tied to the device identity key and the peer’s contact identity wire (same identity as chat). Includes: DM text (**transport KEM v2** after `TransportKemHello`), call signaling (`ghal_bol_call_v1` + **transport KEM** `CALL_CIPHER_TRANSPORT_V2`), call **audio and video** media (`derive_call_media_keys_from_transport` + per-frame AES-GCM seal on `/ghal-bol/call/*` substreams). Offline auxiliary FFI seal (`offline_seal_v1`, secp256k1 recipient only) is not used by product chat/call paths. Do **not** ship peer-facing plaintext payloads or disable media/signaling E2E for “performance” without an explicit product decision.
 8. **Caching — immutable only on disk** — Persist to disk only data that is **user-owned and does not change meaningfully without user action** (keystore, contacts, transcript, preferences). If a value **can change** (relay port, coord presence, mDNS LAN port, bootstrap multiaddr) and relying on a stale copy **could break chat or WAN**, **do not cache it** — refetch live (`GET /v1/relay`, `GET /v1/peers/…`, mDNS events). In-memory session mirrors and short storm throttles are OK when cleared on failure. New cache only with an explicit documented exception in TRANSPORT.md § “Caching policy”. See also golden rule on **`dm_upkeep` LAN** (event-driven only).
 9. **Avoid assumed timers for async P2P work** — General rule (not dial-only): when policy (A) depends on work with unknown duration, a worker (B) owns it until the stack reports an outcome; B **notifies subscribers** and A reacts **instantly** — never “wait N seconds then retry.” Applies to connect, handover, coord lookup, relay reserve, stream open, register, etc. Timers only for guardrails (in-flight observation, storm throttles, keepalive, register dedupe). See [TRANSPORT.md](docs/TRANSPORT.md) § “Event-driven async — avoid assumed timers”. **Do not** reintroduce grace-window coord blackout or tick-polled recovery without a new event.
@@ -42,7 +37,9 @@
 
 | Path | Role |
 |------|------|
-| `ghal_bol/` | Rust crate: `rlib` + `cdylib`, optional `ghal_bol_daemon` binary |
+| `ghal_bol_core/` | Rust crate: `rlib` + `cdylib`, optional `ghal_bol_core_daemon` binary |
+| `ghal_bol_coord/` | Coordination + relay server |
+| `ghal_bol_delivery/` | Delivery server (WAN text mailbox) |
 | `ghal_bol_ui/` | Flutter app (`com.ghalbol`) |
 | `docs/` | Design + wire specs (source of truth with code) |
 | `scripts/` | Native build/sync for Flutter |
@@ -60,14 +57,14 @@
 └────────────────────────────┬─────────────────────────────────┘
                              │ dart:ffi  OR  Unix socket RPC
 ┌────────────────────────────▼─────────────────────────────────┐
-│  ghal_bol — Rust                                              │
-│  chat_server.rs   libp2p streams, outbox, ack_received/read   │
-│  dm_event_handler.rs   poll path → contacts + transcript      │
-│  contacts_v1.rs, dm_transcript_store.rs, connect_invite_v1    │
-│  p2p_runtime.rs, p2p_ffi.rs, daemon/server.rs (RPC)         │
+│  ghal_bol_core — Rust                                         │
+│  delivery_runtime — WAN text (E2E mailbox)                    │
+│  chat_server — LAN text + calls (libp2p)                      │
+│  dm_event_handler, contacts, transcripts, invites             │
+│  p2p_runtime, p2p_ffi, daemon/server.rs (RPC)                 │
 └──────────────────────────────────────────────────────────────┘
 
-Android :p2p process     Linux ghal_bol_daemon
+Android :p2p process     Linux ghal_bol_core_daemon
 (GhalBolP2pService)      (bundled libexec/)
      ↑ same Rust node, separate from UI process
 ```
@@ -76,10 +73,11 @@ Android :p2p process     Linux ghal_bol_daemon
 
 | Concern | Owner | Primary files |
 |---------|--------|----------------|
-| Send/recv acks, outbox, stream I/O | **Rust** | `ghal_bol/src/p2p/chat_server.rs` |
-| Apply events → JSON stores | **Rust** | `ghal_bol/src/dm_event_handler.rs` |
+| WAN text send/recv, delivery acks | **Rust** | `ghal_bol_core/src/delivery_runtime.rs`, `delivery_client.rs`, `delivery_read_acks.rs` |
+| LAN text send/recv acks, outbox, stream I/O | **Rust** | `ghal_bol_core/src/p2p/chat_server/` |
+| Apply events → JSON stores | **Rust** | `ghal_bol_core/src/dm_event_handler.rs` |
 | Contacts / unread / preview / **`is_known` / `is_blocked`** | **Rust** (`contacts_v1.rs`); trust banner + **Unknown** chip **Flutter** — `docs/DESIGN.md` § Contact trust |
-| Transcript lines, `delivery` | **Rust** | `ghal_bol/src/dm_transcript_v1.rs`, `dm_transcript_store.rs` |
+| Transcript lines, `delivery` | **Rust** | `ghal_bol_core/src/dm_transcript_v1.rs`, `dm_transcript_store.rs` |
 | Invites format 2 | **Rust** + thin Dart codec | `connect_invite_v1.rs`, `invite_uri_codec.dart` |
 | Hub, roster, which room is open | **Flutter** | `chat_hub_screen.dart` |
 | Display ticks (no policy) | **Flutter** | `chat_screen.dart`, `dm_delivery_sync.dart` (comments only) |
@@ -110,9 +108,9 @@ Read **`docs/DESIGN.md`** in full before touching acks, ticks, foreground, or tr
 
 | Platform | libp2p runs in | UI talks via |
 |----------|----------------|--------------|
-| **Android** | Process **`:p2p`** — `GhalBolP2pService` | Unix socket `files/.../ghalbol/p2p.sock` JSON-RPC |
-| **Linux desktop** | **`ghal_bol_daemon`** in bundle `libexec/` | `$XDG_RUNTIME_DIR/ghalbol/p2p.sock` |
-| **In-process** | Same process as FFI (no daemon) | Direct `ghal_bol_ffi_p2p_*` when daemon not used |
+| **Android** | Process **`:p2p`** — `GhalBolP2pService` | Unix socket `files/.../ghal_bol/p2p.sock` JSON-RPC |
+| **Linux desktop** | **`ghal_bol_core_daemon`** in bundle `libexec/` | `$XDG_RUNTIME_DIR/ghal_bol/p2p.sock` |
+| **In-process** | Same process as FFI (no daemon) | Direct `ghal_bol_core_ffi_p2p_*` when daemon not used |
 
 **Unlock on daemon platforms:** daemon `unlock` + in-app FFI unlock must match same identity / data dir.
 
@@ -124,7 +122,7 @@ Read **`docs/DESIGN.md`** in full before touching acks, ticks, foreground, or tr
 
 ```bash
 # From repo root — quit flutter first
-# Linux desktop: sync copies lib + ghal_bol_daemon (stops stale daemon)
+# Linux desktop: sync copies lib + ghal_bol_core_daemon (stops stale daemon)
 ./scripts/sync_ghal_bol_native_for_flutter.sh
 # Android phone: pack only (cargo-ndk → build/android-native-ndk/; no adb)
 ./scripts/pack_android_workspace_jni_libs.sh
@@ -132,7 +130,7 @@ Read **`docs/DESIGN.md`** in full before touching acks, ticks, foreground, or tr
 cd ghal_bol_ui && flutter run   # Android: com.ghalbol.debug; Linux debug: ~/.local/share/com.ghalbol.debug/ (release: ~/.local/share/com.ghalbol/)
 
 # Checks
-cargo test -p ghal_bol
+cargo test -p ghal_bol_core
 cd ghal_bol_ui && dart analyze && flutter test
 ```
 
@@ -164,7 +162,7 @@ cd ghal_bol_ui && dart analyze && flutter test
 - **`redial_public_dht_bootnodes` while bootstrap connected** during WAN recovery — disconnects all bootstrap TCP and stalls relay/coord for minutes; see `docs/TRANSPORT.md` § “WAN recovery — relay reservation and bootstrap redial”. Log: `forcing bootstrap redial` with `bootstrap_ok=true`.
 - **Re-issuing relay `listen_on` every tick (1s storm)** — the storm is repeating `listen_on` for a relay faster than `RELAY_RESERVE_THROTTLE_MS`, **not** covering all relays once. Reserve on **all** eligible bootstraps in parallel via `try_relay_reservations` (per-relay throttle prevents the storm). Do **not** serialize one-relay-at-a-time — that lets one pending-but-never-accepted reservation block the others and stalls WAN for minutes. **2026-06-29:** recurring `run_wan_recovery_pass` must **not** pass `force=true` to `ensure_wan_relay_circuit` — that bypasses the throttle every tick and cancels in-flight reservations after `left LAN` (TRANSPORT.md § Post-mortem 2026-06-29).
 - **Bootstrap relay dial storm on CGNAT/mobile** — uncordinated `swarm.dial` to the coord relay from refetch + WAN recovery + redial (many `coord relay dial` lines per second, never `bootstrap connection` / `reservation accepted` on the phone). Must use `issue_bootstrap_dials` / `should_issue_bootstrap_dial` and CGNAT probe `listen_on` — see `docs/TRANSPORT.md` § “CGNAT / mobile-data relay reservation”.
-- **Removing CGNAT probe reservation** — `try_ghalbol_probe_style_circuit_listen` at startup and in `retry_stalled_relay_reservations` when `!any_bootstrap_connected` is required for mobile-data; Wi‑Fi-only testing hides this regression.
+- **Removing CGNAT probe reservation** — `try_ghal_bol_probe_style_circuit_listen` at startup and in `retry_stalled_relay_reservations` when `!any_bootstrap_connected` is required for mobile-data; Wi‑Fi-only testing hides this regression.
 - **One-sided relay OK** — desktop `reservation accepted` + phone stuck on `CGNAT listen addr only` → coord 404 for phone forever, no chat. Fix the phone side, not coord HTTP.
 - **Blocking peer relay dials until own circuit listens** — gating `dial_dm_peer_addr` on `!relay_circuit_listening` for CGNAT logs `skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` and stalls WAN ~40s. Outbound peer circuit dials only need coord relay bootstrap TCP; throttle with `should_routed_dial`, not own-reservation gate. See TRANSPORT.md § “Outbound peer relay dials vs own reservation”.
 - **404 coord backoff during urgent DM reconnect** — after `dm connection closed`, coord lookup must not wait exponential backoff; see `mark_dm_reconnect_urgent` + `is_pk_reconnect_urgent`.
@@ -257,7 +255,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | Coord lookup 404 for peer | Peer not on coord yet — both need `reservation accepted` + `coord registered`; **not** proof coord HTTP is down. If **all** lookups 404 and server shows no `peer registered`, relay TCP is dead (dev: bore stopped / wrong port). **Asymmetric:** Wi‑Fi side registered, phone 404 → phone never got relay circuit — TRANSPORT.md § “CGNAT / mobile-data relay reservation” |
 | Phone: many `coord relay dial`/s, no `bootstrap connection`, `CGNAT listen addr only` | Bootstrap **dial storm** or missing CGNAT probe reservation — rebuild native; see TRANSPORT.md § “CGNAT / mobile-data relay reservation” |
 | `coord_lookup_peer ok` then `skip relay dial … self relay circuit not ready yet` (no `peer_connected` for ~40s) | **Regression:** peer relay dial gated on own reservation — remove gate; peer dials use `should_routed_dial` only. TRANSPORT.md § “Outbound peer relay dials vs own reservation” |
-| Endless `GET /v1/peers/…` 404 on coord server, `GET /v1/relay` 200 | Relay TCP unreachable while HTTP OK | GCP: `nc -zv` relay host `:4002`. Home coord1: `./ghal_bol_server/deploy/verify_coord1.sh` (relay `:55002`); restart coord server; apps refetch live `GET /v1/relay` on next coord tick |
+| Endless `GET /v1/peers/…` 404 on coord server, `GET /v1/relay` 200 | Relay TCP unreachable while HTTP OK | GCP: `nc -zv` relay host `:4002`. Home coord1: `./ghal_bol_coord/deploy/verify_coord1.sh` (relay `:55002`); restart coord server; apps refetch live `GET /v1/relay` on next coord tick |
 | `waiting for relay/public listen endpoint before coord register` | No relay circuit — cannot register WAN endpoint | Fix relay/firewall; `coord_registered=false` until `reservation accepted` |
 | `relay has no public address advertised` / `advertised=[]` on server | `GHAL_BOL_RELAY_PUBLIC_HOST` unset or relay disabled | Set public host; restart coord server |
 | Slow reconnect after idle | `dm peer disconnected` then 404 backoff + stale CGNAT `Timeout` dials? TRANSPORT.md § Idle chat reconnect — urgent reconnect must not apply 404 backoff; no blind `try_routed_dial` for WAN coord peers |
@@ -272,9 +270,9 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | Android: read on screen, sender single tick | **`inactive`** gates read off while room stays open; **`resumed`** must log `read gate opened — catch-up ack_read` (`p2p_sync_ui_session` queues catch-up even if foreground unchanged). DESIGN.md § “Fixed 2026-06-29”. |
 | Android: no messages after device reboot until app manually opened | **Boot auto-start:** `BootReceiver` starts `GhalBolP2pService` on `BOOT_COMPLETED` when keystore exists. Daemon runs locked → posts high-priority "unlock needed" notification. User taps notification → `IdentityScreen` → password → unlock → `cancelUnlockNotification()`. If no notification: check `RECEIVE_BOOT_COMPLETED` permission, `BootReceiver` in manifest, keystore file exists. DESIGN.md § "Boot auto-start and unlock notification". |
 | Android: no messages with screen off / after lock (FGS still running) | **Not** read gate (`ack_received` may work briefly then stop). Check battery optimization (`isBatteryOptimized`), “Pause app activity if unused”, OEM autostart. Hub must run **`AndroidBackgroundReadiness`** before P2P; user should complete prompted steps. Events buffer on aggressive OEMs may show `am_app_frozen` / `fast_freezer` — still require user OEM settings even after stock exemptions. DESIGN.md § “Fixed 2026-07-05 — Android background readiness”. |
-| Linux: no messages after reboot/login until app manually opened | **XDG autostart:** `~/.config/autostart/com.ghalbol.daemon.desktop` starts `ghal_bol_daemon` on login. After 10 s grace, if still locked and no UI socket, daemon raises the app (`gtk-launch` + D-Bus) and shows unlock notification. User enters password → unlock → P2P starts. Autostart entry includes `GHAL_BOL_APP_NAMESPACE` from the last unlock. DESIGN.md § "Linux desktop — daemon auto-start and unlock notification". |
+| Linux: no messages after reboot/login until app manually opened | **XDG autostart:** `~/.config/autostart/com.ghalbol.daemon.desktop` starts `ghal_bol_core_daemon` on login. After 10 s grace, if still locked and no UI socket, daemon raises the app (`gtk-launch` + D-Bus) and shows unlock notification. User enters password → unlock → P2P starts. Autostart entry includes `GHAL_BOL_APP_NAMESPACE` from the last unlock. DESIGN.md § "Linux desktop — daemon auto-start and unlock notification". |
 | Incoming-call notification tap does not show UI | Daemon wrote `incoming_call_wake` but Flutter not polling — check wake poll in `p2p_event_bridge.dart` + D-Bus activate in `incoming_call_notify.rs` |
-| Relay conn drops mid-handshake (`Decode(UnexpectedEof)`), `addrs=[]`, `coord_registered=false` on **every real device** | **Relay server missing `secp256k1` libp2p feature.** Clients use secp256k1 device keys; a relay without that feature can't authenticate them in Noise and drops the link. Add `secp256k1` to `ghal_bol_server/Cargo.toml`. An ed25519-only `relay_probe` hides this — test with `PROBE_SECP256K1=1`. **Not** a Kademlia/listener bug. See TRANSPORT.md § "Ghal Bol relay" |
+| Relay conn drops mid-handshake (`Decode(UnexpectedEof)`), `addrs=[]`, `coord_registered=false` on **every real device** | **Relay server missing `secp256k1` libp2p feature.** Clients use secp256k1 device keys; a relay without that feature can't authenticate them in Noise and drops the link. Add `secp256k1` to `ghal_bol_coord/Cargo.toml`. An ed25519-only `relay_probe` hides this — test with `PROBE_SECP256K1=1`. **Not** a Kademlia/listener bug. See TRANSPORT.md § "Ghal Bol relay" |
 | `Unexpected peer ID` on relay bootstrap dial | Stale in-memory relay state after server restart — client clears state and refetches `GET /v1/relay` (no disk cache) |
 | WAN-only dead (`coord.ghalbol.com`), LAN flaky; `coord_lookup_peer ok` then `relay-circuit dial timed out`; server `circuit ConnectionFailed`; clean `relay_probe`/`circuit_test` work | **Coord lookup `.await` froze the swarm loop** — libp2p not polled during coord HTTP RTT → inbound relay `STOP` times out. Use `request_coord_lookup` (off-loop) + `apply_coord_lookup_result` / `drain_ready_coord_lookups` (sync). Rebuild native. TRANSPORT.md § **Post-mortem 2026-06-25 (coord lookup `.await` froze the swarm loop)** |
 | `node_ready` minutes late | Startup blocked on relay — must emit after ~3s; WAN recovery on coord_tick |
@@ -295,7 +293,7 @@ Trace the **native chain** in [DESIGN.md](docs/DESIGN.md) — do not blame Flutt
 | `docs/COORDINATION_SERVER.md` | Run/test coord server, local dev stack, **HTTP log troubleshooting** |
 | `docs/TRANSPORT.md` | libp2p transport, **Connectivity lifecycle**, **Network truth**, **Asymmetric mux recovery**, **Post-mortem 2026-06-24**, **Post-mortem 2026-06-25**, caching policy, LAN stability, WAN/CGNAT |
 | `docs/ROADMAP.md` | Human product backlog only — not agent implementation specs |
-| `ghal_bol_server/deploy/README.md` | Home `coord1`, GCP deploy, smoke; **§ Regression prevention** |
+| `ghal_bol_coord/deploy/README.md` | Home `coord1`, GCP deploy, smoke; **§ Regression prevention** |
 | `docs/WEB_SITE.md` | Static **ghalbol.com** web build, Firebase, Linux download, `/connect/…` handoff |
 | `README.md` | Product vision + repo map |
 | `ghal_bol_ui/README.md` | Flutter shell scope (native vs `bootstrap_web`) |

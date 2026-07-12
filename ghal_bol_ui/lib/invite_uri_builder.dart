@@ -1,4 +1,4 @@
-import "package:ghal_bol_ui/ghalbol_connect_invite.dart";
+import "package:ghal_bol_ui/ghal_bol_connect_invite.dart";
 import "package:ghal_bol_ui/identity_display_name.dart";
 import "package:ghal_bol_ui/public_key_hex.dart";
 

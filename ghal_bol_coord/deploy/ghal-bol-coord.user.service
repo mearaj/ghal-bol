@@ -1,0 +1,27 @@
+# User systemd unit — no /usr, /var, or /etc paths.
+#
+# Install (paths use your home directory only):
+#   mkdir -p ~/.config/systemd/user
+#   sed "s|@WORKSPACE@|$PWD/../../..|" ghal_bol_coord/deploy/ghal-bol-coord.user.service \
+#     > ~/.config/systemd/user/ghal-bol-coord.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ghal-bol-coord
+#
+# Replace @WORKSPACE@ with the absolute path to the repo root (directory that contains Cargo.toml).
+
+[Unit]
+Description=Ghal Bol coordination server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKSPACE@
+ExecStart=@WORKSPACE@/target/release/ghal_bol_coord
+Environment=GHAL_BOL_COORD_LISTEN=127.0.0.1:8765
+Environment=GHAL_BOL_COORD_DB=%h/.local/share/com.ghal_bol.coord/ghal_bol_coord
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

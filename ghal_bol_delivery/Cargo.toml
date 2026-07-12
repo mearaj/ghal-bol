@@ -1,0 +1,42 @@
+[package]
+name = "ghal_bol_delivery"
+version = "0.1.0"
+edition = "2024"
+description = "Ghal Bol delivery server (temporary encrypted message mailbox)"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ghal_bol_delivery"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["json", "ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+directories = "6"
+futures = "0.3"
+hex = "0.4"
+rand = "0.10"
+rusqlite = { version = "0.39", features = ["bundled"] }
+secp256k1 = { version = "0.31", features = ["rand", "serde"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ghal_bol_ddns = { path = "../ghal_bol_ddns" }
+tar = "0.4"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+tower = { version = "0.5", features = ["util"] }
+futures-util = "0.3"
+ghal_bol_core = { path = "../ghal_bol_core" }

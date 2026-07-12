@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build libghal_bol.so for Android → workspace/build/android-native-ndk/
+# Build lib_ghal_bol_core.so for Android → workspace/build/android-native-ndk/
 # Gradle: android/app/build.gradle.kts jniLibs.srcDirs. Does not use adb.
 #
 # Default: all four standard Android ABIs (required for Play, emulators, and 32-bit ARM devices):
@@ -55,7 +55,7 @@ prune_jni_abi_dir() {
   local dir="$OUT_DIR/$abi"
   [[ -d "$dir" ]] || return 0
   find "$dir" -maxdepth 1 -type f -name '*.so' \
-    ! -name 'libghal_bol.so' ! -name 'libc++_shared.so' -delete 2>/dev/null || true
+    ! -name 'lib_ghal_bol_core.so' ! -name 'libghal_bol_core.so' ! -name 'libc++_shared.so' -delete 2>/dev/null || true
 }
 
 # NDK sysroot lib triple (differs from the Rust triple for 32-bit ARM).
@@ -69,7 +69,7 @@ ndk_lib_triple() {
   esac
 }
 
-# libghal_bol.so now needs libc++_shared.so (Oboe/C++ for native voice). The
+# lib_ghal_bol_core.so now needs libc++_shared.so (Oboe/C++ for native voice). The
 # Flutter app does not otherwise ship it (flutter_webrtc static-links its own
 # libc++), so dlopen of our lib fails with "libc++_shared.so not found" in BOTH
 # the UI and `:p2p` processes. Bundle the NDK's copy into jniLibs per ABI.
@@ -101,7 +101,7 @@ build_abi() {
     exit 1
   fi
   # OpenH264 x86 NASM (.asm) objects use R_386_32 relocations that cannot link
-  # into a PIC shared lib (libghal_bol.so) on Android x86/x86_64 emulators.
+  # into a PIC shared lib (lib_ghal_bol_core.so) on Android x86/x86_64 emulators.
   # Fall back to C-only via OPENH264_NO_ASM (see openh264-sys2 build.rs). ARM ABIs
   # keep NASM/NEON asm — real devices build fine.
   local openh264_no_asm=()
@@ -113,12 +113,15 @@ build_abi() {
   # audiopus_sys can't cross-compile Opus itself; link our NDK-built static lib (P6 native voice).
   prune_jni_abi_dir "$abi"
   env "${openh264_no_asm[@]}" LIBOPUS_NO_PKG=1 LIBOPUS_STATIC=1 LIBOPUS_LIB_DIR="$opus_lib" \
-    cargo ndk -t "$abi" -o "$OUT_DIR" build -p ghal_bol --release --lib
+    cargo ndk -t "$abi" -o "$OUT_DIR" build -p ghal_bol_core --release --lib
+  if [[ -f "$OUT_DIR/$abi/libghal_bol_core.so" ]]; then
+    mv -f "$OUT_DIR/$abi/libghal_bol_core.so" "$OUT_DIR/$abi/lib_ghal_bol_core.so"
+  fi
   prune_jni_abi_dir "$abi"
-  verify_android_lib "$OUT_DIR/$abi/libghal_bol.so"
+  verify_android_lib "$OUT_DIR/$abi/lib_ghal_bol_core.so"
   copy_libcxx_shared "$abi"
   prune_jni_abi_dir "$abi"
-  echo "==> [$abi] OK: $OUT_DIR/$abi/libghal_bol.so"
+  echo "==> [$abi] OK: $OUT_DIR/$abi/lib_ghal_bol_core.so"
 }
 
 # All ABIs Gradle/jniLibs expect when not using PACK_ANDROID_ARM64_ONLY.
@@ -133,7 +136,7 @@ verify_android_pack_complete() {
   fi
   local missing=0
   for abi in "${abis[@]}"; do
-    for lib in libghal_bol.so libc++_shared.so; do
+    for lib in lib_ghal_bol_core.so libc++_shared.so; do
       if [[ ! -f "$OUT_DIR/$abi/$lib" ]]; then
         echo "ERROR: missing $OUT_DIR/$abi/$lib"
         missing=1
@@ -145,7 +148,7 @@ verify_android_pack_complete() {
   fi
   echo ""
   echo "OK. Packaged ${#abis[@]} Android ABI(s): ${abis[*]}"
-  echo "    $OUT_DIR/<abi>/libghal_bol.so + libc++_shared.so"
+  echo "    $OUT_DIR/<abi>/lib_ghal_bol_core.so + libc++_shared.so"
 }
 
 # Native voice (P6) needs a static libopus.a per ABI built with the NDK.

@@ -4,7 +4,7 @@ import "package:ghal_bol_ui/user_flow_log.dart";
 
 /// App password held in RAM for the unlocked session (cleared on [clear] / logout).
 ///
-/// Used to re-unlock the out-of-process P2P daemon after `ghal_bol_daemon` restarts
+/// Used to re-unlock the out-of-process P2P daemon after `ghal_bol_core_daemon` restarts
 /// while the UI process still has FFI identity loaded.
 class SessionCredentials {
   SessionCredentials._();

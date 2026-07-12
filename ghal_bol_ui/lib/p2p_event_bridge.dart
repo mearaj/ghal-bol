@@ -275,7 +275,7 @@ class P2pEventBridge {
   }
 
   /// Process supervision only — NOT reconnect policy. The shell is the only thing that can relaunch
-  /// a dead `ghal_bol_daemon` / Android `:p2p` process; Rust cannot restart its own host process.
+  /// a dead `ghal_bol_core_daemon` / Android `:p2p` process; Rust cannot restart its own host process.
   /// All connectivity policy (WAN recovery, coord lookup/register, dial, LAN handover, backoff)
   /// lives in `ghal_bol` (`chat_server` / `coord_runtime`). This only detects "node process not
   /// running", relaunches + unlocks it, and re-signals contacts (`syncContacts`). Keep it free of
@@ -440,8 +440,12 @@ class P2pEventBridge {
       }
     }
     final next = (_drainChain ?? Future<void>.value()).then((_) => run());
-    _drainChain = next.catchError((_) {});
-    return next;
+    final guarded = next.catchError((Object error, StackTrace stack) {
+      AppLog.instance.w("Daemon", "event poll interrupted — reconnecting");
+      unawaited(recoverP2pIfNeeded());
+    });
+    _drainChain = guarded;
+    return guarded;
   }
 
   /// Linux only: daemon wake files (unlock after reboot, incoming-call notify tap).

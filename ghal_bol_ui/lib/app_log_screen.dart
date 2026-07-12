@@ -132,7 +132,7 @@ class _AppLogScreenState extends State<AppLogScreen> {
 
   String _logFileName() {
     _exportSeq++;
-    return "ghalbol-app-log-${DateTime.now().millisecondsSinceEpoch}-$_exportSeq.txt";
+    return "ghal_bol-app-log-${DateTime.now().millisecondsSinceEpoch}-$_exportSeq.txt";
   }
 
   /// Stream lines to disk — never build one giant `join` string (OOM on desktop/Android).

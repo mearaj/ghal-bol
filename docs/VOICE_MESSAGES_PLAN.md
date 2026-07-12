@@ -221,5 +221,5 @@ Hub `ingestP2pEvent`: treat `voice` like `text` for `syncTranscriptView(force: t
 
 - Text wire: [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)
 - Calls (out of scope): [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md)
-- Frame limit: `ghal_bol/src/p2p/chat_server/frames.rs` (`4 * 1024 * 1024`)
-- Seal: `ghal_bol/src/transport_kem_v1.rs`, `ghal_bol/src/msg_v1.rs`
+- Frame limit: `ghal_bol_core/src/p2p/chat_server/frames.rs` (`4 * 1024 * 1024`)
+- Seal: `ghal_bol_core/src/transport_kem_v1.rs`, `ghal_bol_core/src/msg_v1.rs`

@@ -12,12 +12,13 @@ import "chat_screen.dart";
 import "chat_transcript_store.dart";
 import "contact_store.dart";
 import "contacts_screen.dart";
+import "delivery_storage_screen.dart";
 import "embedder_storage.dart";
 import "ghal_bol_constants.dart";
 import "native_build_hint.dart";
 import "ghal_bol_ffi.dart";
 import "ghal_bol_background.dart";
-import "ghalbol_connect_invite.dart";
+import "ghal_bol_connect_invite.dart";
 import "identity_alias_form.dart";
 import "identity_key_management.dart";
 import "invite_scan_screen.dart";
@@ -1100,6 +1101,17 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
           onPressed: () => unawaited(_openJoinScan()),
           icon: Icon(Icons.qr_code_scanner, color: p.appBarFg),
         ),
+        IconButton(
+          tooltip: "Delivery storage",
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const DeliveryStorageScreen(),
+              ),
+            );
+          },
+          icon: Icon(Icons.cloud_queue, color: p.appBarFg),
+        ),
         if (showLockInAppBar)
           TextButton(
             onPressed: widget.onUiLock,
@@ -1515,7 +1527,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   Future<void> _confirmDeleteIdentityFromDevice(BuildContext context) async {
     if (!GhalBolFfi.isDeleteKeystoreAvailable) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("This build’s native library does not support delete. Re-sync libghal_bol.")),
+        const SnackBar(content: Text("This build’s native library does not support delete. Re-sync lib_ghal_bol_core.")),
       );
       return;
     }

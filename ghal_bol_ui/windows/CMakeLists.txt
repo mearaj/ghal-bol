@@ -88,7 +88,7 @@ if(PLUGIN_BUNDLED_LIBRARIES)
 endif()
 
 # Rust FFI: run **`scripts/sync_ghal_bol_native_for_flutter.sh`** from repo root, then rebuild.
-set(_GHAL_BOL_FFI_DLL "${CMAKE_CURRENT_SOURCE_DIR}/native/ghal_bol.dll")
+set(_GHAL_BOL_FFI_DLL "${CMAKE_CURRENT_SOURCE_DIR}/native/_ghal_bol_core.dll")
 if(EXISTS "${_GHAL_BOL_FFI_DLL}")
   install(FILES "${_GHAL_BOL_FFI_DLL}"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"

@@ -83,7 +83,7 @@ class _IdentityAliasFormState extends State<IdentityAliasForm> {
     }
     if (!GhalBolFfi.isPeerDisplayAliasAvailable) {
       return Text(
-        "Display name needs a newer native build (`ghal_bol_ffi_peer_display_alias_*`).",
+        "Display name needs a newer native build (`ghal_bol_core_ffi_peer_display_alias_*`).",
         style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
       );
     }

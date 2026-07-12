@@ -3,11 +3,11 @@ package com.ghalbol
 import android.content.Context
 
 /**
- * Loads `libghal_bol.so` in the `:p2p` process and runs the Unix-socket P2P daemon (Rust).
+ * Loads `lib_ghal_bol_core.so` in the `:p2p` process and runs the Unix-socket P2P daemon (Rust).
  */
 object P2pDaemonNative {
     init {
-        System.loadLibrary("ghal_bol")
+        System.loadLibrary("_ghal_bol_core")
     }
 
     /** Call before coord HTTPS / `reqwest` in the `:p2p` process (once per process). */

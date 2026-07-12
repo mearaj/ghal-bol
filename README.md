@@ -4,17 +4,19 @@
   <img src="ghal_bol_ui/assets/for-feature-graphic-1.png" alt="Ghal Bol Icon for playstore's feature graphic" width="1536">
 </p>
 
-Gh`al Bol is a realtime peer-to-peer messaging system focused on direct communication, local-first identity, minimal infrastructure dependency, and high-speed synchronization between online peers.
+Gh`al Bol is an end-to-end encrypted messenger: device-owned identity, local transcripts, and minimal server trust.
 
-The project intentionally avoids traditional cloud-centric messaging architecture. There are no phone numbers, no email-based accounts, no permanent centralized chat storage, and no server-owned transcripts. Users own their identities, messages, and local history.
+**Text chat (WAN)** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **LAN text** and **voice/video calls** use **libp2p** (mDNS on LAN, coord + relay on WAN for calls).
 
-The system is designed around a simple principle:
+The system is designed around:
 
-> Communication happens when peers are online simultaneously.
+> Reliable encrypted text when peers are apart; realtime P2P when they share a LAN or place a call.
 
-Unlike traditional messengers such as WhatsApp or Signal, Ghal Bol does not aim to provide permanent cloud-backed offline message guarantees. Instead, it focuses on deterministic realtime synchronization, direct peer communication, and decentralized temporary relaying.
+Unlike traditional messengers, Ghal Bol does **not** store chat history in the cloud. Each device keeps its own transcript. The delivery server holds ciphertext **only until** the recipient acknowledges delivery (then deletes payload, keeps metadata for acks/TTL).
 
-**Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md).
+**Why WAN text moved off pure P2P:** libp2p relay chat required both peers online at the same time and could not guarantee delivery when one peer was offline, asleep, or on a flaky mobile network — unacceptable for the core job of **text messages**. Voice and video remain P2P-first because they are inherently realtime sessions.
+
+**Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md), [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md).
 
 **Invites & coordination:** [docs/GHAL_BOL_URI_SCHEME.md](docs/GHAL_BOL_URI_SCHEME.md), [docs/COORDINATION_SERVER.md](docs/COORDINATION_SERVER.md)
 
@@ -62,7 +64,7 @@ Peer connections can be established through QR codes, invite links, or public ke
 - Web: `https://ghalbol.com/connect/<public_key_hex>`
 - App: `ghalbol://connect/<public_key_hex>`
 
-The link identifies the peer only; the app resolves live endpoints via `ghal_bol_server`, then connects directly. See [docs/TRANSPORT.md](docs/TRANSPORT.md) § Discovery. **HTTPS invites:** with verified App Links (`/.well-known/assetlinks.json` on the site), Android opens the app directly; otherwise the browser shows the [web invite handoff](docs/WEB_SITE.md). **Linux desktop:** [download page](https://ghalbol.com/download/linux).
+The link identifies the peer only; the app resolves live endpoints via `ghal_bol_coord`, then connects directly. See [docs/TRANSPORT.md](docs/TRANSPORT.md) § Discovery. **HTTPS invites:** with verified App Links (`/.well-known/assetlinks.json` on the site), Android opens the app directly; otherwise the browser shows the [web invite handoff](docs/WEB_SITE.md). **Linux desktop:** [download page](https://ghalbol.com/download/linux).
 
 ---
 
@@ -150,48 +152,26 @@ The protocol assumes reconnects and temporary disconnections are normal.
 
 # Message Delivery
 
-Messages are primarily delivered through direct peer synchronization.
+**WAN text** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary E2E encrypted mailbox. The server stores ciphertext only; it cannot decrypt. When the recipient acknowledges delivery, the payload is deleted (metadata retained for acks/TTL). This guarantees offline delivery when the recipient returns — the core requirement pure P2P WAN chat could not meet.
 
-Typical flow:
+**LAN text** uses libp2p direct streams (`mDNS` / TCP) when both peers share a LAN — same E2E envelope format, no server hop.
 
-1. Peer A comes online.
-2. Peer B comes online.
-3. Coordination server notifies interested peers.
-4. Peers establish direct connection.
-5. Messages and acknowledgements synchronize directly.
+**Voice and video** use libp2p on LAN and WAN (coord + relay) — realtime sessions where both peers must be online.
 
-Messages are stored locally by peers and retried while both peers remain online.
+Typical WAN text flow:
 
-The system intentionally does not guarantee permanent centralized offline delivery.
+1. Sender encrypts message locally and uploads ciphertext to delivery server.
+2. Server notifies recipient (WebSocket push when online).
+3. Recipient decrypts locally, sends delivery/read acks through the server.
+4. Each device keeps its own transcript; ticks are recipient-authority only.
+
+See [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md) and [docs/DESIGN.md](docs/DESIGN.md).
 
 ---
 
-# Temporary Distributed Relay (Tier 2)
+# Future: Temporary Distributed Relay (Tier 2)
 
-If a recipient peer is offline, Ghal Bol can optionally use decentralized temporary relaying (Tier 2 peer blob relay; Tier 3 paid backup — see [docs/PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md)). **Not implemented yet** in this repo.
-
-Example flow:
-1. Peer B wants to send message to offline Peer A.
-2. Coordination server selects at least 8 currently online peers.
-3. Encrypted message blobs are distributed across selected peers.
-4. Relay peers temporarily retain encrypted payloads.
-5. Once Peer A becomes reachable, synchronization occurs.
-6. Relay copies are discarded automatically.
-
-Relay peers:
-- cannot decrypt messages
-- only store opaque encrypted blobs
-- retain data temporarily
-- operate under bounded storage limits
-
-The coordination server itself does not permanently store message content.
-
-This mechanism improves:
-- availability
-- survivability
-- decentralized resilience
-
-without relying on permanent centralized infrastructure.
+A decentralized peer-blob relay (Tier 2; Tier 3 paid backup — see [docs/PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md)) remains a **future** option. **WAN text today** uses `ghal_bol_delivery`, not Tier 2.
 
 ---
 
@@ -301,8 +281,9 @@ Open this directory as the workspace root (the folder that contains this `README
 
 | Path | Role |
 |------|------|
-| `ghal_bol/` | Rust core: identity, libp2p sync engine, local stores |
-| `ghal_bol_server/` | Coordination server — see [ghal_bol_server/README.md](ghal_bol_server/README.md) |
+| `ghal_bol_core/` | Rust core: identity, libp2p sync engine, local stores |
+| `ghal_bol_coord/` | Coordination server — see [ghal_bol_coord/README.md](ghal_bol_coord/README.md) |
+| `ghal_bol_delivery/` | Delivery server (WAN text mailbox) — [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md), home deploy [ghal_bol_delivery/deploy/](ghal_bol_delivery/deploy/) |
 | `ghal_bol_ui/` | Flutter UI shell — [ghal_bol_ui/README.md](ghal_bol_ui/README.md) |
 | `docs/` | [Design](docs/DESIGN.md), [transport](docs/TRANSPORT.md), [identity](docs/IDENTITY.md), [coord server](docs/COORDINATION_SERVER.md), [web site](docs/WEB_SITE.md), [doc index](docs/README.md) |
 | `firebase.json` | Firebase Hosting for **ghalbol.com** (static web build) |
@@ -314,7 +295,7 @@ Open this directory as the workspace root (the folder that contains this `README
 
 **Full step-by-step guide:** [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md) (P0 ship test → P1 infra → P2 Play Store)
 
-**Coord server (live):** `https://coord.ghalbol.com` — smoke: `COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh`
+**Coord server (live):** `https://coord.ghalbol.com` — smoke: `COORD_URL=https://coord.ghalbol.com ./ghal_bol_coord/deploy/smoke_coord.sh`
 
 | Phase | Key steps |
 |-------|-----------|
@@ -322,4 +303,4 @@ Open this directory as the workspace root (the folder that contains this `README
 | **P1** | CI green, VM systemd + reboot, commit & push |
 | **P2** | [Privacy policy](docs/PRIVACY_POLICY.md) online → [Play listing](docs/PLAY_STORE_LISTING.md) → AAB upload |
 
-Build/run details: [ghal_bol_ui/env/README.md](ghal_bol_ui/env/README.md). Server deploy: [ghal_bol_server/deploy/README.md](ghal_bol_server/deploy/README.md).
+Build/run details: [ghal_bol_ui/env/README.md](ghal_bol_ui/env/README.md). Server deploy: [ghal_bol_coord/deploy/README.md](ghal_bol_coord/deploy/README.md).

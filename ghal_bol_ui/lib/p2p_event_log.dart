@@ -161,7 +161,7 @@ String? _shortHex(Object? v) {
   return "${s.substring(0, 8)}…${s.substring(s.length - 8)}";
 }
 
-/// libp2p worker inside `libghal_bol` (Rust `native_log` → FFI).
+/// libp2p worker inside `lib_ghal_bol_core` (Rust `native_log` → FFI).
 void _logNativeService(Map<String, dynamic> ev) {
   final tag = ev["tag"]?.toString() ?? "libp2p";
   final msg = ev["message"]?.toString() ?? "";

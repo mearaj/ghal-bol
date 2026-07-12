@@ -9,7 +9,7 @@ import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/call/call_controller.dart";
 import "package:ghal_bol_ui/ghal_bol_p2p.dart";
 import "package:ghal_bol_ui/ghal_bol_ui_session.dart";
-import "package:ghal_bol_ui/ghalbol_connect_invite.dart";
+import "package:ghal_bol_ui/ghal_bol_connect_invite.dart";
 import "package:ghal_bol_ui/identity_alias_store.dart";
 import "package:ghal_bol_ui/identity_display_name.dart";
 import "package:ghal_bol_ui/invite_scan_screen.dart";
@@ -87,7 +87,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => ChatScreenState();
 }
 
-enum _MsgDelivery { pending, delivered, read, failed }
+enum _MsgDelivery { pending, sent, delivered, read, failed }
 
 class _ChatLine {
   _ChatLine({
@@ -558,6 +558,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           _updateOutgoingDelivery(mid, _MsgDelivery.read);
         } else if (r.delivery == "delivered") {
           _updateOutgoingDelivery(mid, _MsgDelivery.delivered);
+        } else if (r.delivery == "sent") {
+          _updateOutgoingDelivery(mid, _MsgDelivery.sent);
         }
         continue;
       }
@@ -707,10 +709,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         return 0;
       case _MsgDelivery.failed:
         return 1;
-      case _MsgDelivery.delivered:
+      case _MsgDelivery.sent:
         return 2;
-      case _MsgDelivery.read:
+      case _MsgDelivery.delivered:
         return 3;
+      case _MsgDelivery.read:
+        return 4;
     }
   }
 
@@ -720,9 +724,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         return _MsgDelivery.read;
       case "delivered":
         return _MsgDelivery.delivered;
+      case "sent":
+        return _MsgDelivery.sent;
       case "failed":
         return _MsgDelivery.failed;
-      case "sent": // legacy single-check before peer ack — never show as delivered
       default:
         return _MsgDelivery.pending;
     }
@@ -1516,8 +1521,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     if (kind == "outbound_sent") {
-      // Native outbox wrote to wire; ticks stay pending until peer ack_received (docs/GHAL_BOL_DM_MSG_V1).
       if (mounted) setState(() => _chatError = null);
+      if (widget.hubPollsEvents && ev["stores_updated"] == true) {
+        _scheduleTranscriptSync(force: true);
+      }
       return;
     }
     if (kind == "send_failed") {
@@ -1722,10 +1729,13 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (d == _MsgDelivery.failed) {
       return Icon(Icons.error_outline, size: 14, color: failedColor ?? Colors.orange.shade700);
     }
-    if (d == _MsgDelivery.delivered) {
+    if (d == _MsgDelivery.sent) {
       return Icon(Icons.done, size: 14, color: color);
     }
-    // Read (double check).
+    if (d == _MsgDelivery.delivered) {
+      return Icon(Icons.done_all, size: 14, color: color);
+    }
+    // Read (double check, blue).
     return Icon(Icons.done_all, size: 14, color: Colors.lightBlueAccent.shade200);
   }
 
