@@ -52,7 +52,7 @@ transport as native voice.
 ┌───────────────────────── ghal_bol_ui (Flutter) ─────────────────────────┐
 │ Call UI, camera-permission prompt, local PiP + remote video surface      │
 │ bound to a native Texture (Texture id from FFI); video on/off toggle      │
-│ Calls native via ghal_bol_ffi_call_video_* ; renders state from poll      │
+│ Calls native via ghal_bol_core_ffi_call_video_* ; renders state from poll      │
 └───────────────────────────────┬─────────────────────────────────────────┘
                                  │ FFI / daemon RPC (control + texture id only)
 ┌───────────────────────────────▼─────────────────────────────────────────┐
@@ -216,15 +216,15 @@ parse remote → decide `_willUseNativeVideo`).
 
 ## Control / FFI surface (additions)
 
-Reuse the `ghal_bol_ffi_p2p_call_media` / `p2p_call_media` pattern. Dart sends
+Reuse the `ghal_bol_core_ffi_p2p_call_media` / `p2p_call_media` pattern. Dart sends
 **control only**; media + pixels never cross FFI as buffers — only a **texture id**
 (or platform surface handle) does.
 
 | FFI (proposed) | Purpose |
 |----------------|---------|
-| `ghal_bol_ffi_p2p_call_video` (action `start`/`stop`/`set_camera_enabled`/`switch_camera`) | Begin/end the video session + camera for `call_id` (after `accept` + `video_on`). |
-| `ghal_bol_ffi_call_video_remote_texture` | Returns the platform **texture id** the engine renders the decoded peer frames into; Flutter shows it in a `Texture(textureId:)`. |
-| `ghal_bol_ffi_call_video_local_texture` | Local camera preview texture id (or Flutter renders preview natively from the camera plugin — TBD per platform). |
+| `ghal_bol_core_ffi_p2p_call_video` (action `start`/`stop`/`set_camera_enabled`/`switch_camera`) | Begin/end the video session + camera for `call_id` (after `accept` + `video_on`). |
+| `ghal_bol_core_ffi_call_video_remote_texture` | Returns the platform **texture id** the engine renders the decoded peer frames into; Flutter shows it in a `Texture(textureId:)`. |
+| `ghal_bol_core_ffi_call_video_local_texture` | Local camera preview texture id (or Flutter renders preview natively from the camera plugin — TBD per platform). |
 | (poll) `call_video_connected` / `call_video_stats` / `call_video_failed` | Truthful UI: "video connected" only on real decoded-frame flow; stats = rtt/loss/fps/bitrate/resolution/e2e-active. |
 
 ---
@@ -289,7 +289,7 @@ tests.
 
 | Phase | State |
 |-------|-------|
-| **V0 engine core** | **Done.** `ghal_bol/src/call_video/` — `RawVideoFrame`/`EncodedVideoFrame`, `VideoEncoder`/`VideoDecoder` traits + `NullVideoCodec`, frame **fragmentation/reassembly** (`packet.rs`, `Reassembler`), **keyframe-aware jitter** (`jitter.rs`, `VideoJitter` — waits for a keyframe, jumps to the next keyframe on a gap, raises a throttled `key_request`), and per-chunk **identity AES-256-GCM seal** reusing `call_media::MediaCrypto` with a distinct video key. `VideoEngine` drives `on_capture → wires`, `on_wire → reassemble+jitter`, `on_render → decoded frame`. **7 unit tests** (multi-chunk round-trip, out-of-order chunks, in-order render, single-frame loss recovery, keyframe-gating + request, tamper/wrong-key rejection). Unwired — does not touch the shipping voice/chat/networking paths. |
+| **V0 engine core** | **Done.** `ghal_bol_core/src/call_video/` — `RawVideoFrame`/`EncodedVideoFrame`, `VideoEncoder`/`VideoDecoder` traits + `NullVideoCodec`, frame **fragmentation/reassembly** (`packet.rs`, `Reassembler`), **keyframe-aware jitter** (`jitter.rs`, `VideoJitter` — waits for a keyframe, jumps to the next keyframe on a gap, raises a throttled `key_request`), and per-chunk **identity AES-256-GCM seal** reusing `call_media::MediaCrypto` with a distinct video key. `VideoEngine` drives `on_capture → wires`, `on_wire → reassemble+jitter`, `on_render → decoded frame`. **7 unit tests** (multi-chunk round-trip, out-of-order chunks, in-order render, single-frame loss recovery, keyframe-gating + request, tamper/wrong-key rejection). Unwired — does not touch the shipping voice/chat/networking paths. |
 | **V1 codec** | **Done (desktop).** `call_video/codec_h264.rs` — `H264Encoder`/`H264Decoder` over **OpenH264** (`openh264` 0.9, bundled source built via `cc`; realtime config: 2 Mbps / 30 fps, accurate keyframe flag via Annex-B NAL scan). I420 in/out. `VideoEngine::new_h264()`. **4 tests** incl. a **full two-engine pipeline** (encode → fragment → seal → wire → reassemble → keyframe-aware jitter → decode). Desktop-gated; Android codec (`MediaCodec` / cross-built openh264) lands in its phase so the Android build stays untouched now. |
 | **V1 transport + capture/render** | **Done (Linux desktop + Android).** `/ghal-bol/call-video/1.0.0` substream, `p2p_call_video` + `p2p_call_video_frame` FFI/daemon RPC. **Desktop:** `nokhwa` camera → I420. **Android:** Camera2 in `:p2p` (`AndroidVideoCapture.kt`) → JNI → Rust; OpenH264 cross-built via NDK (same bitstream as desktop). Flutter `NativeCallVideoView` pulls frames over daemon RPC on Android (UI process) or FFI on Linux. `CallController` negotiates `video_engine: native_v1` on **both** desktop and Android. |
 | **V2 Android HW codec** | **Optional next.** `MediaCodec` H.264 encode/decode behind the same trait for lower CPU/battery (OpenH264 SW already ships). |

@@ -13,8 +13,8 @@ import "package:ghal_bol_ui/src/ghal_bol_android_p2p_service.dart"
 
 /// Reference integrator shell around [`DaemonClient`] / [`RpcConnection`].
 ///
-/// Platform spawn (Linux `ghal_bol_daemon`, Android `:p2p` FGS) stays here.
-/// Wire names: `daemon_client_api.dart`; Rust SDK: `ghal_bol::daemon`.
+/// Platform spawn (Linux `ghal_bol_core_daemon`, Android `:p2p` FGS) stays here.
+/// Wire names: `daemon_client_api.dart`; Rust SDK: `ghal_bol_core::daemon`.
 class GhalBolDaemonClient {
   GhalBolDaemonClient._();
 
@@ -56,12 +56,12 @@ class GhalBolDaemonClient {
   static Future<String?> resolveDaemonExecutable() async {
     if (!Platform.isLinux) return null;
     final exeDir = File(Platform.resolvedExecutable).parent;
-    final bundled = File("${exeDir.path}/libexec/ghal_bol_daemon");
+    final bundled = File("${exeDir.path}/libexec/ghal_bol_core_daemon");
     if (await bundled.exists()) return bundled.path;
-    final dev = File("${exeDir.path}/../../../../target/debug/ghal_bol_daemon");
+    final dev = File("${exeDir.path}/../../../../target/debug/ghal_bol_core_daemon");
     if (await dev.exists()) return dev.absolute.path;
     final devRelease =
-        File("${exeDir.path}/../../../../target/release/ghal_bol_daemon");
+        File("${exeDir.path}/../../../../target/release/ghal_bol_core_daemon");
     if (await devRelease.exists()) return devRelease.absolute.path;
     return null;
   }
@@ -228,7 +228,7 @@ class GhalBolDaemonClient {
           "daemon_binary_missing",
           check: "run sync_ghal_bol_native_for_flutter.sh",
         );
-        AppLog.instance.e("Daemon", "ghal_bol_daemon binary not found");
+        AppLog.instance.e("Daemon", "ghal_bol_core_daemon binary not found");
         return;
       }
       SessionFlowLog.daemon("spawn_daemon", {"bin": bin});
@@ -253,7 +253,7 @@ class GhalBolDaemonClient {
     }
     SessionFlowLog.daemonIssue(
       "daemon_start_timeout",
-      check: "Android :p2p service; Linux ghal_bol_daemon in libexec",
+      check: "Android :p2p service; Linux ghal_bol_core_daemon in libexec",
     );
   }
 

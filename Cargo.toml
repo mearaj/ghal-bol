@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["ghal_bol", "ghal_bol_server"]
+members = ["ghal_bol_core", "ghal_bol_coord", "ghal_bol_delivery", "ghal_bol_ddns"]
 
 # Faster iterative builds (deps compile at opt-level 2 in dev) — same idea as emilk/eframe_template.
 [profile.dev.package."*"]

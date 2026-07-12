@@ -5,7 +5,7 @@ import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/src/ghal_bol_daemon_client_io.dart"
     if (dart.library.html) "package:ghal_bol_ui/src/ghal_bol_daemon_client_stub.dart";
 
-/// Out-of-process P2P (Linux `ghal_bol_daemon`, Android `:p2p` foreground service).
+/// Out-of-process P2P (Linux `ghal_bol_core_daemon`, Android `:p2p` foreground service).
 abstract final class GhalBolDaemon {
   static bool get isSupported => Platform.isLinux || Platform.isAndroid;
 
@@ -106,7 +106,7 @@ abstract final class GhalBolDaemon {
   static Future<void> clearLinuxUiPresence() =>
       GhalBolDaemonClient.clearLinuxUiPresence();
 
-  /// OS network truth from `:p2p` / `ghal_bol_daemon` (`android_network` / `linux_network`).
+  /// OS network truth from `:p2p` / `ghal_bol_core_daemon` (`android_network` / `linux_network`).
   static Future<Map<String, dynamic>?> networkSnapshot() async {
     if (!isSupported) return null;
     if (!await GhalBolDaemonClient.probeDaemon()) return null;

@@ -12,7 +12,7 @@ Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (la
 
 | Driver | Detail |
 |--------|--------|
-| **Golden rule #1** | `ghal_bol` (Rust) owns product logic — capture, codec, transport, jitter, and E2E live in Rust (`call_media/`). |
+| **Golden rule #1** | `ghal_bol_core` (Rust) owns product logic — capture, codec, transport, jitter, and E2E live in Rust (`call_media/`). |
 | **We already have the link** | libp2p provides encrypted connections (TCP/QUIC + Noise + relay + coord). Calls reuse that link via `/ghal-bol/call/1.0.0`. |
 | **No new servers** | Direct when possible; coord/relay only as fallback — same as chat. |
 | **One E2E story** | `derive_call_media_keys_from_transport` + per-frame AES-GCM seal (transport KEM after `TransportKemHello`). |
@@ -38,7 +38,7 @@ Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (la
 ```text
 ┌───────────────────────── ghal_bol_ui (Flutter) ─────────────────────────┐
 │ Call UI, ring/back tones, mute/speaker/video toggles, device picker      │
-│ Calls native via ghal_bol_ffi_call_* ; renders state from poll events    │
+│ Calls native via ghal_bol_core_ffi_call_* ; renders state from poll events    │
 └───────────────────────────────┬─────────────────────────────────────────┘
                                  │ FFI / daemon RPC (control only)
 ┌───────────────────────────────▼─────────────────────────────────────────┐
@@ -147,16 +147,16 @@ Control/signaling stays on the reliable DM stream either way.
 
 ## Control / FFI surface (additions)
 
-Reuse the `ghal_bol_ffi_call_*` pattern (`call_ffi.rs`) and the poll event path
+Reuse the `ghal_bol_core_ffi_call_*` pattern (`call_ffi.rs`) and the poll event path
 (`apply_p2p_event_json` → Flutter reload). Dart sends **control only**; media
 never crosses FFI.
 
 | FFI (proposed) | Purpose |
 |----------------|---------|
-| `ghal_bol_ffi_call_media_start` | Begin capture/playback + media session for `call_id` (after `accept`). |
-| `ghal_bol_ffi_call_media_stop` | Tear down pipeline + transport. |
-| `ghal_bol_ffi_call_set_mic_muted` / `_set_speaker` / `_set_output_route` | Device/route control. |
-| `ghal_bol_ffi_call_media_stats` | Poll: rtt, loss, jitter, bitrate, e2e-active, peer-key short → in-call chip + App log. |
+| `ghal_bol_core_ffi_call_media_start` | Begin capture/playback + media session for `call_id` (after `accept`). |
+| `ghal_bol_core_ffi_call_media_stop` | Tear down pipeline + transport. |
+| `ghal_bol_core_ffi_call_set_mic_muted` / `_set_speaker` / `_set_output_route` | Device/route control. |
+| `ghal_bol_core_ffi_call_media_stats` | Poll: rtt, loss, jitter, bitrate, e2e-active, peer-key short → in-call chip + App log. |
 
 Events on poll: `call_media_connected`, `call_media_stats`, `call_media_failed`
 (UI shows "connected" only on real media flow, mirroring v1's truthful-status rule).
@@ -216,10 +216,10 @@ new platform code and the main quality risk (echo on speakerphone, threading).
 
 | Phase | State |
 |-------|-------|
-| **P0 engine core** | **Done.** `ghal_bol/src/call_media/` — `MediaFrame`, `MediaCrypto` (AES-256-GCM, per-direction nonce), `JitterBuffer` (reorder + PLC), `AudioCodec` trait + `NullCodec`. 7 unit tests. |
+| **P0 engine core** | **Done.** `ghal_bol_core/src/call_media/` — `MediaFrame`, `MediaCrypto` (AES-256-GCM, per-direction nonce), `JitterBuffer` (reorder + PLC), `AudioCodec` trait + `NullCodec`. 7 unit tests. |
 | **P1 Opus** | **Done.** `OpusEncoderCodec`/`OpusDecoderCodec` (audiopus, Voip + in-band FEC, PLC). `MediaEngine::new_opus`. Opus round-trip test. Builds vendored libopus (needs `cmake`). |
 | **P2 transport** | **Done.** `/ghal-bol/call/1.0.0` substream in `chat_server.rs`: a second `control.accept(...)` loop + per-call TX `open_stream`. **Two streams per call** (each side opens its TX, accepts its RX) to avoid glare; first frame is a `{"call_id"}` header, then length-prefixed sealed packets. Registry `SessionState::call_media` maps `call_id → {peer_id, controls, wire_in_tx}`; inbound RX is peer-verified. `OutboundCmd::CallMediaStart/Stop/SetMicMuted` (priority 0). Stopped on node shutdown. |
-| **P3 FFI / daemon** | **Done.** `p2p_runtime::p2p_call_media` (action `start`/`stop`/`set_mic_muted`), C FFI `ghal_bol_ffi_p2p_call_media`, daemon RPC `p2p_call_media`. Stats currently surfaced via `native_log` `call_media` lines (`sent=/recv=` every 3 s); a poll event is a later refinement. |
+| **P3 FFI / daemon** | **Done.** `p2p_runtime::p2p_call_media` (action `start`/`stop`/`set_mic_muted`), C FFI `ghal_bol_core_ffi_p2p_call_media`, daemon RPC `p2p_call_media`. Stats currently surfaced via `native_log` `call_media` lines (`sent=/recv=` every 3 s); a poll event is a later refinement. |
 | **P4 desktop audio** | **Done.** `cpal` capture/playback on a dedicated audio thread (cpal `Stream` is `!Send`); down-mix to mono + linear resample to/from 48 kHz; `SilenceAudioBackend` fallback for headless/Android. **AEC not yet** — use headphones to avoid echo until AEC lands. **Next:** add **`sonora`** (pure-Rust AEC3 + NS + AGC2, confirmed available June 2026) in the capture path, fed the playout stream as the echo reference; cross-compiles for Android `:p2p` (no C++ dep). OS voice-comm AEC preferred on mobile when available. |
 | **P5 Flutter** | **Done (voice).** Invite/accept negotiate `voice_engine: native_v2`; `CallController` uses native media (`GhalBolP2p.callMediaStart/Stop/SetMicMuted`). E2EE chip is truthful (native voice is always identity-E2E). |
 | **P6 Android** | **Done (build + plumbing).** `cpal` reuses its Oboe (AAudio/OpenSL) backend on `target_os = "android"`, gated by `set_android_audio_ready()` — the `:p2p` JNI `initAndroidAudio` hands cpal the JavaVM + Context via `ndk_context`. libopus is cross-built static per ABI by `scripts/build_android_opus.sh` (audiopus_sys can't cross-compile it) and linked via `LIBOPUS_*` from `pack_android_workspace_jni_libs.sh`; the `.so` statically embeds opus and needs only `libc++_shared.so`/`libOpenSLES.so` (already shipped by the app). The `:p2p` service gains a `microphone` FGS type (re-promoted at call start once `RECORD_AUDIO` is granted). `CallController` advertises `native_v2` on Android behind `kAndroidNativeVoice`. **Known gaps (device-test):** cpal uses Oboe's default (media) input/route, so there is **no hardware AEC and no earpiece/speaker route control** — clean on a headset, echo on speaker. Proper fix = drive Oboe directly with `VOICE_COMMUNICATION` preset + `MODE_IN_COMMUNICATION` (bypassing cpal) or a software APM. |
@@ -240,7 +240,7 @@ See [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”. Summary:
 ### Desktop device-test steps (Linux↔Linux)
 
 1. Quit any running Flutter app (the sync script stops a stale daemon).
-2. `./scripts/sync_ghal_bol_native_for_flutter.sh` — rebuilds the lib + `ghal_bol_daemon` (now linked against cpal/ALSA + libopus) and copies them into the bundle.
+2. `./scripts/sync_ghal_bol_native_for_flutter.sh` — rebuilds the lib + `ghal_bol_core_daemon` (now linked against cpal/ALSA + libopus) and copies them into the bundle.
 3. `cd ghal_bol_ui && flutter run` on each desktop (use `--release` to hit the real coord server).
 4. Place a voice call between the two contacts. Use **headphones** on at least one side (no AEC yet).
 5. In the in-app App log, filter `call_media`. Expect on both sides: `start call_id=… local_is_a=…`, `inbound media stream from …`, `rx stream attached …`, then `call_id=… sent=N recv=M` ticking up every ~3 s. Audio should be two-way and clear.

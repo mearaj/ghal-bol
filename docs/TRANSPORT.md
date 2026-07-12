@@ -1,6 +1,8 @@
 # Transport — libp2p data plane
 
-**Status:** **libp2p is the production P2P transport.** A prior plan to replace libp2p with a custom native QUIC/TCP stack was **evaluated and discarded** (May 2026). This document is the canonical reference for how peers connect today.
+**Status:** **libp2p is the production transport for LAN text and voice/video calls (WAN + LAN).** WAN **text** uses [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) — not libp2p relay outbox. A prior plan to replace libp2p with a custom native QUIC/TCP stack was **evaluated and discarded** (May 2026). This document is the canonical reference for how peers connect today.
+
+**Scope:** libp2p upkeep (coord, relay, mDNS, dial) serves **calls** and **LAN DM streams**. When `GHAL_BOL_DELIVERY_URL` is set, WAN text outbox/resync/acks on libp2p are disabled — see `ghal_bol_core/src/text_transport.rs` and [DESIGN.md](DESIGN.md) § “Why pure P2P WAN text was dropped”.
 
 **For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Flutter. **Start here for connectivity:** § **Connectivity lifecycle** → § **Network truth** → § **Parallel LAN + WAN** → § **Asymmetric LAN↔WAN mux recovery** → § **Post-mortem 2026-06-24** → § **Post-mortem 2026-06-25** (mandatory before changing dial/upkeep/coord lookup). Transport reachability is **live-only** — see § “Caching policy (canonical)”.
 
@@ -12,12 +14,14 @@ Ghal Bol separates **chat protocol** from **transport**:
 
 | Layer | Implementation |
 |-------|----------------|
-| **Chat protocol** | `ghal_bol_msg_v1` — signed JSON envelopes on framed streams ([GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)) |
-| **Transport** | **libp2p 0.56** swarm in `ghal_bol/src/p2p/chat_server.rs` |
-| **Discovery (Tier 1)** | `ghal_bol_server` register/lookup + co-located relay (WAN) + libp2p mDNS (LAN per-peer) |
-| **Policy** | Outbox, ack send/retry, foreground gates, transcripts — same module tree regardless of transport |
+| **WAN text** | `ghal_bol_delivery` WebSocket mailbox — E2E `delivery_msg_v1` ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)) |
+| **LAN text** | `ghal_bol_msg_v1` on libp2p `/ghal-bol/msg/1.0.0` ([GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)) |
+| **Calls (LAN + WAN)** | libp2p signaling + media substreams; WAN via coord + relay |
+| **Transport** | **libp2p 0.56** swarm in `ghal_bol_core/src/p2p/chat_server/` |
+| **Discovery** | `ghal_bol_coord` register/lookup + relay (WAN calls) + mDNS (LAN text/calls) |
+| **Policy** | WAN text: `delivery_runtime`; LAN text + calls: outbox/acks/foreground in `chat_server` |
 
-libp2p is **not** the chat protocol. It provides encrypted connections, stream multiplexing, and dial/listen. All product semantics live in Rust (`chat_server.rs`, `dm_event_handler.rs`, stores).
+libp2p is **not** the WAN text path. It provides encrypted connections, stream multiplexing, and dial/listen for **LAN text** and **calls**. WAN text semantics live in `delivery_runtime.rs`; LAN/call semantics in `chat_server/` and `dm_event_handler.rs`.
 
 ---
 
@@ -82,7 +86,7 @@ A peer must **never be momentarily un-findable on coord while a valid relay path
 This is **already guaranteed — do not add a client-side “keep advertising the old circuit across
 renewal” overlap** (it would advertise a *dead* circuit if the reservation genuinely lapses, which
 is worse than a brief gap). The guarantee comes from three server-authoritative mechanisms
-(`ghal_bol_server`):
+(`ghal_bol_coord`):
 
 - **`merge_client_register` never drops the stored `/p2p-circuit`** — a client `POST /v1/register`
   with a circuit-less endpoint list (e.g. during a client listener flap) does **not** strip the
@@ -208,7 +212,7 @@ Per contact (every ~1s dm_upkeep):
 
 ## libp2p stack (current)
 
-Enabled in `ghal_bol/Cargo.toml` and wired in `chat_server.rs`:
+Enabled in `ghal_bol_core/Cargo.toml` and wired in `chat_server.rs`:
 
 | libp2p piece | Role in Ghal Bol |
 |--------------|------------------|
@@ -243,11 +247,11 @@ Identity: one **secp256k1** keypair per device → libp2p **PeerId** via `libp2p
 └────────────────────────────┬────────────────────────────────────┘
                              │ register / heartbeat / lookup
 ┌────────────────────────────▼────────────────────────────────────┐
-│  ghal_bol_server — Tier-1 coordination (no message bodies)       │
+│  ghal_bol_coord — Tier-1 coordination (no message bodies)       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Process split (Linux / Android):** libp2p runs **out-of-process** in `ghal_bol_daemon` or Android `:p2p` (`GhalBolP2pService`). The UI process loads `libghal_bol.so` for identity and store I/O; both share the same data directory.
+**Process split (Linux / Android):** libp2p runs **out-of-process** in `ghal_bol_core_daemon` or Android `:p2p` (`GhalBolP2pService`). The UI process loads `lib_ghal_bol_core.so` for identity and store I/O; both share the same data directory.
 
 ---
 
@@ -255,10 +259,10 @@ Identity: one **secp256k1** keypair per device → libp2p **PeerId** via `libp2p
 
 This section encodes the **binding connectivity rules** — they take precedence over any other guidance here. The whole transport must behave this way; if any other doc disagrees, it is wrong and must be updated to match this.
 
-1. **Start on first unlock, run in the background.** After the user unlocks the first time, the node (`ghal_bol_daemon` / Android `:p2p`) starts and **keeps running** regardless of UI state. UI lock/suspend never stops the node, poll, or ack loops.
+1. **Start on first unlock, run in the background.** After the user unlocks the first time, the node (`ghal_bol_core_daemon` / Android `:p2p`) starts and **keeps running** regardless of UI state. UI lock/suspend never stops the node, poll, or ack loops.
 2. **Watch the network continuously.** OS connectivity callbacks (`notify_network_change`) plus `refresh_os_network_truth` on each `network_tick` (~1s) read **default route transport** and internet validated — not `if_addrs` alone. Loss or change triggers recovery without user-visible disruption (`handle_network_path_change`, `run_wan_recovery_pass`). See § **Network truth**.
 3. **Find both addresses fast.** The node determines its **LAN** address (interface scan / mDNS) and its **globally reachable** address (public listen, AutoNAT/UPnP, or a relay `/p2p-circuit` when behind NAT/CGNAT).
-4. **Register at coord as soon as a reachable address exists, and keep it fresh.** Once a publishable global endpoint (public TCP or relay circuit) is known, register with `ghal_bol_server`. **Re-register** on endpoint change, failed register, relay reservation accepted, handover, or stale presence — **not** on every heartbeat tick when endpoints are unchanged (`should_throttle_register` in `coord_runtime.rs`; details in [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § **Client register & heartbeat policy**).
+4. **Register at coord as soon as a reachable address exists, and keep it fresh.** Once a publishable global endpoint (public TCP or relay circuit) is known, register with `ghal_bol_coord`. **Re-register** on endpoint change, failed register, relay reservation accepted, handover, or stale presence — **not** on every heartbeat tick when endpoints are unchanged (`should_throttle_register` in `coord_runtime.rs`; details in [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § **Client register & heartbeat policy**).
 5. **WAN must always work when both peers have internet and coord is reachable.** This is the baseline guarantee — coord lookup + relay reservation + explicit **`/p2p-circuit` dial**, never gated off by being on Wi‑Fi/LAN. **DCUtR is not used** when coord is configured (see § Stream-first).
 6. **LAN is per-peer and additive.** Use the LAN path **only** for a contact actually discovered on the local LAN (mDNS), never globally. If the LAN is lost, that peer transparently falls back to the normal WAN path with no user-visible change.
 7. **Coord down ≠ app offline, but WAN discovery pauses.** When coord is unreachable, **do not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN peer discovery (§ “Connectivity lifecycle”). **LAN (mDNS) still works** for contacts on the local network. Keep retrying **all configured coord servers** at a regular interval — never stop. **WAN requires coord + relay** when both peers have internet.
@@ -315,7 +319,7 @@ G. Stream + outbox   ConnectionEstablished → /ghal-bol/msg/1.0.0 → resync ou
 | `coord_lookup_peer ok — dialing` but no `dm peer connected` | F | Circuit dial failing — check server `circuit ACCEPTED/DENIED`; check throttles not blocking all paths |
 | `mdns dialing` + `coord dialing` same peer on Wi‑Fi | OK (if throttled) | **Parallel transport** — both paths expected; unhealthy only if **no** `dm connection established` for minutes |
 | `mdns dialing` only for 15s+ then relay (no parallel race) | F (LAN path) | LAN TCP failing (firewall/wrong port); relay should follow after in-flight window — expected sequence |
-| `issue=… ResourceLimitExceeded` | F | Relay server rate limiters — redeploy `ghal_bol_server` |
+| `issue=… ResourceLimitExceeded` | F | Relay server rate limiters — redeploy `ghal_bol_coord` |
 | `dm peer connected` + `outbox resync` | G ✓ | Pending transcript outbox drains — no new user send required |
 
 ---
@@ -330,7 +334,7 @@ G. Stream + outbox   ConnectionEstablished → /ghal-bol/msg/1.0.0 → resync ou
 |---------------|------------------|-----|
 | **Public TCP** (`tcp://routable-ip:port`) | **Client** | `POST /v1/register` when the device has a **globally routable inbound** DM listen (UPnP / port-forward / public IP). Must be the peer’s own socket — **not** the coord relay bootstrap host:port from `GET /v1/relay`, **not** RFC1918/CGNAT LAN. Multiaddr must end with `/p2p/<local_peer_id>`. |
 | **LAN TCP** (`tcp://192.168.x:port`) | **Never on coord** | Same-subnet peers use mDNS direct TCP only — not in `POST /v1/register`. |
-| **`libp2p` `/p2p-circuit/…`** | **Relay server** | On `reservation ACCEPTED` + identify `agent_version` `ghal_bol/<ver>;pk=<66-hex>`, `ghal_bol_server` upserts the circuit into SQLite (`presence.rs`). Clients **must not** POST `/p2p-circuit` (server returns 400). |
+| **`libp2p` `/p2p-circuit/…`** | **Relay server** | On `reservation ACCEPTED` + identify `agent_version` `ghal_bol/<ver>;pk=<66-hex>`, `ghal_bol_coord` upserts the circuit into SQLite (`presence.rs`). Clients **must not** POST `/p2p-circuit` (server returns 400). |
 
 **Server lifecycle (coord must enforce):**
 
@@ -487,7 +491,7 @@ After a toggle, **`os=` should flip within ~1s** (callback) or on the next tick 
 3. **Do not** call `p2p_notify_network_change` from Flutter — Android `:p2p` + Linux `network_tick` own handover.
 4. **Do not** infer “peer is on LAN” from local `profile=lan` alone — use mDNS for that peer or coord circuit for WAN.
 5. **Internet validated** (`NET_CAPABILITY_VALIDATED` / route operstate) is logged and used for urgency; brief `unvalidated` right after Wi‑Fi associate is normal — handover still keys off **default transport**.
-6. **Flutter `NetworkHelper`** (`ghal_bol_ui/lib/network_helper.dart`) — thin poll loop for **UI display only**. OS truth from **`ghal_bol`** via daemon RPC `network_snapshot` (`:p2p` / `ghal_bol_daemon` → `android_network` / `linux_network`). Linux in-process FFI fallback only when daemon is off. Rust logs: `Native/network` `ui snapshot …`; Flutter App log tag **`Network`**. **Never** gates P2P dial/ack/coord policy in Dart.
+6. **Flutter `NetworkHelper`** (`ghal_bol_ui/lib/network_helper.dart`) — thin poll loop for **UI display only**. OS truth from **`ghal_bol`** via daemon RPC `network_snapshot` (`:p2p` / `ghal_bol_core_daemon` → `android_network` / `linux_network`). Linux in-process FFI fallback only when daemon is off. Rust logs: `Native/network` `ui snapshot …`; Flutter App log tag **`Network`**. **Never** gates P2P dial/ack/coord policy in Dart.
 
 ### Network-truth regressions
 
@@ -869,7 +873,7 @@ Upstream issues that match Ghal Bol behaviour. When logs disagree with an issue 
 | [circuit-v2 spec](https://github.com/libp2p/specs/blob/master/relay/circuit-v2.md) | Presence lost after relay TCP drop | Reservation invalid when bootstrap TCP to relay drops | Re-reserve + re-register; server logs `reservation closed` |
 | [PR #5926](https://github.com/libp2p/rust-libp2p/pull/5926) peer-store | Stale identify addrs cause blind wrong dials | Remove addrs on dial failure; don't route from identify alone | Stream-first explicit coord/mDNS addrs; block identify ingest when stream up |
 | [#2216](https://github.com/libp2p/rust-libp2p/issues/2216) / [#1135](https://github.com/libp2p/rust-libp2p/issues/1135) | Old LAN ports dialed forever | Identify/external addrs don't expire by default | No peerstore WAN routing; mDNS event-driven LAN only |
-| Relay default rate limits [PR #3742](https://github.com/libp2p/rust-libp2p/pull/3742) | `ResourceLimitExceeded`; endless reserve, no chat | Raise `reservation_rate_per_peer` on server | `ghal_bol_server/src/relay.rs` |
+| Relay default rate limits [PR #3742](https://github.com/libp2p/rust-libp2p/pull/3742) | `ResourceLimitExceeded`; endless reserve, no chat | Raise `reservation_rate_per_peer` on server | `ghal_bol_coord/src/relay.rs` |
 
 **Do not fight upstream:**
 
@@ -878,7 +882,7 @@ Upstream issues that match Ghal Bol behaviour. When logs disagree with an issue 
 - Inbound relay classified by endpoint path alone → use `InboundCircuitEstablished`.
 - DCUtR + identify addrs as primary WAN when coord is configured → disabled; coord + relay only.
 
-Diagnostic log format (grep `category=` / `reason=` / `next=`): implemented in `ghal_bol/src/p2p/connectivity_diag.rs`.
+Diagnostic log format (grep `category=` / `reason=` / `next=`): implemented in `ghal_bol_core/src/p2p/connectivity_diag.rs`.
 
 ---
 
@@ -887,7 +891,7 @@ Diagnostic log format (grep `category=` / `reason=` / `next=`): implemented in `
 Typical WAN flow ([GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md), [COORDINATION_SERVER.md](COORDINATION_SERVER.md)):
 
 1. Guest scans host QR → stores `public_key_hex`.
-2. Both peers register endpoints with `ghal_bol_server`.
+2. Both peers register endpoints with `ghal_bol_coord`.
 3. Lookup `GET /v1/peers/{public_key_hex}` → dial returned endpoints via libp2p.
 4. Open `/ghal-bol/msg/1.0.0` stream; speak `ghal_bol_msg_v1`.
 
@@ -929,12 +933,12 @@ Checklist before blaming the client:
 | `GET /v1/peers/…` 404 after server restart | Stale presence TTL expired; peer not re-registered yet | Restart apps so they re-reserve and register |
 | `GET /v1/relay` 200 but client `Connection refused` / timeout on relay addr | HTTP advertises relay but TCP unreachable (home: router forward missing/wrong; GCP: firewall) | Home: forward **TCP 55002** on router, run `verify_coord1.sh`. GCP: open `:4002`. Clients refetch live `GET /v1/relay` (no disk cache) |
 | One side `reservation accepted`, other side 404 on coord lookup | **Asymmetric CGNAT bug** — phone never registered; Wi‑Fi side looks healthy | Check **phone** log for dial storm + missing `reservation accepted`; see § “CGNAT / mobile-data relay reservation” |
-| Phone log: many `coord relay dial` per second, no `bootstrap connection` | Bootstrap **dial storm** — do not add more dials; restore throttle + CGNAT probe path | `issue_bootstrap_dials`, `try_ghalbol_probe_style_circuit_listen` in `retry_stalled_relay_reservations` |
+| Phone log: many `coord relay dial` per second, no `bootstrap connection` | Bootstrap **dial storm** — do not add more dials; restore throttle + CGNAT probe path | `issue_bootstrap_dials`, `try_ghal_bol_probe_style_circuit_listen` in `retry_stalled_relay_reservations` |
 | `relay has no public address advertised` at server start | `GHAL_BOL_RELAY_PUBLIC_HOST` unset or relay disabled | Set public host; restart coord server |
 
-See [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md).
+See [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md).
 
-**Home coord1 fixed relay (shipping):** `install_coord1_home.sh` binds **`0.0.0.0:55002`** and advertises `/dns4/coord1.ghalbol.com/tcp/55002` (4002 is often blocked on home routers). Forward **8443 + 55002** on the router; verify with `./ghal_bol_server/deploy/verify_coord1.sh`. Stable port avoids the UPnP port-churn that caused stale coord presence and circuit dial timeouts (see changelog 2026-07-01). DDNS runs in-process inside `ghal_bol_server` (no separate timer). Server still supports UPnP-dynamic relay (`GHAL_BOL_RELAY_DYNAMIC=1`) for experiments — not used on shipping coord1.
+**Home coord1 fixed relay (shipping):** `install_coord1_home.sh` binds **`0.0.0.0:55002`** and advertises `/dns4/coord1.ghalbol.com/tcp/55002` (4002 is often blocked on home routers). Forward **8443 + 55002** on the router; verify with `./ghal_bol_coord/deploy/verify_coord1.sh`. Stable port avoids the UPnP port-churn that caused stale coord presence and circuit dial timeouts (see changelog 2026-07-01). DDNS runs in-process inside `ghal_bol_coord` (no separate timer). Server still supports UPnP-dynamic relay (`GHAL_BOL_RELAY_DYNAMIC=1`) for experiments — not used on shipping coord1.
 
 ### LAN vs WAN dial policy
 
@@ -1220,7 +1224,7 @@ The link between two online contacts must stay **steady** — no idle drops, and
 2. **Partial connection close** — libp2p may hold several parallel TCP paths to the same DM peer (brief mDNS burst before first connect). When one path closes, emit `PeerDisconnected` / clear the stream writer / `note_disconnected` **only if** `!swarm.is_connected(peer)` — otherwise log at debug and keep the live stream. **LAN dials are mDNS event-driven** (`handle_mdns_discovered_list`); **`dm_upkeep` → `connect_dm_peer_now`** may trigger coord/WAN **and** dial a live mDNS addr when present — **in parallel**, throttled — but must **not** re-dial stale LAN TCP from `peer_mdns_lan_candidate_addrs` on a timer (§ “Ephemeral LAN TCP ports”). Do **not** open parallel mDNS dials while a LAN dial is already in flight (`lan_dial_in_flight` → skip). On `OutgoingConnectionError` for a LAN TCP addr, remove that addr and fail over to the next set member once (`try_mdns_lan_failover_dial`), then `notify_coord_lookup` when exhausted. **Linux desktop** idle link timeout is **120s** (not 300s) so quiet LAN links recycle sooner after listen-port changes — still above keepalive ping interval.
 3. **Urgent reconnect** — on full `dm peer disconnected` (no libp2p link left), the peer’s key enters a bounded urgent window (`DM_RECONNECT_URGENT_WINDOW_MS`, 30s) via `mark_dm_reconnect_urgent`. While urgent (`is_pk_reconnect_urgent`), coord lookup **skips** the `peer_not_on_server` 404 backoff and the 1s upkeep tick retries reconnect immediately, instead of waiting for the 5s coord tick or the exponential backoff. The window is cleared on successful reconnect. **Relay bootstrap loss** must not mark urgent / coord-lookup peers that already have a **live direct LAN stream** (`mark_dm_reconnect_urgent_unless_live_direct_stream`).
 4. **Reserve on all configured coord relays in parallel, throttled per relay** — `try_relay_reservations` issues `listen_on(/p2p-circuit)` to every connected **Ghal Bol relay** (from `GET /v1/relay` on each configured coord URL) that is not already circuit-listening, and `try_relay_reservation` enforces a per-relay throttle (`RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or peer discovery. The client **dials relay base TCP first**, then reserves after identify. The anti-pattern is re-issuing `listen_on` **every tick** (a 1s storm), **not** covering all relays once: serializing onto a single relay let one pending-but-never-accepted reservation block the others, so WAN readiness took minutes or never came up. Per-relay throttling keeps the parallel fan-out storm-free.
-5. **Bootstrap relay dial throttle (CGNAT)** — `issue_bootstrap_dials` / `should_issue_bootstrap_dial` limit redundant `swarm.dial` to the same coord relay (10s normal, 3s minimum during forced WAN recovery). Uncoordinated dials from `maybe_refresh_ghalbol_relay`, `ensure_coord_relays_connected`, and `redial_tick` **without** this throttle have repeatedly caused a **dial storm** that prevents bootstrap TCP from ever completing on mobile-data/CGNAT.
+5. **Bootstrap relay dial throttle (CGNAT)** — `issue_bootstrap_dials` / `should_issue_bootstrap_dial` limit redundant `swarm.dial` to the same coord relay (10s normal, 3s minimum during forced WAN recovery). Uncoordinated dials from `maybe_refresh_ghal_bol_relay`, `ensure_coord_relays_connected`, and `redial_tick` **without** this throttle have repeatedly caused a **dial storm** that prevents bootstrap TCP from ever completing on mobile-data/CGNAT.
 6. **Stream mux recovery** — on `open_stream` failure (`receiver is gone`) or send `chat stream closed`, `request_dm_stream_reopen` clears the writer and reopens on the **existing** libp2p connection on the next upkeep tick. Do **not** `disconnect_peer_id` while a direct route may still work. Outbox retries use the same stream — no teardown on `on_wire` timeout alone.
 7. **Presence wake (inactive → active)** — when **this** device re-announces on coord (`try_register_presence` ok, relay `reservation accepted`, app `ui_visible=true`, or network handover), `notify_dm_presence_wake` runs on the next `dm_upkeep` tick (~1s): clears `peer_not_on_coord` backoff for known contacts **without** a live stream and opens a 30s urgent reconnect window. Peers with `dm_peer_stream_up` are skipped. Coord is the WAN phone book; mDNS is the LAN fast path — both are discovery inputs only (stream-first).
 
@@ -1259,7 +1263,7 @@ Two different relay-related actions must stay separate in `dial_dm_peer_addr` / 
 **Root causes (both must be guarded in code):**
 
 1. **Dial storm** — `GET /v1/relay` refetch (every ~5s when not registered), WAN recovery, and bootstrap redial all called `swarm.dial` to the same relay with **no per-relay throttle**. Pending dials pile up; bootstrap TCP never completes on cellular/CGNAT even when the relay is reachable from Wi‑Fi.
-2. **Wrong path while bootstrap TCP is pending** — `try_relay_reservations` only runs after `any_bootstrap_connected`. On CGNAT, bootstrap TCP can stay pending for a long time if dials are spammed. The fix is **probe-style** `listen_on(…/p2p-circuit)` via `try_ghalbol_probe_style_circuit_listen` when `on_mobile_data_path()` and not yet circuit-listening — same idea as `examples/relay_probe.rs`. libp2p’s relay client establishes the link through `listen_on`, not only through a completed outbound dial + `ConnectionEstablished`.
+2. **Wrong path while bootstrap TCP is pending** — `try_relay_reservations` only runs after `any_bootstrap_connected`. On CGNAT, bootstrap TCP can stay pending for a long time if dials are spammed. The fix is **probe-style** `listen_on(…/p2p-circuit)` via `try_ghal_bol_probe_style_circuit_listen` when `on_mobile_data_path()` and not yet circuit-listening — same idea as `examples/relay_probe.rs`. libp2p’s relay client establishes the link through `listen_on`, not only through a completed outbound dial + `ConnectionEstablished`.
 
 **Required behaviour (`chat_server.rs` — do not regress):**
 
@@ -1317,20 +1321,20 @@ Phases: dial bootstrap (all families, one throttle window) → Identify → prun
 
 ---
 
-When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WAN needs a **Ghal Bol relay** that reliably grants Circuit Relay v2 reservations. `ghal_bol_server` runs its **own** relay node next to each HTTP coordinator. The HTTP API stays a lightweight presence phone book; peers discover and dial each other via **`/p2p-circuit`** multiaddrs the relay server upserts on coord when a reservation is accepted. Chat and call media ride that circuit (and parallel LAN direct when mDNS finds the peer) — **not** DCUtR hole-punch. **Public IPFS bootstrap peers are not used** for peer discovery or relay reservation.
+When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WAN needs a **Ghal Bol relay** that reliably grants Circuit Relay v2 reservations. `ghal_bol_coord` runs its **own** relay node next to each HTTP coordinator. The HTTP API stays a lightweight presence phone book; peers discover and dial each other via **`/p2p-circuit`** multiaddrs the relay server upserts on coord when a reservation is accepted. Chat and call media ride that circuit (and parallel LAN direct when mDNS finds the peer) — **not** DCUtR hole-punch. **Public IPFS bootstrap peers are not used** for peer discovery or relay reservation.
 
-**Server (`ghal_bol_server/src/relay.rs`)**
+**Server (`ghal_bol_coord/src/relay.rs`)**
 - Circuit Relay v2 + Identify (`/ghal-bol/1.0.0`) + Ping over **TCP + Noise + Yamux** (libp2p 0.56, protocol‑identical to the client).
 - Stable ed25519 identity persisted at `<data_dir>/relay_ed25519.key` → constant PeerId across restarts. (The relay's **own** node key is ed25519 — that is fine; it is infrastructure, not a user identity.)
-- **The relay's `libp2p` MUST enable the `secp256k1` feature** (`ghal_bol_server/Cargo.toml`). Ghal Bol **clients authenticate with their secp256k1 device identity** (golden rule 7 / [IDENTITY.md](IDENTITY.md)). The Noise handshake authenticates the remote's identity public key, so a relay built **without** `secp256k1` cannot decode/verify a secp256k1 client and **drops the connection mid‑handshake** — the client sees `Decode(Io(UnexpectedEof))`, the circuit listener closes (`addrs=[]`), `coord_registered=false`, and **no real device can ever reserve a circuit** (every device uses a secp256k1 key). A minimal probe using an ed25519 key will *appear* to work and hide this — always test the relay with a **secp256k1** key (`PROBE_SECP256K1=1` in `examples/relay_probe.rs`).
+- **The relay's `libp2p` MUST enable the `secp256k1` feature** (`ghal_bol_coord/Cargo.toml`). Ghal Bol **clients authenticate with their secp256k1 device identity** (golden rule 7 / [IDENTITY.md](IDENTITY.md)). The Noise handshake authenticates the remote's identity public key, so a relay built **without** `secp256k1` cannot decode/verify a secp256k1 client and **drops the connection mid‑handshake** — the client sees `Decode(Io(UnexpectedEof))`, the circuit listener closes (`addrs=[]`), `coord_registered=false`, and **no real device can ever reserve a circuit** (every device uses a secp256k1 key). A minimal probe using an ed25519 key will *appear* to work and hide this — always test the relay with a **secp256k1** key (`PROBE_SECP256K1=1` in `examples/relay_probe.rs`).
 - **Dual-stack (IPv4 + IPv6, IPv6 preferred).** The relay listens on the configured address **and** the counterpart-family wildcard on the same port (`GHAL_BOL_RELAY_LISTEN` default `0.0.0.0:4002` ⇒ also `[::]:4002`), so it accepts both IPv4 and IPv6 clients. A counterpart-listen failure (host without that stack) logs a warning and continues single-stack.
 - Env: `GHAL_BOL_RELAY_ENABLE` (default on), `GHAL_BOL_RELAY_LISTEN` (default `0.0.0.0:4002`), `GHAL_BOL_RELAY_PUBLIC_HOST` (→ advertises **both** `/dns6/<host>/tcp/<port>` and `/dns4/<host>/tcp/<port>`, IPv6 first) or `GHAL_BOL_RELAY_PUBLIC_ADDRS` (comma‑separated multiaddrs). **The relay TCP port must be open to the internet**; advertise the public host or clients cannot reserve. For native IPv6 reachability the host needs an `AAAA` record; on IPv4‑only/NAT64 carriers the `/dns*` host is mapped to a routable address client-side regardless.
-- **Relay rate limiters (production).** libp2p `relay::Config::default()` installs per-peer/per-IP rate limiters (~**one circuit per 2 minutes** per source peer). Ghal Bol’s `:p2p` node retries DM reconnect every ~2 s when the outbox has pending rows (background — **not** gated on opening a chat room). If the coord relay still uses those default limiters, the server logs `relay circuit DENIED … ResourceLimitExceeded` while clients log endless `coord_lookup_peer ok — dialing …/p2p-circuit` with no `dm peer connected`. `ghal_bol_server/src/relay.rs` clears `reservation_rate_limiters` and `circuit_src_rate_limiters` and raises pool caps instead. **Redeploy the server binary** after changing relay config; client-only rebuilds cannot fix this.
+- **Relay rate limiters (production).** libp2p `relay::Config::default()` installs per-peer/per-IP rate limiters (~**one circuit per 2 minutes** per source peer). Ghal Bol’s `:p2p` node retries DM reconnect every ~2 s when the outbox has pending rows (background — **not** gated on opening a chat room). If the coord relay still uses those default limiters, the server logs `relay circuit DENIED … ResourceLimitExceeded` while clients log endless `coord_lookup_peer ok — dialing …/p2p-circuit` with no `dm peer connected`. `ghal_bol_coord/src/relay.rs` clears `reservation_rate_limiters` and `circuit_src_rate_limiters` and raises pool caps instead. **Redeploy the server binary** after changing relay config; client-only rebuilds cannot fix this.
 - `GET /v1/relay` → `{ enabled, peer_id, addrs }` (addrs are dialable bases without `/p2p/<id>`; both `/dns6` and `/dns4` are returned, IPv6 first).
 - **Registration circuit expansion (`routes.rs`).** On `POST /v1/register`, `/dns*/…/p2p-circuit` endpoints are duplicated with resolved `/ip6/…` **and** `/ip4/…` aliases (IPv6 first) so TCP-only clients (Android has no libp2p DNS transport) can dial a peer's relay circuit by concrete IP over whichever family routes.
 
 **Client (`ghal_bol`)**
-- At swarm startup, for **each** configured coord URL, `coord_runtime::fetch_all_ghalbol_relays` fetches live `GET /v1/relay` (no on-disk cache) and `network_transport::resolve_relay_bootnodes` resolves dialable bases into **both IP families** — `/ip4/<public>/tcp/<port>/p2p/<id>` **and `/ip6/<routable>/tcp/<port>/p2p/<id>`** (IPv6 sorted first; product policy is "IPv6 preferred when it works"). This is required for IPv6‑only / NAT64 mobile carriers: there the OS resolver (DNS64) synthesizes an IPv6 address for the relay's `/dns4` hostname and the literal IPv4 base has no route — keeping only IPv4 (the old behaviour) left such devices unable to reserve a circuit and therefore unreachable. `is_trusted_bootstrap_dial_addr` accepts a public IPv4 **or** a globally routable IPv6 (incl. NAT64 `64:ff9b::/96`). `issue_bootstrap_dials` dials **all** resolved families for a relay within one throttle window (happy‑eyeballs) so a preferred‑but‑unroutable family never starves the other. libp2p's relay client pins HOP to **one** bootstrap TCP link per relay, so `prune_duplicate_relay_bootstrap_connections` closes extras and keeps the best family (`relay_bootstrap_family_rank` — IPv6 on global‑v6 LAN, IPv4 on CGNAT/mobile when both connect). **Circuit reservation** is then a single `listen_on(…/p2p-circuit)` on that anchor only (`relay_circuit_listen_addr`). Do **not** issue multi‑family `listen_on` while two bootstrap TCP links are still up — HOP and circuit addr must match. The client **dials base TCP** (throttled), prunes to one link, then after identify requests the circuit. Probe-style `listen_on` runs only from `retry_stalled_relay_reservations` when bootstrap TCP is still **not** connected (not in parallel with active bootstrap dials). The resulting `/p2p-circuit` is registered in coord presence; recovery retries in § "Steady connection". **If the advertised relay TCP port is unreachable** (dev: dead bore tunnel; prod: firewall), clients log `relay TCP unreachable`, clear in-memory relay state, refetch `GET /v1/relay` on the next refresh tick, and never register on coord until the tunnel is fixed.
+- At swarm startup, for **each** configured coord URL, `coord_runtime::fetch_all_ghal_bol_relays` fetches live `GET /v1/relay` (no on-disk cache) and `network_transport::resolve_relay_bootnodes` resolves dialable bases into **both IP families** — `/ip4/<public>/tcp/<port>/p2p/<id>` **and `/ip6/<routable>/tcp/<port>/p2p/<id>`** (IPv6 sorted first; product policy is "IPv6 preferred when it works"). This is required for IPv6‑only / NAT64 mobile carriers: there the OS resolver (DNS64) synthesizes an IPv6 address for the relay's `/dns4` hostname and the literal IPv4 base has no route — keeping only IPv4 (the old behaviour) left such devices unable to reserve a circuit and therefore unreachable. `is_trusted_bootstrap_dial_addr` accepts a public IPv4 **or** a globally routable IPv6 (incl. NAT64 `64:ff9b::/96`). `issue_bootstrap_dials` dials **all** resolved families for a relay within one throttle window (happy‑eyeballs) so a preferred‑but‑unroutable family never starves the other. libp2p's relay client pins HOP to **one** bootstrap TCP link per relay, so `prune_duplicate_relay_bootstrap_connections` closes extras and keeps the best family (`relay_bootstrap_family_rank` — IPv6 on global‑v6 LAN, IPv4 on CGNAT/mobile when both connect). **Circuit reservation** is then a single `listen_on(…/p2p-circuit)` on that anchor only (`relay_circuit_listen_addr`). Do **not** issue multi‑family `listen_on` while two bootstrap TCP links are still up — HOP and circuit addr must match. The client **dials base TCP** (throttled), prunes to one link, then after identify requests the circuit. Probe-style `listen_on` runs only from `retry_stalled_relay_reservations` when bootstrap TCP is still **not** connected (not in parallel with active bootstrap dials). The resulting `/p2p-circuit` is registered in coord presence; recovery retries in § "Steady connection". **If the advertised relay TCP port is unreachable** (dev: dead bore tunnel; prod: firewall), clients log `relay TCP unreachable`, clear in-memory relay state, refetch `GET /v1/relay` on the next refresh tick, and never register on coord until the tunnel is fixed.
 
 ### Caching policy (canonical)
 
@@ -1340,7 +1344,7 @@ When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WA
 
 | Data | Source |
 |------|--------|
-| Relay bootstrap addr/port | `GET /v1/relay` each start + `maybe_refresh_ghalbol_relay` |
+| Relay bootstrap addr/port | `GET /v1/relay` each start + `maybe_refresh_ghal_bol_relay` |
 | Peer WAN dial addrs | `GET /v1/peers/{public_key}` on upkeep / urgent reconnect |
 | LAN TCP port | mDNS `Discovered` / `Expired` events only |
 
@@ -1353,7 +1357,7 @@ When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WA
 | `chat_transcript_v1.json` | User message history |
 | Preferences / aliases | UI state |
 
-**In-memory only (this `:p2p` run):** storm throttles (`should_routed_dial`, `lan_dial_in_flight`, reserve throttle); `ghalbol_relay_state` from last successful `GET /v1/relay` (**cleared** on relay TCP failure); mDNS candidate set `peer_mdns_lan_candidate_addrs` (add on `Discovered`, remove on `Expired`/dial-fail — **upkeep must not re-dial from it**).
+**In-memory only (this `:p2p` run):** storm throttles (`should_routed_dial`, `lan_dial_in_flight`, reserve throttle); `ghal_bol_relay_state` from last successful `GET /v1/relay` (**cleared** on relay TCP failure); mDNS candidate set `peer_mdns_lan_candidate_addrs` (add on `Discovered`, remove on `Expired`/dial-fail — **upkeep must not re-dial from it**).
 
 **Historical note:** older docs mentioned relay disk cache for boot. **This section is canonical** — `ghalbol_relay.json` was removed; legacy files are deleted on start.
 
@@ -1376,13 +1380,13 @@ When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WA
 
 | Path | Role |
 |------|------|
-| `ghal_bol/src/p2p/chat_server.rs` | libp2p swarm, streams, outbox, ack policy |
-| `ghal_bol/src/p2p/network_transport.rs` | `LocalNetworkProfile`, `OsNetworkSnapshot`, OS merge, relay resolution (no Kademlia) |
-| `ghal_bol/src/android_network.rs` | Android `ConnectivityManager` JNI probe (`:p2p` only) |
-| `ghal_bol/src/linux_network.rs` | Linux default route + Wi‑Fi operstate |
-| `ghal_bol/src/p2p_runtime.rs` | Background node thread, poll queue |
-| `ghal_bol/src/dm_transport/` | **Dial-address helpers only** — parse coord endpoints; libp2p still uses `Multiaddr` on the wire |
-| `ghal_bol/src/coord_runtime.rs` | Register/listen snapshot, lookup → dial addrs |
+| `ghal_bol_core/src/p2p/chat_server.rs` | libp2p swarm, streams, outbox, ack policy |
+| `ghal_bol_core/src/p2p/network_transport.rs` | `LocalNetworkProfile`, `OsNetworkSnapshot`, OS merge, relay resolution (no Kademlia) |
+| `ghal_bol_core/src/android_network.rs` | Android `ConnectivityManager` JNI probe (`:p2p` only) |
+| `ghal_bol_core/src/linux_network.rs` | Linux default route + Wi‑Fi operstate |
+| `ghal_bol_core/src/p2p_runtime.rs` | Background node thread, poll queue |
+| `ghal_bol_core/src/dm_transport/` | **Dial-address helpers only** — parse coord endpoints; libp2p still uses `Multiaddr` on the wire |
+| `ghal_bol_core/src/coord_runtime.rs` | Register/listen snapshot, lookup → dial addrs |
 
 There is **no** standalone native TCP/QUIC listener stack. Do not assume `dm_transport/` replaces libp2p.
 
@@ -1392,9 +1396,9 @@ There is **no** standalone native TCP/QUIC listener stack. Do not assume `dm_tra
 
 | Metric | Value |
 |--------|-------|
-| Dependency crates (`cargo tree -p ghal_bol`) | ~967 |
+| Dependency crates (`cargo tree -p ghal_bol_core`) | ~967 |
 | libp2p-named crates | ~70 |
-| Release `libghal_bol.so` / `ghal_bol_daemon` | ~20 MB unstripped, ~15 MB stripped |
+| Release `lib_ghal_bol_core.so` / `ghal_bol_core_daemon` | ~20 MB unstripped, ~15 MB stripped |
 | `chat_server.rs` | ~4k lines — transport + session + ack policy |
 
 Accepting libp2p keeps NAT traversal, mDNS, and relay tooling at the cost of binary size and build time. The discarded native-stack plan targeted smaller binaries but was not pursued.
@@ -1431,7 +1435,7 @@ Do not rename without a version bump:
 | **One bootstrap TCP per coord relay** on the best IP family — libp2p relay HOP uses `directly_connected_peers.first()` only | `prune_duplicate_relay_bootstrap_connections` |
 | Bootstrap dials may race v4+v6; reservation `listen_on` is `…/p2p-circuit` on the **kept** anchor only | `relay_circuit_listen_addr` + `relay_reservation_circuit_addrs` |
 | Bootstrap relay **dials** throttled per relay (no dial storm on CGNAT) | `issue_bootstrap_dials` / `should_issue_bootstrap_dial` |
-| CGNAT/mobile: probe-style relay reservation when bootstrap TCP pending | `try_ghalbol_probe_style_circuit_listen` at startup + `retry_stalled_relay_reservations` |
+| CGNAT/mobile: probe-style relay reservation when bootstrap TCP pending | `try_ghal_bol_probe_style_circuit_listen` at startup + `retry_stalled_relay_reservations` |
 | Outbound peer relay dials after coord lookup are **not** gated on own `relay_circuit_listening` | `dial_dm_peer_addr` + `should_routed_dial` only |
 | LAN discovery upgrades a relay-only link (additive — both links active); LAN loss drops LAN pref + WAN already connected | `dial_lan_upgrade` / `note_peer_mdns_lan_addr_expired` / `forget_peer_on_local_lan` |
 | LAN dials primarily from mDNS events; upkeep may dial live mDNS addr + coord **in parallel** — never re-dial stale cached LAN ports | `handle_mdns_discovered_list`; `connect_dm_peer_now` |
@@ -1455,7 +1459,7 @@ Do not rename without a version bump:
 11. **Reintroducing static `bootstrap_peers` for WAN** — `bootstrap_peers: []` is intentional; only coord relay from `/v1/relay` is the WAN dial target.
 12. **Uncoordinated bootstrap relay dial spam** — refetch + WAN recovery + redial calling `swarm.dial` every 1–2s without `should_issue_bootstrap_dial` prevents bootstrap TCP from completing on mobile-data; log shows many `coord relay dial` lines, never `bootstrap connection`.
 13. **Blind `swarm.dial(peer_id)` for DM peers** — `libp2p_peer_dial_pending` used dial-as-probe and started peerstore multi-dials to `::1`, stale LAN, bare `/p2p/` instead of coord `/p2p-circuit`; symptom: `Failed to negotiate transport protocol(s)` with many bad addrs, LAN ok, WAN dead. Explicit coord/mDNS multiaddrs only.
-13. **Removing CGNAT probe reservation** — `try_ghalbol_probe_style_circuit_listen` at startup / when `!any_bootstrap_connected` is required for phones; Wi‑Fi-only tests hide the regression.
+13. **Removing CGNAT probe reservation** — `try_ghal_bol_probe_style_circuit_listen` at startup / when `!any_bootstrap_connected` is required for phones; Wi‑Fi-only tests hide the regression.
 14. **One-sided relay OK** — Linux `reservation accepted` while Android stuck on `CGNAT listen addr only` means chat will not work; both peers must register on coord.
 15. **Blocking peer relay dials until own circuit listens** — `skip relay dial … self relay circuit not ready yet` after `coord_lookup_peer ok` stalls WAN 30–40s on CGNAT; peer outbound dials only need coord relay bootstrap TCP + peer registered. See § “Outbound peer relay dials vs own reservation”.
 16. **Blocking LAN upkeep during WAN recovery** — `lan_handover_upkeep` returning early when `wan_recovery_active && !relay_circuit_listening`, or `relay_lost_on_lan` re-kicking full handover every 5s while coord is down — LAN never gets stable mDNS. **Fix:** parallel upkeep (WAN reserve + LAN listen/mDNS); `relay_lost_on_lan` false when `wan_recovery_active`. See § “Parallel LAN + WAN transport”.
@@ -1563,7 +1567,7 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 
 | Date | Change |
 |------|--------|
-| 2026-07-01 | **Home coord1 fixed relay `:55002`:** replaced UPnP-dynamic relay (ephemeral WAN ports, router blocked `:4002`) with fixed listen **`0.0.0.0:55002`** + router forward — same stability model as GCP `:4002`. `install_coord1_home.sh` + `verify_coord1.sh`; see [COORD1_HOME.md](../ghal_bol_server/deploy/COORD1_HOME.md), [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Home. WAN prerequisite table updated. |
+| 2026-07-01 | **Home coord1 fixed relay `:55002`:** replaced UPnP-dynamic relay (ephemeral WAN ports, router blocked `:4002`) with fixed listen **`0.0.0.0:55002`** + router forward — same stability model as GCP `:4002`. `install_coord1_home.sh` + `verify_coord1.sh`; see [COORD1_HOME.md](../ghal_bol_coord/deploy/COORD1_HOME.md), [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Home. WAN prerequisite table updated. |
 | 2026-07-02 | **Handover adopt verified (06:05 soak):** Wi‑Fi→cell — `defer full kick` → `left LAN` → relay inbound → `adopt live writer` ~130ms → phone `inbound text` + desktop `ack_received` within ~5s (msgs sent on stale direct during relay dial window). No `stream open deferred` / `open_stream timed out` / 40s burst. |
 | 2026-07-02 | **Relay inbound + in-flight outbound mark (05:56:22 soak):** `should_mark_relay_inbound_handover` on `InboundCircuitEstablished` when lingering direct + on-wire/pending outbox (stale mDNS still live); sets `relay_inbound_handover_active` + `request_lan_listen_rediscovery`. Adopt skips Symptom C when flag set. Fixes ~40s burst delay (`duplicate mux; read-only` → no adopt until `chat_ready`). |
 | 2026-07-02 | **Relay-only inbound handover mux (05:29:54 soak):** § **Asymmetric mux recovery** — `peer_relay_inbound_handover_mux_recovery` inside `asymmetric_relay_recover_on_existing_link`: Wi‑Fi side + `lan_listen_rediscovery_requested` + relay up + **no** lingering direct when mobile re-dials inbound on relay (zombie writer on pre-handover relay mux without stale direct). Step 5 urgent reconcile + step 6 stream-open adopt; Symptom C skip when direct mux still draining. Anti-regression item 38. |
@@ -1576,7 +1580,7 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 | 2026-06-25 | **Coord lookup `.await` froze the swarm loop → WAN-only chat dead (canonical post-mortem):** § **Post-mortem 2026-06-25 (coord lookup `.await` froze the swarm loop)** — the per-peer coord HTTP lookup was `.await`ed inside the `tokio::select!` arm holding `&mut swarm`, so libp2p was not polled for the whole HTTP RTT and inbound relay `STOP` substreams timed out (`relay-circuit dial timed out`, server `circuit ConnectionFailed`). Fix: split into off-loop `request_coord_lookup` (`tokio::spawn`, deduped via `coord_lookup_in_flight`) + sync on-loop `apply_coord_lookup_result` / `drain_ready_coord_lookups`; `coord_lookup_dm_peer` / `run_dm_coord_lookup_pass` are now synchronous. Follow-on: `resync_outbox_burst_for_peer` now skips rows sent within `OUTBOX_RESEND_INTERVAL_MS` (was double-sending with the 1s periodic resync → duplicate `ack_received`). |
 | 2026-06-25 | **One-way WAN after LAN→mobile handover (canonical post-mortem):** § **Post-mortem 2026-06-25** — Wi‑Fi side kept zombie LAN mux (`conn=true,stream=true`) while phone on relay; coord lookup skipped for foreground peer. Fix: `peer_wan_asymmetric_mux_likely` / `peer_needs_wan_mux_reopen` / `peer_lan_handover_outbound_stuck`; `clear_peer_stale_lan_cache`; `coord_lookup_upkeep_satisfied` + `dm_peer_chat_link_stable` false during handover; `InboundCircuitEstablished` stream reopen; do not defer stream when relay up. § **Known symptom — bursty delivery** — multi-second batch delivery during recovery is expected trade-off (5s reconcile throttle + burst resync), not Flutter/`NetworkHelper`. AI handoff items 27–30. |
 | 2026-06-24 | **WAN/LAN stability regression (canonical post-mortem):** § **Post-mortem 2026-06-24** — (A) never clear `circuit_dial_in_flight` / `disconnect_peer_id` during relay handshake for urgent peers; (B) `dm_peer_chat_link_stable` must not flip false solely for missing relay hop — use `needs_additive_relay_dial` for background additive relay on Wi‑Fi; (C) coord lookup must still dial additive relay when stream stable but relay missing; (D) relay `ConnectionClosed` with other path open → event-driven stream reopen + coord wake; (E) LAN TCP fail must not clear circuit in-flight; (F) no blocking coord HTTP on tokio swarm thread. Ack/outbox send fail → `request_dm_stream_reopen`. AI handoff items 22–26. |
-| 2026-06-23 | **Relay presence keepalive (WAN 404-after-90s root-cause):** the relay grants hour-long reservations (`reservation_duration = 3600 s`) but coord presence rows expire after `presence_ttl` (90 s), and the relay only wrote/refreshed a peer's row on the **initial** reservation (renewal `try_register_relay_presence` even early-returns on an unchanged circuit). So a relay-only (NAT'd) peer registered, then became a coord **404 ~90 s later** for the rest of the hour — both devices showed `reservation accepted` / `relay presence visible`, then every lookup (and self-poll) `404 peer not registered or presence expired`, and no WAN chat. Fix: `run_relay` ticks a **30 s `refresh_live_presence`** that re-`upsert_relay_circuit`s every peer in `RelayLiveRegistry::live_peers_with_pk()`, keeping the row inside the 90 s TTL while the reservation is held. **Requires redeploying `ghal_bol_server`** (`deploy_server.sh` for prod). § “Findability is continuous across relay-reservation renewal”. |
+| 2026-06-23 | **Relay presence keepalive (WAN 404-after-90s root-cause):** the relay grants hour-long reservations (`reservation_duration = 3600 s`) but coord presence rows expire after `presence_ttl` (90 s), and the relay only wrote/refreshed a peer's row on the **initial** reservation (renewal `try_register_relay_presence` even early-returns on an unchanged circuit). So a relay-only (NAT'd) peer registered, then became a coord **404 ~90 s later** for the rest of the hour — both devices showed `reservation accepted` / `relay presence visible`, then every lookup (and self-poll) `404 peer not registered or presence expired`, and no WAN chat. Fix: `run_relay` ticks a **30 s `refresh_live_presence`** that re-`upsert_relay_circuit`s every peer in `RelayLiveRegistry::live_peers_with_pk()`, keeping the row inside the 90 s TTL while the reservation is held. **Requires redeploying `ghal_bol_coord`** (`deploy_server.sh` for prod). § “Findability is continuous across relay-reservation renewal”. |
 | 2026-06-23 | **Steady-state LAN upkeep no longer rebinds the listener (loop fix):** `lan_handover_upkeep_if_needed` only runs the **full destructive kick** (fresh ephemeral TCP port + purge candidates + mDNS restart) when **no** ephemeral DM TCP listener exists (e.g. closed by a real interface handover). When a listener is already up and we are merely waiting for mDNS to discover the peer, it does a **soft nudge** (throttled mDNS query, no port rebind, no candidate purge) and lets event-driven discovery dial. Fixes the loop where the advertised mDNS port changed every ~5 s (`LAN DM rediscovery — link down, no mDNS candidate yet` → `closed stale LAN ephemeral TCP listener` → `fresh ephemeral TCP listen` → `mdns restarted`), so two same-LAN devices never converged. Full kick still owns genuine handovers (connectivity notify / relay-lost / dial-path-failed) and the deferred-kick path. § “Ephemeral LAN TCP ports”, § “Deferred full LAN kick”. |
 | 2026-06-23 | **Full journey at `info` (both logs comprehensive):** the connect→stream→message→ack milestones are all at `info`, so the App log and stderr/logcat each tell the whole story without `GHAL_BOL_VERBOSE_LOG`. Promoted the previously-`debug`/silent milestones: `stream: chat_ready <peer> — can send now` (the moment chat works), `stream: inbound text from <peer>` (message arrived), and `stream: ack_received\|ack_read from <peer> … — our outbound delivered\|read by peer` (sender-side tick transition). Added the canonical milestone table in § “Logging — see the precise flow” → “The full journey at `info`”. |
 | 2026-06-22 | **Intent beats backoff (root-cause, prime directive #4):** explicit send (`outbound.rs`), pending outbox, and the foreground chat now **bypass the 404 / `peer_coord_absent_never_connected` backoff** — a peer last seen offline is looked up at intent cadence and connects within seconds once reachable, instead of waiting out a 15–60 s backoff. Removed the layered `&& !absent_never` gates that neutered urgency in `coord_lookup_dm_peer` and the urgent loop; added `should_coord_lookup_intent_pk`; the lookup pass classifies priority **before** the backoff skip. `absent_never` now gates only **idle/background** retries. |
@@ -1588,7 +1592,7 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 | 2026-06-18 | **Parallel LAN+WAN doc + code alignment:** LAN upkeep no longer blocked by `wan_recovery_active`; `relay_lost_on_lan` does not re-kick handover while WAN recovery is stuck (coord down). Supersedes changelog rows that said “defer LAN upkeep during WAN recovery”. § “Parallel LAN + WAN transport”, § “Hybrid coord presence”. |
 | 2026-06-18 | **Caching policy (canonical):** disk only for immutable user-owned data; transport reachability live-only (`ghalbol_relay.json` removed). § “Caching policy”. |
 | 2026-06-18 | **Removed on-disk relay cache (`ghalbol_relay.json`):** relay bootstrap coords come from live `GET /v1/relay` only; legacy files deleted on `:p2p` start; in-memory state cleared on relay TCP failure. |
-| 2026-06-18 | **LAN cold start + WAN relay hardening (partial — see parallel row above):** `peer_eligible_for_lan_handover` gates `lan_rediscovery_peer_set` (foreground room, Wi‑Fi outbox, or prior mDNS — not ghost/WAN-only roster). ~~`lan_handover_upkeep` defers while `wan_recovery_active`~~ **superseded** — parallel upkeep. Coord transport lookup uses fixed 3s throttle (not 404 curve). Bootstrap: prune spare HOP before reserve, never mid-reserve; IPv4-only when v4 advertised (LAN/mobile/CGNAT). `maybe_refresh_ghalbol_relay` stops on circuit listen (not `coord_registered` alone). |
+| 2026-06-18 | **LAN cold start + WAN relay hardening (partial — see parallel row above):** `peer_eligible_for_lan_handover` gates `lan_rediscovery_peer_set` (foreground room, Wi‑Fi outbox, or prior mDNS — not ghost/WAN-only roster). ~~`lan_handover_upkeep` defers while `wan_recovery_active`~~ **superseded** — parallel upkeep. Coord transport lookup uses fixed 3s throttle (not 404 curve). Bootstrap: prune spare HOP before reserve, never mid-reserve; IPv4-only when v4 advertised (LAN/mobile/CGNAT). `maybe_refresh_ghal_bol_relay` stops on circuit listen (not `coord_registered` alone). |
 | 2026-06-18 | **WAN + LAN + switching verified (dev):** hybrid coord presence stable on Linux desktop + Android over local coord + bore. Fixes: never register relay bootstrap TCP as client endpoint; prune stale published LAN ports; ~~defer LAN upkeep during WAN recovery~~ **superseded** — parallel; relay renewal vs re-reserve race; `prefer_direct_dm_path_over_relay` only on active LAN; coord lookup error bodies. § “Hybrid coord presence”, § “LAN ↔ WAN handover”. |
 | 2026-06-18 | **Relay reservation cancel loop (root WAN flap):** clean `ListenerClosed` during libp2p renewal was calling `kick_relay` → new `listen_on` every ~2s, cancelling the live reservation. Track `ReservationReqAccepted` time; skip re-reserve during renewal window; skip `notify_dm_presence_wake` on renewals; do not call `ensure_wan_relay_circuit` when circuit already listening. Throttle coord re-register when HTTP transport down. |
 | 2026-06-16 | **LAN stability (verified short test):** cold-start LAN and Wi‑Fi off/on on same subnet recover on Linux + Android. Fixes: `linux_network.rs` (sysfs operstate → `notify_network_change`); `platform_wifi_linked`; full `kick_lan` on connectivity notify and in `lan_handover_upkeep` (not soft mDNS-only); `dm_down_on_lan` on 1s poll when streams down. § “LAN stability — cold start and Wi‑Fi toggle”. Removed port ranking / upkeep LAN re-dial (earlier). |
@@ -1612,8 +1616,8 @@ Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start a
 | 2026-06-09 | **WAN dev regression docs + relay dial path:** § “Naming — bootstrap in logs”, § “WAN prerequisites”, symptom→cause table. Client dials coord relay TCP before reservation; clears `ghalbol_relay.json` on refused dial. Dev bore port changes each `run_server.sh` run — document refetch requirement. |
 | 2026-06-09 | **Coord-required WAN, no KAD/bootstrap discovery:** WAN peer discovery requires configured coord/relay servers; Kademlia DHT and public libp2p bootstrap peers are not fallbacks. LAN (mDNS) still works when coord is down. Added § "Multiple coord / relay servers". |
 | 2026-06-06 | **Immediate LAN shift + fast WAN fallback:** mDNS `Discovered` now upgrades a relay-only link to a direct LAN connection (`dial_lan_upgrade`, `PeerCondition::NotDialing`, per-peer throttle; additive, never tears down WAN); per-connection direct/relay tracking added (`peers_direct_conns`). mDNS `Expired` drops the LAN preference immediately (no 180s TTL wait) and re-kicks WAN discovery. See § "Immediate LAN shift + fast WAN fallback". |
-| 2026-06-06 | **Relay secp256k1 fix (root cause of WAN failure):** `ghal_bol_server`'s `libp2p` was missing the `secp256k1` feature, so the relay dropped every secp256k1 client (i.e. every real device) mid Noise handshake (`Decode(UnexpectedEof)` → circuit listener `addrs=[]` → `coord_registered=false`). Added `secp256k1` (+`ed25519`) to the server. `examples/relay_probe.rs` gained `PROBE_SECP256K1=1` because the ed25519-only probe masked the bug. Removed debug-only scaffolding committed during the hunt (relay-reservation repro test module, `keycheck` example). |
-| 2026-06-06 | **Ghal Bol relay co-located with coord** (`ghal_bol_server/src/relay.rs`, `GET /v1/relay`): clients reserve a circuit on our own reliably-granting relay (preferred over public IPFS bootstraps) and register that `/p2p-circuit` in presence — fixes WAN for NAT⇄CGNAT pairs where neither side is directly reachable. |
+| 2026-06-06 | **Relay secp256k1 fix (root cause of WAN failure):** `ghal_bol_coord`'s `libp2p` was missing the `secp256k1` feature, so the relay dropped every secp256k1 client (i.e. every real device) mid Noise handshake (`Decode(UnexpectedEof)` → circuit listener `addrs=[]` → `coord_registered=false`). Added `secp256k1` (+`ed25519`) to the server. `examples/relay_probe.rs` gained `PROBE_SECP256K1=1` because the ed25519-only probe masked the bug. Removed debug-only scaffolding committed during the hunt (relay-reservation repro test module, `keycheck` example). |
+| 2026-06-06 | **Ghal Bol relay co-located with coord** (`ghal_bol_coord/src/relay.rs`, `GET /v1/relay`): clients reserve a circuit on our own reliably-granting relay (preferred over public IPFS bootstraps) and register that `/p2p-circuit` in presence — fixes WAN for NAT⇄CGNAT pairs where neither side is directly reachable. |
 | 2026-06-06 | WAN regression fix: relay reservations fan out to **all** eligible bootstraps again (per-relay throttle), reverting the one-at-a-time scheme that serialized behind a stuck pending reservation and stalled WAN for minutes. |
 | 2026-06-05 | Steady-connection hardening: keepalive `ping`, urgent DM reconnect (no 404 backoff), one-at-a-time relay reservation. |
 | 2026-05-31 | Canonical transport doc; libp2p confirmed as production stack. |

@@ -6,7 +6,7 @@ cd "$root"
 
 rust_all=$(python3 <<'PY'
 import re
-text = open("ghal_bol/src/daemon/client_api.rs").read()
+text = open("ghal_bol_core/src/daemon/client_api.rs").read()
 block = re.search(r"pub const ALL.*?&\[(.*?)\];", text, re.S)
 items = re.findall(r"Self::(\w+)", block.group(1) if block else "")
 print(len(items))
@@ -39,4 +39,4 @@ fi
 cd ghal_bol_ui && flutter test test/daemon_client_api_test.dart
 
 # Daemon Rust unit tests (client_api, paths, …) run in CI job "Rust tests"
-# (`cargo test -p ghal_bol --lib`) which installs ALSA/opus; do not compile ghal_bol here.
+# (`cargo test -p ghal_bol_core --lib`) which installs ALSA/opus; do not compile ghal_bol here.

@@ -1,17 +1,17 @@
 ---
-description: Product logic lives in ghal_bol (Rust); ghal_bol_ui is a thin shell
+description: Product logic lives in ghal_bol_core (Rust); ghal_bol_ui is a thin shell
 alwaysApply: true
 ---
 
-# ghal_bol owns product logic
+# ghal_bol_core owns product logic
 
-**`ghal_bol` (Rust)** owns crypto, P2P, outbox, acks, contacts, transcripts, invites, OS network truth, and coord/relay policy.
+**`ghal_bol_core` (Rust)** owns crypto, P2P, outbox, acks, contacts, transcripts, invites, OS network truth, and coord/relay policy.
 
 **`ghal_bol_ui` (Flutter)** is a thin shell: screens, navigation, rendering, platform glue (permissions, foreground service lifecycle).
 
 When adding features (including NetworkHelper, connectivity, acks, storage):
 
-- Implement behaviour in **`ghal_bol`** and expose **`ghal_bol_ffi_*`** or daemon JSON-RPC (`:p2p` socket).
+- Implement behaviour in **`ghal_bol_core`** and expose **`ghal_bol_core_ffi_*`** or daemon JSON-RPC (`:p2p` socket).
 - Flutter **polls/displays** native state — do not duplicate OS probes in Kotlin/Dart when Rust already has them.
 - **Android UI must not** call JNI network probes; use daemon `network_snapshot` from `:p2p`.
 - Do not move ack policy, outbox, transcript merge, or WAN/LAN dial policy into Dart.

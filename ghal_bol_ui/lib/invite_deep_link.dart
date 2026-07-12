@@ -3,7 +3,7 @@ import "dart:async";
 import "package:app_links/app_links.dart";
 import "package:flutter/foundation.dart" show kIsWeb;
 
-import "ghalbol_connect_invite.dart";
+import "ghal_bol_connect_invite.dart";
 
 /// Android/iOS invite URLs opened from outside the app (`https://ghalbol.com/connect/…`, `ghalbol://…`).
 abstract final class InviteDeepLink {

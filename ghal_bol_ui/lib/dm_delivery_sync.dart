@@ -1,24 +1,37 @@
 /// DM delivery sync — policy comments only (ticks come from native transcript fields).
 ///
-/// **Truthful UI:** show ticks only after native `dm_event_handler` patches transcript on poll.
+/// **Truthful UI:** show ticks only after native patches transcript on poll / FFI reload.
 /// Never show delivered/read because the user opened the chat or because send succeeded.
 ///
 /// Intent: recipient decides delivery/read; sender and recipient views may differ; no cross-device
-/// tick sync. Delivered always (`ack_received` from `:p2p`); read only with hub room open for
-/// **new** inbound; after leave, still retry read for in-room backlog; new mail = delivered only.
-/// Hub / lifecycle: [GhalBolUiSession] only — native owns ack policy.
-/// See `docs/DESIGN.md` § “Truthful status in the UI”, “Leave / backlog”, “Room open vs closed”.
+/// tick sync. Hub / lifecycle: [GhalBolUiSession] only — native owns ack policy.
+/// See `docs/DESIGN.md` § “Truthful status in the UI”, “Delivery mode — outbound ticks”.
 ///
 /// Do not implement ack send or outbox logic in Dart.
 ///
-/// ### Peer A (sent message `X`)
+/// ### Delivery mode (`GHAL_BOL_DELIVERY_URL` set) — chat text
+///
+/// Outbound ticks (sender): clock → single black → double black → double blue.
+///
+/// | UI | Transcript `delivery` | Native trigger |
+/// |----|----------------------|----------------|
+/// | Clock | `pending` | Local save; upload not confirmed |
+/// | Single black ✓ | `sent` | Server `message.upload.ok` |
+/// | Double black ✓✓ | `delivered` | `message.ack_to_sender` (recipient `inbox.ack`) |
+/// | Double blue ✓✓ | `read` | `message.read_to_sender` (recipient `inbox.read`) |
+///
+/// See `docs/GHAL_BOL_DELIVERY.md` § “Outbound ticks”.
+///
+/// ### P2P libp2p DM (LAN text + calls only when `GHAL_BOL_DELIVERY_URL` set)
+///
+/// #### Peer A (sent message `X`)
 /// - **Outbound** `X`: `pending` until **recipient B** sends `ack_received` → `delivered`;
 ///   `ack_read` → `read`. A never upgrades ticks without an ack from B.
 /// - Native **outbox** on A resends `X` until B's `ack_received` (efficiency; not a UI tick).
 ///
-/// ### Peer B (received message `X`)
+/// #### Peer B (received message `X`)
 /// - **Inbound** `X`: no delivery ticks (B is not the authority on A's send state).
-/// - **Always** (including `:p2p` background, UI dead): native sends **`ack_received`** for `X`
+/// - **Always** (including `:p2p` / daemon, UI optional): native sends **`ack_received`** for `X`
 ///   (`chat_server.rs` — not from this Dart file). Retries on ~1s upkeep until the stream accepts.
 /// - **Inside the open chat room** (hub set foreground): native **also** sends **`ack_read`** for `X`.
 /// - If `X` arrived after B left the room, **no** new `ack_read` until room opens again.
@@ -33,8 +46,8 @@
 /// There is no shared global state and no pull-sync of the other side's ticks — only ack frames
 /// on the wire. Flutter persists each peer's local view in [ChatTranscriptStore].
 ///
-/// UI rule: outbound ticks only from peer `ack_received` / `ack_read` on poll plus transcript
-/// `delivery` after native applied that ack — never from send-queue success alone.
+/// UI rule: outbound ticks only from native transcript `delivery` after poll/FFI merge — never from
+/// send-queue success alone (delivery `sent` requires server `message.upload.ok`).
 
 library;
 

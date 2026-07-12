@@ -31,7 +31,7 @@ Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling
 | `video_off` | Stop camera + tear down video substream; voice continues. |
 | `key_request` | RX → TX: force an immediate video keyframe (after loss / late join). |
 
-All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encrypted inner JSON, secp256k1 signature (see `ghal_bol/src/call_sig_v1.rs`).
+All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encrypted inner JSON, secp256k1 signature (see `ghal_bol_core/src/call_sig_v1.rs`).
 
 ---
 
@@ -96,7 +96,7 @@ ratchet_salt  = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_rat
 
 Video uses a distinct HKDF `info` (e.g. `ghal_bol_call_video_v1`) — see [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
-Rust: `ghal_bol/src/call_media_key.rs`, `call_media/crypto.rs`, FFI `ghal_bol_ffi_p2p_call_media` / `p2p_call_video`.
+Rust: `ghal_bol_core/src/call_media_key.rs`, `call_media/crypto.rs`, FFI `ghal_bol_core_ffi_p2p_call_media` / `p2p_call_video`.
 
 ---
 

@@ -78,7 +78,7 @@ class TranscriptThreadView {
 
 /// Local transcript — persisted in **`ghal_bol`**.
 ///
-/// **Daemon platforms (Android/Linux):** `:p2p` / `ghal_bol_daemon` owns all
+/// **Daemon platforms (Android/Linux):** `:p2p` / `ghal_bol_core_daemon` owns all
 /// transcript **writes** on poll; UI loads read-only via [GhalBolP2p.transcriptLoadThreadView].
 class ChatTranscriptStore {
   ChatTranscriptStore._();

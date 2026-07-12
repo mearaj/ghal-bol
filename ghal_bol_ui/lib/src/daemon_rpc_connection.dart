@@ -22,6 +22,7 @@ class RpcConnection {
       ).timeout(const Duration(seconds: 2));
       const id = 0;
       s.writeln(jsonEncode({"id": id, "method": DaemonMethod.ping, "params": {}}));
+      await s.flush();
       final lines = s
           .cast<List<int>>()
           .transform(utf8.decoder)
@@ -57,14 +58,16 @@ class RpcConnection {
   }
 
   Future<void> disconnect() {
-    return _serialized(() async {
-      await _lines?.cancel();
-      _lines = null;
-      try {
-        await _socket?.close();
-      } catch (_) {}
-      _socket = null;
-    });
+    return _serialized(_disconnectNow);
+  }
+
+  Future<void> _disconnectNow() async {
+    await _lines?.cancel();
+    _lines = null;
+    try {
+      await _socket?.close();
+    } catch (_) {}
+    _socket = null;
   }
 
   Future<Map<String, dynamic>> call(
@@ -80,6 +83,10 @@ class RpcConnection {
         _socket!.writeln(
           jsonEncode({"id": id, "method": method, "params": params}),
         );
+        // `IOSink.writeln` can report a broken pipe asynchronously. Flush here
+        // so socket loss becomes this RPC's result instead of an unhandled
+        // Flutter exception.
+        await _socket!.flush();
         while (await _lines!.moveNext()) {
           final line = _lines!.current.trim();
           if (line.isEmpty) continue;
@@ -93,10 +100,10 @@ class RpcConnection {
           if (payload is Map) return Map<String, dynamic>.from(payload);
           return {"ok": true, "result": payload};
         }
-        await disconnect();
+        await _disconnectNow();
         return {"ok": false, "error": "daemon disconnected"};
       } catch (e) {
-        await disconnect();
+        await _disconnectNow();
         return {"ok": false, "error": e.toString()};
       }
     });

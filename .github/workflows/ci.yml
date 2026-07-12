@@ -29,11 +29,14 @@ jobs:
       - name: Install native deps (cpal/ALSA + libopus for voice)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev pkg-config
 
-      - name: Unit tests (ghal_bol)
-        run: cargo test -p ghal_bol --lib
+      - name: Unit tests (ghal_bol_core)
+        run: cargo test -p ghal_bol_core --lib
 
-      - name: Unit tests (ghal_bol_server)
-        run: cargo test -p ghal_bol_server
+      - name: Unit tests (ghal_bol_coord)
+        run: cargo test -p ghal_bol_coord
+
+      - name: Unit tests (ghal_bol_delivery)
+        run: cargo test -p ghal_bol_delivery
 
   flutter:
     name: Flutter analyze & test

@@ -37,7 +37,7 @@ Examples aligned with **Tier 3** (paid backup relay):
 - permanent centralized transcript archives
 - replacing E2E encryption with server-readable mail
 
-`ghal_bol_server` **today** is Tier 1 coordination only (register, heartbeat, peer lookup). It is **not** Tier 3 billing or blob storage.
+`ghal_bol_coord` **today** is Tier 1 coordination only (register, heartbeat, peer lookup). It is **not** Tier 3 billing or blob storage.
 
 ---
 
@@ -148,13 +148,13 @@ They must not become owners of identities or long-term chat history.
 
 | Piece | Status |
 |-------|--------|
-| Tier 1 `ghal_bol_server` | Shipped |
+| Tier 1 `ghal_bol_coord` | Shipped |
 | Tier 3 backup relay service | Not started |
 | Invoice / payment detection API | Not started |
 | Flutter premium UI / paywall | Not started |
 | Entitlement store (decoupled from pubkey) | Not started |
 
-When Tier 3 is built, document APIs here and link from [ghal_bol_server/README.md](../ghal_bol_server/README.md) only if the same binary gains premium features — otherwise a separate service crate is likely.
+When Tier 3 is built, document APIs here and link from [ghal_bol_coord/README.md](../ghal_bol_coord/README.md) only if the same binary gains premium features — otherwise a separate service crate is likely.
 
 ---
 

@@ -74,7 +74,7 @@ class GhalBolP2pService : Service() {
         try {
             val pm = getSystemService(POWER_SERVICE) as? PowerManager ?: return
             wakeLock =
-                pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ghalbol:p2p_listener").apply {
+                pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ghal_bol:p2p_listener").apply {
                     setReferenceCounted(false)
                     acquire(6 * 60 * 60 * 1000L)
                 }
@@ -119,7 +119,7 @@ class GhalBolP2pService : Service() {
     }
 
     private fun socketFile(): File {
-        val dir = File(filesDir, "ghalbol")
+        val dir = File(filesDir, "ghal_bol")
         if (!dir.exists()) dir.mkdirs()
         return File(dir, "p2p.sock")
     }
@@ -447,14 +447,14 @@ class GhalBolP2pService : Service() {
         private var userRequestedStop = false
 
         private const val NOTIFICATION_ID = 0x6768_6c62
-        private const val UNLOCK_CHANNEL_ID = "ghalbol_unlock"
+        private const val UNLOCK_CHANNEL_ID = "ghal_bol_unlock"
         private const val UNLOCK_NOTIFICATION_ID = 0x6768_756e
 
         fun stopIntent(context: Context): Intent =
             Intent(context, GhalBolP2pService::class.java).setAction(ACTION_STOP_FOR_LOGOUT)
 
         fun socketPath(context: Context): String {
-            val dir = File(context.filesDir, "ghalbol")
+            val dir = File(context.filesDir, "ghal_bol")
             return File(dir, "p2p.sock").absolutePath
         }
 

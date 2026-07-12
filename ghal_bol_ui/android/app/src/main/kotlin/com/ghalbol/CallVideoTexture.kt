@@ -38,7 +38,7 @@ object CallVideoTexture {
     fun register(registry: TextureRegistry, shmPath: String, width: Int, height: Int): Long {
         val producer = registry.createSurfaceProducer()
         val id = producer.id()
-        val thread = HandlerThread("ghalbol_video_tex_$id").apply { start() }
+        val thread = HandlerThread("ghal_bol_video_tex_$id").apply { start() }
         val handler = Handler(thread.looper)
         val poll =
             object : Runnable {

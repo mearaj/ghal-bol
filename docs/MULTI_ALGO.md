@@ -79,7 +79,7 @@ Same rule as wire identity: **optional `identity_algorithm` field**; **omitted o
 - New secp256k1 keystores also omit the field (canonical on-disk shape for implicit secp256k1).
 - Non-secp256k1 keystores set `identity_algorithm` to the wire id (`ed25519`, `ecdsa-p256`, …).
 
-Implementation: [`ghal_bol/src/keystore_v1.rs`](../ghal_bol/src/keystore_v1.rs), [`ghal_bol/src/identity.rs`](../ghal_bol/src/identity.rs).
+Implementation: [`ghal_bol_core/src/keystore_v1.rs`](../ghal_bol_core/src/keystore_v1.rs), [`ghal_bol_core/src/identity.rs`](../ghal_bol_core/src/identity.rs).
 
 ---
 
@@ -117,11 +117,11 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 
 | Surface | Implementation |
 |---------|----------------|
-| DM text | [`transport_kem_v1.rs`](../ghal_bol/src/transport_kem_v1.rs) + `TransportKemHello` → `DM_CIPHER_TRANSPORT_V2` (`0x03`) |
-| Call signaling | [`call_sig_v1.rs`](../ghal_bol/src/call_sig_v1.rs) + transport KEM → `CALL_CIPHER_TRANSPORT_V2` (`0x04`) |
-| Call audio/video | [`call_media_key.rs`](../ghal_bol/src/call_media_key.rs) — `derive_call_media_keys_from_transport` + HKDF(`call_id`) |
+| DM text | [`transport_kem_v1.rs`](../ghal_bol_core/src/transport_kem_v1.rs) + `TransportKemHello` → `DM_CIPHER_TRANSPORT_V2` (`0x03`) |
+| Call signaling | [`call_sig_v1.rs`](../ghal_bol_core/src/call_sig_v1.rs) + transport KEM → `CALL_CIPHER_TRANSPORT_V2` (`0x04`) |
+| Call audio/video | [`call_media_key.rs`](../ghal_bol_core/src/call_media_key.rs) — `derive_call_media_keys_from_transport` + HKDF(`call_id`) |
 | Envelope signatures | Per-algorithm sign with identity key (auth only) |
-| Offline FFI seal | [`offline_seal_v1.rs`](../ghal_bol/src/offline_seal_v1.rs) — encrypt-to-secp256k1 pubkey (`0x10`); auxiliary only |
+| Offline FFI seal | [`offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — encrypt-to-secp256k1 pubkey (`0x10`); auxiliary only |
 
 ---
 
@@ -131,8 +131,8 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 |---------|--------------|-------|--------|
 | Connect invite URI | path segment | Full `Identity` wire (bare secp256k1 or `algo:hex`) | format v3 split fields — TBD |
 | `ghal_bol_connect_v1` wire map | `public_key_hex` | Full identity wire | optional split `algorithm` field — TBD |
-| [`contacts_v1.json`](../ghal_bol/src/contacts_v1.rs) | contact key | Full identity wire | — |
-| [`keystore_v1.json`](../ghal_bol/src/keystore_v1.rs) | `identity_algorithm` + encrypted secret | secp256k1 default; ed25519/ecdsa-p256 optional | — |
+| [`contacts_v1.json`](../ghal_bol_core/src/contacts_v1.rs) | contact key | Full identity wire | — |
+| [`keystore_v1.json`](../ghal_bol_core/src/keystore_v1.rs) | `identity_algorithm` + encrypted secret | secp256k1 default; ed25519/ecdsa-p256 optional | — |
 | DM frames ([`ghal_bol_msg_v1`](GHAL_BOL_DM_MSG_V1.md)) | `sender_public_key_hex` | Identity wire + session ciphertext outbound | Transport session keys for all algorithms |
 | Coord `GET /v1/peers/{[algo:]hex}` | path key | Identity wire (URL-encoded) | — |
 | Coord agent string | `pk=…` | Full identity wire in identify `agent_version` | — |
@@ -142,18 +142,18 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 
 **Primary code references (today):**
 
-- [`ghal_bol/src/identity.rs`](../ghal_bol/src/identity.rs) — multi-algo wire parse/validate
-- [`ghal_bol/src/public_key_util.rs`](../ghal_bol/src/public_key_util.rs) — secp256k1 contact compare (legacy helpers)
-- [`ghal_bol/src/identity_ffi.rs`](../ghal_bol/src/identity_ffi.rs) — FFI parse/normalize/same
-- [`ghal_bol/src/transport_kem_v1.rs`](../ghal_bol/src/transport_kem_v1.rs) — transport KEM v2 (DM, call sig, call media HKDF)
-- [`ghal_bol/src/call_sig_v1.rs`](../ghal_bol/src/call_sig_v1.rs) — call signaling transport seal/open
-- [`ghal_bol/src/call_media_key.rs`](../ghal_bol/src/call_media_key.rs) — call media keys from transport KEM
-- [`ghal_bol/src/offline_seal_v1.rs`](../ghal_bol/src/offline_seal_v1.rs) — offline encrypt-to-secp256k1 (auxiliary FFI)
-- [`ghal_bol/src/symmetric_seal.rs`](../ghal_bol/src/symmetric_seal.rs) — AES-GCM session seal
-- [`ghal_bol/src/connect_invite_v1.rs`](../ghal_bol/src/connect_invite_v1.rs) — multi-algo invite validation + URI
-- [`ghal_bol/src/identity_sign.rs`](../ghal_bol/src/identity_sign.rs) — per-algorithm envelope signatures
-- [`ghal_bol/src/keystore_v1.rs`](../ghal_bol/src/keystore_v1.rs) — multi-algo keystore (optional `identity_algorithm`)
-- [`ghal_bol_server/src/agent_pk.rs`](../ghal_bol_server/src/agent_pk.rs) — identify `pk=` identity wire parse
+- [`ghal_bol_core/src/identity.rs`](../ghal_bol_core/src/identity.rs) — multi-algo wire parse/validate
+- [`ghal_bol_core/src/public_key_util.rs`](../ghal_bol_core/src/public_key_util.rs) — secp256k1 contact compare (legacy helpers)
+- [`ghal_bol_core/src/identity_ffi.rs`](../ghal_bol_core/src/identity_ffi.rs) — FFI parse/normalize/same
+- [`ghal_bol_core/src/transport_kem_v1.rs`](../ghal_bol_core/src/transport_kem_v1.rs) — transport KEM v2 (DM, call sig, call media HKDF)
+- [`ghal_bol_core/src/call_sig_v1.rs`](../ghal_bol_core/src/call_sig_v1.rs) — call signaling transport seal/open
+- [`ghal_bol_core/src/call_media_key.rs`](../ghal_bol_core/src/call_media_key.rs) — call media keys from transport KEM
+- [`ghal_bol_core/src/offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — offline encrypt-to-secp256k1 (auxiliary FFI)
+- [`ghal_bol_core/src/symmetric_seal.rs`](../ghal_bol_core/src/symmetric_seal.rs) — AES-GCM session seal
+- [`ghal_bol_core/src/connect_invite_v1.rs`](../ghal_bol_core/src/connect_invite_v1.rs) — multi-algo invite validation + URI
+- [`ghal_bol_core/src/identity_sign.rs`](../ghal_bol_core/src/identity_sign.rs) — per-algorithm envelope signatures
+- [`ghal_bol_core/src/keystore_v1.rs`](../ghal_bol_core/src/keystore_v1.rs) — multi-algo keystore (optional `identity_algorithm`)
+- [`ghal_bol_coord/src/agent_pk.rs`](../ghal_bol_coord/src/agent_pk.rs) — identify `pk=` identity wire parse
 
 ---
 
@@ -168,17 +168,17 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Keystore create/unlock ed25519 / ecdsa-p256 | **Implemented** |
 | Per-algorithm public key validate/encode (standalone crypto crates) | **Implemented** (`secp256k1` via `secp256k1` crate; `ed25519`/`ecdsa-p256` via Dalek/P-256) |
 | Invites / contacts / coord keyed by full `Identity` string (incl. algo prefix) | **Implemented** (`connect_invite_v1`, `contacts_v1`, `coord.rs` URL-encode) |
-| FFI `ghal_bol_ffi_identity_*` + Dart `GhalBolFfi.identityParse` | **Implemented** |
+| FFI `ghal_bol_core_ffi_identity_*` + Dart `GhalBolFfi.identityParse` | **Implemented** |
 | Transport KEM v2 (DM text) | **Implemented** — `DM_CIPHER_TRANSPORT_V2` (`0x03`) after `TransportKemHello` (`transport_kem_v1.rs`, `dm_transport_kem.rs`) |
 | DM outbound / inbound text | **Transport v2 only** — requires exchanged hello before send; decrypt `0x03` only |
 | Call signaling transport keys | **Implemented** — `CALL_CIPHER_TRANSPORT_V2` (`0x04`) after `TransportKemHello` (`call_sig_v1.rs`, `transport_kem_v1.rs`) |
 | Call media transport binding | **Implemented** — `derive_call_media_keys_from_transport` (`call_media_key.rs`) |
 | Envelope signatures per identity algorithm | **Implemented** (`identity_sign.rs` — all three algorithms) |
-| UI: identity algorithm picker at create | **Implemented** (metadata + validation via `ghal_bol_ffi_identity_*`) |
+| UI: identity algorithm picker at create | **Implemented** (metadata + validation via `ghal_bol_core_ffi_identity_*`) |
 | UI: QR with prefixed identity | **Implemented** — Rust + FFI; hub/share/chat/bootstrap use `identityWire` |
 | Reveal private key shows algorithm | **Implemented** (`reveal_secret_key_hex` + UI) |
 | Migration tooling for existing stores | **Implemented** — `list_contacts` normalizes identity wires on read/write |
-| Coord register challenge + signature verify | **Implemented** — all three algorithms (`ghal_bol_server/auth.rs`, client `coord_register_auth.rs`) |
+| Coord register challenge + signature verify | **Implemented** — all three algorithms (`ghal_bol_coord/auth.rs`, client `coord_register_auth.rs`) |
 | Coord agent `pk=` binding | **Implemented** — identify `agent_version` parses full identity wire (all three algorithms) via `agent_pk.rs` |
 
 **Explicitly not required for the identity layer:** libp2p multi-key identity, PeerId derivation per algorithm, libp2p feature flags for identity.
@@ -195,7 +195,7 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 
 ### Phase 1 — Identity parse/validate
 
-- `Identity` parse/format/validate in `ghal_bol` (`identity.rs`); Dart uses **FFI only** (`ghal_bol_ffi_identity_*`).
+- `Identity` parse/format/validate in `ghal_bol` (`identity.rs`); Dart uses **FFI only** (`ghal_bol_core_ffi_identity_*`).
 - Bare hex (no prefix) = implicit **`secp256k1`** by definition; prefixed forms for other algorithms.
 - Keystore: optional `identity_algorithm` on disk (absent → implicit secp256k1).
 
@@ -227,10 +227,16 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 
 ## Open questions (TBD)
 
-- Invite URI: prefixed string in path vs `format_version: 3` with separate JSON fields (`algorithm`, `public_key_hex`).
 - Coord DB primary key: full identity string vs `(algorithm, public_key_hex)` columns.
-- **Transport KEM algorithm** — **DM:** X25519 (`x25519-dalek`). Independent of identity algorithm.
+- **Transport KEM algorithm** — **DM (libp2p path):** X25519 (`x25519-dalek`). **Delivery mailbox (server path):** identity-sealed ciphertext per [GHAL_BOL_DELIVERY_WIRE_V1.md](GHAL_BOL_DELIVERY_WIRE_V1.md).
 - **Call signaling transport KEM** — TBD (session v1 ships today).
+
+### Connect invite v3 (implemented)
+
+- Wire: `format_version: 3`, `identity_wire`, optional `global_alias` (`connect_invite_v1.rs`).
+- URI path segment remains the identity wire; `?alias=` is a hint mapped to `global_alias` on encode.
+- v2 invites (`public_key_hex`, `peer_alias`) still parse; new emits use v3.
+- **Global alias** travels on invites and may seed a contact row; **local alias** (`display_alias` in `contacts_v1.json`) is per-device only.
 
 ---
 

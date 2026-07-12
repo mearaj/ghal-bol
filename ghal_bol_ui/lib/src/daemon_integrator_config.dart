@@ -1,6 +1,6 @@
 import "package:ghal_bol_ui/daemon_client_api.dart";
 
-/// Per-integrator configuration (mirrors Rust `ghal_bol::daemon::IntegratorConfig`).
+/// Per-integrator configuration (mirrors Rust `ghal_bol_core::daemon::IntegratorConfig`).
 class IntegratorConfig {
   IntegratorConfig({
     required this.appNamespace,
@@ -37,7 +37,7 @@ class IntegratorConfig {
         xdgRuntimeDir: xdgRuntimeDir,
       );
 
-  /// Environment for spawning `ghal_bol_daemon` (Linux).
+  /// Environment for spawning `ghal_bol_core_daemon` (Linux).
   Map<String, String> daemonSpawnEnv() => {
         "GHAL_BOL_APP_NAMESPACE": appNamespace,
         if (socketPathOverride != null)

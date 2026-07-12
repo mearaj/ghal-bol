@@ -579,4 +579,57 @@ abstract final class GhalBolP2p {
     }
     return await isRunning();
   }
+
+  static Future<Map<String, dynamic>> deliveryConnectionStatus() async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        DaemonMethod.deliveryConnectionStatus,
+      );
+    }
+    return {"ok": false, "error": "delivery requires daemon"};
+  }
+
+  static Future<Map<String, dynamic>> deliveryQuotaStatus() async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        DaemonMethod.deliveryQuotaStatus,
+      );
+    }
+    return {"ok": false, "error": "delivery requires daemon"};
+  }
+
+  static Future<Map<String, dynamic>> deliveryMailboxList({
+    bool includeExpired = true,
+  }) async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        DaemonMethod.deliveryMailboxList,
+        params: {"include_expired": includeExpired},
+      );
+    }
+    return {"ok": false, "error": "delivery requires daemon"};
+  }
+
+  static Future<Map<String, dynamic>> deliveryExtendTtl({
+    required String messageId,
+    required int extendSecs,
+  }) async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        DaemonMethod.deliveryExtendTtl,
+        params: {"message_id": messageId, "extend_secs": extendSecs},
+      );
+    }
+    return {"ok": false, "error": "delivery requires daemon"};
+  }
+
+  static Future<Map<String, dynamic>> deliveryResendMessage(String messageId) async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        DaemonMethod.deliveryResendMessage,
+        params: {"message_id": messageId},
+      );
+    }
+    return {"ok": false, "error": "delivery requires daemon"};
+  }
 }

@@ -53,7 +53,7 @@ object AndroidVideoCapture {
 
     private fun ensureThread() {
         if (cameraThread?.isAlive == true && cameraHandler != null) return
-        val thread = HandlerThread("ghalbol-camera2").also { it.start() }
+        val thread = HandlerThread("ghal_bol-camera2").also { it.start() }
         cameraThread = thread
         cameraHandler = Handler(thread.looper)
     }

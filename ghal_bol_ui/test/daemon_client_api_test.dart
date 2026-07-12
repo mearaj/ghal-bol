@@ -2,7 +2,7 @@ import "package:ghal_bol_ui/daemon_client_api.dart";
 import "package:ghal_bol_ui/src/daemon_integrator_config.dart";
 import "package:flutter_test/flutter_test.dart";
 
-/// Must match `DaemonMethod::ALL` wire order in `ghal_bol/src/daemon/client_api.rs`.
+/// Must match `DaemonMethod::ALL` wire order in `ghal_bol_core/src/daemon/client_api.rs`.
 const _rustMirrorWireNames = <String>[
   "ping",
   "unlock",
@@ -40,6 +40,11 @@ const _rustMirrorWireNames = <String>[
   "coord_set_base_url",
   "coord_lookup_peer",
   "coord_register_now",
+  "delivery_connection_status",
+  "delivery_quota_status",
+  "delivery_mailbox_list",
+  "delivery_extend_ttl",
+  "delivery_resend_message",
 ];
 
 void main() {
@@ -56,8 +61,8 @@ void main() {
       appNamespace: "com.example.chat",
       xdgRuntimeDir: "/run/user/1000",
     );
-    expect(cfg.socketPath, "/run/user/1000/ghalbol/com.example.chat/p2p.sock");
-    expect(cfg.runtimeDir, "/run/user/1000/ghalbol/com.example.chat");
+    expect(cfg.socketPath, "/run/user/1000/ghal_bol/com.example.chat/p2p.sock");
+    expect(cfg.runtimeDir, "/run/user/1000/ghal_bol/com.example.chat");
     expect(cfg.daemonSpawnEnv()["GHAL_BOL_APP_NAMESPACE"], "com.example.chat");
   });
 }

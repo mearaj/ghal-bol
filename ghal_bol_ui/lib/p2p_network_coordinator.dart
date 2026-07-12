@@ -2,6 +2,7 @@ import "dart:async";
 import "dart:convert";
 import "dart:io" show Platform;
 
+import "app_env_config.dart";
 import "app_log.dart";
 import "call/call_controller.dart";
 import "user_flow_log.dart";
@@ -55,11 +56,26 @@ class P2pNetworkCoordinator {
         dmPeers.add(<String, dynamic>{"public_key_hex": pk!.toLowerCase()});
       }
     }
-    return {
+    final cfg = <String, dynamic>{
       "bootstrap_peers": bootstrapPeers,
       "dm_peers": dmPeers,
       ...await GhalBolCoord.p2pConfigFields(),
     };
+    final deliveryUrl = _deliveryUrlFromEnv();
+    if (deliveryUrl != null && deliveryUrl.isNotEmpty) {
+      cfg["delivery_url"] = deliveryUrl;
+    }
+    return cfg;
+  }
+
+  /// WAN URL for mobile; optional `GHAL_BOL_DELIVERY_URL_LOCAL` on desktop dev hosts.
+  static String? _deliveryUrlFromEnv() {
+    final isDesktop = Platform.isLinux || Platform.isMacOS || Platform.isWindows;
+    if (isDesktop) {
+      final local = AppEnvConfig.get("GHAL_BOL_DELIVERY_URL_LOCAL")?.trim();
+      if (local != null && local.isNotEmpty) return local;
+    }
+    return AppEnvConfig.get("GHAL_BOL_DELIVERY_URL")?.trim();
   }
 
   static Future<Map<String, dynamic>> _configWithNamespace(

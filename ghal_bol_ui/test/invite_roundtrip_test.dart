@@ -1,5 +1,5 @@
 import "package:flutter_test/flutter_test.dart";
-import "package:ghal_bol_ui/ghalbol_connect_invite.dart";
+import "package:ghal_bol_ui/ghal_bol_connect_invite.dart";
 import "package:ghal_bol_ui/invite_uri_builder.dart";
 import "package:ghal_bol_ui/invite_uri_codec.dart";
 

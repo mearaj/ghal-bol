@@ -1,0 +1,27 @@
+# Systemd unit for home coord1.ghalbol.com (not GCP).
+#
+# Rendered by install_coord1_home.sh — do not enable placeholders directly.
+
+[Unit]
+Description=Ghal Bol coordination server (coord1.ghalbol.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_COORD1_USER
+Group=REPLACE_COORD1_USER
+WorkingDirectory=/home/REPLACE_COORD1_USER
+ExecStart=REPLACE_COORD1_BIN
+Environment=GHAL_BOL_COORD_LISTEN=REPLACE_GHAL_BOL_COORD_LISTEN
+Environment=GHAL_BOL_COORD_DB=/home/REPLACE_COORD1_USER/.local/share/com.ghal_bol.coord/ghal_bol_coord
+Environment=RUST_LOG=info
+Environment=GHAL_BOL_RELAY_LISTEN=REPLACE_GHAL_BOL_RELAY_LISTEN
+Environment=GHAL_BOL_RELAY_PUBLIC_HOST=REPLACE_GHAL_BOL_RELAY_PUBLIC_HOST
+Environment=GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES=REPLACE_GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES
+Environment=GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER=REPLACE_GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

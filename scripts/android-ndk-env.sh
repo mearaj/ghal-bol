@@ -5,15 +5,15 @@
 # Designed for newcomers: if ANDROID_NDK_HOME / ANDROID_NDK_ROOT / SDK vars are unset,
 # the script picks a recent NDK from usual install locations (Android Studio, env SDK).
 #
-# Overrides (optional): ANDROID_NDK_HOST_TAG, GHALBOL_ANDROID_API_LEVEL (default 21).
-# Silence status lines: GHALBOL_ANDROID_NDK_ENV_QUIET=1
+# Overrides (optional): ANDROID_NDK_HOST_TAG, GHAL_BOL_ANDROID_API_LEVEL (default 21).
+# Silence status lines: GHAL_BOL_ANDROID_NDK_ENV_QUIET=1
 #
 # One-shot without sourcing (CI / scripts):  scripts/with-android-env.sh cargo check …
 
 set -euo pipefail
 
 _ghalbol_log() {
-  [[ -n "${GHALBOL_ANDROID_NDK_ENV_QUIET:-}" ]] && return 0
+  [[ -n "${GHAL_BOL_ANDROID_NDK_ENV_QUIET:-}" ]] && return 0
   printf '%s\n' "$*" >&2
 }
 
@@ -136,11 +136,11 @@ Try one of these:
   4) Prefer cargo-ndk for APK jniLibs (it discovers the NDK too); see:
         ghal_bol_ui/README.md   # Flutter shell; optional JNI notes
 
-One-shot (no sourcing):  scripts/with-android-env.sh cargo check -p ghal_bol --target aarch64-linux-android
+One-shot (no sourcing):  scripts/with-android-env.sh cargo check -p ghal_bol_core --target aarch64-linux-android
 EOF
 }
 
-API="${GHALBOL_ANDROID_API_LEVEL:-21}"
+API="${GHAL_BOL_ANDROID_API_LEVEL:-21}"
 
 NDK="$(resolve_android_ndk_home || true)"
 if ! is_ndk_root "$NDK"; then

@@ -10,7 +10,7 @@ plugins {
 /** AAR from rustls-platform-verifier-android (coord HTTPS JNI in :p2p). */
 fun rustlsPlatformVerifierAar(): File {
     val workspace = rootProject.file("../..")
-    val manifest = File(workspace, "ghal_bol/Cargo.toml")
+    val manifest = File(workspace, "ghal_bol_core/Cargo.toml")
     val out =
         providers.exec {
             workingDir(workspace)
@@ -64,7 +64,7 @@ android {
         }
     }
 
-    // We bundle the NDK libc++_shared.so (needed by libghal_bol.so / Oboe). If any
+    // We bundle the NDK libc++_shared.so (needed by lib_ghal_bol_core.so / Oboe). If any
     // other dependency ever ships it too, keep the first instead of failing the merge.
     packaging {
         jniLibs {
@@ -79,10 +79,10 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         // Must match scripts/pack_android_workspace_jni_libs.sh (four standard ABIs).
-        // Dev fast path: -Pghalbol.arm64Only=true after PACK_ANDROID_ARM64_ONLY=1 pack.
+        // Dev fast path: -Pghal_bol.arm64Only=true after PACK_ANDROID_ARM64_ONLY=1 pack.
         ndk {
             val abis =
-                if (project.findProperty("ghalbol.arm64Only") == "true") {
+                if (project.findProperty("ghal_bol.arm64Only") == "true") {
                     listOf("arm64-v8a")
                 } else {
                     listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
@@ -127,11 +127,11 @@ val ghalBolRequiredAbis =
     listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
 tasks.named("preBuild").configure {
     doFirst {
-        val arm64Only = project.findProperty("ghalbol.arm64Only") == "true"
+        val arm64Only = project.findProperty("ghal_bol.arm64Only") == "true"
         val required = if (arm64Only) listOf("arm64-v8a") else ghalBolRequiredAbis
         val missing =
             required.filter { abi ->
-                !File(ghalBolJniRoot, "$abi/libghal_bol.so").isFile ||
+                !File(ghalBolJniRoot, "$abi/lib_ghal_bol_core.so").isFile ||
                     !File(ghalBolJniRoot, "$abi/libc++_shared.so").isFile
             }
         if (missing.isNotEmpty()) {
@@ -142,7 +142,7 @@ tasks.named("preBuild").configure {
                     "./scripts/pack_android_workspace_jni_libs.sh"
                 }
             throw GradleException(
-                "Missing libghal_bol.so / libc++_shared.so for: ${missing.joinToString()}. " +
+                "Missing lib_ghal_bol_core.so / libc++_shared.so for: ${missing.joinToString()}. " +
                     "From workspace root run: $hint",
             )
         }

@@ -1,6 +1,6 @@
 import "dart:io";
 
-/// Platform-correct command to rebuild `libghal_bol` for the current target.
+/// Platform-correct command to rebuild `lib_ghal_bol_core` for the current target.
 abstract final class NativeBuildHint {
   static String get rebuildFromRepoRoot {
     if (Platform.isAndroid) {
@@ -18,5 +18,5 @@ abstract final class NativeBuildHint {
   }
 
   static String get libraryUnavailable =>
-      "Could not load libghal_bol. $rebuildInstructions";
+      "Could not load lib_ghal_bol_core. $rebuildInstructions";
 }

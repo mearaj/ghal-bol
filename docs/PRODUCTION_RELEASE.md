@@ -77,7 +77,7 @@ Use **two physical phones on mobile data** (Wi‑Fi off or different carriers �
 If lookup fails: confirm coord smoke passes from laptop:
 
 ```bash
-COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
+COORD_URL=https://coord.ghalbol.com ./ghal_bol_coord/deploy/smoke_coord.sh
 ```
 
 Debug on device: `:p2p` process logs via `adb logcat | rg ghal_bol`.
@@ -103,13 +103,13 @@ On the VM (`coord.ghalbol.com`):
 # 1. Stop foreground server (Ctrl+C) if running
 
 # 2. Install system unit (edit User + paths if needed)
-sudo cp ghal_bol_server/deploy/ghal-bol-server.service /etc/systemd/system/
+sudo cp ghal_bol_coord/deploy/ghal-bol-coord.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable ghal-bol-server
-sudo systemctl start ghal-bol-server
+sudo systemctl enable ghal-bol-coord
+sudo systemctl start ghal-bol-coord
 
 # 3. Verify
-sudo systemctl status ghal-bol-server
+sudo systemctl status ghal-bol-coord
 curl -s https://coord.ghalbol.com/health
 
 # 4. Reboot test
@@ -118,11 +118,11 @@ sudo reboot
 curl -s https://coord.ghalbol.com/health
 ```
 
-See [ghal_bol_server/deploy/README.md](../ghal_bol_server/deploy/README.md).
+See [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md).
 
 ### P1.3 Commit production changes
 
-From repo root — exclude built binaries (`linux/native/libexec/ghal_bol_daemon` is gitignored).
+From repo root — exclude built binaries (`linux/native/libexec/ghal_bol_core_daemon` is gitignored).
 
 **P1 is done when:** CI green, coord survives reboot, production branch committed and pushed.
 
@@ -176,7 +176,7 @@ Privacy policy URL for Play: `https://ghalbol.com/privacy` when that page is pub
 
 ```bash
 # Prod coord smoke
-COORD_URL=https://coord.ghalbol.com ./ghal_bol_server/deploy/smoke_coord.sh
+COORD_URL=https://coord.ghalbol.com ./ghal_bol_coord/deploy/smoke_coord.sh
 
 # Android release
 ./scripts/pack_android_workspace_jni_libs.sh
