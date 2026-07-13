@@ -145,6 +145,7 @@ pub enum OutboundCmd {
         recipient_public_key_hex: String,
         text: String,
         message_id: String,
+        created_at_ms: i64,
         done: Option<std::sync::mpsc::Sender<Result<(), String>>>,
     },
     SendAck {

@@ -368,6 +368,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn existing_outbound_created_at_ms(ns: &str, conv_key: &str, message_id: &str) -> Option<i64> {
+    if message_id.trim().is_empty() {
+        return None;
+    }
+    load_merged(ns, &[conv_key.to_string()], None)
+        .ok()?
+        .into_iter()
+        .find(|row| row.outgoing && row.message_id.as_deref() == Some(message_id.trim()))
+        .and_then(|row| row.created_at_ms)
+}
+
 fn append_outbound_transcript(
     ns: &str,
     recipient_wire: &str,
@@ -379,6 +390,9 @@ fn append_outbound_transcript(
         return;
     }
     let now = now_ms();
+    // Preserve existing timestamp if message already persisted (Flutter saves before calling Rust)
+    // This ensures timestamps are immutable - once set, never changed
+    let created_at_ms = existing_outbound_created_at_ms(ns, &conv_key, message_id).unwrap_or(now);
     let line = StoredChatLine {
         local_id: message_id.to_string(),
         text: text.to_string(),
@@ -386,7 +400,7 @@ fn append_outbound_transcript(
         from: None,
         message_id: Some(message_id.to_string()),
         delivery: "pending".to_string(),
-        created_at_ms: Some(now),
+        created_at_ms: Some(created_at_ms),
         received_at_ms: None,
         read_ack_sent: false,
     };

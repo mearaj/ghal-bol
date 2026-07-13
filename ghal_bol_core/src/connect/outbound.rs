@@ -70,6 +70,7 @@ async fn process_one(
             recipient_public_key_hex,
             text,
             message_id,
+            created_at_ms,
             done,
         } => {
             let Ok(peer) = session_peer_from_identity_wire(&recipient_public_key_hex) else {
@@ -83,7 +84,7 @@ async fn process_one(
                 peer: peer.clone(),
                 recipient_public_key_hex: recipient_public_key_hex.clone(),
                 text: text.clone(),
-                created_at_ms: now,
+                created_at_ms,
                 last_send_ms: 0,
                 first_on_wire_ms: 0,
                 on_wire: false,

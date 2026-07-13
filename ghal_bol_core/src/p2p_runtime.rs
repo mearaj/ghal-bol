@@ -1162,6 +1162,20 @@ pub fn p2p_call_video_frame(config: &Value) -> Value {
     }
 }
 
+/// Look up existing timestamp for outbound message (Flutter saves before calling Rust).
+fn existing_outbound_created_at_ms(recipient: &str, message_id: &str) -> Option<i64> {
+    if let Some(ns) = active_app_namespace() {
+        if let Ok(rows) = crate::dm_transcript_store::load_merged(&ns, &[recipient.to_string()], None) {
+            for row in rows {
+                if row.outgoing && row.message_id.as_deref() == Some(message_id) {
+                    return row.created_at_ms;
+                }
+            }
+        }
+    }
+    None
+}
+
 fn enqueue_send_text_dm(
     message_id: String,
     recipient: String,
@@ -1189,6 +1203,9 @@ fn enqueue_send_text_dm(
         };
         h.out_tx.clone()
     };
+    // Preserve existing timestamp if Flutter already saved the message to transcript.
+    // This ensures timestamps are immutable - once set, never changed.
+    let created_at_ms = existing_outbound_created_at_ms(&recipient_trim, &message_id).unwrap_or_else(now_ms);
     if wait_for_wire {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         if out_tx
@@ -1196,6 +1213,7 @@ fn enqueue_send_text_dm(
                 recipient_public_key_hex: recipient,
                 text,
                 message_id: message_id.clone(),
+                created_at_ms,
                 done: Some(done_tx),
             })
             .is_err()
@@ -1240,6 +1258,7 @@ fn enqueue_send_text_dm(
             recipient_public_key_hex: recipient,
             text,
             message_id: message_id.clone(),
+            created_at_ms,
             done: None,
         })
         .is_err()
