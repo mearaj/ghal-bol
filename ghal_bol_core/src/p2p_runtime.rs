@@ -7,8 +7,9 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dm_transport::DmDialAddr;
-use crate::p2p::chat_server::identity_wire_for_libp2p_peer;
-use libp2p::Multiaddr;
+use crate::connect::{
+    identity_wire_for_libp2p_peer, new_msg_id_for_ffi,
+};
 use serde_json::Value;
 
 use crate::call_sig_v1::CallSigKind;
@@ -164,7 +165,7 @@ pub fn p2p_force_end_active_call(reason: &str) -> Value {
                 call_id,
                 signal_kind: CallSigKind::Hangup,
                 payload: serde_json::json!({}),
-                signal_id: crate::p2p::chat_server::new_msg_id_for_ffi(),
+                signal_id: new_msg_id_for_ffi(),
             });
         }
     }
@@ -427,19 +428,10 @@ fn parse_dm_peers(v: &Value) -> Vec<DmPeer> {
             .and_then(|x| x.as_str())
             .map(str::trim)
             .filter(|s| crate::contacts_v1::is_valid_public_key_hex(s));
-        let peer_hint = item
-            .get("peer_id")
-            .and_then(|x| x.as_str())
-            .and_then(|s| s.parse::<libp2p::identity::PeerId>().ok());
-        match (pk, peer_hint) {
-            (Some(pk), _) => {
-                if let Ok(dm) = DmPeer::from_public_key_hex(pk.to_string()) {
-                    out.push(dm);
-                } else if let Some(peer_id) = peer_hint {
-                    out.push(DmPeer::from_identity_wire_with_peer(pk.to_string(), peer_id));
-                }
+        if let Some(pk) = pk {
+            if let Ok(dm) = DmPeer::from_public_key_hex(pk.to_string()) {
+                out.push(dm);
             }
-            _ => {}
         }
     }
     out
@@ -464,22 +456,8 @@ pub fn p2p_dial_bootstrap_peers(addrs: &[DmDialAddr]) -> Value {
     json_ok(serde_json::json!({ "ok": true, "count": addrs.len() }))
 }
 
-fn dial_bootstrap_on_running_node(addrs: Vec<DmDialAddr>) {
-    if addrs.is_empty() {
-        return;
-    }
-    let out_tx = match p2p_mx().lock() {
-        Ok(g) => g.as_ref().map(|h| h.out_tx.clone()),
-        Err(_) => None,
-    };
-    let Some(out_tx) = out_tx else {
-        return;
-    };
-    let mas: Vec<Multiaddr> = addrs
-        .iter()
-        .filter_map(|a| a.to_multiaddr_string().parse().ok())
-        .collect();
-    let _ = out_tx.send(OutboundCmd::DialBootstrapPeers { addrs: mas });
+fn dial_bootstrap_on_running_node(_addrs: Vec<DmDialAddr>) {
+    // Native connect uses mDNS + coord bridge — no libp2p bootstrap dials.
 }
 
 fn apply_delivery_from_p2p_config(config: &Value) {
@@ -498,7 +476,7 @@ fn apply_delivery_from_p2p_config(config: &Value) {
     }
 }
 
-/// Start libp2p DM node in a background thread.
+/// Start native connect DM node in a background thread.
 pub fn p2p_start(config: &Value) -> Value {
     crate::rustls_init::ensure_rustls_crypto_provider();
     set_drop_pending_call_invite_hook(drop_pending_call_invite);
@@ -532,13 +510,9 @@ pub fn p2p_start(config: &Value) -> Value {
 
     let mut gossip_cfg = match GossipChatConfig::from_unlocked_identity(topic, &ident) {
         Ok(c) => c,
-        Err(e) => return json_err(format!("{e}")),
+        Err(e) => return json_err(e),
     };
     let bootstrap_for_hot_dial = peers.clone();
-    gossip_cfg.bootstrap_peers = peers
-        .iter()
-        .filter_map(|a| a.to_multiaddr_string().parse().ok())
-        .collect();
     gossip_cfg.dm_peers = dm_peers;
     gossip_cfg.transcript_path = config
         .get("transcript_path")
@@ -565,7 +539,7 @@ pub fn p2p_start(config: &Value) -> Value {
             crate::incoming_call_notify::set_desktop_app_id(ns);
         }
         for dm in &gossip_cfg.dm_peers {
-            let pk = dm.public_key_hex.as_deref().unwrap_or("").trim();
+            let pk = dm.identity_wire.trim();
             if !crate::contacts_v1::is_valid_public_key_hex(pk) {
                 continue;
             }
@@ -597,10 +571,9 @@ pub fn p2p_start(config: &Value) -> Value {
     native_log::info(
         "p2p",
         format!(
-            "node starting local_peer={} dm_peers={} bootstrap={}",
-            gossip_cfg.keypair.public().to_peer_id(),
+            "node starting identity={} dm_peers={}",
+            ident.identity_wire(),
             gossip_cfg.dm_peers.len(),
-            gossip_cfg.bootstrap_peers.len()
         ),
     );
 
@@ -611,6 +584,16 @@ pub fn p2p_start(config: &Value) -> Value {
 
     clear_pending_p2p_events();
     apply_delivery_from_p2p_config(config);
+    {
+        let contacts: Vec<String> = gossip_cfg
+            .dm_peers
+            .iter()
+            .map(|p| p.identity_wire.clone())
+            .collect();
+        if let Err(e) = crate::connect::connect_start(&ident.identity_wire(), &contacts) {
+            native_log::warn("connect", format!("connect_start failed: {e}"));
+        }
+    }
     let join = std::thread::spawn(move || {
         let default_panic_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -632,7 +615,7 @@ pub fn p2p_start(config: &Value) -> Value {
             }
         };
         let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rt.block_on(run_gossip_chat_node_with_std_io(
+            rt.block_on(crate::connect::run_connect_node_with_std_io(
                 gossip_cfg,
                 ident,
                 out_rx,
@@ -702,6 +685,7 @@ pub fn p2p_is_running() -> Value {
 
 pub fn p2p_stop() {
     native_log::info("p2p", "p2p_stop requested");
+    crate::connect::connect_stop();
     crate::delivery_runtime::delivery_stop();
     clear_ui_session_snapshot();
     crate::coord_runtime::stop_coord_presence();
@@ -747,7 +731,7 @@ pub fn p2p_call_signal(config: &Value) -> Value {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| crate::p2p::chat_server::new_msg_id_for_ffi());
+        .unwrap_or_else(new_msg_id_for_ffi);
 
     let out_tx = {
         let g = match p2p_mx().lock() {
@@ -1273,13 +1257,32 @@ fn enqueue_send_text_dm(
     }))
 }
 
+fn maybe_mirror_text_on_lan_fast_path(
+    message_id: &str,
+    recipient: &str,
+    text: &str,
+) {
+    if !crate::text_transport::lan_fast_path_enabled() {
+        return;
+    }
+    if !crate::p2p::contact_has_lan_p2p_text_path(recipient) {
+        return;
+    }
+    let _ = enqueue_send_text_dm(
+        message_id.to_string(),
+        recipient.to_string(),
+        text.to_string(),
+        false,
+    );
+}
+
 pub fn p2p_send_text_dm(recipient: &str, text: &str) -> Value {
-    let message_id = crate::p2p::chat_server::new_msg_id_for_ffi();
-    if crate::text_transport::wan_text_via_delivery_server() {
-        if crate::p2p::contact_has_lan_p2p_text_path(recipient) {
-            return enqueue_send_text_dm(message_id, recipient.to_string(), text.to_string(), false);
-        }
-        return crate::delivery_runtime::delivery_send_text_dm(recipient, text, &message_id);
+    let message_id = new_msg_id_for_ffi();
+    if crate::text_transport::delivery_primary_text() {
+        let result =
+            crate::delivery_runtime::delivery_send_text_dm(recipient, text, &message_id);
+        maybe_mirror_text_on_lan_fast_path(&message_id, recipient, text);
+        return result;
     }
     if !crate::p2p::contact_has_lan_p2p_text_path(recipient) {
         return json_err(
@@ -1293,20 +1296,11 @@ pub fn p2p_requeue_outbound_dm(message_id: &str, recipient: &str, text: &str) ->
     if message_id.trim().is_empty() {
         return json_err("message_id required");
     }
-    if crate::text_transport::wan_text_via_delivery_server() {
-        if crate::p2p::contact_has_lan_p2p_text_path(recipient) {
-            return enqueue_send_text_dm(
-                message_id.trim().to_string(),
-                recipient.to_string(),
-                text.to_string(),
-                false,
-            );
-        }
-        return crate::delivery_runtime::delivery_send_text_dm(
-            recipient,
-            text,
-            message_id.trim(),
-        );
+    if crate::text_transport::delivery_primary_text() {
+        let mid = message_id.trim();
+        let result = crate::delivery_runtime::delivery_send_text_dm(recipient, text, mid);
+        maybe_mirror_text_on_lan_fast_path(mid, recipient, text);
+        return result;
     }
     if !crate::p2p::contact_has_lan_p2p_text_path(recipient) {
         return json_err(
@@ -1385,7 +1379,6 @@ pub fn p2p_register_dm_peer(public_key_hex: &str) -> Value {
     native_log::info("session", format!("register_dm_peer pk={pk_short}"));
     if out_tx
         .send(OutboundCmd::RegisterDmPeer {
-            peer_id: None,
             public_key_hex: public_key_hex.to_string(),
         })
         .is_err()
@@ -1404,9 +1397,7 @@ pub fn p2p_set_app_ack_read_enabled(enabled: bool) -> Value {
             if crate::text_transport::wan_text_via_delivery_server() {
                 crate::delivery_read_acks::queue_delivery_read_catchup(&peer);
             }
-            let lan_p2p_read = !crate::text_transport::wan_text_via_delivery_server()
-                || crate::p2p::contact_has_lan_p2p_text_path(&peer);
-            if lan_p2p_read {
+            if crate::text_transport::lan_p2p_ack_mirror_enabled(&peer) {
                 if let Ok(g) = p2p_mx().lock() {
                     if let Some(h) = g.as_ref() {
                         queue_read_ack_catchup(&h.out_tx, peer);
@@ -1499,9 +1490,7 @@ pub fn p2p_nudge_read_catchup() -> Value {
         if crate::text_transport::wan_text_via_delivery_server() {
             crate::delivery_read_acks::queue_delivery_read_catchup(&peer);
         }
-        let lan_p2p_read = !crate::text_transport::wan_text_via_delivery_server()
-            || crate::p2p::contact_has_lan_p2p_text_path(&peer);
-        if lan_p2p_read {
+        if crate::text_transport::lan_p2p_ack_mirror_enabled(&peer) {
             if let Ok(g) = p2p_mx().lock() {
                 if let Some(h) = g.as_ref() {
                     queue_read_ack_catchup(&h.out_tx, peer);
@@ -1595,9 +1584,7 @@ fn queue_read_catchup_for_room(room: Option<&str>) {
     if crate::text_transport::wan_text_via_delivery_server() {
         crate::delivery_read_acks::queue_delivery_read_catchup(&peer_pk);
     }
-    let lan_p2p_read = !crate::text_transport::wan_text_via_delivery_server()
-        || crate::p2p::contact_has_lan_p2p_text_path(&peer_pk);
-    if lan_p2p_read {
+    if crate::text_transport::lan_p2p_ack_mirror_enabled(&peer_pk) {
         if let Ok(g) = p2p_mx().lock() {
             if let Some(h) = g.as_ref() {
                 queue_read_ack_catchup(&h.out_tx, peer_pk);
@@ -1653,11 +1640,9 @@ pub fn p2p_set_foreground_peer(public_key_hex: Option<&str>) -> Value {
         }
     }
     let prev_pk = live_foreground_peer_for_catchup();
-    let peer_id = pk.as_ref().and_then(|hex| libp2p_peer_for_contact_identity(hex));
-    let generation = crate::p2p::chat_server::bump_foreground_peer_cmd_gen();
+    let generation = crate::p2p::bump_foreground_peer_cmd_gen();
     if out_tx
         .send(OutboundCmd::SetForegroundPeer {
-            peer_id,
             identity_wire: pk.clone(),
             generation,
         })
@@ -1704,9 +1689,14 @@ pub fn p2p_poll_event() -> Option<Value> {
         let Some(ev) = poll_next_p2p_event() else {
             return None;
         };
-        if let GossipChatEvent::Listening(ma) = &ev {
-            if let Some(dm) = DmDialAddr::parse(&ma.to_string()) {
-                crate::coord_runtime::on_listen_dm_addr(&dm);
+        if let GossipChatEvent::Listening(addr) = &ev {
+            if let Some((host, port)) = addr.rsplit_once(':') {
+                if let Ok(p) = port.parse::<u16>() {
+                    crate::coord_runtime::on_listen_dm_addr(&DmDialAddr::new(
+                        host.to_string(),
+                        p,
+                    ));
+                }
             }
         }
         let mut j = gossip_event_json(ev.clone());

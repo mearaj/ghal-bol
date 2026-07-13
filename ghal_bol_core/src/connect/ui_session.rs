@@ -1,14 +1,15 @@
-use super::prelude::*;
-use super::notify::drop_pending_call_invite;
-use super::notify::notify_dm_presence_wake;
 use super::chat_room_session::freeze_open_chat_room_session;
-use super::{GossipChatEvent, OutboundCmd, READ_ACK_CATCHUP_THROTTLE_MS, SessionState};
+use super::notify::{drop_pending_call_invite, notify_dm_presence_wake};
+use super::types::{GossipChatEvent, OutboundCmd, READ_ACK_CATCHUP_THROTTLE_MS, SessionPeer};
+use super::session::SessionState;
 use crate::dm_transport::ContactPk;
-/// UI foreground peer — single source of truth for in-room read receipts and unread skip.
-/// Updated synchronously from `p2p_sync_ui_session` via `sync_foreground_peer_now`.
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
+
 static LIVE_FOREGROUND_PEER: OnceLock<RwLock<Option<ContactPk>>> = OnceLock::new();
 static LAST_ROOM_PEER: OnceLock<RwLock<Option<ContactPk>>> = OnceLock::new();
-/// Match Flutter `CallController._maxLiveInviteAgeMs` — stale invites must not ring or notify.
+
 #[inline]
 pub(crate) fn platform_incoming_call_show(peer_pk: &str, call_id: &str) {
     if app_ui_visible() {
@@ -36,6 +37,7 @@ pub(crate) fn on_local_call_signal_sent(call_id: &str, kind: crate::call_sig_v1:
         _ => {}
     }
 }
+
 fn live_foreground_peer_mx() -> &'static RwLock<Option<ContactPk>> {
     LIVE_FOREGROUND_PEER.get_or_init(|| RwLock::new(None))
 }
@@ -48,9 +50,8 @@ pub fn last_room_peer() -> Option<ContactPk> {
     last_room_peer_mx().read().ok().and_then(|g| g.clone())
 }
 
-static FOREGROUND_PEER_CMD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FOREGROUND_PEER_CMD_GEN: AtomicU64 = AtomicU64::new(0);
 
-/// Bump on each `p2p_set_foreground_peer` / `sync_ui_session` room change.
 pub fn bump_foreground_peer_cmd_gen() -> u64 {
     FOREGROUND_PEER_CMD_GEN.fetch_add(1, Ordering::SeqCst) + 1
 }
@@ -59,7 +60,6 @@ pub(crate) fn foreground_peer_cmd_gen_latest() -> u64 {
     FOREGROUND_PEER_CMD_GEN.load(Ordering::SeqCst)
 }
 
-/// Match Flutter room open/close immediately (avoids 1–2 spurious `ack_read` while leaving).
 pub fn sync_foreground_peer_now(peer: Option<ContactPk>) {
     if let Ok(mut g) = live_foreground_peer_mx().write() {
         *g = peer.clone();
@@ -82,9 +82,9 @@ pub fn live_foreground_peer_pk() -> Option<ContactPk> {
     live_foreground_peer()
 }
 
-pub(crate) fn is_live_foreground_peer(peer: PeerId) -> bool {
+pub(crate) fn is_live_foreground_peer(peer: &SessionPeer) -> bool {
     live_foreground_peer().is_some_and(|pk| {
-        super::libp2p_peer_for_contact_identity(&pk).is_some_and(|p| p == peer)
+        crate::public_key_util::same_contact_pk(&pk, peer)
     })
 }
 
@@ -118,23 +118,17 @@ pub fn live_foreground_peer_for_catchup() -> Option<ContactPk> {
     live_foreground_peer()
 }
 
-/// UI visibility gate (protonet: read state only while chatroom is active / app visible).
-/// When false: inbound text gets `ack_received` only; no `ack_read` enqueue, seed, or upkeep.
 static APP_ACK_READ_ENABLED: OnceLock<AtomicBool> = OnceLock::new();
-
-/// When true: Flutter UI is visible — skip OS incoming-call notification (in-app ring only).
 static APP_UI_VISIBLE: OnceLock<AtomicBool> = OnceLock::new();
 
 fn app_ui_visible_mx() -> &'static AtomicBool {
     APP_UI_VISIBLE.get_or_init(|| AtomicBool::new(false))
 }
 
-/// Called from FFI when the app foreground/background changes.
 pub fn set_app_ui_visible(visible: bool) {
     let was = app_ui_visible_mx().swap(visible, Ordering::SeqCst);
     if visible {
         platform_incoming_call_dismiss();
-        // Only on inactive→active edge — sync_ui_session repeats visible=true at startup.
         if !was {
             notify_dm_presence_wake();
         }
@@ -151,7 +145,6 @@ fn app_ack_read_enabled_mx() -> &'static AtomicBool {
     APP_ACK_READ_ENABLED.get_or_init(|| AtomicBool::new(false))
 }
 
-/// Delivery mode + P2P: in-room read gate for a contact identity wire (66-hex pk).
 pub fn may_send_read_ack_for_contact_pk(sender_pk: &str) -> bool {
     app_ui_visible()
         && app_ack_read_enabled()
@@ -160,17 +153,10 @@ pub fn may_send_read_ack_for_contact_pk(sender_pk: &str) -> bool {
         })
 }
 
-/// P2P stream path: read gate for a libp2p [PeerId] (maps to foreground contact pk).
-pub(crate) fn may_send_in_room_read_ack(_session: &SessionState, peer: PeerId) -> bool {
-    live_foreground_peer().is_some_and(|pk| {
-        super::libp2p_peer_for_contact_identity(&pk).is_some_and(|p| p == peer)
-            && may_send_read_ack_for_contact_pk(&pk)
-    })
+pub(crate) fn may_send_in_room_read_ack(_session: &SessionState, peer: &SessionPeer) -> bool {
+    is_live_foreground_peer(peer) && may_send_read_ack_for_contact_pk(peer)
 }
 
-/// Hub unread is suppressed for the open room only while the read gate is on (user actively
-/// viewing that chat). Android inactive / background keeps foreground pk but must still bump
-/// unread — see `p2p_sync_ui_session` room-unchanged + `read=false` path.
 pub(crate) fn inbound_suppresses_hub_unread(sender_pk: &str, from_key: &str) -> bool {
     if !app_ui_visible() || !app_ack_read_enabled() {
         return false;
@@ -182,7 +168,6 @@ pub(crate) fn inbound_suppresses_hub_unread(sender_pk: &str, from_key: &str) -> 
         || crate::public_key_util::same_contact_pk(&live, sender_pk)
 }
 
-/// Called from FFI when the app backgrounds or UI is torn down.
 pub fn set_app_ack_read_enabled(enabled: bool) {
     app_ack_read_enabled_mx().store(enabled, Ordering::SeqCst);
 }
@@ -199,20 +184,20 @@ pub fn queue_read_ack_catchup(out_tx: &std::sync::mpsc::Sender<OutboundCmd>, pee
     });
 }
 
-fn read_catchup_throttle_mx() -> &'static RwLock<HashMap<PeerId, i64>> {
-    static M: OnceLock<RwLock<HashMap<PeerId, i64>>> = OnceLock::new();
+fn read_catchup_throttle_mx() -> &'static RwLock<HashMap<String, i64>> {
+    static M: OnceLock<RwLock<HashMap<String, i64>>> = OnceLock::new();
     M.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-pub(crate) fn read_ack_catchup_throttled(peer: PeerId, now_ms: i64) -> bool {
+pub(crate) fn read_ack_catchup_throttled(peer: &SessionPeer, now_ms: i64) -> bool {
     let Ok(mut m) = read_catchup_throttle_mx().write() else {
         return false;
     };
-    let last = m.get(&peer).copied().unwrap_or(0);
+    let last = m.get(peer).copied().unwrap_or(0);
     if now_ms.saturating_sub(last) < READ_ACK_CATCHUP_THROTTLE_MS {
         return true;
     }
-    m.insert(peer, now_ms);
+    m.insert(peer.clone(), now_ms);
     false
 }
 

@@ -6,7 +6,7 @@ use std::os::raw::c_char;
 
 use crate::c_ffi::ffi_unlocked_identity_clone;
 use crate::call_media_key::derive_call_media_keys_from_transport;
-use crate::p2p::chat_server::transport_kem_for_peer;
+use crate::connect::transport_kem_for_peer;
 
 fn json_err(msg: impl AsRef<str>) -> *mut c_char {
     let v = serde_json::json!({ "ok": false, "error": msg.as_ref() });

@@ -367,12 +367,7 @@ mod tests {
     fn v2_rejects_multiaddrs_on_wire() {
         let (_ks, id) = create_keystore_v1("pw", None).unwrap();
         let pk = id.public_key_hex();
-        let pid = id
-            .to_libp2p_keypair()
-            .unwrap()
-            .public()
-            .to_peer_id()
-            .to_string();
+        let pid = id.identity_wire();
         let v = serde_json::json!({
             "ghalbol.share": SHARE,
             "format_version": CONNECT_INVITE_FORMAT_VERSION,

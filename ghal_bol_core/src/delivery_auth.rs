@@ -48,3 +48,58 @@ pub fn sign_delivery_challenge(ident: &DecryptedIdentity, msg: &[u8]) -> Result<
         IdentityAlgorithm::Ed25519 | IdentityAlgorithm::EcdsaP256 => ident.sign_message(msg),
     }
 }
+
+/// Verify delivery-server signatures (DER secp256k1 — matches `ghal_bol_delivery::auth`).
+pub fn verify_delivery_signature(
+    identity_wire: &str,
+    msg: &[u8],
+    signature: &[u8],
+) -> Result<(), String> {
+    use crate::identity::Identity;
+    use crate::public_key_util::normalize_contact_identity_wire;
+    use ed25519_dalek::{Signature as Ed25519Sig, Verifier, VerifyingKey};
+    use p256::ecdsa::{
+        Signature as EcdsaSig, VerifyingKey as EcdsaVerifyingKey,
+        signature::Verifier as EcdsaVerifier,
+    };
+    use secp256k1::{ecdsa::Signature as Secp256k1Sig, Message, PublicKey, Secp256k1};
+
+    let wire = normalize_contact_identity_wire(identity_wire)?;
+    let id = Identity::parse(&wire)?;
+    match id.algorithm {
+        IdentityAlgorithm::Secp256k1 => {
+            let pk = PublicKey::from_slice(&id.public_key)
+                .map_err(|e| format!("secp256k1 public key: {e}"))?;
+            let hash = Sha256::digest(msg);
+            let digest_msg = Message::from_digest(hash.into());
+            let sig = Secp256k1Sig::from_der(signature)
+                .map_err(|e| format!("secp256k1 signature: {e}"))?;
+            Secp256k1::verification_only()
+                .verify_ecdsa(digest_msg, &sig, &pk)
+                .map_err(|e| format!("secp256k1 verify: {e}"))?;
+        }
+        IdentityAlgorithm::Ed25519 => {
+            let arr: [u8; 32] = id
+                .public_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| "ed25519 public key: invalid length".to_string())?;
+            let vk = VerifyingKey::from_bytes(&arr)
+                .map_err(|e| format!("ed25519 public key: {e}"))?;
+            let sig = Ed25519Sig::from_slice(signature)
+                .map_err(|e| format!("ed25519 signature: {e}"))?;
+            vk.verify(msg, &sig)
+                .map_err(|e| format!("ed25519 verify: {e}"))?;
+        }
+        IdentityAlgorithm::EcdsaP256 => {
+            let vk = EcdsaVerifyingKey::from_sec1_bytes(&id.public_key)
+                .map_err(|e| format!("ecdsa-p256 public key: {e}"))?;
+            let sig = EcdsaSig::from_der(signature)
+                .or_else(|_| EcdsaSig::from_slice(signature))
+                .map_err(|e| format!("ecdsa-p256 signature: {e}"))?;
+            EcdsaVerifier::verify(&vk, msg, &sig)
+                .map_err(|e| format!("ecdsa-p256 verify: {e}"))?;
+        }
+    }
+    Ok(())
+}

@@ -204,7 +204,7 @@ pub fn on_connectivity_changed() {
     #[cfg(target_os = "android")]
     {
         let wifi = wifi_transport_linked();
-        crate::p2p::chat_server::set_android_wifi_transport_available(wifi);
+        crate::connect::set_android_wifi_transport_available(wifi);
     }
     crate::p2p::notify_network_change();
 }

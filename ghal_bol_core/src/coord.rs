@@ -138,48 +138,40 @@ impl CoordHttpClient {
         serde_json::from_value(v["peer"].clone()).map_err(|e| e.to_string())
     }
 
-    /// Fetch the coordinator's co-located Circuit Relay v2 coordinates.
-    /// Returns `(peer_id, base_addrs)`; empty when the server runs no relay.
-    pub fn get_relay(&self) -> Result<(String, Vec<String>), String> {
-        self.get_relay_remap(false)
+    pub fn base_url(&self) -> &str {
+        &self.base
     }
 
-    /// Like [`get_relay`]; when `remap` is true, home UPnP coord servers remove the stale WAN port and map fresh.
-    pub fn get_relay_remap(&self, remap: bool) -> Result<(String, Vec<String>), String> {
-        let url = if remap {
-            format!("{}/v1/relay?remap=true", self.base)
-        } else {
-            format!("{}/v1/relay", self.base)
-        };
-        let resp = self.send_with_transport_retry(|http| self.with_headers(http.get(&url)))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().unwrap_or_default();
-            let lower = body.to_ascii_lowercase();
-            if lower.contains("<!doctype html") {
-                return Err(format!(
-                    "coord HTTP transport failure {} (non-JSON body — coord unreachable or proxy error)",
-                    status
-                ));
-            }
-            return Err(format!("relay HTTP {}", status));
+    pub fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let resp = self.send_with_transport_retry(|http| {
+            self.with_headers(http.post(url)).json(body)
+        })?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "POST {} HTTP {}: {}",
+                url,
+                resp.status(),
+                resp.text().unwrap_or_default()
+            ));
         }
-        let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-        if v.get("enabled") == Some(&serde_json::Value::Bool(false)) {
-            return Ok((String::new(), Vec::new()));
+        resp.json().map_err(|e| e.to_string())
+    }
+
+    pub fn get_json(&self, url: &str) -> Result<serde_json::Value, String> {
+        let resp = self.send_with_transport_retry(|http| self.with_headers(http.get(url)))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "GET {} HTTP {}: {}",
+                url,
+                resp.status(),
+                resp.text().unwrap_or_default()
+            ));
         }
-        let peer_id = v["peer_id"].as_str().unwrap_or_default().trim().to_string();
-        let addrs = v["addrs"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        Ok((peer_id, addrs))
+        resp.json().map_err(|e| e.to_string())
     }
 
     pub fn lookup(&self, identity_wire: &str) -> Result<CoordPeerRecord, String> {

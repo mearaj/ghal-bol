@@ -4,10 +4,12 @@ use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
 
-use libp2p::multiaddr::Protocol;
-use libp2p::{Multiaddr, PeerId};
+use crate::multiaddr_local::{Multiaddr, Protocol};
 
 use super::native_log;
+
+/// Session peer id — normalized identity wire (legacy name in dial helpers).
+pub type PeerId = String;
 
 /// OS-reported default network transport (ConnectivityManager / Linux default route).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -470,29 +472,44 @@ pub(crate) fn is_public_bootstrap_ipv4(ip: std::net::Ipv4Addr) -> bool {
         && !is_cgnat_ipv4(ip)
 }
 
+fn is_valid_dial_peer_component(peer: &str) -> bool {
+    let peer = peer.trim();
+    if peer.is_empty() {
+        return false;
+    }
+    if peer.contains(':') {
+        return crate::public_key_util::is_valid_contact_identity(peer);
+    }
+    match bs58::decode(peer).into_vec() {
+        Ok(b) if b.len() >= 34 => matches!(b.first(), Some(0x00 | 0x12)),
+        _ => false,
+    }
+}
+
 /// Resolve a Ghal Bol relay advertised by coord (`GET /v1/relay`) into concrete TCP dial
 /// multiaddrs `(PeerId, /ip4/<public-ip>/tcp/<port>/p2p/<id>)`.
 pub(crate) fn resolve_relay_bootnodes(
     peer_str: &str,
     addrs: &[String],
 ) -> Vec<(PeerId, Multiaddr)> {
-    let Ok(peer) = PeerId::from_str(peer_str) else {
+    let peer = peer_str.trim().to_string();
+    if !is_valid_dial_peer_component(&peer) {
         native_log::warn("relay", format!("ghalbol relay bad peer id: {peer_str}"));
         return Vec::new();
-    };
+    }
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for addr in addrs {
-        for ma in relay_base_addr_to_dial_multiaddrs(addr, peer) {
+        for ma in relay_base_addr_to_dial_multiaddrs(addr, &peer) {
             if seen.insert(ma.to_string()) {
-                out.push((peer, ma));
+                out.push((peer.clone(), ma));
             }
         }
     }
     out
 }
 
-fn relay_base_addr_to_dial_multiaddrs(addr: &str, peer: PeerId) -> Vec<Multiaddr> {
+fn relay_base_addr_to_dial_multiaddrs(addr: &str, peer: &str) -> Vec<Multiaddr> {
     let segs: Vec<&str> = addr.trim().split('/').filter(|s| !s.is_empty()).collect();
     let mut host: Option<(String, bool, bool)> = None;
     let mut port: Option<u16> = None;
@@ -786,13 +803,12 @@ pub(crate) fn is_relay_bootstrap_tcp(
 
 /// Last `/p2p/<id>` on a multiaddr (local peer on DM listen, client peer on relay circuit).
 pub(crate) fn terminal_p2p_peer_id(ma: &Multiaddr) -> Option<PeerId> {
-    let mut last = None;
-    for p in ma.iter() {
-        if let Protocol::P2p(pid) = p {
-            last = Some(pid);
-        }
-    }
-    last
+    let s = ma.to_string();
+    s.rsplit("/p2p/")
+        .next()
+        .and_then(|tail| tail.split('/').next())
+        .map(|id| id.to_string())
+        .filter(|id| !id.is_empty())
 }
 
 /// Coord registration: public routable TCP only (not RFC1918 — mDNS covers LAN per DESIGN.md).
@@ -973,7 +989,7 @@ pub(crate) fn expand_listen_addresses(addr: &Multiaddr) -> Vec<Multiaddr> {
 pub(crate) fn peer_id_from_multiaddr(ma: &Multiaddr) -> Option<PeerId> {
     ma.iter().find_map(|p| {
         if let Protocol::P2p(pid) = p {
-            Some(pid)
+            Some(pid.clone())
         } else {
             None
         }
@@ -983,7 +999,7 @@ pub(crate) fn peer_id_from_multiaddr(ma: &Multiaddr) -> Option<PeerId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libp2p::Multiaddr;
+    use crate::multiaddr_local::Multiaddr;
 
     #[test]
     fn peer_own_coord_register_rejects_relay_bootstrap_hop() {

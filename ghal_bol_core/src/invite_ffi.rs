@@ -125,7 +125,7 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_seal_utf8_to_public_key_hex(
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
-        let sealed = match seal_to_secp256k1_public(&pk.to_bytes(), text.as_bytes()) {
+        let sealed = match seal_to_secp256k1_public(&pk.serialize(), text.as_bytes()) {
             Ok(b) => b,
             Err(e) => return json_err(e),
         };

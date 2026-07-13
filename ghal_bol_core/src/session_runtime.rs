@@ -40,10 +40,7 @@ pub fn unlock_identity(app_namespace: &str, password: &str) -> Value {
     match unlocked {
         Ok(Ok(ident)) => {
             let pk = ident.public_key_hex();
-            let libp2p_peer_id = ident
-                .to_libp2p_keypair()
-                .ok()
-                .map(|kp| kp.public().to_peer_id().to_string());
+            let libp2p_peer_id = Some(ident.identity_wire());
             if let Err(e) = install_session(ident) {
                 return serde_json::json!({ "ok": false, "error": e });
             }

@@ -2,7 +2,7 @@
 //!
 //! Presence and endpoint discovery only — no chat transcripts or message payloads.
 
-use ghal_bol_coord::{AppState, DdnsConfig, RelayConfig, ServerConfig, app, relay, spawn_ddns_task};
+use ghal_bol_coord::{AppState, DdnsConfig, ServerConfig, app, spawn_ddns_task};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,40 +20,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = ServerConfig::from_env();
-    // Bind coord HTTP first — if the port is taken, fail before starting the libp2p relay
-    // (otherwise logs show "relay started" then AddrInUse, which looks like a relay bug).
     let listener = TcpListener::bind(config.listen).await?;
-
     let state = Arc::new(AppState::open(config.clone())?);
-
-    // Co-located Circuit Relay v2 node (NAT traversal). The HTTP API stays a lightweight
-    // phone book; the relay only carries brief NAT-traversal traffic until DCUtR upgrades
-    // clients to a direct connection. Advertised to clients at GET /v1/relay.
-    let relay_data_dir = config
-        .database_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    match relay::start(
-        RelayConfig::from_env(&relay_data_dir),
-        Arc::clone(&state.presence),
-        Some(Arc::clone(&state)),
-    )
-    .await
-    {
-        Ok(Some(info)) => state.set_relay_info(info),
-        Ok(None) => {}
-        Err(e) => tracing::warn!(error = %e, "relay node failed to start — continuing HTTP only"),
-    }
 
     let shutdown = Arc::new(Notify::new());
     let purge = spawn_purge_task(Arc::clone(&state), Arc::clone(&shutdown));
+    let bridge_sweep = spawn_bridge_sweep_task(Arc::clone(&state), Arc::clone(&shutdown));
     let ddns = DdnsConfig::from_env().map(|cfg| spawn_ddns_task(cfg, Arc::clone(&shutdown)));
     let app = app(state);
 
-    // Dual-stack: also serve the counterpart IP family on the same port so both IPv4 and IPv6
-    // clients can reach coord (IPv6 is preferred when both work). Best-effort — a host without an
-    // IPv6 (or IPv4) stack simply keeps the primary listener.
     let counterpart = bind_counterpart_listener(config.listen).await;
 
     tracing::info!(
@@ -63,7 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "ghal_bol_coord listening (ctrl+c to stop)"
     );
 
-    // Trigger graceful shutdown for every server task on the first signal.
     {
         let shutdown_notify = Arc::clone(&shutdown);
         tokio::spawn(async move {
@@ -85,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     purge.abort();
+    bridge_sweep.abort();
     if let Some(handle) = ddns {
         handle.abort();
     }
@@ -92,7 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-/// Serve the router on a listener until the shared shutdown is notified.
 fn spawn_http_server(
     listener: TcpListener,
     app: axum::Router,
@@ -101,7 +75,6 @@ fn spawn_http_server(
     tokio::spawn(async move {
         let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
             shutdown.notified().await;
-            // Do not block Ctrl+C forever on slow/stuck HTTP clients.
             tokio::time::sleep(Duration::from_secs(3)).await;
         });
         if let Err(e) = serve.await {
@@ -110,10 +83,6 @@ fn spawn_http_server(
     })
 }
 
-/// Map a listen address to its counterpart-family address **preserving scope** so the server is
-/// reachable over both IP families without changing exposure: a wildcard maps to the other-family
-/// wildcard, loopback to other-family loopback. A specific interface IP has no safe counterpart
-/// (returns `None`) — we must never widen a loopback/single-IP bind into a public wildcard.
 fn counterpart_addr(primary: SocketAddr) -> Option<SocketAddr> {
     use std::net::{Ipv4Addr, Ipv6Addr};
     let port = primary.port();
@@ -134,18 +103,10 @@ fn counterpart_addr(primary: SocketAddr) -> Option<SocketAddr> {
     }
 }
 
-/// Bind a listener for the IP family not covered by `primary` (same port, same scope), so the
-/// server is reachable over both IPv4 and IPv6. The IPv6 socket is forced `V6ONLY` to avoid
-/// clashing with an IPv4 wildcard already bound. Returns `None` (with a log) when there is no safe
-/// counterpart (specific-IP bind) or the counterpart stack is unavailable — single-stack continues.
 async fn bind_counterpart_listener(primary: SocketAddr) -> Option<TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
 
     let Some(addr) = counterpart_addr(primary) else {
-        tracing::debug!(
-            listen = %primary,
-            "coord HTTP bound to a specific IP — no dual-stack counterpart"
-        );
         return None;
     };
     let domain = match addr.ip() {
@@ -190,10 +151,7 @@ fn spawn_purge_task(state: Arc<AppState>, shutdown: Arc<Notify>) -> JoinHandle<(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         'purge: loop {
             tokio::select! {
-                _ = shutdown.notified() => {
-                    tracing::debug!("purge task stopped");
-                    break 'purge;
-                }
+                _ = shutdown.notified() => break 'purge,
                 _ = tick.tick() => {
                     let store = Arc::clone(&presence);
                     let t = ttl;
@@ -202,15 +160,27 @@ fn spawn_purge_task(state: Arc<AppState>, shutdown: Arc<Notify>) -> JoinHandle<(
                     tokio::select! {
                         _ = stop.notified() => break 'purge,
                         r = purge => match r {
-                            Ok(Ok(n)) if n > 0 => {
-                                tracing::info!(removed = n, "purged expired peers")
-                            }
+                            Ok(Ok(n)) if n > 0 => tracing::info!(removed = n, "purged expired peers"),
                             Ok(Err(e)) => tracing::warn!(error = %e, "purge failed"),
                             Err(e) => tracing::warn!(error = %e, "purge task join failed"),
                             _ => {}
                         },
                     }
                 }
+            }
+        }
+    })
+}
+
+fn spawn_bridge_sweep_task(state: Arc<AppState>, shutdown: Arc<Notify>) -> JoinHandle<()> {
+    let bridge = state.bridge.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown.notified() => break,
+                _ = tick.tick() => bridge.purge_expired().await,
             }
         }
     })
@@ -223,24 +193,15 @@ async fn shutdown_signal() {
         .expect("failed to install SIGTERM handler");
 
     tokio::select! {
-        _ = ctrl_c => {
-            tracing::info!("Ctrl+C received — shutting down");
-        }
+        _ = ctrl_c => tracing::info!("Ctrl+C received — shutting down"),
         _ = async {
             #[cfg(unix)]
-            {
-                terminate.recv().await;
-            }
+            { terminate.recv().await; }
             #[cfg(not(unix))]
-            {
-                std::future::pending::<()>().await;
-            }
-        } => {
-            tracing::info!("SIGTERM received — shutting down");
-        }
+            { std::future::pending::<()>().await; }
+        } => tracing::info!("SIGTERM received — shutting down"),
     }
 
-    // Second Ctrl+C: exit immediately (graceful drain already started).
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::warn!("second Ctrl+C — exiting now");

@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use crate::identity::Identity;
-use crate::identity_sign::verify_identity_signature;
+use crate::delivery_auth::{sign_delivery_challenge, verify_delivery_signature};
 use crate::keystore_v1::DecryptedIdentity;
 use crate::offline_seal_v1::seal_to_secp256k1_public;
 use crate::public_key_util::normalize_contact_identity_wire;
@@ -51,7 +51,7 @@ pub fn build_text_envelope(
         created_at_ms,
         &ciphertext_hex,
     );
-    let signature = ident.sign_message(&sign_bytes)?;
+    let signature = sign_delivery_challenge(ident, &sign_bytes)?;
     Ok(json!({
         "ghalbol.share": DELIVERY_MSG_SHARE,
         "format_version": DELIVERY_MSG_FORMAT_VERSION,
@@ -137,7 +137,7 @@ pub fn verify_delivery_envelope(envelope: &Value) -> Result<(), String> {
         created_at_ms,
         ciphertext_hex,
     );
-    verify_identity_signature(sender_wire, &sign_bytes, &sig)
+    verify_delivery_signature(sender_wire, &sign_bytes, &sig)
 }
 
 #[cfg(test)]

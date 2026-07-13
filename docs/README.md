@@ -13,6 +13,7 @@ Canonical index — read [DESIGN.md](DESIGN.md) before changing P2P, acks, invit
 | [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Connect invites: `ghalbol.com`, `ghalbol://` |
 | [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Run/test `ghal_bol_coord`, local dev stack, prod `coord.ghalbol.com`, **WAN troubleshooting** |
 | [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) | Delivery server design (WAN text mailbox); crate `ghal_bol_delivery/` |
+| [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) | Native connect transport (mDNS + Noise + channel mux + coord bridge) — replaces libp2p |
 | [../ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md) | Home `coord1`, GCP `coord`, smoke; **§ Regression prevention** |
 | [IDENTITY.md](IDENTITY.md) | Local identity: create/import, export, ownership |
 | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional paid Tier 3 relay (separate from messaging keys) |
