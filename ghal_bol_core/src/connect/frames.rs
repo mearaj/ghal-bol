@@ -81,10 +81,28 @@ async fn handle_channel0_frame(payload: &[u8], ctx: &WireDispatchCtx) {
                 sender_public_key_hex.trim(),
                 transport_pk,
             );
-            native_log::debug(
+            native_log::info(
                 "connect",
-                format!("transport kem hello from {} pk stored", ctx.peer),
+                format!("transport kem hello from {} pk stored — flushing deferred", ctx.peer),
             );
+            // Ensure our hello is on the wire too (initiator often never saw responder hello).
+            maybe_send_transport_kem_hello(ctx.session.as_ref(), &ctx.peer, &ctx.writers).await;
+            // Call invite (and sealed chat) wait on peer transport pk. Session-ready
+            // flush often races before inbound hello arrives — re-flush now.
+            flush_pending_call_signals(
+                Arc::clone(&ctx.session),
+                Arc::clone(&ctx.writers),
+                vec![ctx.peer.clone()],
+                ctx.events_tx.clone(),
+            )
+            .await;
+            resync_outbox_burst_for_peer(
+                Arc::clone(&ctx.session),
+                Arc::clone(&ctx.writers),
+                ctx.peer.clone(),
+                ctx.events_tx.clone(),
+            )
+            .await;
         }
         ParsedMsg::Text(t) => {
             if !sender_matches_peer(&t.sender_public_key_hex, &ctx.peer) {
@@ -423,6 +441,14 @@ pub(crate) async fn on_session_ready(
     let peer2 = peer.clone();
     tokio::spawn(async move {
         maybe_send_transport_kem_hello(session2.as_ref(), &peer2, &writers2).await;
+        // Identity-derived peer pk is always available; flush invites immediately.
+        flush_pending_call_signals(
+            Arc::clone(&session2),
+            writers2.clone(),
+            vec![peer2.clone()],
+            events_tx.clone(),
+        )
+        .await;
         resync_outbox_burst_for_peer(
             Arc::clone(&session2),
             writers2.clone(),
@@ -431,13 +457,6 @@ pub(crate) async fn on_session_ready(
         )
         .await;
         resync_pending_outbox(
-            Arc::clone(&session2),
-            writers2.clone(),
-            vec![peer2.clone()],
-            events_tx.clone(),
-        )
-        .await;
-        flush_pending_call_signals(
             Arc::clone(&session2),
             writers2.clone(),
             vec![peer2.clone()],

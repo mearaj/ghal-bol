@@ -19,7 +19,6 @@ use crate::transport_kem_v1::{
 
 pub const MSG_SHARE: &str = "ghal_bol_msg_v1";
 pub const MSG_FORMAT_VERSION: u64 = 2;
-pub const STREAM_PROTOCOL: &str = "/ghal-bol/msg/1.0.0";
 
 /// Optional transport KEM context for outbound DM text (`DM_CIPHER_TRANSPORT_V2`).
 pub struct DmSealTransportCtx<'a> {
@@ -450,10 +449,6 @@ mod tests {
         let open_b = DmOpenTransportCtx {
             local_sk: &sk_b,
             peer_pk: &pk_a,
-        };
-        let seal_a = DmSealTransportCtx {
-            local_sk: &sk_a,
-            peer_pk: &pk_b,
         };
 
         let env = build_text_envelope(

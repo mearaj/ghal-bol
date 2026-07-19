@@ -37,10 +37,18 @@ impl ConnectNoiseSession {
             .map_err(|e| e.to_string())?;
 
         let msg2 = read_message(&mut read).await?;
+        // Hash / transcript before msg2 — must match what the responder signed.
+        let hash_before_msg2 = hs.get_handshake_hash().to_vec();
         let mut payload2 = vec![0u8; msg2.len()];
-        hs.read_message(&msg2, &mut payload2)
+        let n2 = hs
+            .read_message(&msg2, &mut payload2)
             .map_err(|e| e.to_string())?;
-        let peer_wire = verify_remote_proof(&payload2, &hs)?;
+        payload2.truncate(n2);
+        let remote_static = hs
+            .get_remote_static()
+            .ok_or("missing remote static after msg2")?
+            .to_vec();
+        let peer_wire = verify_remote_proof(&payload2, &hash_before_msg2, &remote_static)?;
 
         let proof = build_identity_proof(ident, &hs)?;
         let n3 = hs
@@ -80,37 +88,39 @@ impl ConnectNoiseSession {
             .map_err(|e| e.to_string())?;
 
         let msg3 = read_message(&mut read).await?;
+        let hash_before_msg3 = hs.get_handshake_hash().to_vec();
         let mut payload3 = vec![0u8; msg3.len()];
-        hs.read_message(&msg3, &mut payload3)
+        let n3 = hs
+            .read_message(&msg3, &mut payload3)
             .map_err(|e| e.to_string())?;
-        let peer_wire = verify_remote_proof(&payload3, &hs)?;
+        payload3.truncate(n3);
+        let remote_static = hs
+            .get_remote_static()
+            .ok_or("missing remote static after msg3")?
+            .to_vec();
+        let peer_wire = verify_remote_proof(&payload3, &hash_before_msg3, &remote_static)?;
 
         let transport = hs.into_transport_mode().map_err(|e| e.to_string())?;
         Ok((Self { transport }, peer_wire, read, write))
     }
 
-    pub async fn write<W: AsyncWrite + Unpin>(
-        &mut self,
-        plaintext: &[u8],
-        write: &mut W,
-    ) -> Result<(), String> {
+    /// Encrypt one Noise transport message (no IO) — safe under a short mutex hold.
+    pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         let mut buf = vec![0u8; plaintext.len() + 64];
         let n = self
             .transport
             .write_message(plaintext, &mut buf)
             .map_err(|e| e.to_string())?;
-        write_message(write, &buf[..n]).await.map_err(|e| e.to_string())
+        buf.truncate(n);
+        Ok(buf)
     }
 
-    pub async fn read<R: AsyncRead + Unpin>(
-        &mut self,
-        read: &mut R,
-    ) -> Result<Vec<u8>, String> {
-        let wire = read_message(read).await?;
+    /// Decrypt one Noise transport message (no IO).
+    pub fn open(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let mut out = vec![0u8; wire.len()];
         let n = self
             .transport
-            .read_message(&wire, &mut out)
+            .read_message(wire, &mut out)
             .map_err(|e| e.to_string())?;
         out.truncate(n);
         Ok(out)
@@ -171,7 +181,11 @@ fn build_identity_proof(
     .to_string())
 }
 
-fn verify_remote_proof(payload: &[u8], hs: &HandshakeState) -> Result<String, String> {
+fn verify_remote_proof(
+    payload: &[u8],
+    handshake_hash_before_msg: &[u8],
+    remote_static_pub: &[u8],
+) -> Result<String, String> {
     let v: serde_json::Value =
         serde_json::from_slice(payload).map_err(|e| format!("proof json: {e}"))?;
     let wire = v
@@ -183,12 +197,23 @@ fn verify_remote_proof(payload: &[u8], hs: &HandshakeState) -> Result<String, St
         .and_then(|x| x.as_str())
         .ok_or("proof missing sig_hex")?;
     let sig = hex::decode(sig_hex.trim()).map_err(|e| format!("sig hex: {e}"))?;
-    let hash = hs.get_handshake_hash();
     let mut sign_bytes = Vec::new();
     sign_bytes.extend_from_slice(PROOF_DOMAIN);
-    sign_bytes.extend_from_slice(hash);
+    sign_bytes.extend_from_slice(handshake_hash_before_msg);
+    sign_bytes.extend_from_slice(remote_static_pub);
     crate::identity_sign::verify_identity_signature(wire, &sign_bytes, &sig)?;
     Ok(wire.to_string())
+}
+
+pub(crate) async fn write_sealed_frame<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    sealed: &[u8],
+) -> Result<(), String> {
+    write_message(w, sealed).await.map_err(|e| e.to_string())
+}
+
+pub(crate) async fn read_sealed_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, String> {
+    read_message(r).await
 }
 
 async fn write_message<W: AsyncWrite + Unpin>(w: &mut W, msg: &[u8]) -> io::Result<()> {
@@ -210,4 +235,42 @@ async fn read_message<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, String
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_identity(password: &str) -> crate::DecryptedIdentity {
+        crate::create_keystore_v1(password, None)
+            .expect("keystore")
+            .1
+    }
+
+    #[tokio::test]
+    async fn noise_xx_handshake_roundtrip_over_duplex() {
+        let a = test_identity("pw-a");
+        let b = test_identity("pw-b");
+        let wire_a = a.identity_wire();
+        let wire_b = b.identity_wire();
+        let sk_a = transport_static_secret_for_identity(&a);
+        let sk_b = transport_static_secret_for_identity(&b);
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (c_read, c_write) = tokio::io::split(client);
+        let (s_read, s_write) = tokio::io::split(server);
+
+        let init = tokio::spawn(async move {
+            ConnectNoiseSession::initiator(&a, &sk_a, c_read, c_write).await
+        });
+        let resp = tokio::spawn(async move {
+            ConnectNoiseSession::responder(&b, &sk_b, s_read, s_write).await
+        });
+
+        let (init_r, resp_r) = tokio::join!(init, resp);
+        let (_sess_a, peer_b, _, _) = init_r.unwrap().expect("initiator");
+        let (_sess_b, peer_a, _, _) = resp_r.unwrap().expect("responder");
+        assert_eq!(peer_b, wire_b);
+        assert_eq!(peer_a, wire_a);
+    }
 }

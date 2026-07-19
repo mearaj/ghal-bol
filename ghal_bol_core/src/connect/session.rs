@@ -1,13 +1,28 @@
 //! Slim session state for native connect (identity-wire keyed).
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 
-use super::prelude::*;
 use super::types::{
     DmPeer, PendingCallSignal, PendingDeliveryAck, PendingOutbound, PendingReadAck, SessionPeer,
     SEEN_INBOUND_MAX, session_peer_from_identity_wire,
 };
+
+/// Same KDF as [`SessionState`] local DM transport secret — peer pk is deterministic
+/// from their identity wire (hello still exchanged for confirmation / future ephemerals).
+pub(crate) fn dm_transport_sk_for_identity_wire(identity_wire: &str) -> x25519_dalek::StaticSecret {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"ghal_bol_connect_v1/dm_transport_sk");
+    h.update(identity_wire.as_bytes());
+    let digest: [u8; 32] = h.finalize().into();
+    x25519_dalek::StaticSecret::from(digest)
+}
+
+pub(crate) fn dm_transport_pk_for_identity_wire(identity_wire: &str) -> [u8; 32] {
+    let sk = dm_transport_sk_for_identity_wire(identity_wire);
+    *x25519_dalek::PublicKey::from(&sk).as_bytes()
+}
 
 pub(crate) struct SessionState {
     pub(crate) identity: crate::DecryptedIdentity,
@@ -25,7 +40,6 @@ pub(crate) struct SessionState {
     read_ack_confirmed: RwLock<HashSet<String>>,
     delivery_ack_sent: RwLock<HashSet<String>>,
     foreground_peer: RwLock<Option<SessionPeer>>,
-    pub(crate) transcript_path: Option<String>,
     pub(crate) app_namespace: Option<String>,
     dm_transport_local_sk: x25519_dalek::StaticSecret,
     dm_peer_transport_pks: RwLock<HashMap<String, [u8; 32]>>,
@@ -51,15 +65,9 @@ impl SessionState {
     pub fn new(
         identity: crate::DecryptedIdentity,
         dm_peers: &[DmPeer],
-        transcript_path: Option<String>,
         app_namespace: Option<String>,
     ) -> Result<Self, String> {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(b"ghal_bol_connect_v1/dm_transport_sk");
-        h.update(identity.identity_wire().as_bytes());
-        let digest: [u8; 32] = h.finalize().into();
-        let sk = x25519_dalek::StaticSecret::from(digest);
+        let sk = dm_transport_sk_for_identity_wire(&identity.identity_wire());
         let mut peers = HashMap::new();
         for p in dm_peers {
             if let Ok(w) = session_peer_from_identity_wire(&p.identity_wire) {
@@ -82,7 +90,6 @@ impl SessionState {
             read_ack_confirmed: RwLock::new(HashSet::new()),
             delivery_ack_sent: RwLock::new(HashSet::new()),
             foreground_peer: RwLock::new(None),
-            transcript_path,
             app_namespace,
             dm_transport_local_sk: sk,
             dm_peer_transport_pks: RwLock::new(HashMap::new()),
@@ -105,9 +112,6 @@ impl SessionState {
         session_peer_from_identity_wire(pk).ok()
     }
 
-    pub fn peer_connected(&self, peer: &SessionPeer) -> bool {
-        self.connected.read().ok().is_some_and(|g| g.contains(peer))
-    }
 
     pub fn set_peer_connected(&self, peer: &SessionPeer, up: bool) {
         if let Ok(mut g) = self.connected.write() {
@@ -129,16 +133,7 @@ impl SessionState {
         }
     }
 
-    pub fn stream_ready(&self, peer: &SessionPeer) -> bool {
-        self.stream_ready.read().ok().is_some_and(|g| g.contains(peer))
-    }
 
-    pub fn peer_on_local_lan(&self, peer: &SessionPeer) -> bool {
-        self.peers_on_local_lan
-            .read()
-            .ok()
-            .is_some_and(|g| g.contains(peer))
-    }
 
     pub fn set_peer_on_local_lan(&self, peer: &SessionPeer, on: bool) {
         if let Ok(mut g) = self.peers_on_local_lan.write() {
@@ -150,9 +145,6 @@ impl SessionState {
         }
     }
 
-    pub fn current_foreground_peer(&self) -> Option<SessionPeer> {
-        self.foreground_peer.read().ok().and_then(|g| g.clone())
-    }
 
     pub fn set_foreground_peer(&self, peer: Option<SessionPeer>) {
         if let Ok(mut g) = self.foreground_peer.write() {
@@ -160,9 +152,6 @@ impl SessionState {
         }
     }
 
-    pub fn outbox_contains(&self, id: &str) -> bool {
-        self.outbox.read().ok().is_some_and(|g| g.contains_key(id))
-    }
 
     pub fn track_outbound(&self, row: PendingOutbound) {
         if let Ok(mut g) = self.outbox.write() {
@@ -170,11 +159,6 @@ impl SessionState {
         }
     }
 
-    pub fn remove_outbox(&self, id: &str) {
-        if let Ok(mut g) = self.outbox.write() {
-            g.remove(id);
-        }
-    }
 
     pub fn pending_outbox_for_peer(&self, peer: &SessionPeer) -> Vec<PendingOutbound> {
         self.outbox
@@ -195,11 +179,6 @@ impl SessionState {
         }
     }
 
-    pub fn purge_pending_call_signals(&self, call_id: &str) {
-        if let Ok(mut g) = self.pending_call_signals.write() {
-            g.retain(|s| s.call_id != call_id);
-        }
-    }
 
     pub fn call_media_stop(&self, call_id: &str) -> bool {
         self.call_media.lock().ok().map(|mut g| g.remove(call_id).is_some()).unwrap_or(false)
@@ -249,10 +228,32 @@ impl SessionState {
         }
     }
 
+    /// Peer X25519 transport public key for sealing.
+    ///
+    /// Prefers a key learned from `TransportKemHello`. Falls back to the same
+    /// identity-wire KDF used for the local transport secret — hello can be
+    /// one-sided on a fresh bridge (initiator never sees responder hello) and
+    /// call invites must not sit deferred forever.
     pub fn peer_transport_pk(&self, peer_identity_wire: &str) -> Option<[u8; 32]> {
-        session_peer_from_identity_wire(peer_identity_wire)
+        let wire = session_peer_from_identity_wire(peer_identity_wire).ok()?;
+        if let Some(pk) = self
+            .dm_peer_transport_pks
+            .read()
             .ok()
-            .and_then(|w| self.dm_peer_transport_pks.read().ok()?.get(&w).copied())
+            .and_then(|g| g.get(&wire).copied())
+        {
+            return Some(pk);
+        }
+        Some(dm_transport_pk_for_identity_wire(&wire))
+    }
+
+    pub(crate) fn clear_transport_kem_for_peer(&self, peer: &SessionPeer) {
+        if let Ok(mut g) = self.dm_peer_transport_pks.write() {
+            g.remove(peer);
+        }
+        if let Ok(mut g) = self.dm_transport_hello_sent.write() {
+            g.remove(peer);
+        }
     }
 
     pub fn mark_seen_inbound(&self, id: &str, now_ms: i64) -> bool {
@@ -395,7 +396,6 @@ impl SessionState {
                 inbound_id: id,
                 recipient_public_key_hex: recipient_signing.trim().to_string(),
                 received_at_ms,
-                queued_at_ms: chrono_now_ms(),
             });
         }
     }
@@ -463,7 +463,7 @@ impl SessionState {
         true
     }
 
-    pub(crate) fn release_read_ack_wire_claim(&self, inbound_id: &str) {}
+    pub(crate) fn release_read_ack_wire_claim(&self, _inbound_id: &str) {}
 
     pub(crate) fn mark_read_ack_wire_sent(&self, inbound_id: &str) {
         if let Ok(mut q) = self.pending_read_acks.write() {

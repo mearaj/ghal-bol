@@ -44,8 +44,8 @@ async fn health_ok_with_database() {
 
 #[tokio::test]
 async fn register_and_lookup_roundtrip() {
-    use ghal_bol_coord::{registration_challenge_bytes, registration_message_digest};
-    use secp256k1::{Message, Secp256k1, SecretKey, ecdsa::Signature};
+    use ghal_bol_coord::registration_message_digest;
+    use secp256k1::{Secp256k1, SecretKey};
 
     let app = test_app();
     let sk = SecretKey::from_byte_array([7u8; 32]).expect("key");

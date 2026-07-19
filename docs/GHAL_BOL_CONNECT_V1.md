@@ -1,7 +1,7 @@
 # Ghal Bol Connect v1 — native transport wire spec
 
-Status: **shipping target** — replaces the libp2p transport stack (mDNS + TCP + Noise + relay)
-with a purpose-built native stack. Zero `libp2p*` crates in any workspace `Cargo.toml` or
+Status: **shipping target** — replaces the native transport stack (mDNS + TCP + Noise + relay)
+with a purpose-built native stack. Zero `native connect*` crates in any workspace `Cargo.toml` or
 `Cargo.lock` once the migration lands.
 
 Scope of the connect layer:
@@ -28,7 +28,7 @@ Only **popular, actively maintained** crates. Re-evaluate quarterly. As of **12 
 | Coord bridge server | `axum` | `0.8` | Already serving coord + delivery HTTP |
 | Optional media datagrams (later) | `quinn` + `rustls` | `0.11` / `0.23` | Pure-Rust QUIC; only if TCP bridge latency proves insufficient |
 
-**Explicitly rejected:** `libp2p*` (all), obscure Noise forks, custom mDNS, `webrtc-rs` as default,
+**Explicitly rejected:** `native connect*` (all), obscure Noise forks, custom mDNS, `webrtc-rs` as default,
 alpha (`0.0.x`) protocol crates.
 
 **In-house only where no popular crate fits:** the channel mux (8-byte header, ~100 LOC) and the
@@ -109,6 +109,13 @@ encrypted handshake payloads:
 ```
 
 Sign bytes: `"ghal_bol_connect_v1/proof" || noise_handshake_hash || x25519_static_public`.
+
+`noise_handshake_hash` is the Noise transcript hash **before** the proof-carrying message
+is written/read (msg2 for the responder proof, msg3 for the initiator proof). The verifier
+uses that same pre-message hash plus `get_remote_static()` (the peer’s X25519 static).
+Payload buffers must be truncated to the length returned by `snow` decrypt — trailing
+zeros after the JSON proof are a parse error.
+
 The signature uses the device identity key (secp256k1/ed25519/ecdsa-p256 — same
 `identity_sign` scheme as `msg_v1`). This binds the Noise session statics to the contact
 identity: a MITM cannot splice sessions, and the E2E rule (golden rule 7) holds — the
@@ -127,7 +134,7 @@ peer is the steady state; a brief overlap is harmless (frame handling is idempot
 
 ## Channel mux
 
-Replaces yamux/libp2p-stream. Fixed 8-byte header per frame, inside the Noise transport
+Replaces yamux/native-stream. Fixed 8-byte header per frame, inside the Noise transport
 ciphertext:
 
 ```text
@@ -170,7 +177,7 @@ engines may keep smaller frames for latency.
 
 ---
 
-## WAN call bridge (replaces libp2p relay)
+## WAN call bridge (replaces coord bridge)
 
 The coord server pairs two **outbound** client connections and pipes opaque bytes. No
 reservations, no `/p2p-circuit`, no Multiaddr, no relay v2.
@@ -188,16 +195,24 @@ reservations, no `/p2p-circuit`, no Multiaddr, no relay v2.
 4. Coord pairs the two sockets and forwards bytes bidirectionally until hangup, TTL, or byte
    budget.
 5. Inside the bridged byte stream the peers run the exact **same Noise XX handshake + channel
-   mux** as LAN — the bridge sees only ciphertext.
+   mux** as LAN — the bridge sees only ciphertext. **Caller = Noise initiator, callee =
+   Noise responder** (both WSS dials are outbound to coord; Noise roles stay asymmetric).
+   Coord **buffers** early binary frames until both sides are connected so Noise message 1
+   is not dropped if the initiator dials first.
 
 ### Limits (product-controlled)
 
 | Parameter | Default | Env |
 |---|---|---|
 | Session max duration | 4 h | `GHAL_BOL_BRIDGE_MAX_SECS` |
+| Unpaired pending TTL | 90 s | `GHAL_BOL_BRIDGE_PENDING_SECS` |
 | Max relayed bytes | unlimited (`0`) | `GHAL_BOL_BRIDGE_MAX_BYTES` |
 | Max concurrent bridges per identity | 4 | `GHAL_BOL_BRIDGE_MAX_PER_PEER` |
 | Idle timeout | 120 s (keepalive above) | `GHAL_BOL_BRIDGE_IDLE_SECS` |
+
+A new `POST /v1/bridge/request` for the same caller→callee (or same `call_id`) **replaces**
+prior unpaired pending entries so retries after a failed WSS connect are not blocked by
+`bridge limit per identity`.
 
 ---
 
@@ -225,7 +240,7 @@ Concretely:
 ## Non-goals
 
 - Kademlia / DHT / gossipsub / mesh discovery — never.
-- Pure P2P WAN without a server — CGNAT reality unchanged; the bridge is the call-reachability
+- native connect WAN without a server — CGNAT reality unchanged; the bridge is the call-reachability
   equivalent of the delivery server.
 - WebRTC/ICE — only reconsidered if quinn datagrams prove insufficient for media.
 - Disk caching of ports, bridge tokens, or discovery results — live lookup only.

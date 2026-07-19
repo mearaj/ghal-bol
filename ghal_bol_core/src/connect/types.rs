@@ -6,10 +6,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub const CONNECT_MDNS_SERVICE: &str = "_ghalbol._tcp.local.";
-pub const CONNECT_PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_GOSSIP_TOPIC: &str = "ghal-bol-chat";
 
-pub type ConnectEvent = GossipChatEvent;
 
 /// Remote peer key — normalized contact identity wire (no PeerId).
 pub type SessionPeer = String;
@@ -39,7 +37,6 @@ impl DmPeer {
 pub struct ConnectConfig {
     pub topic: String,
     pub dm_peers: Vec<DmPeer>,
-    pub transcript_path: Option<String>,
     pub app_namespace: Option<String>,
 }
 
@@ -50,7 +47,6 @@ impl ConnectConfig {
         Self {
             topic: topic.into(),
             dm_peers: Vec::new(),
-            transcript_path: None,
             app_namespace: None,
         }
     }
@@ -230,7 +226,6 @@ pub(crate) struct PendingDeliveryAck {
     pub(crate) inbound_id: String,
     pub(crate) recipient_public_key_hex: String,
     pub(crate) received_at_ms: i64,
-    pub(crate) queued_at_ms: i64,
 }
 
 #[derive(Clone)]
@@ -270,7 +265,5 @@ pub fn identity_wire_for_session_peer(peer: &SessionPeer) -> Option<String> {
 /// Sidecar runtime commands (mDNS/TCP listener thread).
 #[derive(Clone, Debug)]
 pub enum ConnectOutboundCmd {
-    RegisterContact { identity_wire: String },
-    DialContact { identity_wire: String },
     Stop,
 }

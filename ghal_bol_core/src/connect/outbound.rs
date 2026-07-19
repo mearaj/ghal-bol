@@ -11,7 +11,7 @@ use super::frames::{
 use super::outbox_acks::{
     flush_pending_call_signals, handle_run_read_ack_catchup, handle_send_ack_cmd,
 };
-use super::peer_session::writer_open_for_peer;
+use super::peer_session::{prune_closed_writers, writer_open_for_peer};
 use super::prelude::*;
 use super::session::chrono_now_ms;
 use super::types::{
@@ -133,6 +133,10 @@ async fn process_one(
             signal_id,
         } => {
             let Ok(peer) = session_peer_from_identity_wire(&recipient_public_key_hex) else {
+                native_log::warn(
+                    "call",
+                    format!("call signal dropped — bad peer wire call_id={call_id}"),
+                );
                 return;
             };
             let recipient_hex = recipient_public_key_hex.clone();
@@ -150,7 +154,18 @@ async fn process_one(
                 recipient_public_key_hex,
                 created_at_ms: chrono_now_ms(),
             });
-            if writer_open_for_peer(&writers, &peer) {
+            prune_closed_writers(&writers);
+            let lan_up = writer_open_for_peer(&writers, &peer);
+            native_log::info(
+                "call",
+                format!(
+                    "call signal enqueue kind={} call_id={call_id} peer={} lan_writer={lan_up}",
+                    signal_kind.wire_name(),
+                    &peer[..peer.len().min(16)],
+                ),
+            );
+            // `CallSignalSent` only after a real wire write (LAN flush or post-bridge ready).
+            if lan_up {
                 flush_pending_call_signals(
                     Arc::clone(&session),
                     Arc::clone(&writers),
@@ -158,24 +173,69 @@ async fn process_one(
                     events_tx.clone(),
                 )
                 .await;
-            } else if let Ok(bridge) = bridge_request_for_call(&recipient_hex, &call_id) {
-                let reg = Arc::clone(&worker.registry);
-                let sess = Arc::clone(&session);
-                let id = worker.identity.clone();
-                let ev = worker.events_tx.clone();
-                let pw = peer.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = connect_bridge_session(reg, sess, id, ev, pw, bridge).await {
-                        native_log::warn("bridge", format!("wan call bridge failed: {e}"));
-                    }
-                });
             }
-            if let Some(tx) = events_tx {
-                let _ = tx.send(GossipChatEvent::CallSignalSent {
-                    call_id,
-                    signal: signal_kind.wire_name().to_string(),
-                    recipient_public_key_hex: recipient_hex,
-                });
+            // Docs (GHAL_BOL_CONNECT_V1): WAN call bridge when no live LAN writer.
+            let need_bridge = !lan_up
+                && matches!(
+                    signal_kind,
+                    crate::call_sig_v1::CallSigKind::Invite
+                        | crate::call_sig_v1::CallSigKind::Accept
+                        | crate::call_sig_v1::CallSigKind::Hangup
+                        | crate::call_sig_v1::CallSigKind::Reject
+                        | crate::call_sig_v1::CallSigKind::VideoOn
+                        | crate::call_sig_v1::CallSigKind::VideoOff
+                );
+            if need_bridge {
+                if !crate::coord_runtime::coord_is_configured() {
+                    native_log::warn(
+                        "call",
+                        format!(
+                            "call signal queued but no LAN session and coord not configured call_id={call_id}"
+                        ),
+                    );
+                } else {
+                    let reg = Arc::clone(&worker.registry);
+                    let sess = Arc::clone(&session);
+                    let id = worker.identity.clone();
+                    let ev = worker.events_tx.clone();
+                    let pw = peer.clone();
+                    let peer_hex = recipient_hex.clone();
+                    let cid = call_id.clone();
+                    native_log::info(
+                        "bridge",
+                        format!("wan call bridge requesting call_id={cid}"),
+                    );
+                    tokio::spawn(async move {
+                        let bridge = match tokio::task::spawn_blocking(move || {
+                            bridge_request_for_call(&peer_hex, &cid)
+                        })
+                        .await
+                        {
+                            Ok(Ok(b)) => b,
+                            Ok(Err(e)) => {
+                                native_log::warn(
+                                    "bridge",
+                                    format!("wan call bridge request failed: {e}"),
+                                );
+                                return;
+                            }
+                            Err(e) => {
+                                native_log::warn(
+                                    "bridge",
+                                    format!("wan call bridge request task: {e}"),
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(e) = connect_bridge_session(
+                            reg, sess, id, ev, pw, bridge, true, // caller = Noise initiator
+                        )
+                        .await
+                        {
+                            native_log::warn("bridge", format!("wan call bridge failed: {e}"));
+                        }
+                    });
+                }
             }
         }
         OutboundCmd::CallMediaStart {

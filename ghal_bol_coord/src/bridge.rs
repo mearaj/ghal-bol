@@ -22,6 +22,9 @@ use crate::routes::RouteState;
 pub struct BridgeRegistry {
     inner: Arc<Mutex<BridgeInner>>,
     max_secs: u64,
+    /// Unpaired pending lifetime — short so failed dials do not fill `max_per_peer`
+    /// for hours (docs: pairing completes in seconds; session TTL is separate).
+    pending_secs: u64,
     max_bytes: u64,
     max_per_peer: usize,
     idle_secs: u64,
@@ -46,7 +49,12 @@ struct PendingBridge {
 struct ActiveBridge {
     caller_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
     callee_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// Frames received before the peer side connected — Noise msg1 must not be dropped.
+    to_caller: Vec<Vec<u8>>,
+    to_callee: Vec<Vec<u8>>,
     bytes_relayed: u64,
+    /// True once both sockets have joined — after that, a missing peer tx means hangup.
+    was_paired: bool,
     notify: Arc<Notify>,
 }
 
@@ -68,20 +76,27 @@ impl BridgeRegistry {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(120);
+        // Unpaired pending default 90s — not session max (4h). Override: GHAL_BOL_BRIDGE_PENDING_SECS.
+        let pending_secs = std::env::var("GHAL_BOL_BRIDGE_PENDING_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90)
+            .clamp(15, max_secs.max(15));
         Self {
             inner: Arc::new(Mutex::new(BridgeInner {
                 pending: HashMap::new(),
                 active: HashMap::new(),
             })),
             max_secs,
+            pending_secs,
             max_bytes,
             max_per_peer,
             idle_secs,
         }
     }
 
-    fn ttl(&self) -> Duration {
-        Duration::from_secs(self.max_secs.min(24 * 3600))
+    fn pending_ttl(&self) -> Duration {
+        Duration::from_secs(self.pending_secs)
     }
 
     pub async fn purge_expired(&self) {
@@ -90,17 +105,31 @@ impl BridgeRegistry {
         g.pending.retain(|_, b| b.expires > now);
     }
 
+    /// Drop stale unpaired entries for this caller so a new invite can proceed
+    /// (docs: one call path; retries must not be blocked by dead pending).
+    async fn drop_caller_pending_for_replace(&self, caller: &str, callee: &str, call_id: &str) {
+        let mut g = self.inner.lock().await;
+        let caller_l = caller.to_ascii_lowercase();
+        let callee_l = callee.to_ascii_lowercase();
+        g.pending.retain(|_, b| {
+            let same_caller = b.caller_wire.to_ascii_lowercase() == caller_l;
+            if !same_caller {
+                return true;
+            }
+            // Replace same call_id, or any prior unpaired invite to the same callee.
+            !(b.call_id == call_id || b.callee_wire.to_ascii_lowercase() == callee_l)
+        });
+    }
+
     async fn count_for_peer(&self, wire: &str) -> usize {
         let g = self.inner.lock().await;
         let w = wire.to_ascii_lowercase();
         g.pending
             .values()
-            .filter(|b| b.caller_wire.to_ascii_lowercase() == w || b.callee_wire.to_ascii_lowercase() == w)
+            .filter(|b| {
+                b.caller_wire.to_ascii_lowercase() == w || b.callee_wire.to_ascii_lowercase() == w
+            })
             .count()
-            + g.active
-                .values()
-                .filter(|_| false)
-                .count()
     }
 }
 
@@ -185,6 +214,10 @@ pub async fn post_bridge_request(
 
     let registry = state.app.bridge.clone();
     registry.purge_expired().await;
+    // Docs pairing flow: a new invite replaces dead unpaired pending for this caller→callee.
+    registry
+        .drop_caller_pending_for_replace(&caller, &callee, call_id)
+        .await;
     if registry.count_for_peer(&caller).await >= registry.max_per_peer {
         return Err(ServerError::BadRequest("bridge limit per identity".into()));
     }
@@ -200,7 +233,7 @@ pub async fn post_bridge_request(
         call_id: call_id.to_string(),
         caller_token: caller_token.clone(),
         callee_token: callee_token.clone(),
-        expires: now + registry.ttl(),
+        expires: now + registry.pending_ttl(),
     };
     tracing::info!(
         bridge_id = %bridge_id,
@@ -214,15 +247,24 @@ pub async fn post_bridge_request(
         g.pending.insert(bridge_id.clone(), pending);
     }
 
-    let connect_url = format!(
-        "{}/v1/bridge/connect",
-        state.app.config.public_base_url.trim_end_matches('/')
-    );
+    let connect_url = bridge_connect_ws_url(&state.app.config.public_base_url);
     Ok(Json(BridgeRequestResponse {
         bridge_id,
         token: caller_token,
         connect_url,
     }))
+}
+
+fn bridge_connect_ws_url(public_base_url: &str) -> String {
+    let base = public_base_url.trim_end_matches('/');
+    let ws = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base.to_string()
+    };
+    format!("{ws}/v1/bridge/connect")
 }
 
 pub async fn get_bridge_pending(
@@ -232,10 +274,7 @@ pub async fn get_bridge_pending(
     let wire = normalize_identity_wire(&q.identity_wire)?;
     let registry = state.app.bridge.clone();
     registry.purge_expired().await;
-    let connect_url = format!(
-        "{}/v1/bridge/connect",
-        state.app.config.public_base_url.trim_end_matches('/')
-    );
+    let connect_url = bridge_connect_ws_url(&state.app.config.public_base_url);
     let g = registry.inner.lock().await;
     let w = wire.to_ascii_lowercase();
     let pending: Vec<BridgePendingItem> = g
@@ -288,45 +327,50 @@ async fn handle_bridge_socket(
             } else {
                 None
             }
+        } else if let Some(_a) = g.active.get(&bridge_id) {
+            // Pending already cleared after first pair — reject late duplicates.
+            None
         } else {
             None
         }
     };
     let Some((role, _pending)) = role else {
-        tracing::warn!(bridge_id = %bridge_id, "bridge connect rejected — bad token");
+        tracing::warn!(bridge_id = %bridge_id, "bridge connect rejected — bad token or unknown bridge");
         return;
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let notify = Arc::new(Notify::new());
-    let paired = {
+    let (paired, flush_to_self) = {
         let mut g = registry.inner.lock().await;
-        if let Some(active) = g.active.get_mut(&bridge_id) {
-            if role == "caller" {
-                active.caller_tx = Some(tx.clone());
-            } else {
-                active.callee_tx = Some(tx.clone());
-            }
-            active.caller_tx.is_some() && active.callee_tx.is_some()
+        let active = g.active.entry(bridge_id.clone()).or_insert_with(|| ActiveBridge {
+            caller_tx: None,
+            callee_tx: None,
+            to_caller: Vec::new(),
+            to_callee: Vec::new(),
+            bytes_relayed: 0,
+            was_paired: false,
+            notify: Arc::clone(&notify),
+        });
+        if role == "caller" {
+            active.caller_tx = Some(tx.clone());
         } else {
-            let mut active = ActiveBridge {
-                caller_tx: None,
-                callee_tx: None,
-                bytes_relayed: 0,
-                notify: Arc::clone(&notify),
-            };
-            if role == "caller" {
-                active.caller_tx = Some(tx.clone());
-            } else {
-                active.callee_tx = Some(tx.clone());
-            }
-            let paired = active.caller_tx.is_some() && active.callee_tx.is_some();
-            g.active.insert(bridge_id.clone(), active);
-            if paired {
-                g.pending.remove(&bridge_id);
-            }
-            paired
+            active.callee_tx = Some(tx.clone());
         }
+        let paired = active.caller_tx.is_some() && active.callee_tx.is_some();
+        if paired {
+            active.was_paired = true;
+        }
+        // Buffered frames waiting for *this* role (sent by the other side early).
+        let flush = if role == "caller" {
+            std::mem::take(&mut active.to_caller)
+        } else {
+            std::mem::take(&mut active.to_callee)
+        };
+        if paired {
+            g.pending.remove(&bridge_id);
+        }
+        (paired, flush)
     };
 
     if paired {
@@ -337,6 +381,11 @@ async fn handle_bridge_socket(
         } {
             n.notify_waiters();
         }
+    }
+
+    // Deliver any frames the peer sent before we connected (critical for Noise XX msg1).
+    for bytes in flush_to_self {
+        let _ = tx.send(bytes);
     }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -355,36 +404,47 @@ async fn handle_bridge_socket(
     let started = Instant::now();
     let idle = Duration::from_secs(registry.idle_secs);
     let max_duration = Duration::from_secs(registry.max_secs);
+    let mut last_activity = Instant::now();
     loop {
         tokio::select! {
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
-                        let peer_tx = {
-                            let g = registry.inner.lock().await;
-                            g.active.get(&bridge_id).and_then(|a| {
-                                if role == "caller" {
-                                    a.callee_tx.clone()
+                        last_activity = Instant::now();
+                        let forward = {
+                            let mut g = registry.inner.lock().await;
+                            if let Some(a) = g.active.get_mut(&bridge_id) {
+                                let len = data.len() as u64;
+                                a.bytes_relayed = a.bytes_relayed.saturating_add(len);
+                                if registry.max_bytes > 0 && a.bytes_relayed > registry.max_bytes {
+                                    None // signal over budget
+                                } else if role == "caller" {
+                                    if let Some(peer) = a.callee_tx.clone() {
+                                        Some(Ok(peer))
+                                    } else if a.was_paired {
+                                        None // peer hung up
+                                    } else {
+                                        a.to_callee.push(data.to_vec());
+                                        Some(Err(())) // buffered
+                                    }
+                                } else if let Some(peer) = a.caller_tx.clone() {
+                                    Some(Ok(peer))
+                                } else if a.was_paired {
+                                    None
                                 } else {
-                                    a.caller_tx.clone()
+                                    a.to_caller.push(data.to_vec());
+                                    Some(Err(()))
                                 }
-                            })
-                        };
-                        if let Some(peer_tx) = peer_tx {
-                            let len = data.len() as u64;
-                            let over = {
-                                let mut g = registry.inner.lock().await;
-                                if let Some(a) = g.active.get_mut(&bridge_id) {
-                                    a.bytes_relayed = a.bytes_relayed.saturating_add(len);
-                                    registry.max_bytes > 0 && a.bytes_relayed > registry.max_bytes
-                                } else {
-                                    true
-                                }
-                            };
-                            if over {
-                                break;
+                            } else {
+                                None
                             }
-                            let _ = peer_tx.send(data.to_vec());
+                        };
+                        match forward {
+                            None => break,
+                            Some(Ok(peer_tx)) => {
+                                let _ = peer_tx.send(data.to_vec());
+                            }
+                            Some(Err(())) => {}
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -392,8 +452,10 @@ async fn handle_bridge_socket(
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(idle) => {
-                break;
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                if last_activity.elapsed() > idle {
+                    break;
+                }
             }
         }
         if started.elapsed() > max_duration {
@@ -402,8 +464,26 @@ async fn handle_bridge_socket(
     }
 
     relay_task.abort();
-    let mut g = registry.inner.lock().await;
-    g.active.remove(&bridge_id);
+    {
+        let mut g = registry.inner.lock().await;
+        if let Some(a) = g.active.get_mut(&bridge_id) {
+            if role == "caller" {
+                a.caller_tx = None;
+            } else {
+                a.callee_tx = None;
+            }
+            let both_gone = a.caller_tx.is_none() && a.callee_tx.is_none();
+            if both_gone {
+                g.active.remove(&bridge_id);
+            }
+        } else {
+            g.active.remove(&bridge_id);
+        }
+        // Pending was already cleared on pair; keep remove for unpaired half-connects.
+        if g.active.get(&bridge_id).is_none() {
+            g.pending.remove(&bridge_id);
+        }
+    }
     tracing::info!(
         bridge_id = %bridge_id,
         role = %role,
@@ -439,5 +519,5 @@ pub struct BridgeChallengeResponse {
     pub caller_identity_wire: String,
     pub nonce_hex: String,
     pub expires_in_secs: u64,
-    pub     message_domain: &'static str,
+    pub message_domain: &'static str,
 }

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use super::session::{chrono_now_ms, SessionState};
 use super::types::SessionPeer;
-use super::ui_session::{app_ack_read_enabled, app_ui_visible, is_live_foreground_peer, live_foreground_peer};
+use super::ui_session::{app_ack_read_enabled, app_ui_visible, live_foreground_peer};
 use crate::p2p::native_log;
 
 static CHAT_ROOM_SESSION_AT_MS: AtomicI64 = AtomicI64::new(0);
@@ -40,20 +40,6 @@ pub(crate) fn begin_chat_room_session(session: &SessionState, peer: &SessionPeer
     }
 }
 
-pub(crate) fn freeze_chat_room_for_peer(session: &SessionState, peer: &SessionPeer) {
-    let at = chat_room_session_at_ms();
-    if at <= 0 {
-        return;
-    }
-    let Some(ns) = app_namespace(session) else {
-        return;
-    };
-    if let Err(e) = crate::contacts_v1::sync_chat_room_exit_at_ms(ns, peer, at) {
-        native_log::debug("read_ack", format!("chat room freeze {peer}: {e}"));
-        return;
-    }
-    native_log::info("read_ack", format!("chat room frozen for {peer} exit_at_ms={at}"));
-}
 
 pub fn freeze_open_chat_room_session() {
     let Some(fg_pk) = live_foreground_peer() else {

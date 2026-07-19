@@ -3,12 +3,14 @@
 //! Identity wires bind HKDF `info`; shared secret comes from X25519 ECDH between ephemeral
 //! per-node transport keypairs exchanged via `MsgKind::TransportKemHello`.
 
-use rand_core::{OsRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use sha2::Digest;
 
 use crate::session_key_common::{hkdf_expand_32, identity_pair_binding};
+
+#[cfg(test)]
+use rand_core::{OsRng, RngCore};
 
 pub const TRANSPORT_PUBKEY_LEN: usize = 32;
 pub const DM_CIPHER_TRANSPORT_V2: u8 = 0x03;
@@ -33,7 +35,8 @@ fn transport_ecdh_ikm(local_sk: &StaticSecret, peer_pk: &[u8; TRANSPORT_PUBKEY_L
     sha2::Sha256::digest(shared.as_bytes()).into()
 }
 
-pub fn generate_transport_keypair() -> (StaticSecret, [u8; TRANSPORT_PUBKEY_LEN]) {
+#[cfg(test)]
+pub(crate) fn generate_transport_keypair() -> (StaticSecret, [u8; TRANSPORT_PUBKEY_LEN]) {
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     let sk = StaticSecret::from(seed);

@@ -21,19 +21,18 @@ pub mod ui_session;
 pub mod util;
 pub mod worker;
 
-pub use bridge_client::bridge_request;
-pub use channel_mux::{ChannelMuxReader, ChannelMuxWriter, MUX_HEADER_LEN};
+
 pub use chat_room_session::{
     chat_room_session_at_ms, freeze_open_chat_room_session,
 };
-pub use id_commitment::identity_commitment_hex;
-pub use lan_discovery::{LanDiscovery, LanDiscoveryEvent};
-pub use noise_session::{ConnectNoiseSession, NOISE_PATTERN};
+
+
+
 pub use notify::{
     notify_dm_presence_wake, notify_network_change, notify_relay_refresh,
-    set_android_wifi_transport_available, set_drop_pending_call_invite_hook,
+    set_drop_pending_call_invite_hook,
 };
-pub use runtime::{connect_start, connect_stop, contact_has_lan_connect_path};
+pub use runtime::{connect_start, connect_stop};
 pub use types::{
     ConnectConfig, ConnectError, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd,
     SessionPeer, ChatServerError, DEFAULT_GOSSIP_TOPIC, new_msg_id_for_ffi,
@@ -42,16 +41,14 @@ pub use types::{
     libp2p_peer_for_contact_identity,
 };
 pub use ui_session::{
-    app_ui_visible, bump_foreground_peer_cmd_gen, last_room_peer,
+    bump_foreground_peer_cmd_gen, last_room_peer,
     live_foreground_peer_for_catchup, live_foreground_peer_pk,
     may_send_read_ack_for_contact_pk, queue_read_ack_catchup,
-    set_app_ack_read_enabled, set_app_ui_visible, sync_foreground_peer_now,
+    set_app_ack_read_enabled, sync_foreground_peer_now, set_app_ui_visible,
 };
 pub use worker::run_connect_node_with_std_io;
 
 pub use transport_kem::transport_kem_for_peer;
-pub use types::ConnectEvent;
-pub use types::ConnectOutboundCmd;
 
 /// Alias for legacy callers — async entrypoint.
 pub async fn run_gossip_chat_node_with_std_io(

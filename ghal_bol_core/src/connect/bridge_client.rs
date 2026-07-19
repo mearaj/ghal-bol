@@ -1,7 +1,6 @@
 //! Coord bridge client for WAN call byte relay.
 
 use crate::coord::CoordHttpClient;
-use crate::coord_register_auth::sign_coord_registration;
 use crate::p2p::native_log;
 
 #[derive(Clone, Debug)]

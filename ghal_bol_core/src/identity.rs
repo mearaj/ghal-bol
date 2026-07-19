@@ -177,7 +177,7 @@ pub fn public_key_from_secret(
                 .map_err(|e| format!("secp256k1 secret: {e}"))?;
             let secp = secp256k1::Secp256k1::new();
             let pk = sk.public_key(&secp);
-            let secp = secp256k1::Secp256k1::new();
+            let _secp = secp256k1::Secp256k1::new();
             Ok(pk.serialize().to_vec())
         }
         IdentityAlgorithm::Ed25519 => {

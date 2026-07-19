@@ -18,20 +18,12 @@ pub fn wan_text_via_delivery_server() -> bool {
     delivery_primary_text()
 }
 
-/// Legacy full P2P text on coord/relay WAN paths — false when delivery URL is set.
-pub fn p2p_wan_text_enabled() -> bool {
-    !delivery_primary_text()
-}
 
 /// LAN fast-path text mirror is enabled (additive; does not disable delivery worker).
 pub fn lan_fast_path_enabled() -> bool {
     true
 }
 
-/// Alias — LAN P2P/native text fast path available.
-pub fn p2p_lan_text_enabled() -> bool {
-    lan_fast_path_enabled()
-}
 
 /// Whether LAN P2P read/delivery acks may mirror alongside delivery-server acks.
 pub fn lan_p2p_ack_mirror_enabled(recipient_wire: &str) -> bool {

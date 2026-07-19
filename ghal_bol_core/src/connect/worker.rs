@@ -1,7 +1,8 @@
 //! Main connect worker loop — mDNS + TCP + Noise + mux.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 use tokio::select;
@@ -22,6 +23,13 @@ use crate::p2p::native_log;
 static LAST_BRIDGE_PENDING_POLL_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 const BRIDGE_PENDING_POLL_MS: i64 = 3_000;
+/// After a failed accept, wait before retrying the same bridge_id (avoids log storms).
+const BRIDGE_ACCEPT_RETRY_MS: i64 = 30_000;
+static BRIDGE_ACCEPT_BACKOFF: std::sync::LazyLock<Mutex<HashMap<String, i64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// bridge_ids currently in `accept_bridge_pending` — do not spawn duplicates.
+static BRIDGE_ACCEPT_INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
 pub struct ConnectWorkerState {
     pub registry: Arc<PeerSessionRegistry>,
@@ -44,7 +52,6 @@ pub async fn run_connect_node_with_std_io(
         SessionState::new(
             identity.clone(),
             &config.dm_peers,
-            config.transcript_path.clone(),
             config.app_namespace.clone(),
         )
         .map_err(ConnectError::Other)?,
@@ -86,6 +93,16 @@ pub async fn run_connect_node_with_std_io(
     loop {
         if stop.load(Ordering::SeqCst) {
             break;
+        }
+
+        if super::notify::take_connect_upkeep_notify() {
+            run_connect_upkeep(
+                &identity,
+                listen_port,
+                Arc::clone(&registry),
+                Arc::clone(&session),
+                events_tx.clone(),
+            );
         }
 
         process_outbound_cmds(
@@ -234,12 +251,8 @@ pub fn mark_peer_disconnected(
 ) {
     session.set_peer_connected(peer, false);
     session.set_stream_ready(peer, false);
+    session.clear_transport_kem_for_peer(peer);
     let _ = events_tx.send(GossipChatEvent::PeerDisconnected(peer.clone()));
-}
-
-#[allow(dead_code)]
-fn time_now_ms() -> i64 {
-    chrono_now_ms()
 }
 
 fn run_connect_upkeep(
@@ -291,14 +304,31 @@ fn run_connect_upkeep(
         };
         for item in pending {
             let caller = item.caller_identity_wire.clone();
-            if reg.has_session(&caller) {
+            // Skip only when a live writer exists — a stale registry entry must not
+            // block WAN bridge accept (cell↔Wi‑Fi calls).
+            if super::peer_session::writer_open_for_peer(&reg.writers, &caller) {
                 continue;
+            }
+            let now_ms = chrono_now_ms();
+            if let Ok(g) = BRIDGE_ACCEPT_BACKOFF.lock() {
+                if g.get(&item.bridge_id).is_some_and(|until| *until > now_ms) {
+                    continue;
+                }
+            }
+            {
+                let Ok(mut inflight) = BRIDGE_ACCEPT_INFLIGHT.lock() else {
+                    continue;
+                };
+                if !inflight.insert(item.bridge_id.clone()) {
+                    continue; // already accepting this bridge_id
+                }
             }
             native_log::info(
                 "bridge",
                 format!("accepting pending bridge call_id={}", item.call_id),
             );
-            let _ = super::bridge_ws::accept_bridge_pending(
+            let bridge_id = item.bridge_id.clone();
+            let accept_result = super::bridge_ws::accept_bridge_pending(
                 Arc::clone(&reg),
                 Arc::clone(&sess),
                 id.clone(),
@@ -307,6 +337,18 @@ fn run_connect_upkeep(
                 item,
             )
             .await;
+            if let Ok(mut inflight) = BRIDGE_ACCEPT_INFLIGHT.lock() {
+                inflight.remove(&bridge_id);
+            }
+            if let Err(e) = accept_result {
+                native_log::warn("bridge", format!("accept pending bridge failed: {e}"));
+                if let Ok(mut g) = BRIDGE_ACCEPT_BACKOFF.lock() {
+                    g.insert(bridge_id, now_ms + BRIDGE_ACCEPT_RETRY_MS);
+                    if g.len() > 64 {
+                        g.retain(|_, until| *until > now_ms);
+                    }
+                }
+            }
         }
     });
 }

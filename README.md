@@ -6,7 +6,7 @@
 
 Gh`al Bol is an end-to-end encrypted messenger: device-owned identity, local transcripts, and minimal server trust.
 
-**Text chat (WAN)** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **LAN text** and **voice/video calls** use **libp2p** (mDNS on LAN, coord + relay on WAN for calls).
+**Text chat (WAN)** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **LAN text** and **voice/video calls** use **native connect** (LAN/Voice/Video pure P2P where possible, otherwise P2P with the help of a coord relay server).
 
 The system is designed around:
 
@@ -14,7 +14,7 @@ The system is designed around:
 
 Unlike traditional messengers, Ghal Bol does **not** store chat history in the cloud. Each device keeps its own transcript. The delivery server holds ciphertext **only until** the recipient acknowledges delivery (then deletes payload, keeps metadata for acks/TTL).
 
-**Why WAN text moved off pure P2P:** libp2p relay chat required both peers online at the same time and could not guarantee delivery when one peer was offline, asleep, or on a flaky mobile network — unacceptable for the core job of **text messages**. Voice and video remain P2P-first because they are inherently realtime sessions.
+**Why WAN text moved off pure P2P:** relay chat required both peers online at the same time and could not guarantee delivery when one peer was offline, asleep, or on a flaky mobile network — unacceptable for the core job of **text messages**. Voice and video remain P2P-first because they are inherently realtime sessions.
 
 **Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md), [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md).
 
@@ -102,12 +102,12 @@ Peers communicate directly whenever possible.
 Connection policy for a configured contact ([TRANSPORT.md](docs/TRANSPORT.md) § “Both links active”):
 
 1. Existing active session (resume)
-2. **Parallel on Wi‑Fi:** coord lookup + relay circuit + public TCP (WAN) **and** mDNS → direct TCP (LAN) when the contact is on the local network — **both links stay active** when connected
-3. **Mobile-data / CGNAT:** WAN (coord + relay) only when no active LAN
+2. **Parallel on Wi‑Fi:** coord lookup + coord bridge + public TCP (WAN) **and** mDNS → direct TCP (LAN) when the contact is on the local network — **both links stay active** when connected
+3. **Mobile-data / CGNAT:** WAN (coord bridge) only when no active LAN
 4. **LAN loss:** WAN is already connected — immediate fallback without tearing down coord
-5. **libp2p Circuit Relay v2** on a **Ghal Bol relay** (co-located with coord) for NAT/CGNAT — WAN peers dial **`/p2p-circuit`** from coord lookup (DCUtR off when coord is configured)
+5. **Coord bridge** on the **Ghal Bol coord server** for NAT/CGNAT — WAN calls are bridged over WebSocket.
 
-Peer **discovery over WAN requires coord + relay** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. The app does **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN discovery. Multiple coord servers are supported as a list (today a single production entry).
+Peer **discovery over WAN requires coord** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. The app does **not** fall back to Kademlia DHT or public bootstrap peers for WAN discovery. Multiple coord servers are supported as a list (today a single production entry).
 
 The system is designed to be:
 - IPv6-first
@@ -152,11 +152,11 @@ The protocol assumes reconnects and temporary disconnections are normal.
 
 # Message Delivery
 
-**WAN text** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary E2E encrypted mailbox. The server stores ciphertext only; it cannot decrypt. When the recipient acknowledges delivery, the payload is deleted (metadata retained for acks/TTL). This guarantees offline delivery when the recipient returns — the core requirement pure P2P WAN chat could not meet.
+**WAN text** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary E2E encrypted mailbox. The server stores ciphertext only; it cannot decrypt. When the recipient acknowledges delivery, the payload is deleted (metadata retained for acks/TTL). This guarantees offline delivery when the recipient returns — the core requirement native connect WAN chat could not meet.
 
-**LAN text** uses libp2p direct streams (`mDNS` / TCP) when both peers share a LAN — same E2E envelope format, no server hop.
+**LAN text** uses native connect direct streams (`mDNS` / TCP) when both peers share a LAN — same E2E envelope format, no server hop.
 
-**Voice and video** use libp2p on LAN and WAN (coord + relay) — realtime sessions where both peers must be online.
+**Voice and video** use native connect on LAN and WAN (coord bridge) — realtime sessions where both peers must be online.
 
 Typical WAN text flow:
 
@@ -281,7 +281,7 @@ Open this directory as the workspace root (the folder that contains this `README
 
 | Path | Role |
 |------|------|
-| `ghal_bol_core/` | Rust core: identity, libp2p sync engine, local stores |
+| `ghal_bol_core/` | Rust core: identity, native connect sync engine, local stores |
 | `ghal_bol_coord/` | Coordination server — see [ghal_bol_coord/README.md](ghal_bol_coord/README.md) |
 | `ghal_bol_delivery/` | Delivery server (WAN text mailbox) — [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md), home deploy [ghal_bol_delivery/deploy/](ghal_bol_delivery/deploy/) |
 | `ghal_bol_ui/` | Flutter UI shell — [ghal_bol_ui/README.md](ghal_bol_ui/README.md) |

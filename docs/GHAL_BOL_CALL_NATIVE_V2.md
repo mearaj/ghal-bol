@@ -4,7 +4,7 @@
 
 **Goal:** Voice where the media engine lives in **Rust** and rides the **direct peer connection we already establish** — no separate STUN/TURN/SDP stack, no MoQ. One identity, one crypto story, one transport.
 
-Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (layers + E2E), [TRANSPORT.md](TRANSPORT.md) (libp2p stack), [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (signaling). Video: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
+Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (layers + E2E), [TRANSPORT.md](TRANSPORT.md) (native connect stack), [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (signaling). Video: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
 ---
 
@@ -13,7 +13,7 @@ Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (la
 | Driver | Detail |
 |--------|--------|
 | **Golden rule #1** | `ghal_bol_core` (Rust) owns product logic — capture, codec, transport, jitter, and E2E live in Rust (`call_media/`). |
-| **We already have the link** | libp2p provides encrypted connections (TCP/QUIC + Noise + relay + coord). Calls reuse that link via `/ghal-bol/call/1.0.0`. |
+| **We already have the link** | native connect provides encrypted connections (TCP/QUIC + Noise + relay + coord). Calls reuse that link via `/ghal-bol/call/1.0.0`. |
 | **No new servers** | Direct when possible; coord/relay only as fallback — same as chat. |
 | **One E2E story** | `derive_call_media_keys_from_transport` + per-frame AES-GCM seal (transport KEM after `TransportKemHello`). |
 
@@ -28,7 +28,7 @@ Read first: [AGENTS.md](../AGENTS.md) (golden rules), [DESIGN.md](DESIGN.md) (la
 | **Signaling** | `call_sig_v1.rs`, `call_state.rs`, `call_ffi.rs` over the DM stream |
 | **Media key** | `call_media_key.rs` (`derive_call_media_keys_from_transport`) |
 | **Media engine** | Rust: capture → APM → Opus → seal → transport → jitter → decode → playback |
-| **Media transport** | `/ghal-bol/call/1.0.0` on the existing libp2p peer connection |
+| **Media transport** | `/ghal-bol/call/1.0.0` on the existing native connect peer connection |
 | **Flutter** | `call_controller.dart`, `call_screen.dart`, `call_ringtone.dart` — UI + FFI control only |
 
 ---
@@ -92,12 +92,12 @@ analysis fed the render (playback) stream as the echo reference.
 ## Transport decision (the one big choice)
 
 A call wants an **unreliable** datagram channel: drop a late audio packet, never
-retransmit (retransmits = head-of-line latency = "robot voice"). Our libp2p stack
-gives **reliable, ordered streams** (`/ghal-bol/msg/1.0.0` via `libp2p-stream`
+retransmit (retransmits = head-of-line latency = "robot voice"). Our native connect stack
+gives **reliable, ordered streams** (`/ghal-bol/msg/1.0.0` via `native-stream`
 over QUIC/TCP+yamux). So there are two options:
 
-### Option A — media over a libp2p substream (recommended v1)
-Open a second protocol `/ghal-bol/call/1.0.0` on the **same** libp2p connection
+### Option A — media over a native connect substream (recommended v1)
+Open a second protocol `/ghal-bol/call/1.0.0` on the **same** native connection
 (mirrors how `/ghal-bol/msg/1.0.0` is opened in `chat_server.rs`).
 
 - ➕ Reuses **everything**: NAT traversal, relay `/p2p-circuit` fallback, Noise, peer auth,
@@ -110,7 +110,7 @@ Open a second protocol `/ghal-bol/call/1.0.0` on the **same** libp2p connection
 
 ### Option B — raw QUIC unreliable datagrams (v2 optimization)
 A dedicated **`quinn`** QUIC connection between the peers (addresses learned from
-coord/libp2p), audio as **unreliable datagrams** (RFC 9221) — **the exact shape
+coord/native connect), audio as **unreliable datagrams** (RFC 9221) — **the exact shape
 `voicemcu` / `proscenium` use** and the path this engine was conceptually started
 from.
 
@@ -119,7 +119,7 @@ from.
 - ➕ Field-proven recipe (from `voicemcu`): CBR Opus, a **hard ceiling on encoded
   frame size** + capped `quinn` MTU discovery so each datagram stays under tight
   VPN/CGNAT MTUs (e.g. Tailscale); same jitter-buffer + Opus PLC on both ends.
-- ➖ `rust-libp2p`'s QUIC does **not** expose datagrams to the app, so this is a
+- ➖ `rust-stack`'s QUIC does **not** expose datagrams to the app, so this is a
   *parallel* transport: we own connection setup for hard NATs. More code, more failure modes.
   Reuse coord/relay-learned addresses for the `quinn` dial; signaling stays on the
   reliable DM stream.
@@ -134,7 +134,7 @@ Control/signaling stays on the reliable DM stream either way.
 
 - Media key = `derive_call_media_keys_from_transport(call_id, transport_kem)` — same
   `TransportKemHello` session keys as DM text and call signaling (golden rule #7).
-- **Option A:** the libp2p stream is already Noise-encrypted peer-to-peer; we add
+- **Option A:** the native stream is already Noise-encrypted peer-to-peer; we add
   a thin per-frame seal with the transport media key so a relay/path never sees
   plaintext (defense in depth, matches chat's seal-then-transport model).
 - **Option B:** datagrams are sealed with the transport media key (QUIC TLS also
@@ -184,7 +184,7 @@ new platform code and the main quality risk (echo on speakerphone, threading).
 
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
-| **P0** | Rust voice PoC, **desktop only**, Option A transport, fixed bitrate, no UI wiring (CLI/test harness) | Two desktops hold a clear 2-way call over a real libp2p link; measured RTT/jitter/loss |
+| **P0** | Rust voice PoC, **desktop only**, Option A transport, fixed bitrate, no UI wiring (CLI/test harness) | Two desktops hold a clear 2-way call over a real native connect link; measured RTT/jitter/loss |
 | **P1** | Wire P0 into `call_controller` via FFI on **Linux**; ring UX kept; in-call stats chip | Linux↔Linux production voice call |
 | **P2** | **Android** capture/playback + hardware AEC; speaker/route toggles | Android↔Android and Android↔Linux voice solid on Wi-Fi + cellular |
 | **P3** | **iOS** VPIO path | iOS interop |

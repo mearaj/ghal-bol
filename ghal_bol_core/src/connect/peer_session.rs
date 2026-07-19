@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use super::channel_mux::{CHANNEL_CALL_AUDIO, CHANNEL_KEEPALIVE, CHANNEL_MSG, MUX_HEADER_LEN};
+use super::channel_mux::{CHANNEL_KEEPALIVE, CHANNEL_MSG, MUX_HEADER_LEN};
 use super::frames::{dispatch_mux_payload, on_session_ready, WireDispatchCtx};
 use super::noise_session::{transport_static_secret_for_identity, ConnectNoiseSession};
 use super::session::{chrono_now_ms, SessionState};
@@ -258,7 +258,7 @@ pub(crate) async fn start_session_io<R, W>(
     } else {
         ConnectNoiseSession::responder(&identity, &transport_sk, read, write).await
     };
-    let (mut noise, remote_wire, read, write) = match hs {
+    let (noise, remote_wire, read, write) = match hs {
         Ok(v) => v,
         Err(e) => {
             if is_outbound {
@@ -322,60 +322,45 @@ pub(crate) async fn start_session_io<R, W>(
         writers: Arc::clone(&registry.writers),
     };
 
-    let abort_c = Arc::clone(&abort_flag);
-    tokio::spawn(async move {
-        let mut read = read;
+    // Separate read/write tasks: a single biased select starved reads when video
+    // flooded the outbound queue (call dropped ~200ms after first video frames).
+    let noise = Arc::new(tokio::sync::Mutex::new(noise));
+    let abort_w = Arc::clone(&abort_flag);
+    let abort_r = Arc::clone(&abort_flag);
+    let noise_w = Arc::clone(&noise);
+    let noise_r = Arc::clone(&noise);
+    let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+
+    let write_task = tokio::spawn(async move {
         let mut write = write;
         let mut last_write = chrono_now_ms();
-
         loop {
-            if abort_c.load(Ordering::SeqCst) {
+            if abort_w.load(Ordering::SeqCst) {
                 break;
             }
             tokio::select! {
-                biased;
                 item = wire_rx.recv() => {
                     let Some(item) = item else { break };
                     let (channel, payload) = match item {
                         SessionWireItem::Channel0(frame) => (CHANNEL_MSG, frame),
                         SessionWireItem::Mux { channel, payload } => (channel, payload),
                     };
-                    if write_noise_mux(&mut noise, &mut write, channel, &payload).await.is_err() {
+                    if write_noise_mux(&noise_w, &mut write, channel, &payload)
+                        .await
+                        .is_err()
+                    {
+                        abort_w.store(true, Ordering::SeqCst);
                         break;
                     }
                     last_write = chrono_now_ms();
                 }
-                read_res = read_noise_mux(&mut noise, &mut read) => {
-                    match read_res {
-                        Ok((channel, payload)) => {
-                            if channel == CHANNEL_KEEPALIVE {
-                                if payload.is_empty() {
-                                    let _ = write_noise_mux(
-                                        &mut noise,
-                                        &mut write,
-                                        CHANNEL_KEEPALIVE,
-                                        &[0x01],
-                                    )
-                                    .await;
-                                }
-                                continue;
-                            }
-                            dispatch_mux_payload(channel, &payload, &dispatch_ctx).await;
-                        }
-                        Err(_) => break,
-                    }
-                }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {
                     if chrono_now_ms().saturating_sub(last_write) >= 20_000 {
-                        if write_noise_mux(
-                            &mut noise,
-                            &mut write,
-                            CHANNEL_KEEPALIVE,
-                            &[],
-                        )
-                        .await
-                        .is_err()
+                        if write_noise_mux(&noise_w, &mut write, CHANNEL_KEEPALIVE, &[])
+                            .await
+                            .is_err()
                         {
+                            abort_w.store(true, Ordering::SeqCst);
                             break;
                         }
                         last_write = chrono_now_ms();
@@ -383,7 +368,47 @@ pub(crate) async fn start_session_io<R, W>(
                 }
             }
         }
+        abort_w.store(true, Ordering::SeqCst);
+        let _ = stop_tx.send(()).await;
+    });
 
+    let read_task = tokio::spawn(async move {
+        let mut read = read;
+        loop {
+            if abort_r.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::select! {
+                read_res = read_noise_mux(&noise_r, &mut read) => {
+                    match read_res {
+                        Ok((channel, payload)) => {
+                            if channel == CHANNEL_KEEPALIVE {
+                                if payload.is_empty() {
+                                    let _ = queue_mux_for_peer(
+                                        &dispatch_ctx.writers,
+                                        &dispatch_ctx.peer,
+                                        CHANNEL_KEEPALIVE,
+                                        vec![0x01],
+                                    );
+                                }
+                                continue;
+                            }
+                            dispatch_mux_payload(channel, &payload, &dispatch_ctx).await;
+                        }
+                        Err(_) => {
+                            abort_r.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                }
+                _ = stop_rx.recv() => break,
+            }
+        }
+        abort_r.store(true, Ordering::SeqCst);
+    });
+
+    tokio::spawn(async move {
+        let _ = tokio::join!(write_task, read_task);
         reg_c.remove_session(&peer_c);
         sess_c.set_peer_on_local_lan(&peer_c, false);
         mark_peer_disconnected(sess_c.as_ref(), &peer_c, &ev_c);
@@ -403,7 +428,7 @@ pub(crate) async fn start_session_io<R, W>(
 }
 
 async fn write_noise_mux<W: AsyncWrite + Unpin>(
-    noise: &mut ConnectNoiseSession,
+    noise: &tokio::sync::Mutex<ConnectNoiseSession>,
     write: &mut W,
     channel: u32,
     payload: &[u8],
@@ -412,14 +437,22 @@ async fn write_noise_mux<W: AsyncWrite + Unpin>(
     buf.put_u32(channel);
     buf.put_u32(payload.len() as u32);
     buf.extend_from_slice(payload);
-    noise.write(&buf, write).await
+    let sealed = {
+        let mut g = noise.lock().await;
+        g.seal(&buf)?
+    };
+    super::noise_session::write_sealed_frame(write, &sealed).await
 }
 
 async fn read_noise_mux<R: AsyncRead + Unpin>(
-    noise: &mut ConnectNoiseSession,
+    noise: &tokio::sync::Mutex<ConnectNoiseSession>,
     read: &mut R,
 ) -> Result<(u32, Vec<u8>), String> {
-    let plaintext = noise.read(read).await?;
+    let wire = super::noise_session::read_sealed_frame(read).await?;
+    let plaintext = {
+        let mut g = noise.lock().await;
+        g.open(&wire)?
+    };
     if plaintext.len() < MUX_HEADER_LEN {
         return Err("mux frame too short".into());
     }
@@ -435,8 +468,20 @@ async fn read_noise_mux<R: AsyncRead + Unpin>(
 }
 
 pub(crate) fn writer_open_for_peer(writers: &SessionWriters, peer: &SessionPeer) -> bool {
-    writers
-        .read()
-        .ok()
-        .is_some_and(|g| g.contains_key(peer))
+    let Ok(g) = writers.read() else {
+        return false;
+    };
+    match g.get(peer) {
+        Some(tx) if !tx.is_closed() => true,
+        Some(_) => false, // receiver gone — stale map entry
+        None => false,
+    }
+}
+
+/// Drop closed writers so call invite falls through to the WAN bridge path.
+pub(crate) fn prune_closed_writers(writers: &SessionWriters) {
+    let Ok(mut g) = writers.write() else {
+        return;
+    };
+    g.retain(|_, tx| !tx.is_closed());
 }

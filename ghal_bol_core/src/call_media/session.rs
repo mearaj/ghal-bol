@@ -57,12 +57,6 @@ impl MediaControls {
     pub fn is_stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
-    pub fn sent(&self) -> u64 {
-        self.frames_sent.load(Ordering::Relaxed)
-    }
-    pub fn received(&self) -> u64 {
-        self.frames_received.load(Ordering::Relaxed)
-    }
 }
 
 /// Run one call's media until `controls.stop` is set or a channel closes.

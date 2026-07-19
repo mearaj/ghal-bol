@@ -2,7 +2,7 @@
 
 **Tier 1 only** — presence and endpoint discovery. No message bodies or transcripts.
 
-It also runs a co-located **libp2p Circuit Relay v2** node for NAT/CGNAT traversal (transport helper; peers dial each other via `/p2p-circuit` multiaddrs registered on coord — not a message store). See [TRANSPORT.md](TRANSPORT.md) § "Ghal Bol relay".
+It also runs a co-located **coord bridge** node for NAT/CGNAT traversal (transport helper; peers dial each other via `/p2p-circuit` multiaddrs registered on coord — not a message store). See [TRANSPORT.md](TRANSPORT.md) § "Ghal Bol relay".
 
 ```text
 Peer A / B  →  register / heartbeat  →  ghal_bol_coord (SQLite)  →  GET /v1/peers/{[algo:]hex}  →  dial /p2p-circuit
@@ -15,7 +15,7 @@ After unlock: configure the **coord server list** (today a single URL; the API i
 
 Set URLs in `ghal_bol_ui/env/.env.development` (debug) or `env/.env.production` (release) via `GHAL_BOL_COORD_URLS` (JSON array or comma-separated). No hardcoded coord URLs in the app binary.
 
-**WAN policy:** coord + co-located relay are **required** for internet peer discovery. WAN dials use explicit **`/p2p-circuit`** multiaddrs from `GET /v1/peers/{pk}` — **not** DCUtR hole-punch (DCUtR is disabled when coord is configured; see [TRANSPORT.md](TRANSPORT.md) § Stream-first). When coord is unreachable, LAN (mDNS) still works; the node keeps retrying all configured servers. Do **not** fall back to Kademlia DHT or public libp2p bootstrap peers for WAN peer lookup — **libp2p remains** for transport (relay circuit, mDNS, streams).
+**WAN policy:** coord + co-located relay are **required** for internet peer discovery. WAN dials use explicit **`/p2p-circuit`** multiaddrs from `GET /v1/peers/{pk}` — **not** DCUtR hole-punch (DCUtR is disabled when coord is configured; see [TRANSPORT.md](TRANSPORT.md) § Stream-first). When coord is unreachable, LAN (mDNS) still works; the node keeps retrying all configured servers. Do **not** fall back to Kademlia DHT or public native connect bootstrap peers for WAN peer lookup — **native connect remains** for transport (coord bridge, mDNS, streams).
 
 ### Client register & heartbeat policy (`coord_runtime.rs`)
 
@@ -23,7 +23,7 @@ Set URLs in `ghal_bol_ui/env/.env.development` (debug) or `env/.env.production` 
 
 | Trigger | Action |
 |---------|--------|
-| Publishable endpoint set **changed** (public TCP and/or relay circuit) | Full `POST /v1/register` on **all** configured coord URLs (`schedule_register_presence_force`) |
+| Publishable endpoint set **changed** (public TCP and/or coord bridge) | Full `POST /v1/register` on **all** configured coord URLs (`schedule_register_presence_force`) |
 | Last register **failed** or never succeeded | Retry register (min gap **2s** between attempts) |
 | Relay **reservation accepted** (public TCP path) or **network handover** | Force re-register when endpoints change |
 | **Presence stale** — no successful heartbeat/self-lookup in **~70s** (`PRESENCE_STALE_MS`; server row TTL ~90s) | Force re-register |
@@ -100,7 +100,7 @@ Server-side: `ghal_bol_coord/src/identity.rs` → `normalize_identity_wire()` on
 
 Client-side: `ghal_bol_core/src/coord.rs` uses `normalize_contact_identity_wire()` (same parse rules). Lookup URL-encodes the wire (`ed25519:…` → `ed25519%3A…`).
 
-**Transport `endpoints[]`** (scheme/host/port or libp2p multiaddr) are dial addresses — **not** identity strings. They do not carry an algorithm prefix.
+**Transport `endpoints[]`** (scheme/host/port or native endpoint) are dial addresses — **not** identity strings. They do not carry an algorithm prefix.
 
 | Method | Path |
 |--------|------|
@@ -131,7 +131,7 @@ Register signature: canonical bytes `ghal_bol:register:v1\n<nonce_hex>\n<identit
 | `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but relay disabled or failed to bind | Home: `journalctl --user -u ghal-bol-coord1`; GCP: set `GHAL_BOL_RELAY_PUBLIC_HOST` |
 | `peer registered` in **server** logs but lookup 404 | TTL expired (~90s) or wrong coord URL in app | Heartbeat/register failing; check app `coord_registered` |
 | `peer registered` but client `peer_on_coord_no_dial_addrs` | Row has relay bootstrap `tcp` or LAN-only — no `/p2p-circuit` | Phone lost reservation; client must not POST relay IP:port; wait for `reservation ACCEPTED` + server circuit upsert |
-| `relay circuit DENIED` … `NoReservation` | Destination peer has no active relay reservation | Remote `:p2p` dropped reservation (background/LAN handover); remote must re-reserve |
+| `coord bridge DENIED` … `NoReservation` | Destination peer has no active relay reservation | Remote `:p2p` dropped reservation (background/LAN handover); remote must re-reserve |
 
 ### Session checklist
 
@@ -141,55 +141,3 @@ Register signature: canonical bytes `ghal_bol:register:v1\n<nonce_hex>\n<identit
 4. Rebuild native + restart apps after server identity or relay config change
 
 When testing app traffic against your local server (not production), set `GHAL_BOL_COORD_URLS` to a reachable `http://…:8765` URL and restart the app.
-
-Full detail: [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md) § “Regression prevention”, [TRANSPORT.md](TRANSPORT.md) § “WAN prerequisites”.
-
-## Environment
-
-| Variable | Default |
-|----------|---------|
-| `GHAL_BOL_COORD_LISTEN` | `127.0.0.1:8765`. Dual-stack: the server also binds the counterpart-family wildcard (`[::]:<port>`, IPv6 `V6ONLY`) on the same port so coord HTTP is reachable over both IPv4 and IPv6; a missing stack logs a warning and continues single-stack |
-| `GHAL_BOL_COORD_DB` | `~/.local/share/com.ghal_bol.coord/ghal_bol_coord/coord.db` |
-| `GHAL_BOL_COORD_PRESENCE_TTL_SECS` | `90` |
-| `GHAL_BOL_RELAY_ENABLE` | `1` (set `0` to disable the relay node) |
-| `GHAL_BOL_RELAY_LISTEN` | `0.0.0.0:4002` (GCP default). Home coord1: **`0.0.0.0:55002`** via `install_coord1_home.sh`. Raw TCP — **open this port** on the router/firewall; not proxied by nginx |
-| `GHAL_BOL_RELAY_PUBLIC_HOST` | unset → advertises **both** `/dns6/<host>/tcp/<port>` and `/dns4/<host>/tcp/<port>` (IPv6 first; e.g. `coord.ghalbol.com`) so clients can reserve over either family. Native IPv6 needs an `AAAA` record; IPv4-only/NAT64 clients map the host themselves |
-| `GHAL_BOL_RELAY_PUBLIC_ADDRS` | unset → comma-separated dialable multiaddrs (overrides `_PUBLIC_HOST`) |
-| `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` | `0` (unlimited per circuit; set e.g. `2147483648` for 2 GiB cap) |
-| `GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER` | `16` |
-
-Production VM egress cap (Linux **tc**): `GHAL_BOL_RELAY_EGRESS_MBIT` in `deploy_server.sh` → rendered into [relay-egress-cap.service](../ghal_bol_coord/deploy/relay-egress-cap.service). See [GCP.md](../ghal_bol_coord/deploy/GCP.md).
-
-## `coord_client`
-
-```bash
-cargo build -p ghal_bol_coord --release
-./target/release/coord_client http://127.0.0.1:8765 demo-two-peers
-```
-
-`-k` = skip TLS verify (self-signed / dev HTTPS).
-
-## Local smoke
-
-```bash
-cargo run -p ghal_bol_coord
-COORD_URL=http://127.0.0.1:8765 ./ghal_bol_coord/deploy/smoke_coord.sh
-```
-
-Set `GHAL_BOL_COORD_URLS` in `ghal_bol_ui/env/.env.development` (default: `https://coord.ghalbol.com`). Rebuild after changes.
-
-**Rebuild native after Rust changes** (quit app first):
-
-```bash
-./scripts/sync_ghal_bol_native_for_flutter.sh   # Linux
-./scripts/pack_android_workspace_jni_libs.sh    # Android
-cd ghal_bol_ui && flutter run
-```
-
-Two-device test: server running → desktop `flutter run` + QR → phone scan → send both ways. Same Wi‑Fi uses mDNS; different subnets need coord lookup (URLs from env).
-
-## Related
-
-- [TRANSPORT.md](TRANSPORT.md) — WAN/LAN dial policy, invites, multiple coord servers
-- [ghal_bol_coord/README.md](../ghal_bol_coord/README.md)
-- [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md)

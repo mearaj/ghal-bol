@@ -40,13 +40,19 @@ static COORD_LAST_OK_MS: AtomicU64 = AtomicU64::new(0);
 static COORD_LAST_REG_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
 /// Avoid flapping `coord_registered` on one transient mobile-data failure.
 static COORD_CONSEC_FAILS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
 static RELAY_PRESENCE_CHECK_PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(not(test))]
 static RELAY_PRESENCE_POLL_LAST_END_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Fast poll after reservation (coord HTTP flap ~seconds); slow poll until mirror or circuit down.
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_FAST_MS: u64 = 500;
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_FAST_ATTEMPTS: u32 = 12;
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_SLOW_MS: u64 = 2_000;
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_SLOW_ATTEMPTS: u32 = 30;
 const RELAY_PRESENCE_RESCHEDULE_MIN_MS: u64 = 5_000;
 /// When already registered, relay self-poll is guardrail-only — do not spawn every coord_tick.
@@ -547,10 +553,6 @@ pub fn coord_invalidate_presence_on_network_change() {
     }
 }
 
-/// Relay removed — native connect uses coord bridge for WAN calls.
-fn fetch_ghalbol_relay_for_base(_base: &str, _remap: bool) -> Option<(String, Vec<String>)> {
-    None
-}
 
 /// Relay removed — returns empty.
 pub fn fetch_all_ghal_bol_relays(_remap: bool) -> Vec<(String, Vec<String>)> {
@@ -585,6 +587,11 @@ pub fn invalidate_cached_ghalbol_relay(data_dir: Option<&std::path::Path>) {
 /// True when at least one coordination server URL was configured.
 pub fn coord_is_configured() -> bool {
     !coord_base_urls().is_empty()
+}
+
+/// Insecure TLS flag for the configured coord URL list (always false for all-HTTPS).
+pub fn coord_insecure_tls() -> bool {
+    coord_globals().insecure_tls.load(Ordering::Relaxed)
 }
 
 /// True after a successful `POST /v1/peers/register` for this session.

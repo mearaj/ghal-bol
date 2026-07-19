@@ -10,7 +10,7 @@ use super::peer_session::{writer_open_for_peer, SessionWriters};
 use super::prelude::*;
 use super::session::{chrono_now_ms, SessionState};
 use super::types::{
-    GossipChatEvent, OutboundCmd, PendingCallSignal, PendingOutbound, SessionPeer,
+    GossipChatEvent, PendingOutbound, SessionPeer,
     OUTBOX_RESEND_INTERVAL_MS,
 };
 use super::ui_session::{may_send_in_room_read_ack, read_ack_catchup_throttled};
@@ -18,7 +18,6 @@ use super::ui_session::{may_send_in_room_read_ack, read_ack_catchup_throttled};
 const READ_ACK_UPKEEP_MAX_OPS: usize = 32;
 const ACK_BURST_MAX_ROUNDS: usize = 4;
 const ACK_BURST_MAX_OPS: usize = 64;
-const MAX_PENDING_READ_ACKS: usize = 512;
 
 pub(crate) async fn maybe_send_transport_kem_hello(
     session: &SessionState,
@@ -50,7 +49,12 @@ pub(crate) async fn maybe_send_transport_kem_hello(
     };
     if send_frame_to_peer(peer, frame, writers).await.is_ok() {
         session.mark_transport_hello_sent(peer);
-        native_log::debug("connect", format!("transport kem hello sent to {peer}"));
+        native_log::info("connect", format!("transport kem hello sent to {peer}"));
+    } else {
+        native_log::warn(
+            "connect",
+            format!("transport kem hello send failed to {peer}"),
+        );
     }
 }
 
@@ -422,7 +426,7 @@ pub(crate) async fn flush_pending_call_signals(
         let frame = match build_call_signal_frame(session.as_ref(), &call) {
             Ok(f) => f,
             Err(e) => {
-                native_log::debug("call", format!("call signal deferred: {e}"));
+                native_log::info("call", format!("call signal deferred: {e}"));
                 session.requeue_pending_call_signal_front(call);
                 continue;
             }

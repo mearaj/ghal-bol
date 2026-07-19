@@ -21,7 +21,7 @@ use crate::contacts_v1::{clear_unread, is_valid_public_key_hex};
 use crate::msg_v1::MsgKind;
 use crate::p2p::{
     DEFAULT_GOSSIP_TOPIC, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd, native_log,
-    live_foreground_peer_for_catchup, libp2p_peer_for_contact_identity, queue_read_ack_catchup, run_gossip_chat_node_with_std_io,
+    live_foreground_peer_for_catchup, queue_read_ack_catchup,
     set_drop_pending_call_invite_hook, sync_foreground_peer_now,
 };
 use crate::session_runtime::unlocked_identity_clone;
@@ -512,13 +512,8 @@ pub fn p2p_start(config: &Value) -> Value {
         Ok(c) => c,
         Err(e) => return json_err(e),
     };
-    let bootstrap_for_hot_dial = peers.clone();
     gossip_cfg.dm_peers = dm_peers;
-    gossip_cfg.transcript_path = config
-        .get("transcript_path")
-        .and_then(|x| x.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let bootstrap_for_hot_dial = peers.clone();
     gossip_cfg.app_namespace = config
         .get("app_namespace")
         .and_then(|x| x.as_str())
@@ -1569,6 +1564,11 @@ fn native_log_should_forward_to_ui(line: &native_log::NativeLogLine) -> bool {
             | "dcutr"
             | "upnp"
             | "stream"
+            | "connect"
+            | "bridge"
+            | "call"
+            | "call_media"
+            | "call_video"
     );
     if connectivity {
         return line.level == "info" || (line.level == "debug" && native_log::verbose_enabled());

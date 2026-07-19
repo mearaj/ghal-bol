@@ -30,17 +30,39 @@ fn dm_transport_sk_from_identity(ident: &crate::DecryptedIdentity) -> StaticSecr
 pub fn transport_kem_for_peer(peer_wire: &str) -> Option<(StaticSecret, [u8; 32])> {
     let ident = crate::session_runtime::unlocked_identity_clone().ok()?;
     let local_sk = dm_transport_sk_from_identity(&ident);
-    let peer_pk = *peer_map().lock().ok()?.get(peer_wire)?;
+    let peer_pk = if let Some(pk) = peer_map().lock().ok()?.get(peer_wire).copied() {
+        pk
+    } else {
+        // Same identity-wire KDF as connect session — call media must not stall
+        // when hello was one-sided on the bridge.
+        let wire = crate::public_key_util::normalize_contact_identity_wire(peer_wire).ok()?;
+        let sk = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(b"ghal_bol_connect_v1/dm_transport_sk");
+            h.update(wire.as_bytes());
+            let digest: [u8; 32] = h.finalize().into();
+            StaticSecret::from(digest)
+        };
+        *PublicKey::from(&sk).as_bytes()
+    };
     Some((local_sk, peer_pk))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x25519_dalek::PublicKey;
 
     #[test]
-    fn transport_kem_missing_peer_returns_none() {
-        assert!(transport_kem_for_peer("deadbeef").is_none());
+    fn transport_kem_missing_peer_derives_from_identity_wire() {
+        let (_ks, id) = crate::create_keystore_v1("pw", None).unwrap();
+        crate::session_runtime::install_unlocked_identity(id).unwrap();
+        let peer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let (sk, got) = transport_kem_for_peer(peer).unwrap();
+        assert_eq!(got.len(), 32);
+        let _ = PublicKey::from(got);
+        let _ = sk;
     }
 
     #[test]

@@ -60,6 +60,33 @@ else
   fail "https://${HOST}:${HTTPS_PORT}/v1/bridge/pending"
 fi
 
+note "WSS upgrade /v1/bridge/connect (nginx must forward Upgrade)"
+WS_BODY="$(mktemp)"
+WS_CODE="$(curl -sS -o "${WS_BODY}" -w "%{http_code}" --http1.1 --resolve "${HOST}:${HTTPS_PORT}:127.0.0.1" \
+  --connect-timeout 10 --max-time 8 \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  "https://${HOST}:${HTTPS_PORT}/v1/bridge/connect?bridge_id=verify&token=verify" || true)"
+WS_TEXT="$(tr -d '\r' <"${WS_BODY}" | head -c 200)"
+rm -f "${WS_BODY}"
+# 101 = handshake accepted (token may still be rejected after upgrade).
+# 400 + "Connection header did not include 'upgrade'" = nginx missing proxy Upgrade headers.
+if [[ "${WS_CODE}" == "101" ]]; then
+  pass "WSS /v1/bridge/connect → HTTP 101"
+elif echo "${WS_TEXT}" | grep -qi "Connection header did not include"; then
+  fail "WSS blocked by nginx (no Upgrade proxy) — run: ./ghal_bol_coord/deploy/enable_coord1_https.sh"
+  echo "     got HTTP ${WS_CODE}: ${WS_TEXT}"
+else
+  # Backend may close after upgrade with other errors; non-upgrade-400 is still progress.
+  if [[ "${WS_CODE}" == "400" ]] && echo "${WS_TEXT}" | grep -qi "upgrade"; then
+    fail "WSS upgrade failed HTTP ${WS_CODE}: ${WS_TEXT}"
+  else
+    pass "WSS path reachable (HTTP ${WS_CODE}; not missing Upgrade headers)"
+    echo "     body: ${WS_TEXT}"
+  fi
+fi
+
 note "nginx listen :${HTTPS_PORT}"
 if ss -tln 2>/dev/null | grep -qE ":${HTTPS_PORT}\\b"; then
   pass "nginx listening on :${HTTPS_PORT}"

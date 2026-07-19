@@ -23,14 +23,16 @@ mod imp {
         probe_connectivity_truth_jni().unwrap_or_else(|_| if_addrs_fallback())
     }
 
-    pub fn wifi_transport_linked() -> bool {
-        probe_connectivity_truth().wifi_link_up
-    }
-
     fn if_addrs_fallback() -> OsNetworkSnapshot {
         let p = detect_local_network_profile();
+        let has_active_lan = p.has_rfc1918_on_wifi
+            || (p.has_rfc1918_ipv4
+                && (p.has_wifi_iface
+                    || p.has_tether_iface
+                    || p.has_usb_iface
+                    || (!p.has_cellular_iface && !p.has_cgnat_ipv4)));
         OsNetworkSnapshot {
-            default_transport: if p.has_active_lan() {
+            default_transport: if has_active_lan {
                 OsDefaultTransport::Wifi
             } else if p.has_cellular_iface || p.has_cgnat_ipv4 {
                 OsDefaultTransport::Cellular
@@ -186,12 +188,7 @@ mod imp {
 }
 
 #[cfg(target_os = "android")]
-pub use imp::{probe_connectivity_truth, wifi_transport_linked};
-
-#[cfg(not(target_os = "android"))]
-pub fn wifi_transport_linked() -> bool {
-    false
-}
+pub use imp::probe_connectivity_truth;
 
 #[cfg(not(target_os = "android"))]
 pub fn probe_connectivity_truth() -> crate::p2p::network_transport::OsNetworkSnapshot {
@@ -201,10 +198,5 @@ pub fn probe_connectivity_truth() -> crate::p2p::network_transport::OsNetworkSna
 /// `:p2p` Android connectivity callback — refresh OS truth and wake libp2p handover recovery.
 pub fn on_connectivity_changed() {
     crate::p2p::network_transport::refresh_os_network_truth();
-    #[cfg(target_os = "android")]
-    {
-        let wifi = wifi_transport_linked();
-        crate::connect::set_android_wifi_transport_available(wifi);
-    }
     crate::p2p::notify_network_change();
 }

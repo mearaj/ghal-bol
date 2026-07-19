@@ -53,11 +53,6 @@ impl LanDiscovery {
         Ok(())
     }
 
-    pub fn unregister_contact(&mut self, identity_wire: &str) {
-        if let Some(idc) = self.contact_commitments.remove(identity_wire) {
-            self.commitment_to_wire.remove(&idc);
-        }
-    }
 
     pub fn publish_listener(&self, identity_wire: &str, port: u16) -> Result<(), String> {
         let idc = identity_commitment_hex(identity_wire)?;

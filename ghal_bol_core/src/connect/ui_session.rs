@@ -56,9 +56,6 @@ pub fn bump_foreground_peer_cmd_gen() -> u64 {
     FOREGROUND_PEER_CMD_GEN.fetch_add(1, Ordering::SeqCst) + 1
 }
 
-pub(crate) fn foreground_peer_cmd_gen_latest() -> u64 {
-    FOREGROUND_PEER_CMD_GEN.load(Ordering::SeqCst)
-}
 
 pub fn sync_foreground_peer_now(peer: Option<ContactPk>) {
     if let Ok(mut g) = live_foreground_peer_mx().write() {

@@ -117,7 +117,7 @@ The Identity tab is kept alive in an **`IndexedStack`**. Two Flutter pitfalls st
 1. **`TextEditingController` dispose race** — disposing a controller in the caller immediately after `await showDialog` while the dialog `TextField` is still tearing down (`TextEditingController was used after being disposed` in `flutter_android.log`). Use a **`StatefulWidget` dialog**; dispose only in `State.dispose()` ([`invite_paste_dialog.dart`](../ghal_bol_ui/lib/invite_paste_dialog.dart)).
 2. **`SelectableText` / `SelectionArea`** on the tab body — can cascade into `_dependents.isEmpty` on dialog pop. Use plain **`Text`** + copy buttons.
 
-**Required:** [`identity_key_management.dart`](../ghal_bol_ui/lib/identity_key_management.dart) `_AppPasswordDialog`; plain `Text` on `_identityBody`; `dismissTextSelectionForDialog` before dialog chains. Full spec: [DESIGN.md § Identity tab regression guard](DESIGN.md#identity-tab--show-private-key-dialog-stack--regression-guard).
+**Required:** [`identity_key_management.dart`](../ghal_bol_ui/lib/identity_key_management.dart) `_AppPasswordDialog`; plain `Text` on `_identityBody`; `dismissTextSelectionForDialog` before dialog chains. Full spec: [DESIGN.md § Identity tab guard](DESIGN.md#identity-tab--show-private-key-dialog-stack--guard).
 
 ---
 

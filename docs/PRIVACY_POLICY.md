@@ -53,7 +53,7 @@ You may **export** an encrypted keystore backup or (after re-entering your passw
 
 When you send a message or place a call:
 
-1. Content is protected for transport between peers using **cryptographic keys derived from your identities** (message envelopes are signed/sealed in the `ghal_bol` protocol; connections use **libp2p** with encrypted transports such as Noise over TCP/QUIC).
+1. Content is protected for transport between peers using **cryptographic keys derived from your identities** (message envelopes are signed/sealed in the `ghal_bol` protocol; connections use **native connect** with encrypted transports such as Noise over TCP/QUIC).
 2. Payloads are intended to flow **directly between devices** when the network allows.
 3. **We do not receive message bodies, attachments, or call audio/video** on the coordination server.
 
@@ -61,7 +61,7 @@ When you send a message or place a call:
 
 **LAN discovery:** On local networks, the app may use **mDNS** to find configured contacts without using the coordination server.
 
-**NAT traversal:** If a direct connection is not possible, the app may use **libp2p relay circuits** on **Ghal Bol coordination servers** (co-located with `coord.ghalbol.com` or other configured coord hosts). Traffic remains encrypted at the transport/protocol layers. The app does **not** use public libp2p bootstrap peers or Kademlia DHT for peer discovery.
+**NAT traversal:** If a direct connection is not possible, the app may use **coord bridge circuits** on **Ghal Bol coordination servers** (co-located with `coord.ghalbol.com` or other configured coord hosts). Traffic remains encrypted at the transport/protocol layers. The app does **not** use public native connect bootstrap peers or Kademlia DHT for peer discovery.
 
 ---
 
@@ -74,7 +74,7 @@ When your app is online and registered, the server may store:
 | Data | Purpose |
 |------|---------|
 | **Public key** (66-character hex identity) | Identify your peer for lookup |
-| **Reachable endpoints** (e.g. IP addresses, ports, libp2p multiaddrs, transport capabilities) | Allow other peers to dial you |
+| **Reachable endpoints** (e.g. IP addresses, ports, native endpoints, transport capabilities) | Allow other peers to dial you |
 | **Optional IPv4 / IPv6 hints** | Assist connection setup |
 | **Last heartbeat timestamp** | Know whether you are currently reachable |
 
@@ -88,7 +88,7 @@ Registration uses a **challenge–response**: you sign a server nonce with your 
 
 ## Voice and video calls
 
-Calls use **native encrypted media** over the **same libp2p peer connection** as chat (`/ghal-bol/call/1.0.0` for voice, `/ghal-bol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **same P2P messaging channel**, not through our coordination server.
+Calls use **native encrypted media** over the **same native connect peer connection** as chat (`/ghal-bol/call/1.0.0` for voice, `/ghal-bol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **same P2P messaging channel**, not through our coordination server.
 
 Media is intended to flow **peer-to-peer** (direct LAN or relayed via our coordination relay when NAT requires it). We do not operate a media server that decrypts call content.
 

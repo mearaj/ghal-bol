@@ -15,11 +15,11 @@ Ghal Bol identities are **cryptographic public keys**. The **`algorithm:` prefix
 - Support multiple public-key algorithms (`secp256k1`, `ed25519`, `ecdsa-p256`, …) without free-form algorithm strings.
 - **Implicit `secp256k1`:** identity strings with **no** `algorithm:` prefix are defined to use **`secp256k1`** (bare hex = secp256k1 public key).
 - **Separate identity from transport/E2E:** the identity key is for discovery and connectivity lookup; message and media confidentiality use **session transport keys** (same general approach as call media today — HKDF + symmetric AES-GCM).
-- Stay **transport-agnostic** at the identity layer: validation and storage live in `ghal_bol` with per-algorithm crypto crates. The current P2P stack may use libp2p internally; that is **not** an identity dependency and is not guaranteed long-term.
+- Stay **transport-agnostic** at the identity layer: validation and storage live in `ghal_bol` with per-algorithm crypto crates. The current P2P stack may use native connect internally; that is **not** an identity dependency and is not guaranteed long-term.
 
-**Public key is the only wire identity.** Do not use libp2p PeerId (or any other transport handle) as a roster key, invite payload, coord lookup key, or transcript key. Shipping code may still map secp256k1 public key → libp2p PeerId inside the transport layer; that is **legacy transport glue** to isolate, not the multi-algo identity contract.
+**Public key is the only wire identity.** Do not use identity (or any other transport handle) as a roster key, invite payload, coord lookup key, or transcript key. Shipping code may still map secp256k1 public key → identity inside the transport layer; that is **legacy transport glue** to isolate, not the multi-algo identity contract.
 
-**Algorithm registry rationale:** The enum lists commonly used public-key algorithms. That set overlaps what many P2P stacks happen to support; it is a **convenience reference only** — Ghal Bol does **not** depend on libp2p for identity parsing, validation, or storage.
+**Algorithm registry rationale:** The enum lists commonly used public-key algorithms. That set overlaps what many P2P stacks happen to support; it is a **convenience reference only** — Ghal Bol does **not** depend on native connect for identity parsing, validation, or storage.
 
 ---
 
@@ -57,7 +57,7 @@ ed25519:02a1b2…              # invalid — if hex fails ed25519 codec
 
 ### What is out of scope for the identity layer
 
-- libp2p `PublicKey`, `PeerId`, protobuf key encoding, or “enable libp2p features per algo.”
+- native connect `PublicKey`, `PeerId`, protobuf key encoding, or “enable native connect features per algo.”
 - Public key **size** tables in this document — length is defined by each algorithm’s codec at implementation time, not by a global wire table.
 
 ### Keystore on disk (`keystore_v1.json`)
@@ -89,11 +89,11 @@ Stable wire constants (kebab-case). Unknown ids → reject when a prefix is pres
 
 | Algorithm id | Status | Role |
 |--------------|--------|------|
-| `secp256k1` | **Shipping** | **Implicit default** when prefix omitted. Identity, envelope signing, coord registration/lookup, libp2p PeerId derivation. |
-| `ed25519` | **Shipping** | Identity, signing, coord, libp2p PeerId derivation, full P2P. |
-| `ecdsa-p256` | **Shipping** | Identity, signing, coord, libp2p PeerId derivation, full P2P. |
+| `secp256k1` | **Shipping** | **Implicit default** when prefix omitted. Identity, envelope signing, coord registration/lookup, identity derivation. |
+| `ed25519` | **Shipping** | Identity, signing, coord, identity derivation, full P2P. |
+| `ecdsa-p256` | **Shipping** | Identity, signing, coord, identity derivation, full P2P. |
 
-Implement validation with **standard crypto libraries per algorithm** in `ghal_bol` — **not** `libp2p-identity`.
+Implement validation with **standard crypto libraries per algorithm** in `ghal_bol` — **not** `native-identity`.
 
 ---
 
@@ -104,7 +104,7 @@ Implement validation with **standard crypto libraries per algorithm** in `ghal_b
 | Layer | Purpose | Uses identity (public key)? |
 |-------|---------|----------------------------|
 | **Identity** | Who the peer is — invites, contacts, coord register/lookup, roster, transcript keys | Yes — full `Identity` string |
-| **Connectivity** | Reach the peer (dial, relay, LAN discovery, streams). Stack is pluggable; libp2p may be used today | Lookup and dial **by public key identity** |
+| **Connectivity** | Reach the peer (dial, relay, LAN discovery, streams). Stack is pluggable; native connect may be used today | Lookup and dial **by public key identity** |
 | **Transport / E2E** | DM text bodies, call signaling payloads, call audio/video frames | **No** for payload encryption — session-derived symmetric keys |
 
 ### Core rule
@@ -181,7 +181,7 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Coord register challenge + signature verify | **Implemented** — all three algorithms (`ghal_bol_coord/auth.rs`, client `coord_register_auth.rs`) |
 | Coord agent `pk=` binding | **Implemented** — identify `agent_version` parses full identity wire (all three algorithms) via `agent_pk.rs` |
 
-**Explicitly not required for the identity layer:** libp2p multi-key identity, PeerId derivation per algorithm, libp2p feature flags for identity.
+**Explicitly not required for the identity layer:** native connect multi-key identity, PeerId derivation per algorithm, native connect feature flags for identity.
 
 **P2P chat/calls** run for **all three** identity algorithms (`p2p_ready` for each).
 
@@ -221,14 +221,14 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 - **Golden rule 7 (E2E):** Payloads remain end-to-end encrypted; target path uses **transport session keys**, not sealing to identity pubkey.
 - **Signatures:** Identity key authenticates sender on envelopes; transport keys protect confidentiality.
 - **Unknown algorithm prefix** when `:` is present → hard reject. Only **missing** prefix implies `secp256k1`. Includes removed ids such as `ml-dsa-65`.
-- **Do not conflate** today’s libp2p transport internals (PeerId, Noise) with this identity spec.
+- **Do not conflate** today’s native transport internals (PeerId, Noise) with this identity spec.
 
 ---
 
 ## Open questions (TBD)
 
 - Coord DB primary key: full identity string vs `(algorithm, public_key_hex)` columns.
-- **Transport KEM algorithm** — **DM (libp2p path):** X25519 (`x25519-dalek`). **Delivery mailbox (server path):** identity-sealed ciphertext per [GHAL_BOL_DELIVERY_WIRE_V1.md](GHAL_BOL_DELIVERY_WIRE_V1.md).
+- **Transport KEM algorithm** — **DM (native connect path):** X25519 (`x25519-dalek`). **Delivery mailbox (server path):** identity-sealed ciphertext per [GHAL_BOL_DELIVERY_WIRE_V1.md](GHAL_BOL_DELIVERY_WIRE_V1.md).
 - **Call signaling transport KEM** — TBD (session v1 ships today).
 
 ### Connect invite v3 (implemented)

@@ -15,6 +15,15 @@
 App coord URL: `https://coord1.ghalbol.com:8443`  
 Bridge WSS: `wss://coord1.ghalbol.com:8443/v1/bridge/connect`
 
+**nginx must forward WebSocket Upgrade** (`proxy_set_header Upgrade` / `Connection`) for
+`/v1/bridge/connect`. If clients log `bridge ws connect: HTTP error: 400 Bad Request` /
+`Connection header did not include 'upgrade'`, re-apply HTTPS nginx config:
+
+```bash
+./ghal_bol_coord/deploy/enable_coord1_https.sh
+./ghal_bol_coord/deploy/verify_coord1.sh
+```
+
 ---
 
 ## GoDaddy DDNS (once)

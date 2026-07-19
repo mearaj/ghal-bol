@@ -1,6 +1,6 @@
 # Ghal Bol calls — signaling (`ghal_bol_call_v1`)
 
-**Status:** Signaling implemented in Rust (`call_sig_v1.rs`, `call_state.rs`). **Voice and video media** run in Rust over libp2p substreams — see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) (voice) and [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) (video).
+**Status:** Signaling implemented in Rust (`call_sig_v1.rs`, `call_state.rs`). **Voice and video media** run in Rust over native connect substreams — see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) (voice) and [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) (video).
 
 Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling and media**; Flutter is call UI, permissions, and FFI control only.
 
@@ -13,9 +13,9 @@ Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling
 | **One call type** | No separate “voice call” vs “video call” buttons. Tap **Call** → audio call. |
 | **Default media** | Audio only (`media: "audio"` on invite). |
 | **Video** | In-call **Video** toggle → `video_on` / `video_off` native signals; starts/stops `/ghal-bol/call-video/1.0.0`. |
-| **Signaling transport** | Same libp2p DM stream as chat (`ghal_bol_call_v1` frames). |
+| **Signaling transport** | Same native connect DM stream as chat (`ghal_bol_call_v1` frames). |
 | **Media transport** | `/ghal-bol/call/1.0.0` (voice) and `/ghal-bol/call-video/1.0.0` (video) on the existing peer connection. |
-| **Media encryption** | Identity-bound AES-GCM per frame (`call_media_key.rs` + `MediaCrypto`); libp2p Noise on the wire. |
+| **Media encryption** | Identity-bound AES-GCM per frame (`call_media_key.rs` + `MediaCrypto`); native connect Noise on the wire. |
 
 ---
 
@@ -81,7 +81,7 @@ Video pipeline, textures, and call end: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_V
 | Layer | What it protects |
 |-------|------------------|
 | **DM signaling** (`ghal_bol_call_v1`) | Invite, accept, video_on/off — transport KEM seal (`CALL_CIPHER_TRANSPORT_V2`) + identity signature. |
-| **libp2p transport** | Noise on connections and substreams. |
+| **native transport** | Noise on connections and substreams. |
 | **Per-frame seal** | Opus / video chunks sealed with `derive_call_media_keys_from_transport` before substream write. |
 
 **Key derivation (both peers, same result):**

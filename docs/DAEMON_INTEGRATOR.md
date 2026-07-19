@@ -21,7 +21,7 @@
                             │ + namespace-scoped runtime files
 ┌───────────────────────────▼─────────────────────────────────┐
 │ ghal_bol_core_daemon (precompiled — do not fork to integrate)     │
-│  • libp2p, outbox, acks, coord/WAN, network truth          │
+│  • native connect, outbox, acks, coord/WAN, network truth          │
 │  • Emits poll events + wake markers                        │
 │  • Ends calls when last UI socket closes                   │
 └─────────────────────────────────────────────────────────────┘
@@ -157,4 +157,4 @@ Any replacement (Qt, Tauri, Swift, etc.) must:
 | [DESIGN.md § UI integrator contract](DESIGN.md#ui-integrator-contract-daemon-owned) | RPC + wake tables |
 | [DESIGN.md § UI session contract](DESIGN.md#ui-session-contract-integrator-app--native-p2p) | Read receipts / foreground room |
 | [AGENTS.md](../AGENTS.md) | Agent rules — daemon owns logic |
-| [TRANSPORT.md](TRANSPORT.md) | libp2p / coord (daemon-internal) |
+| [TRANSPORT.md](TRANSPORT.md) | native connect / coord (daemon-internal) |

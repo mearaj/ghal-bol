@@ -49,8 +49,8 @@ mod tests {
     fn different_call_ids_differ() {
         let (_ks_a, alice) = crate::create_keystore_v1("pw", None).unwrap();
         let (_ks_b, bob) = crate::create_keystore_v1("pw2", None).unwrap();
-        let (sk_a, pk_a) = generate_transport_keypair();
-        let (sk_b, pk_b) = generate_transport_keypair();
+        let (sk_a, _) = generate_transport_keypair();
+        let (_, pk_b) = generate_transport_keypair();
         let wire_a = alice.identity_wire();
         let wire_b = bob.identity_wire();
         let k1 =

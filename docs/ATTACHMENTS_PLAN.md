@@ -25,7 +25,7 @@ User A shares a **file** with user B in 1:1 chat:
 | Rule | Detail |
 |------|--------|
 | **Chat carries the offer only** | Small sealed `attachment_offer` on `/ghal-bol/msg/1.0.0`. |
-| **Bytes on a dedicated substream** | New libp2p protocol e.g. `/ghal-bol/attach/1.0.0` on the **same peer connection** as chat. |
+| **Bytes on a dedicated substream** | New native protocol e.g. `/ghal-bol/attach/1.0.0` on the **same peer connection** as chat. |
 | **Sender-served** | A is the HTTP-like origin; no upload to coord. |
 | **E2E** | File encrypted **before** serve; key material only inside sealed DM offer. |
 | **Recipient authority for completion** | A learns “downloaded” from B’s signed ack — same philosophy as delivery/read ticks. |

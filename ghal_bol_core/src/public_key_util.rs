@@ -2,19 +2,13 @@
 
 use secp256k1::PublicKey as Secp256k1PublicKey;
 
-use crate::identity::{normalize_identity_wire, same_contact_identity, Identity};
+use crate::identity::{normalize_identity_wire, same_contact_identity};
 
 /// Parse compressed secp256k1 public key hex (legacy invite/seal helpers).
 pub fn secp256k1_public_key_from_hex(hex_s: &str) -> Result<Secp256k1PublicKey, String> {
     let s = hex_s.trim();
     let v = hex::decode(s).map_err(|e| format!("public_key_hex: hex: {e}"))?;
     Secp256k1PublicKey::from_slice(&v).map_err(|e| format!("public_key_hex: secp256k1: {e}"))
-}
-
-/// Hex-encode compressed secp256k1 public key bytes (33-byte).
-#[cfg(test)]
-pub fn secp256k1_public_key_to_hex(pk: &Secp256k1PublicKey) -> String {
-    hex::encode(pk.serialize())
 }
 
 /// Whether two identity wire strings denote the same contact.
@@ -28,9 +22,6 @@ pub fn normalize_contact_identity_wire(s: &str) -> Result<String, String> {
 }
 
 /// True when `s` is a valid contact identity wire string.
-pub fn is_valid_contact_identity(s: &str) -> bool {
-    Identity::parse(s).is_ok()
-}
 
 fn secp256k1_protobuf_bytes(pk: &[u8]) -> Option<Vec<u8>> {
     if pk.len() != 33 {
