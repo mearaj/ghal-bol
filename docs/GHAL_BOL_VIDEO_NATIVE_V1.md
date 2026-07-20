@@ -3,7 +3,7 @@
 **Status:** **Shipping** on Linux desktop and Android when both peers negotiate `video_engine: native_v1`. Display/capture polish (HW codec, adaptive bitrate) is in progress — see § Implementation status.
 
 **Read first:** [AGENTS.md](../AGENTS.md) (golden rules — esp. #1 Rust owns product
-logic, #7 identity E2EE), [DESIGN.md](DESIGN.md), [TRANSPORT.md](TRANSPORT.md) (libp2p
+logic, #7 identity E2EE), [DESIGN.md](DESIGN.md), [TRANSPORT.md](TRANSPORT.md) (native connect
 stack), and [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) (the shipping
 native **voice** engine this extends). This doc reuses that engine's pipeline,
 crypto, transport, and FFI patterns — video is an **additional media track**, not a
@@ -20,9 +20,9 @@ transport as native voice.
 | Principle | Consequence for video |
 |-----------|-----------------------|
 | **Rust owns media** (golden rule #1) | Capture→encode→seal→transport→jitter→decode happen in Rust; Flutter does camera-permission UI, the local/remote render surface, and toggle buttons via FFI. |
-| **Reuse the link** | Video frames ride the **same libp2p connection** as chat + voice (a media substream), so we inherit NAT traversal, relay `/p2p-circuit` fallback, Noise, coord discovery, urgent-reconnect, keepalive, and the **LAN-shift** work in `chat_server.rs`. |
+| **Reuse the link** | Video frames ride the **same native connection** as chat + voice (a media substream), so we inherit NAT traversal, relay `/p2p-circuit` fallback, Noise, coord discovery, urgent-reconnect, keepalive, and the **LAN-shift** work in `chat_server.rs`. |
 | **One E2E story** (golden rule #7) | Video frames are sealed with the transport media key (`derive_call_media_keys_from_transport`). Per-frame AES-GCM; key never on the wire. |
-| **No new servers** | Direct when possible; relay (coord/libp2p) only as fallback — identical to chat and voice. |
+| **No new servers** | Direct when possible; relay (coord/native connect) only as fallback — identical to chat and voice. |
 | **Truthful UI** | "Video connected" only when decoded frames actually flow (mirrors voice + DESIGN.md truthful-status rule). |
 
 **Why not MoQ:** see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § "Why not MoQ". For 1:1 interactive video we want the existing peer link + an unreliable-friendly media path, not a pub/sub broadcast protocol.
@@ -125,10 +125,10 @@ from** — Opus/media over a **direct peer QUIC connection**, with **each media 
 its own channel** so a dropped video packet never blocks audio (the `voicemcu` /
 `proscenium` / `iroh-live` insight). We deliberately do **not** adopt a MoQ relay/CDN;
 we keep MoQ's *per-track-independent-stream* idea but run it over **our own** direct
-libp2p/QUIC connection. Two phases, same as voice's Option A → Option B:
+native connect/QUIC connection. Two phases, same as voice's Option A → Option B:
 
-- **Phase-1 transport — libp2p substream `/ghal-bol/call-video/1.0.0`** — a third
-  protocol on the same libp2p connection (`chat_server.rs`), opened/accepted exactly
+- **Phase-1 transport — native connect substream `/ghal-bol/call-video/1.0.0`** — a third
+  protocol on the same native connection (`chat_server.rs`), opened/accepted exactly
   like `/ghal-bol/call/1.0.0` (CALL_STREAM_PROTOCOL): each side **opens TX** and
   **accepts RX**, first message is a `{"call_id"}` header, then length-prefixed sealed
   packets. Register in a `SessionState::call_video` map keyed by `call_id` (parallel to
@@ -138,7 +138,7 @@ libp2p/QUIC connection. Two phases, same as voice's Option A → Option B:
   **preferred end state for video**, even more than for voice: video is loss-tolerant
   and frames are large, so retransmits (reliable streams) are exactly what causes
   freeze/HOL stalls. A parallel `quinn` connection (addresses learned from
-  coord/libp2p) carries **audio datagrams + video datagrams as separate flows** — the
+  coord/native connect) carries **audio datagrams + video datagrams as separate flows** — the
   `voicemcu` recipe (capped datagram size vs MTU, CBR/bitrate ceiling) extended with
   fragmentation for video. Control/signaling stays on the reliable DM stream. See
   [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § "Transport decision".
@@ -258,7 +258,7 @@ tests.
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
 | **V0** | `VideoCodec` trait + `NullVideoCodec` + packetizer/reassembler + video jitter (keyframe-aware) + `MediaCrypto` video key — **engine core, no camera/transport**, unit-tested like the voice P0 | Round-trip + reorder/loss/keyframe-recovery unit tests pass (mirrors `call_media` tests) |
-| **V1** | `/ghal-bol/call-video/1.0.0` substream in `chat_server.rs` + SW codec (H.264) + **desktop** camera (`nokhwa`) + render texture; CLI/test harness | Two Linux desktops hold a clear 2-way video call over a real libp2p link; measured rtt/fps/bitrate; audio stays native voice |
+| **V1** | `/ghal-bol/call-video/1.0.0` substream in `chat_server.rs` + SW codec (H.264) + **desktop** camera (`nokhwa`) + render texture; CLI/test harness | Two Linux desktops hold a clear 2-way video call over a real native connect link; measured rtt/fps/bitrate; audio stays native voice |
 | **V2** | Wire V1 into `call_controller`/`call_screen` via FFI on **Linux** (native texture); congestion control + `key_request` | Linux↔Linux native video |
 | **V3** | **Android** Camera2 + `MediaCodec` HW encode/decode + SurfaceTexture render; switch-camera; route toggles | Android↔Android and Android↔Linux video solid on Wi-Fi + cellular within battery/thermal budget |
 | **V4** | **iOS** AVFoundation + VideoToolbox | iOS interop |
@@ -314,4 +314,4 @@ tests.
 - **Camera / capture:** `nokhwa` (desktop), the iroh team's **`rusty-capture`** (PipeWire/V4L2/X11/ScreenCaptureKit/AVFoundation), Camera2/CameraX (Android), AVFoundation (iOS).
 - **Reference architecture (full P2P A/V pipeline in Rust over QUIC):** **`iroh-live`** (n0-computer) and its `moq-media` (capture/encode/decode/playout + **adaptive bitrate**), `rusty-codecs` (codecs + HW + `wgpu` render), `rusty-capture` — validates the per-track-stream + adaptive-bitrate design we adopt over our own direct connection.
 - **Proven 1:1 P2P voice references the audio engine started from:** `voicemcu` (Opus over **unreliable QUIC datagrams**, `quinn`), `proscenium` (P2P voice over a dedicated QUIC protocol).
-- **Transport shape:** libp2p substream (Phase 1) / `quinn` **QUIC unreliable datagrams** RFC 9221 (Phase 2, preferred end state). **Congestion:** GCC-lite / AIMD for 1:1; `moq-media` adaptive bitrate as reference.
+- **Transport shape:** native connect substream (Phase 1) / `quinn` **QUIC unreliable datagrams** RFC 9221 (Phase 2, preferred end state). **Congestion:** GCC-lite / AIMD for 1:1; `moq-media` adaptive bitrate as reference.

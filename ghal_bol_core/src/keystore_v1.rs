@@ -1,7 +1,6 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use libp2p_identity::Keypair;
 use rand_core::{OsRng, RngCore};
 use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
@@ -36,8 +35,8 @@ pub enum KeystoreError {
 
 #[derive(Debug, Error)]
 pub enum Libp2pIdentityError {
-    #[error("libp2p identity: {0}")]
-    SecretKey(String),
+    #[error("legacy libp2p identity removed: {0}")]
+    Removed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +66,6 @@ pub struct KeystoreV1 {
 #[derive(Clone)]
 enum IdentityKeyMaterial {
     Secp256k1 {
-        keypair: Keypair,
         secret: SecretKey,
     },
     Ed25519 {
@@ -100,16 +98,9 @@ impl DecryptedIdentity {
         self.algorithm
     }
 
-    pub fn keypair(&self) -> &Keypair {
-        match &self.material {
-            IdentityKeyMaterial::Secp256k1 { keypair, .. } => keypair,
-            _ => panic!("keypair() requires secp256k1 identity"),
-        }
-    }
-
     pub fn secp256k1_secret(&self) -> &SecretKey {
         match &self.material {
-            IdentityKeyMaterial::Secp256k1 { secret, .. } => secret,
+            IdentityKeyMaterial::Secp256k1 { secret } => secret,
             _ => panic!("secp256k1_secret() requires secp256k1 identity"),
         }
     }
@@ -130,26 +121,9 @@ impl DecryptedIdentity {
         &self.public_key
     }
 
-    pub fn to_libp2p_keypair(&self) -> Result<Keypair, Libp2pIdentityError> {
-        match &self.material {
-            IdentityKeyMaterial::Secp256k1 { keypair, .. } => Ok(keypair.clone()),
-            IdentityKeyMaterial::Ed25519 { signing } => {
-                let mut seed = signing.to_bytes();
-                let secret = libp2p_identity::ed25519::SecretKey::try_from_bytes(&mut seed)
-                    .map_err(|e| Libp2pIdentityError::SecretKey(format!("{e}")))?;
-                Ok(Keypair::from(libp2p_identity::ed25519::Keypair::from(secret)))
-            }
-            IdentityKeyMaterial::EcdsaP256 { signing } => {
-                let sk = libp2p_identity::ecdsa::SecretKey::try_from_bytes(signing.to_bytes())
-                    .map_err(|e| Libp2pIdentityError::SecretKey(format!("{e}")))?;
-                Ok(Keypair::from(libp2p_identity::ecdsa::Keypair::from(sk)))
-            }
-        }
-    }
-
-    /// Whether this identity can run the shipping libp2p P2P stack.
+    /// Whether this identity can run the native connect stack.
     pub fn p2p_ready(&self) -> bool {
-        self.algorithm.p2p_ready()
+        true
     }
 
     pub(crate) fn ed25519_signing_key(&self) -> Option<&ed25519_dalek::SigningKey> {
@@ -222,20 +196,13 @@ fn is_legacy_secp256k1_keystore(ks: &KeystoreV1) -> bool {
     ks.identity_algorithm.as_deref().map(str::trim).is_none_or(|s| s.is_empty())
 }
 
-fn keypair_from_secp256k1_secret_bytes(sk: &[u8]) -> Result<(Keypair, SecretKey), KeystoreError> {
+fn secp256k1_secret_from_bytes(sk: &[u8]) -> Result<SecretKey, KeystoreError> {
     if sk.len() != 32 {
         return Err(KeystoreError::Invalid("bad secret length"));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(sk);
-    let secret = SecretKey::from_byte_array(arr)
-        .map_err(|_| KeystoreError::Invalid("invalid secp256k1 secret"))?;
-    let mut sk_bytes = secret.secret_bytes();
-    let libp2p_secret = libp2p_identity::secp256k1::SecretKey::try_from_bytes(&mut sk_bytes)
-        .map_err(|_| KeystoreError::Invalid("libp2p secp256k1 secret"))?;
-    let secp_kp = libp2p_identity::secp256k1::Keypair::from(libp2p_secret);
-    let keypair = Keypair::from(secp_kp);
-    Ok((keypair, secret))
+    SecretKey::from_byte_array(arr).map_err(|_| KeystoreError::Invalid("invalid secp256k1 secret"))
 }
 
 fn decrypted_from_secret(
@@ -246,8 +213,8 @@ fn decrypted_from_secret(
         .map_err(|e| KeystoreError::InvalidMsg(e))?;
     let material = match algorithm {
         IdentityAlgorithm::Secp256k1 => {
-            let (keypair, secret) = keypair_from_secp256k1_secret_bytes(secret)?;
-            IdentityKeyMaterial::Secp256k1 { keypair, secret }
+            let secret = secp256k1_secret_from_bytes(secret)?;
+            IdentityKeyMaterial::Secp256k1 { secret }
         }
         IdentityAlgorithm::Ed25519 => {
             let arr: [u8; 32] = secret

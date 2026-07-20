@@ -2,28 +2,28 @@
 
 This document is the **single design reference** for how Ghal Bol is meant to work: layers, messaging state, chat-room semantics, and P2P lifecycle. Wire-level detail lives in [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md); invites in [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
 
-**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport (libp2p): [TRANSPORT.md](TRANSPORT.md). Connectivity policy: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**.
+**AI / new contributors:** read [../AGENTS.md](../AGENTS.md) first, then this file. Transport: [TRANSPORT.md](TRANSPORT.md). Connectivity policy: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**.
 
 ## Goals
 
-- **End-to-end encrypted text** between contacts — **WAN** via [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) (temporary mailbox); **LAN** via libp2p mDNS/direct TCP when both peers share a LAN.
-- **Voice/video calls** via libp2p (WAN relay + LAN) — realtime P2P sessions; see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
+- **End-to-end encrypted text** between contacts — **WAN** via [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) (temporary mailbox); **LAN** via native connect (LAN pure P2P where possible).
+- **Voice/video calls** via native connect (Voice/Video pure P2P where possible, otherwise P2P with the help of relay server) — realtime P2P sessions; see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
 - **No server-side chat history** — each device keeps its own transcript; delivery server stores ciphertext only until recipient ack (then deletes payload).
 - **Recipient-authority** delivery and read state — the sender does not invent ticks.
-- **Resilience** — WAN text survives recipient offline periods; LAN/call paths use libp2p upkeep.
-- **Thin UI** — Flutter handles navigation and rendering; **`ghal_bol_core`** owns crypto, delivery client, libp2p (LAN + calls), and persistence.
+- **Resilience** — WAN text survives recipient offline periods; LAN/call paths use native connect upkeep.
+- **Thin UI** — Flutter handles navigation and rendering; **`ghal_bol_core`** owns crypto, delivery client, native connect (LAN + calls), and persistence.
 
 ### Why pure P2P WAN text was dropped
 
-Early designs routed **all** text over libp2p (coord + relay). That failed the product requirement that **a message must reach a peer even when they are offline or on mobile data behind CGNAT**:
+Early designs routed **all** text over relay chat. That failed the product requirement that **a message must reach a peer even when they are offline or on mobile data behind CGNAT**:
 
 - Both sides had to be online simultaneously for relay DM streams to deliver text.
 - Outbox/resync over WAN was fragile during handover and did not behave like a mailbox.
 - Thousands of stale contacts could starve coord lookup for reachable peers.
 
-**WAN text** now uses the delivery server (E2E ciphertext only — same identity keys as chat). **libp2p** remains for **LAN text** (optional fast path when `contact_has_lan_p2p_text_path`) and **all call media/signaling**. Privacy principle unchanged: servers assist availability; only sender and recipient decrypt.
+**WAN text** now uses the delivery server (E2E ciphertext only — same identity keys as chat). **Native connect** remains for **LAN text** (optional fast path when `contact_has_lan_connect_path`) and **all call media/signaling**. Privacy principle unchanged: servers assist availability; only sender and recipient decrypt.
 
-Set `GHAL_BOL_DELIVERY_URL` in app env for WAN text. Without it, text works **LAN-only** via libp2p.
+Set `GHAL_BOL_DELIVERY_URL` in app env for WAN text. Without it, text works **LAN-only** via native connect.
 
 ## Layer split
 
@@ -39,18 +39,18 @@ Set `GHAL_BOL_DELIVERY_URL` in app env for WAN text. Without it, text works **LA
                 ▼                              ▼
 ┌───────────────────────────┐    ┌──────────────────────────────┐
 │  ghal_bol in UI process    │    │  ghal_bol in :p2p / daemon    │
-│  Keystore, contacts_v1,    │    │  libp2p node, outbox,          │
+│  Keystore, contacts_v1,    │    │  native connect node, outbox,  │
 │  transcript read/write   │    │  ack send/retry, dm_event_    │
 │  via FFI                 │    │  handler on p2p_poll         │
 └───────────────────────────┘    └──────────────────────────────┘
          shared on-disk stores (contacts_v1.json, chat_transcript_v1.json)
 ```
 
-**Linux / Android:** libp2p runs **out-of-process** (`ghal_bol_core_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `lib_ghal_bol_core.so` for identity and store I/O over FFI. Both processes must use the **same** data directory and `app_namespace`. One **namespace root** per build holds keystore, prefs, and `ghal_bol/` (contacts, transcript): Linux `~/.local/share/com.ghalbol.debug/` (debug) or `~/.local/share/com.ghalbol/` (release); Android `{app_flutter}/com.ghalbol.debug/` (debug) or `{app_flutter}/` (release). See [IDENTITY.md](IDENTITY.md).
+**Linux / Android:** P2P runs **out-of-process** (`ghal_bol_core_daemon` or `GhalBolP2pService` in `:p2p`). The UI process still loads `lib_ghal_bol_core.so` for identity and store I/O over FFI. Both processes must use the **same** data directory and `app_namespace`. One **namespace root** per build holds keystore, prefs, and `ghal_bol/` (contacts, transcript): Linux `~/.local/share/com.ghalbol.debug/` (debug) or `~/.local/share/com.ghalbol/` (release); Android `{app_flutter}/com.ghalbol.debug/` (debug) or `{app_flutter}/` (release). See [IDENTITY.md](IDENTITY.md).
 
 | Concern | Owner |
 |---------|--------|
-| libp2p listen/dial, LAN text streams, call streams, LAN outbox/acks | `chat_server.rs`, `p2p_runtime.rs` (in **:p2p** / daemon) |
+| Connect listen/dial, LAN text streams, call streams, LAN outbox/acks | `connect/` (in **:p2p** / daemon) |
 | WAN text mailbox (upload, push, acks) | `delivery_runtime.rs`, `delivery_client.rs` |
 | Coord endpoint → dial helpers | `coord_runtime.rs`, `dm_transport/` |
 | Envelope crypto | `msg_v1.rs`, `transport_kem_v1.rs`, `offline_seal_v1.rs` (auxiliary FFI only) |
@@ -69,9 +69,9 @@ Set `GHAL_BOL_DELIVERY_URL` in app env for WAN text. Without it, text works **LA
 
 ## Identity and trust
 
-- One **secp256k1** keypair per device → libp2p **PeerId**, signatures, and message sealing.
-- Connect invite (format **2**) carries **`public_key_hex` only** — no PeerId, no IP/multiaddrs on the wire.
-- On each DM stream: Noise proves PeerId; every frame’s `sender_public_key_hex` must **match** that PeerId.
+- One **secp256k1** keypair per device → signatures, and message sealing.
+- Connect invite (format **2**) carries **`public_key_hex` only** — no IP/multiaddrs on the wire.
+- On each DM stream: Noise proves identity; every frame’s `sender_public_key_hex` must **match** that identity.
 
 ## End-to-end encryption (product rule)
 
@@ -80,11 +80,11 @@ Set `GHAL_BOL_DELIVERY_URL` in app env for WAN text. Without it, text works **LA
 | Channel | E2E mechanism | Keys |
 |---------|----------------|------|
 | Text DM (WAN) | `ghal_bol_delivery` + `delivery_msg_v1` | E2E envelope; server stores ciphertext only |
-| Text DM (LAN) | `ghal_bol_msg_v1` on libp2p stream | Ephemeral ECDH + AES-GCM; P2P acks |
+| Text DM (LAN) | `ghal_bol_msg_v1` on native connect stream | Ephemeral ECDH + AES-GCM; P2P acks |
 | **Call signaling** (invite, video_on/off, …) | `ghal_bol_call_v1` | Same seal + signature on DM stream |
-| **Call media** (audio + in-call video) | Per-frame AES-GCM seal on libp2p substreams | `call_media_key.rs`: ECDH(local secret, peer `public_key_hex`) + HKDF(`call_id`, both pubkeys); see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md), [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) |
+| **Call media** (audio + in-call video) | Per-frame AES-GCM seal on native connect substreams | `call_media_key.rs`: ECDH(local secret, peer `public_key_hex`) + HKDF(`call_id`, both pubkeys); see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md), [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) |
 
-libp2p **Noise** encrypts the transport; it is not a substitute for app-layer E2E above. New features (voice messages, attachments, group chat) must follow the same rule unless explicitly scoped otherwise in design docs.
+**Noise** encrypts the transport; it is not a substitute for app-layer E2E above. New features (voice messages, attachments, group chat) must follow the same rule unless explicitly scoped otherwise in design docs.
 
 Implementation detail: [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (calls), [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) (chat). [AGENTS.md](../AGENTS.md) golden rule 7.
 
@@ -92,10 +92,10 @@ Implementation detail: [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (calls), [GH
 
 | Role | After QR |
 |------|----------|
-| **Guest** (scanner) | Knows host’s `public_key_hex` → derives PeerId → registers `dm_peer` → dials |
+| **Guest** (scanner) | Knows host’s `public_key_hex` → registers `dm_peer` → dials |
 | **Host** (QR shown) | May have **zero** contacts until first inbound connection or frame; first inbound text may create an **unknown** roster row until the user **Add**s or replies — see [Contact trust (`is_known` / `is_blocked`)](#contact-trust-is_known--is_blocked) |
 
-Both sides must run P2P. For **configured** contacts only (no public directory): **WAN** (coord lookup + relay/public paths) and **LAN** (mDNS `_ghalbol._tcp` / direct TCP when that peer is on the local LAN) run **in parallel** on Wi‑Fi — both stay active when connected ([TRANSPORT.md](TRANSPORT.md) § “Both links active”). Do not use coord RFC1918 addrs alone as LAN; mDNS discovery on this device is required for the LAN path.
+Both sides must run native connect. For **configured** contacts only (no public directory): **WAN** (coord lookup + bridge/public paths) and **LAN** (mDNS `_ghalbol._tcp` / direct TCP when that peer is on the local LAN) run **in parallel** on Wi‑Fi — both stay active when connected ([TRANSPORT.md](TRANSPORT.md) § “Both links active”). Do not use coord RFC1918 addrs alone as LAN; mDNS discovery on this device is required for the LAN path.
 
 ## Truthful status in the UI (critical)
 
@@ -121,7 +121,7 @@ Users must **never** see delivery or read ticks that the local device has not ea
 
 ### Delivery mode — outbound ticks (WAN text)
 
-When **`GHAL_BOL_DELIVERY_URL`** is set, chat text does **not** use libp2p `ack_received` / `ack_read`. Outbound ticks follow [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) § “Outbound ticks”:
+When **`GHAL_BOL_DELIVERY_URL`** is set, chat text does **not** use native connect `ack_received` / `ack_read`. Outbound ticks follow [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) § “Outbound ticks”:
 
 | UI | Transcript | Meaning |
 |----|------------|---------|
@@ -132,7 +132,7 @@ When **`GHAL_BOL_DELIVERY_URL`** is set, chat text does **not** use libp2p `ack_
 
 **Authority:** `sent` comes from **server** `message.upload.ok` (not sender self-promotion on tap-send). `delivered` and `read` come from **recipient** signals relayed by the server (`inbox.ack`, `inbox.read`). Flutter maps transcript `delivery` in `chat_screen.dart` — never promotes ticks in Dart.
 
-**P2P DM (no delivery URL):** unchanged — `pending` → single black at `delivered` (`ack_received`) → double blue at `read` (`ack_read`). Voice/video/call signaling stay on libp2p regardless.
+**P2P DM (no delivery URL):** unchanged — `pending` → single black at `delivered` (`ack_received`) → double blue at `read` (`ack_read`). Voice/video/call signaling stay on native connect regardless.
 
 ## Message state — intent and how Ghal Bol implements it
 
@@ -181,7 +181,7 @@ until ack_received or ack_read          until written on wire
 
 Native code: `send_inbound_delivery_ack`, `send_inbound_read_ack_if_possible`, `pending_delivery_acks` / `pending_read_acks` in `chat_server.rs`. Runs in **`:p2p` / daemon** — not in the Flutter isolate.
 
-**Zombie mux recovery (2026-06-24, extended 2026-06-25, 2026-06-28, 2026-07-02):** If the stream writer flag is set but frames fail (`send_ack_frame` / outbox resync error while `writer_open_for_peer`), native calls **`request_dm_stream_reopen`** — not Flutter poll. Symptom: repeating `resync N pending` with `conn=true,stream=true`. **2026-06-25:** after LAN→mobile handover, Wi‑Fi side may keep zombie **direct** mux while phone is on relay — inbound works, outbound never gets `ack_received`; fix is asymmetric mux detection + coord lookup for foreground peer ([TRANSPORT.md](TRANSPORT.md) § **Post-mortem 2026-06-25**). **2026-06-28:** reopen cannot replace a writer that still *looks* alive, so when the peer's frames arrive on a live **duplicate** stream the duplicate handler **adopts** the writer slot (`adopt_duplicate_mux_as_writer`, gated by `duplicate_mux_should_take_over`); a **writer-generation epoch** (`finalize_dm_writer_if_current`) stops a stale handler's later close from deleting the live writer (TRANSPORT.md § **Post-mortem 2026-06-28**). **2026-07-02:** on Wi‑Fi, relay `InboundCircuitEstablished` during handover sets **`relay_inbound_handover_active`** (`should_mark_relay_inbound_handover`) so duplicate stream-open adopt fires immediately — not after 5s reconcile / 40s burst (TRANSPORT.md § **Asymmetric mux recovery** steps 5–7). **Known follow-on:** once mux recovers, pending outbox and acks may **burst** in one drain (`burst resync N pending row(s)`) — multi-second stalls between bursts during handover are transport-level, not a Dart poll bug; do not route through `NetworkHelper`.
+**Zombie mux recovery (2026-06-24, extended 2026-06-25, 2026-06-28, 2026-07-02):** If the stream writer flag is set but frames fail (`send_ack_frame` / outbox resync error while `writer_open_for_peer`), native calls **`request_dm_stream_reopen`** — not Flutter poll. Symptom: repeating `resync N pending` with `conn=true,stream=true`. **2026-06-25:** after LAN→mobile handover, Wi‑Fi side may keep zombie **direct** mux while phone is on relay — inbound works, outbound never gets `ack_received`; fix is asymmetric mux detection + coord lookup for foreground peer ([TRANSPORT.md](TRANSPORT.md) ). **2026-06-28:** reopen cannot replace a writer that still *looks* alive, so when the peer's frames arrive on a live **duplicate** stream the duplicate handler **adopts** the writer slot (`adopt_duplicate_mux_as_writer`, gated by `duplicate_mux_should_take_over`); a **writer-generation epoch** (`finalize_dm_writer_if_current`) stops a stale handler's later close from deleting the live writer (TRANSPORT.md ). **2026-07-02:** on Wi‑Fi, relay `InboundCircuitEstablished` during handover sets **`relay_inbound_handover_active`** (`should_mark_relay_inbound_handover`) so duplicate stream-open adopt fires immediately — not after 5s reconcile / 40s burst (TRANSPORT.md § **Asymmetric mux recovery** steps 5–7). **Known follow-on:** once mux recovers, pending outbox and acks may **burst** in one drain (`burst resync N pending row(s)`) — multi-second stalls between bursts during handover are transport-level, not a Dart poll bug; do not route through `NetworkHelper`.
 
 ### Sender lifecycle
 
@@ -346,7 +346,7 @@ mark_read_ack_confirmed(X)
 | Acks arrive via `ingestP2pEvent` | Do not also full-merge transcript on every `previewChangeCount` for the open room |
 | Delivery ticks | Debounced `mergeTranscriptFromNative(deliveryOnly: true)` on ack polls — not one FFI reload per retry |
 | Never send acks from Dart | Poll refreshes UI only |
-| Identity tab text widgets | `_identityBody`: plain **`Text`** only — no `SelectableText` / `SelectionArea` under hub `IndexedStack`. Dialog `TextEditingController`s owned by **`StatefulWidget` dialog `State`** — never dispose in caller after `showDialog` (§ [Identity tab regression guard](DESIGN.md#identity-tab--show-private-key-dialog-stack--regression-guard); pattern: `invite_paste_dialog.dart`) |
+| Identity tab text widgets | `_identityBody`: plain **`Text`** only — no `SelectableText` / `SelectionArea` under hub `IndexedStack`. Dialog `TextEditingController`s owned by **`StatefulWidget` dialog `State`** — never dispose in caller after `showDialog` (§ [Identity tab guard](DESIGN.md#identity-tab--show-private-key-dialog-stack--guard); pattern: `invite_paste_dialog.dart`) |
 
 ### Linux desktop — layout sync and read gate
 
@@ -385,7 +385,6 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 **Verified:** Android ↔ Linux desktop LAN, **>10 min** soak — messages, **`ack_read sent`**, blue ticks, **`conn=true,stream=true`** without resize.
 
-**Regression — never reintroduce:**
 - `setVisible(false)` on Linux **`inactive`** (restores the resize workaround bug).
 - Fixing ticks with the forbidden **`lastApplySucceeded`** patch (broke P2P for hours — § below).
 - Fake ticks in Flutter without native transcript patch.
@@ -399,7 +398,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | `GhalBolUiSession.lastApplySucceeded` / `uiSessionLastApplyOk` / `_uiSessionLastApplyOk` | Tracks RPC ok — then used to drive retry loops |
 | `_invalidateNativeForegroundSync()` on resume, `node_ready`, call end, `_attachHubChat` | Forces `_layoutSyncedRoomOpen = null` → burst of close/open sync |
 | `_syncNativeForegroundIfLayoutChanged` retry when `!lastApplySucceeded` (from `build()` every frame) | **Session RPC storm** on daemon state socket while P2P recovering |
-| Hub `node_ready`: invalidate + `reapplyUiSession()` + `_syncNativeForegroundPeer()` **on top of** bridge reapply | Duplicate `p2p_sync_ui_session`; fights libp2p upkeep |
+| Hub `node_ready`: invalidate + `reapplyUiSession()` + `_syncNativeForegroundPeer()` **on top of** bridge reapply | Duplicate `p2p_sync_ui_session`; fights native connect upkeep |
 | `_attachHubChat` → extra `_syncNativeForegroundPeer()` | Double `room open` sync on every `ChatScreen` mount |
 | Only mark `_layoutSyncedRoomOpen` after native `ok: true`; remove optimistic pre-set before sync | Intended to fix read gate; paired with per-frame retry it **stopped working chat** |
 
@@ -427,7 +426,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 1. **Confirm loop treated “saw inbound text” as “sent `ack_read`”.** In `chat_server.rs`, inbound `ack_received` called `mark_read_ack_confirmed` when `has_pending_read_ack(ref_id) **or** has_seen_inbound_id(ref_id)`. Every accepted inbound text id enters the seen set. A peer’s unrelated `ack_received` (e.g. confirming *their* delivery ack) could flip **`read_ack_sent=true`** on disk **without** this device ever queueing `ack_read` — violating § “Read receipts — wire volume, confirm loop” (`read_ack_sent` only after **our** `ack_read` and peer confirm).
 
-2. **Poll and ack patches used a single conversation bucket.** `apply_inbound_ack` and poll-replay dedupe called `load_merged` with one key (`public_key_hex` from the event) while older lines lived under the **libp2p peer id** bucket (or vice versa). Outbound acks did not patch ticks; poll replay re-appended unread for the same `message_id`.
+2. **Poll and ack patches used a single conversation bucket.** `apply_inbound_ack` and poll-replay dedupe called `load_merged` with one key (`public_key_hex` from the event) while older lines lived under the **peer id** bucket (or vice versa). Outbound acks did not patch ticks; poll replay re-appended unread for the same `message_id`.
 
 3. **Foreground leave did not clear hub unread** for the room being left — only entering a room called `clear_unread`.
 
@@ -468,7 +467,7 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 
 3. **Hub preview not transcript-authoritative.** **`record_inbound_preview`** on poll could run before a later local outbound line was persisted, leaving **`last_message_preview`** stale.
 
-4. **Stream-open outbox ordering.** Periodic **`resync_pending_outbox`** running before the stream-open **burst** could mark rows **`on_wire`** within **`OUTBOX_RESEND_INTERVAL_MS`**, so the burst skipped them even when the peer never got the frame. **`chat_ready`** also ran before **`ensure_dm_peer_from_libp2p`** / transcript sync in some peer-key races.
+4. **Stream-open outbox ordering.** Periodic **`resync_pending_outbox`** running before the stream-open **burst** could mark rows **`on_wire`** within **`OUTBOX_RESEND_INTERVAL_MS`**, so the burst skipped them even when the peer never got the frame. **`chat_ready`** also ran before **`ensure_dm_peer_from_connect`** / transcript sync in some peer-key races.
 
 **Fix (shipped — Rust only):**
 
@@ -477,9 +476,8 @@ No matching `resumed` → read gate stayed off until layout/`resumed` re-sync.
 | Read catch-up on gate open | **`p2p_sync_ui_session`**: when **`ui_visible && room`**, always **`queue_read_ack_catchup`** after enabling read gate — even if foreground pk unchanged (`p2p_runtime.rs`) |
 | Transcript order | **`insert_line_in_thread_order`** in **`append_if_new`** — disk order matches **`created_at_ms`** sort (`dm_transcript_store.rs`) |
 | Hub preview | **`refresh_thread_preview_from_transcript`** on **`chat_ready`**; **`record_thread_message_preview`** on outbound send (`contacts_v1.rs`, `outbox_wire.rs`, `outbound.rs`) |
-| Background outbox | **`chat_ready`**: **`ensure_dm_peer_from_libp2p`** + transcript sync before emit; **burst before** periodic resync; burst skips only **`on_wire`** rows inside resend interval; transcript replay when in-memory outbox still pending (`outbox_wire.rs`, `dm_dial.rs`, `session.rs`) |
+| Background outbox | **`chat_ready`**: **`ensure_dm_peer_from_connect`** + transcript sync before emit; **burst before** periodic resync; burst skips only **`on_wire`** rows inside resend interval; transcript replay when in-memory outbox still pending (`outbox_wire.rs`, `dm_dial.rs`, `session.rs`) |
 
-**Regression — never reintroduce:**
 
 - Relying on **`SetForegroundPeer`** alone for read catch-up when Android **`inactive`** can skip it.
 - Treating “user saw the bubble” as **`ack_read`** without read gate + wire send.
@@ -528,18 +526,6 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 3. **Unused-app pause** — when `PackageManager.isAutoRevokeWhitelisted` is false, open app settings to disable “Pause app activity if unused”
 4. **OEM background** — when `BackgroundReadiness` detects a resolvable manufacturer autostart/background settings activity and autostart is not already verified (Vivo: content-provider query when available; others: one-time settings shortcut after user opens OEM screen)
 
-**Prompt rules (regression guards):**
-
-- **Do not prompt** if the step is already satisfied (re-check before each dialog)
-- **Do not overlap** prompts — await dialog dismiss, `Permission.request()` return, or app **resume** after settings before the next step
-- **Do not** request notification permission from **`ghal_bol_listener_foreground_io.dart`** — that raced hub onboarding
-
-**Manifest (canonical):** `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_REMOTE_MESSAGING`, `WAKE_LOCK`, `POST_NOTIFICATIONS`, `RECEIVE_BOOT_COMPLETED`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, plus call FGS types as needed.
-
-**Code:** `android_background_readiness.dart`, `BackgroundReadiness.kt`, `MainActivity.kt` (embedder method channel), `embedder_storage.dart`, `AndroidManifest.xml`, `chat_hub_screen.dart` (`_bootstrapHub` order), `ghal_bol_listener_foreground_io.dart` (start FGS only — no permission prompt).
-
-**Verified:** User-confirmed screen-off messaging after completing the prompted steps (2026-07-05).
-
 #### Linux desktop — daemon auto-start and unlock notification
 
 **Problem:** After a system reboot or fresh login, `ghal_bol_core_daemon` is not running. The user must manually open the app to start receiving messages.
@@ -564,67 +550,12 @@ A prior attempt (2026-07-03, reverted) added **`WifiLock`** and hibernation-only
 
 **Code:** `linux_desktop_launch.rs`, `app_paths::detect_keystore_app_namespace`, `daemon/paths.rs` (`unlock_wake`), `ghal_bol_core_daemon.rs` (`spawn_unlock_reminder`), `p2p_event_bridge.dart` (`startLinuxWakePollIfNeeded`), `ghal_bol_core_daemon_client_io.dart` (`installLinuxAutostart`), `bootstrap_native.dart` (early wake poll).
 
-### Regression symptoms (treat as bugs)
-
-| Log / behaviour | Likely cause |
-|-----------------|--------------|
-| Same `ack_read` `ref=` many times per second | Read retry without confirm; burst rounds ≫ 1; upkeep ignoring `last_send_ms` |
-| `poll drain saturated` + `totalEvents` ≫ message count | Every wire retry emitted to UI; `stores_updated` on no-op transcript patch; or **session-sync storm** (`chat room enter` / `sync_ui_session` every frame) flooding `NativeLog` poll events so delivery/read ack applies never reach Flutter |
-| Burst `chat room enter` / `sync_ui_session` while room unchanged | Repeated `SetForegroundPeer` for same peer — starves poll + upkeep; sender sees no delivery/read ticks though recipient got text | Use `p2p_sync_ui_session` dedupe + `p2p_nudge_read_catchup` for Linux nudge; hub skips re-sync when `_lastSyncedForegroundPk` matches |
-| `patch outbound delivery=read` in a tight loop on unlock | Draining stale poll queue; fix emit + apply gates |
-| `Large outgoing transaction` / app dies copying logs | Log + poll storm; fix native volume first |
-| Blue tick never appears | Confirm `ack_received` not sent or not applied; foreground/room gates wrong — not “send more ack_read” |
-| Linux desktop: chat open, `ack_received` only, no `ack_read sent` | **Regression:** Linux **`inactive`** called `setVisible(false)` while room open (`read=false` in `ui_session_applied`). Fix: § “Fixed 2026-06-15 — Linux desktop read ticks”. **Do not** use forbidden `lastApplySucceeded` patch. |
-| Android/iOS: chat dead, `stream_ready_count=0`, many `room closed` + `leave drain` at hub open | **Regression:** forbidden session-sync patch or hub foreground storm — check log for burst `sync_ui_session` / `set_foreground_peer (none)` before first `chat_ready`. |
-| App “empty” after session churn, `conv=solo rows=0`, files still on disk under `ghal_bol/` | UI/session desync — not directory wipe. Do not create new identity; fix foreground sync. See forbidden patch table above. |
-| Single tick while peer “read” it | Recipient never sent `ack_read` (room/gate closed on **their** device — common: Android **`inactive`** without resume catch-up). Check **reader** logs: `ack_read sent`, `read gate opened — catch-up ack_read`. Sender: `patch outbound delivery=read`. § “Fixed 2026-06-29”. |
-| `inbound ack no matching row` / `has_out=false` on `ack_received` | Ack patch used single transcript bucket — fix merged keys (`inbound_transcript_lookup_keys`). § “Fixed 2026-06-19”. |
-| Desktop `read_ack_sent=true` on mass inbound, peer no blue tick | Loose confirm loop (`has_seen_inbound_id` in `mark_read_ack_confirmed`) — § “Fixed 2026-06-19”. |
-| `seeded N pending read ack(s)` with N ≫ room backlog (hundreds+) | Read-ack seed ignoring eligibility (`received_at_ms`, `read_ack_sent`, cutoff) — fix `dispatch_read_ack_pass`, not “seed all inbound”. |
-| Android: messages stop ~minutes after lock; `:p2p` PID unchanged; events log `am_app_frozen` / `fast_freezer` | OEM UID freezer +/or battery optimization / unused-app pause / autostart — not Flutter poll or read gate. Hub must run **`AndroidBackgroundReadiness`** before P2P; user completes stock + OEM prompts. § “Fixed 2026-07-05”. |
-| Overlapping Android permission dialogs at unlock | **`Permission.notification.request`** in listener foreground **and** hub readiness — regression. Listener starts FGS only; readiness owns all prompts sequentially. § “Fixed 2026-07-05”. |
-
-**Do not fix floods by:** larger poll batches, Dart-side ack filtering alone, or “dedupe” without fixing confirm + retry cadence in Rust.
-
-**Anti-patterns (do not reintroduce):**
-
-- In-room path that sends **`ack_read` only** with **no** `ack_received` when `:p2p` can outlive the UI.
-- Relying on Flutter poll to **send** acks (poll only applies events to stores).
-- Clearing read-ack retry queues on leave.
-- **`set_app_ack_read_enabled(false)` clearing `live_foreground_peer`** before `SetForegroundPeer(null)` (breaks leave backlog drain).
-- Hub **disabling read gate before** `setForegroundConversation(null)` on room close.
-- Showing ticks from Flutter logic without a transcript/poll patch (fake delivered/read).
-- Loading chat with a **single** conversation key when history spans peer id + public key buckets.
-- Setting `read_ack_sent` on enter without sender `ack_received` confirm.
-- **`mark_read_ack_confirmed` on `has_seen_inbound_id`** — receiving inbound text must not count as having sent `ack_read`; confirm only when `has_pending_read_ack` (§ “Fixed 2026-06-19”).
-- **Room-enter seed of all inbound rows** or seed without **`received_at_ms` + cutoff** — causes false read and ack/poll storms.
-- Sender emitting `ack_request`.
-- Mutual-QR / “both sides must scan” requirement.
-- **High-volume `ack_read` retry** (burst rounds ≫ 1, upkeep every tick without `last_send_ms`, or 128×512 style bursts).
-- **Emitting a poll/UI event for every wire ack retry** when transcript delivery / `read_ack_sent` is already at target.
-- **`stores_updated` on no-op** transcript patches (forces hub/chat FFI reload storms).
-- **Hub `previewChangeCount` → full `mergeTranscriptFromNative`** while the open chat already handles the same events in `ingestP2pEvent`.
-- Treating duplicate read acks as expected — fix the confirm loop and retry cadence instead.
-- **Linux desktop `inactive` → `setVisible(false)`** while chat room open — sets `:p2p` `read=false` without leave drain; ticks stall until resize/`resumed`. **Keep** `lifecycle inactive on Linux — read gate unchanged`. Android shade/task switcher still uses `inactive` gate-off.
-- **WifiLock-only / hibernation-dialog-only screen-off fix (reverted 2026-07-03)** — did not restore screen-off delivery in testing; use sequential **`AndroidBackgroundReadiness`** instead. § “Fixed 2026-07-05”.
-- **Overlapping Android background permission prompts** — listener foreground must not call `Permission.notification.request()`; hub **`AndroidBackgroundReadiness.runIfNeeded`** runs before P2P and owns all steps one at a time.
-- **Assuming FGS + `WAKE_LOCK` exempt `:p2p` from all OEM freezers** — user must still complete battery optimization + OEM autostart settings when prompted.
-- **Forbidden 2026-06-15 hub session patch** — `lastApplySucceeded`, `_invalidateNativeForegroundSync`, per-frame `!lastApplySucceeded` retry in `_syncNativeForegroundIfLayoutChanged`, hub `node_ready` + `_attachHubChat` session reapply. **Broke P2P messaging** and indirectly caused identity/data loss UX. § “FORBIDDEN — reverted 2026-06-15”. **Do not** substitute for the Linux `inactive` fix.
-
-## UI integrator contract (daemon-owned)
-
-**Authority:** The background node (`ghal_bol_core_daemon` on Linux, Android `:p2p` / `GhalBolP2pService`) owns product behaviour — P2P, outbox, ack policy, transcript merge on poll, network truth, coord/WAN recovery, call teardown when the UI session ends. **`ghal_bol_ui` is reference integrator #1**, not the spec — any app may replace it using the same contract. See **[DAEMON_INTEGRATOR.md](DAEMON_INTEGRATOR.md)** (precompiled daemon + SDK, multi-integrator isolation).
-
-Integrators must speak only the contract in [`DaemonMethod`](../ghal_bol_core/src/daemon/client_api.rs) (Rust) and [`daemon_client_api.dart`](../ghal_bol_ui/lib/daemon_client_api.dart) (Dart mirror). Rust integrators use `ghal_bol_core::daemon::{IntegratorConfig, DaemonClient}`. Do not invent parallel policy in the UI (no coord HTTP lookup loops, no ack retries, no optimistic delivery ticks).
-
-**Wire:** Newline-delimited JSON on the Unix socket: `{ "id", "method", "params" }` → `{ "id", "result" }` or `{ "id", "error" }`. Method names are stable literals from [`DaemonMethod`](../ghal_bol_core/src/daemon/client_api.rs).
-
 ### UI → daemon (JSON-RPC methods)
 
 | Category | Methods | Integrator use |
 |----------|---------|----------------|
 | Session | `unlock`, `lock`, `session_unlocked` | Password unlock; UI lock; probe locked state |
-| P2P lifecycle | `p2p_start`, `p2p_stop`, `p2p_is_running` | Start/stop libp2p after unlock |
+| P2P lifecycle | `p2p_start`, `p2p_stop`, `p2p_is_running` | Start/stop native connect after unlock |
 | UI session (canonical) | `p2p_sync_ui_session`, `p2p_nudge_read_catchup` | **Only** allowed foreground/read gate API — see § UI session contract below |
 | UI session (deprecated) | `p2p_set_app_ack_read_enabled`, `p2p_set_app_ui_visible`, `p2p_set_foreground_peer` | Kept for compat; integrators must use `GhalBolUiSession` → `p2p_sync_ui_session` |
 | Chat / outbox | `p2p_send_text_dm`, `p2p_requeue_outbound_dm`, `p2p_register_dm_peer`, `p2p_send_ack_dm` | Send text; dev/test ack RPC only — normal acks are native |
@@ -682,7 +613,6 @@ Each integrator app uses its own **`app_namespace`** (keystore/data dir) and **n
 
 **Scope:** `ghal_bol` (and `:p2p` / daemon) — **not** `ghal_bol_coord`. The coord server never knows whether the UI is foreground; it only stores dialable endpoints. Any app integrating `ghal_bol` must drive this contract.
 
-**Problem this solves:** Read receipts, foreground peer, and “app visible” were three separate RPC flags (`set_app_ack_read_enabled`, `set_foreground_peer`, `set_app_ui_visible`). They could drift (P2P recover re-enabled read without visibility; Android `inactive` left read on; defaults were `ack_read=true`). That caused **regressions** — wrong blue ticks, leave drain broken, or ack storms when one flag was fixed in isolation.
 
 ### Single native gate for **new** read receipts
 
@@ -786,7 +716,7 @@ Selecting a row in the roster is **not** “room open”. Only the hub rules in 
 
 ## Transcript threads and conversation keys
 
-`chat_transcript_v1.json` stores one array per **conversation key**. Contacts use **`libp2p_peer_id` when known**, else **`public_key_hex`**.
+`chat_transcript_v1.json` stores one array per **conversation key**. Contacts use **`peer_id` when known**, else **`public_key_hex`**.
 
 Historically, some threads were stored under the **public key** before PeerId was learned; newer lines may use **peer id**. That must not look like an empty chat or block ack patches.
 
@@ -800,7 +730,7 @@ Historically, some threads were stored under the **public key** before PeerId wa
 
 **Rule:** never show transcript lines in the UI without loading through merged keys for the active contact.
 
-### Hub chat — stable thread id (`hubThreadKey`) — regression guard
+### Hub chat — stable thread id (`hubThreadKey`) — guard
 
 On daemon platforms the hub mounts one [`ChatScreen`](../ghal_bol_ui/lib/chat_screen.dart) per selected contact (`ValueKey("hub-chat-<pk>")`). **Which transcript bucket to load is not the same as the roster row object.**
 
@@ -809,7 +739,6 @@ On daemon platforms the hub mounts one [`ChatScreen`](../ghal_bol_ui/lib/chat_sc
 | **Thread id** (load/save key, send target, `didUpdateWidget` room switch) | `hubThreadKey` from hub `_selectedConversationKey` (66-hex `public_key_hex`) | **Yes** |
 | **Roster metadata** (alias, trust banner, preview, `is_known`) | `activeContact` (`SavedContact` from `ContactStore`) | **No** — row can be **null for a frame** after send, poll, or `ContactStore` reload |
 
-**Regression (2026-06):** tying thread identity to `activeContact?.conversationKey` caused cross-room history loss. After send or poll, roster reload often rebuilt the hub with `activeContact == null` while the user was still in the same room. `didUpdateWidget` treated that as `conversationKey` changing `A → ""`, cleared lines, reloaded with `conv=solo`, and opening another chat showed empty or wrong history. **Disk was fine** — Flutter dropped or painted the wrong thread.
 
 **Do not reintroduce:**
 
@@ -825,7 +754,7 @@ On daemon platforms the hub mounts one [`ChatScreen`](../ghal_bol_ui/lib/chat_sc
 
 **Symptom if broken:** `transcript reload skipped conv=solo` or `conv=solo rows=0` while a room is open; sending in chat A empties chat B on next open; log shows `Contacts list` then missing `transcript reload conv=<pk> rows=N` for the selected peer.
 
-### Identity tab — Show private key dialog stack — regression guard
+### Identity tab — Show private key dialog stack — guard
 
 The Identity tab (`_identityBody` in [`chat_hub_screen.dart`](../ghal_bol_ui/lib/chat_hub_screen.dart)) stays **mounted** in an **`IndexedStack`** while the user is on Chats or More. Dialog chains from that tab (**Show private key**, **Export backup**, import backup) stack `showDialog` on top of widgets that must not hold active text-selection dependents.
 
@@ -873,24 +802,23 @@ ml-dsa public key size made selection issues easy to hit; **secp256k1 still cras
 
 ### Stream-first symmetric connect (wire layer)
 
-**Ideas reference only:** older [protonet](https://github.com/mearaj/protonet) (`protonet-as-reference`, 4+ years) had one `chatStreams` entry per contact and 1 Hz upkeep — useful as a **historical sketch**, not a target to mirror. Ghal Bol’s connect layer is **stream-first on the wire**: one live DM mux per contact, upkeep noop while the writer is up, coord + relay + mDNS for discovery (not Kademlia), and no `disconnect_peer` while a route may still work.
+**Ideas reference only:** older [protonet](https://github.com/mearaj/protonet) (`protonet-as-reference`, 4+ years) had one `chatStreams` entry per contact and 1 Hz upkeep — useful as a **historical sketch**, not a target to mirror. Ghal Bol’s connect layer is **stream-first on the wire**: one live DM mux per contact, upkeep noop while the writer is up, coord bridge + mDNS for discovery (not Kademlia), and no `disconnect_peer` while a route may still work.
 
-The connect layer that made the original serverless libp2p build reliable: **both peers connected within a few seconds** with no coord server — only DHT bootstrap and the rules below. Ghal Bol **must keep this wire shape** in `:p2p` / daemon. WAN adds coord + relay for **discovery**; LAN adds mDNS — **both run in parallel** ([TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”).
+The connect layer that made the original serverless build reliable: **both peers connected within a few seconds** with no coord server — only the rules below. Ghal Bol **must keep this wire shape** in `:p2p` / daemon. WAN adds coord bridge for **discovery**; LAN adds mDNS — **both run in parallel** ([TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”).
 
 | Rule | Meaning |
 |------|---------|
-| **Both listen** | Each node accepts inbound libp2p connections and inbound DM streams (`/ghal-bol/msg/1.0.0`). |
-| **One stream per contact** | At most one live DM stream per contact, keyed by `public_key_hex` / derived PeerId (`dm_peer_stream_up`). While the stream writer is live, `dm_upkeep` **does nothing** for that contact — no coord lookup, no `disconnect_peer`, no identify dials. **Dual links:** when both LAN and WAN libp2p connections exist, **both stay up**; upkeep noop for the mux does **not** mean WAN is idle or should be closed. Missing relay hop on Wi‑Fi → **`needs_additive_relay_dial`** (background additive relay) — **not** declaring the mux unstable every tick ([TRANSPORT.md](TRANSPORT.md) § Post-mortem 2026-06-24). If both sides open outbound before either accept wins the writer slot, extra inbound streams are **read-only** (process DM frames; do not drain) until the mux closes. |
+| **Both listen** | Each node accepts inbound native connections and inbound DM streams (`/ghal-bol/msg/1.0.0`). |
+| **One stream per contact** | At most one live DM stream per contact, keyed by `public_key_hex` / derived PeerId (`dm_peer_stream_up`). While the stream writer is live, `dm_upkeep` **does nothing** for that contact — no coord lookup, no `disconnect_peer`, no identify dials. **Dual links:** when both LAN and WAN connect connections exist, **both stay up**; upkeep noop for the mux does **not** mean WAN is idle or should be closed. Missing relay hop on Wi‑Fi → **`needs_additive_relay_dial`** (background additive relay) — **not** declaring the mux unstable every tick ([TRANSPORT.md](TRANSPORT.md) ). If both sides open outbound before either accept wins the writer slot, extra inbound streams are **read-only** (process DM frames; do not drain) until the mux closes. |
 | **Symmetric roles** | No permanent listener/caller. Either peer may accept inbound or open outbound; same stream handler on both paths. |
-| **Send = connect** | Outbound text uses: no stream → ensure libp2p connection → open one stream → write. UI never dials or owns connect policy. |
-| **Parallel transport** | LAN (mDNS) and WAN (coord + relay) stacks and per-peer dials run **concurrently** — both links **active** when connected; see TRANSPORT.md § “Parallel LAN + WAN transport”. |
+| **Send = connect** | Outbound text uses: no stream → ensure connection → open one stream → write. UI never dials or owns connect policy. |
+| **Parallel transport** | LAN (mDNS) and WAN (coord bridge) stacks and per-peer dials run **concurrently** — both links **active** when connected; see TRANSPORT.md § “Parallel LAN + WAN transport”. |
 | **Single upkeep owner** | `dm_upkeep` (~1s) walks contacts: **if stream up → skip**; else missing stream → connect attempts on any available path; pending outbox drains when `chat_ready`. **"Single owner" = one owner of the stream/connection lifecycle, not one function that issues every dial.** Each transport's **dial is event-driven by that transport's own discovery**: **LAN dials are owned by the mDNS `Discovered` handler** (never timer re-dials from the candidate cache — TRANSPORT.md § “Ephemeral LAN TCP ports”), and **WAN dials are owned by coord lookup** (in the upkeep tick / `notify_coord_lookup`-woken). The **identify** handler must **not** add a third competing `swarm.dial` when coord is configured — it only ingests addrs and signals the owners. The shared per-peer in-flight guards (`try_claim_lan_dial_slot`, `should_routed_dial`, `circuit_dial_in_flight`) are **required guardrails** (happy-eyeballs, CGNAT probe, parallel LAN+WAN), not workarounds to remove. |
 
 **PeerId** is derived from secp256k1 `public_key_hex` (already). **Discovery** is coord HTTP + relay (WAN) and mDNS (LAN) — parallel layers below the single wire mux.
 
 **Target latency:** when a route exists, `peer_connected` → `chat_ready` within **seconds**, as in the original build — not minutes of blocked paths.
 
-**Violations (regressions):** tearing down relay when direct LAN connects; separate LAN/WAN message stores; downgrading `read` → `delivered` on duplicate acks; Flutter dial or transcript policy; uncoordinated dial spam (many dials/s per peer); **`dm_peer_chat_link_stable=false` solely because relay hop missing**; clearing **`circuit_dial_in_flight`** on urgent reconnect; blocking coord HTTP on tokio swarm loop; **skipping coord lookup for foreground/outbox peer during LAN handover** ([TRANSPORT.md](TRANSPORT.md) § **Post-mortem 2026-06-25**). See [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”, § **Post-mortem 2026-06-24**, § **Post-mortem 2026-06-25**.
 
 ### Unified message state (E) — single source of truth (2026-06-17)
 
@@ -900,7 +828,7 @@ The connect layer that made the original serverless libp2p build reliable: **bot
 
 | Layer | LAN | WAN | Interference rule |
 |-------|-----|-----|-------------------|
-| **Transport (libp2p)** | mDNS + direct TCP | coord + relay circuit | **Parallel** — both may connect and stay active; throttles only; never tear down relay when direct LAN appears ([TRANSPORT.md](TRANSPORT.md) § Parallel LAN + WAN) |
+| **Transport** | mDNS + direct TCP | coord + bridge | **Parallel** — both may connect and stay active; throttles only; never tear down relay when direct LAN appears ([TRANSPORT.md](TRANSPORT.md) § Parallel LAN + WAN) |
 | **Application (E)** | Same handler for every frame | Same handler for every frame | **One store** — path-agnostic merge; never separate “LAN transcript” vs “WAN transcript” |
 
 ```text
@@ -943,7 +871,7 @@ Peer A                          Peer B
 2. **`p2p_start`** — `dm_peers: [{ "public_key_hex": "…" }]`, `bootstrap_peers: []`, `app_namespace`. If the node is **already running**, native still refreshes handler context and re-registers all `dm_peers` from config (daemon may survive UI restarts).
 3. **Contact added** (scan) → `sync_contacts` **hot-registers** keys on the **running** node — **no full `p2p_stop` / restart** for roster changes.
 4. **Route** → coord lookup + relay (WAN) and mDNS (LAN) run **in parallel** — see [TRANSPORT.md](TRANSPORT.md) § “Parallel LAN + WAN transport”.
-5. **Connect** → libp2p `ConnectionEstablished` toward derived PeerId (guest from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
+5. **Connect** → `ConnectionEstablished` toward derived PeerId (guest from stored `public_key_hex`; host may learn peer on first `peer_identified` or inbound text).
 6. **Stream** → open `/ghal-bol/msg/1.0.0` if none live (inbound accept or outbound open — same handler).
 7. **`chat_ready`** → outbound stream writer up; safe to send frames; outbox drains without opening a hub room.
 8. **Poll** → `p2p_poll` → JSON events; `dm_event_handler` updates on-disk stores; Flutter reloads roster/transcript via FFI.
@@ -969,7 +897,7 @@ If sends stay `queued` / `not connected yet`, the break is in the **native chain
 
 **Both:**
 
-- libp2p, outbox, and **all ack send/retry** run here — **not** in the Flutter isolate.
+- native connect, outbox, and **all ack send/retry** run here — **not** in the Flutter isolate.
 - Flutter **poll** refreshes UI from disk after `dm_event_handler` runs on each `p2p_poll`.
 - **UI lock** (`bootstrap_native.dart` `_uiLocked`): hides hub UI only — **does not** `p2p_stop`, stop `:p2p` / daemon, or stop poll. **Logout / delete identity** stops P2P.
 - Hub pause / leave room: clear **conversation** foreground (`setForegroundConversation`) for read-ack policy — not the Android foreground service.
@@ -987,7 +915,7 @@ Coord HTTP register in Rust waits until listen addrs are publishable — see `co
 
 | LAN | WAN | Together |
 |-----|-----|----------|
-| mDNS `Discovered` → direct TCP for that contact | coord lookup → relay circuit + public TCP when registered | **Both stacks always on** on Wi‑Fi; per-peer both links may be connected |
+| mDNS `Discovered` → direct TCP for that contact | coord lookup → coord bridge + public TCP when registered | **Both stacks always on** on Wi‑Fi; per-peer both links may be connected |
 
 Rules:
 
@@ -995,7 +923,7 @@ Rules:
 2. **LAN path is opt-in by discovery** — mDNS sighting for that contact, not global LAN-first for all roster peers.
 3. **Mobile-data / CGNAT** (no active Wi‑Fi LAN): coord relay dials only (throttled). Probe-style `listen_on(…/p2p-circuit)` when bootstrap TCP down — [TRANSPORT.md](TRANSPORT.md) § “CGNAT / mobile-data relay reservation”.
 4. **Wi‑Fi with LAN:** mDNS and coord/relay dial **in parallel** for the same peer when stream is down — throttled, not mutually deferred. **Do not close relay links** when direct LAN connects; **both links stay active** (LAN + WAN each doing their job). See TRANSPORT.md § “Both links active”.
-5. **Outbound dial to peer’s relay circuit** after coord lookup: proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Throttle: `should_routed_dial` in `dial_dm_peer_addr`.
+5. **Outbound dial to peer’s coord bridge** after coord lookup: proceed when lookup succeeds — **do not** wait for own `reservation accepted`. Throttle: `should_routed_dial` in `dial_dm_peer_addr`.
 6. **Wi‑Fi toggle on LAN** — event-driven ([TRANSPORT.md](TRANSPORT.md) § “LAN stability — cold start and Wi‑Fi toggle”): `kick_lan_dm_rediscovery_after_handover` + WAN recovery in parallel. LAN dials remain **mDNS `Discovered` only** — never upkeep re-dial from cache.
 
 **Event-driven rule (general):** avoid assumed timers whenever policy waits on async work with unknown duration — worker owns the work, subscribers react on reported facts. See TRANSPORT.md § “Event-driven async — avoid assumed timers”.
@@ -1009,9 +937,9 @@ Rules:
 When two contacts are both online the link must stay **steady** and recover instantly from blips — never an idle drop or a backoff-delayed reconnect that the user perceives as lag. Native (`chat_server.rs`) enforces this; see [TRANSPORT.md](TRANSPORT.md) § “Steady connection”:
 
 - **Keepalive ping** keeps an idle DM/relay connection alive (ping interval **15s** < `idle_connection_timeout` 45s/300s), so the next message reuses the live link instead of paying a reconnect.
-- **Urgent reconnect** after `dm connection closed`: the peer’s key is urgent for ~30s — coord lookup **skips** the `peer_not_on_server` backoff and the 1s upkeep tick retries immediately (`mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent`), cleared on **`chat_ready`** (live mux — not bare libp2p `ConnectionEstablished`; `conn=true` alone is not reconnect per TRANSPORT.md § Post-mortem 2026-06-24).
+- **Urgent reconnect** after `dm connection closed`: the peer’s key is urgent for ~30s — coord lookup **skips** the `peer_not_on_server` backoff and the 1s upkeep tick retries immediately (`mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent`), cleared on **`chat_ready`** (live mux — not bare `ConnectionEstablished`; `conn=true` alone is not reconnect per TRANSPORT.md ).
 - **Reserve on all configured coord relays in parallel, throttled per relay** (`try_relay_reservations` / `try_relay_reservation`, per-relay `RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or WAN peer discovery ([TRANSPORT.md](TRANSPORT.md) § Connectivity lifecycle).
-- **CGNAT/mobile:** throttle bootstrap relay dials (`issue_bootstrap_dials`); probe-style `listen_on` at startup and when bootstrap TCP is not up yet — § “CGNAT / mobile-data relay reservation” in TRANSPORT.md. **Both peers** must `reservation accepted` + coord register for **bidirectional** coord visibility; one-sided success still means no chat. **Outbound** dial to a peer’s relay circuit after coord lookup does **not** wait for own reservation — see TRANSPORT.md § “Outbound peer relay dials vs own reservation”.
+- **CGNAT/mobile:** throttle bootstrap relay dials (`issue_bootstrap_dials`); probe-style `listen_on` at startup and when bootstrap TCP is not up yet — § “CGNAT / mobile-data relay reservation” in TRANSPORT.md. **Both peers** must `reservation accepted` + coord register for **bidirectional** coord visibility; one-sided success still means no chat. **Outbound** dial to a peer’s coord bridge after coord lookup does **not** wait for own reservation — see TRANSPORT.md § “Outbound peer relay dials vs own reservation”.
 
 ## Call UI lifecycle and privacy (do not regress)
 
@@ -1031,7 +959,7 @@ When two contacts are both online the link must stay **steady** and recover inst
 |-------|---------------|---------|
 | **UI** | Flutter main process | Flutter main process |
 | **P2P + calls** | `ghal_bol_core_daemon` (`libexec/`) | `:p2p` (`GhalBolP2pService`) |
-| **Survives UI exit?** | **Yes** — daemon keeps libp2p for DM/acks | **Yes** — `:p2p` keeps libp2p for DM/acks |
+| **Survives UI exit?** | **Yes** — daemon keeps native connect for DM/acks | **Yes** — `:p2p` keeps native connect for DM/acks |
 | **Must end call when UI gone?** | **Yes** | **Yes** |
 
 **Dev confusion:** `flutter run` **Ctrl+C** kills the **Flutter UI only**; the daemon / `:p2p` **stay running** (by design — DM and acks continue). That is **not** permission to keep a call alive: when the last UI RPC socket closes, native **`p2p_force_end_active_call`** must stop media and send **`hangup`**.
@@ -1057,29 +985,6 @@ Native implementation: `daemon/ui_session.rs` (socket counting), `p2p_runtime::p
 - OS notification is shown by **daemon** (`incoming_call_notify.rs`), not only GTK in Flutter.
 - Tap must **present** the window: D-Bus `Application.Activate` + **`incoming_call_wake`** file under `$XDG_RUNTIME_DIR/ghal_bol/`.
 - Flutter poll bridge **consumes** the wake file (`p2p_take_incoming_call_wake`) and calls `CallIncomingAlert.presentWindow()` + `CallController.onAppForeground()`.
-
-### Regression checklist (manual — two devices)
-
-1. Connected **video** call → Linux **X** → peer must see hangup within seconds; no camera/mic on either side; **no Flutter SIGSEGV** (textures released on end, not on widget dispose).
-2. Connected **video** call → **Hang up** button → same; call UI closes cleanly on both sides.
-3. Same with **`flutter run` Ctrl+C** during call (UI only) — daemon must hang up; Android peer must not stay in-call.
-4. Pop call screen during connected call → hangup on both sides.
-5. Incoming call with app hidden → notification tap → call UI visible and answerable.
-6. Login unlock (UI lock, not logout) during call → call **continues** (suppress window applies).
-7. Linux desktop chat open → drag window / brief focus loss → send inbound text → **`ack_read sent`** without resize (`inactive` must **not** log `read=false` with room still set). Soak **>10 min** LAN Android↔Linux: **`conn=true,stream=true`**, ticks stable. **Do not** fix regressions with forbidden `lastApplySucceeded` patch (§ “FORBIDDEN — reverted 2026-06-15”).
-8. **Android screen off:** unlock → complete **`AndroidBackgroundReadiness`** prompts if shown → lock device → peer sends text → **`ack_received`** / delivery tick within normal WAN/LAN latency (not only while screen on). If dead: check battery optimization, unused-app pause, OEM autostart; events buffer may show `am_app_frozen`. § “Fixed 2026-07-05”.
-
-Wire detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § “UI session and privacy”.
-
-## Contacts and roster preview
-
-On inbound `dm_message` (text), native `dm_event_handler`:
-
-- Always updates **last message preview** on the contact (either direction).
-- Increments **unread** once per inbound text when the message is **not** from the foreground peer **while the read gate is open** (visible + `ack_read` enabled + room open — same predicate as in-room read receipts). Background/inactive with room still on the UI stack must still bump unread. Clears **unread** when the hub opens that peer’s room (`clear_unread` on foreground). Poll replay of the same `message_id` does not bump again. **Poll still emits `stores_updated` on inbound text** so Flutter reloads the roster after wire persist (apply may be a no-op replay).
-- Contact trust fields (`is_known`, `is_blocked`) follow [Contact trust](#contact-trust-is_known--is_blocked) — preview and unread behavior for unknown peers is unchanged unless the peer is **blocked**.
-
-## Contact trust (`is_known` / `is_blocked`)
 
 ### Intent
 
@@ -1218,7 +1123,7 @@ Transcript survives restart; native re-seeds outbox and read-ack queues from dis
 - Pull chat history from the peer’s device (“give me messages since T”).
 - Mirror the other side’s delivery/read flags without ack frames.
 - Put multiaddrs or PeerId on new connect invites.
-- Restart the whole libp2p node on every contact list change.
+- Restart the whole native connect node on every contact list change.
 - Use gossipsub for 1:1 DM (streams only).
 - Store block state outside `contacts_v1.json` (`is_blocked` on the contact row is the only block flag; no legacy blocked-peer-id list).
 - Infer `is_known` from chat history or preview alone.

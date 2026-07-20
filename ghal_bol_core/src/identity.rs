@@ -177,10 +177,8 @@ pub fn public_key_from_secret(
                 .map_err(|e| format!("secp256k1 secret: {e}"))?;
             let secp = secp256k1::Secp256k1::new();
             let pk = sk.public_key(&secp);
-            let libp2p =
-                libp2p_identity::secp256k1::PublicKey::try_from_bytes(&pk.serialize())
-                    .map_err(|e| format!("secp256k1 public key: {e}"))?;
-            Ok(libp2p.to_bytes().to_vec())
+            let _secp = secp256k1::Secp256k1::new();
+            Ok(pk.serialize().to_vec())
         }
         IdentityAlgorithm::Ed25519 => {
             let arr: [u8; 32] = secret

@@ -43,6 +43,8 @@ mod contacts_v1;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coord;
 #[cfg(not(target_arch = "wasm32"))]
+mod connect;
+#[cfg(not(target_arch = "wasm32"))]
 mod coord_ffi;
 #[cfg(not(target_arch = "wasm32"))]
 mod coord_register_auth;
@@ -89,6 +91,7 @@ pub use linux_desktop_launch::{wake_for_incoming_call, wake_for_unlock};
 #[cfg(target_os = "linux")]
 mod linux_network;
 mod msg_v1;
+mod multiaddr_local;
 #[cfg(not(target_arch = "wasm32"))]
 mod network_ffi;
 #[cfg(not(target_arch = "wasm32"))]

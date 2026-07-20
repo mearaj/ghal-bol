@@ -1,14 +1,16 @@
 use crate::AppState;
 use crate::auth::{ChallengeStore, verify_registration_signature};
+use crate::bridge::{
+    bridge_challenge, get_bridge_pending, post_bridge_request, ws_bridge_connect,
+};
 use crate::identity::{normalize_identity_wire, percent_decode_uri_component};
 use crate::error::{ApiResult, ServerError};
 use crate::presence::{PeerEndpoint, PeerRecord};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -26,72 +28,24 @@ pub fn router(app: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health))
-        .route("/v1/relay", get(get_relay))
         .route("/v1/register/challenge", post(register_challenge))
         .route("/v1/register", post(register))
         .route("/v1/heartbeat", post(heartbeat))
         .route("/v1/peers/{identity_wire}", get(get_peer))
         .route("/v1/peers", get(list_peers))
+        .route("/v1/bridge/challenge", post(bridge_challenge))
+        .route("/v1/bridge/request", post(post_bridge_request))
+        .route("/v1/bridge/pending", get(get_bridge_pending))
+        .route("/v1/bridge/connect", get(ws_bridge_connect))
         .with_state(state)
 }
 
 #[derive(Serialize)]
-struct RelayResponse {
-    /// Whether this coordinator runs a Circuit Relay v2 node.
-    enabled: bool,
-    /// Relay libp2p PeerId (stable across restarts).
-    peer_id: Option<String>,
-    /// Dialable base multiaddrs (without `/p2p/<id>`); clients append `/p2p/<peer_id>/p2p-circuit`.
-    addrs: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct RelayQuery {
-    /// When true, client bootstrap TCP failed — request throttled UPnP remap (event-driven).
-    #[serde(default)]
-    remap: bool,
-}
-
-/// Advertise the co-located relay so clients can reserve a circuit and register it in presence.
-async fn get_relay(
-    State(state): State<Arc<RouteState>>,
-    Query(query): Query<RelayQuery>,
-) -> Json<RelayResponse> {
-    // Home UPnP: only `?remap=true` after bootstrap failure — not every relay poll (would rotate ports).
-    if query.remap {
-        state.app.request_upnp_remap();
-    }
-    let info = state.app.relay_info.lock().ok().and_then(|g| g.clone());
-    match info {
-        Some(i) if !i.addrs.is_empty() => Json(RelayResponse {
-            enabled: true,
-            peer_id: Some(i.peer_id),
-            addrs: i.addrs,
-        }),
-        _ => Json(RelayResponse {
-            enabled: false,
-            peer_id: None,
-            addrs: Vec::new(),
-        }),
-    }
-}
-
-#[derive(Serialize)]
-struct HealthRelayStatus {
-    /// libp2p relay task started and coordinates are published.
-    running: bool,
-    /// Non-empty `GET /v1/relay` addrs — required for WAN chat.
-    wan_ready: bool,
-    advertised_addrs: Vec<String>,
-}
-
-#[derive(Serialize)]
 struct HealthResponse {
-    /// `database` + relay `wan_ready`. Do not treat HTTP 200 alone as “chat works”.
     ok: bool,
     service: &'static str,
     database: bool,
-    relay: HealthRelayStatus,
+    bridge: bool,
 }
 
 async fn health(State(state): State<Arc<RouteState>>) -> Json<HealthResponse> {
@@ -101,24 +55,11 @@ async fn health(State(state): State<Arc<RouteState>>) -> Json<HealthResponse> {
         .ok()
         .and_then(|r| r.ok())
         .is_some();
-    let relay_info = state.app.relay_info.lock().ok().and_then(|g| g.clone());
-    let relay = match relay_info {
-        Some(info) => HealthRelayStatus {
-            running: true,
-            wan_ready: !info.addrs.is_empty(),
-            advertised_addrs: info.addrs,
-        },
-        None => HealthRelayStatus {
-            running: false,
-            wan_ready: false,
-            advertised_addrs: Vec::new(),
-        },
-    };
     Json(HealthResponse {
-        ok: database && relay.wan_ready,
+        ok: database,
         service: "ghal_bol_coord",
         database,
-        relay,
+        bridge: true,
     })
 }
 
@@ -190,8 +131,8 @@ async fn register(
         req.transport_capabilities
     };
 
-    validate_endpoints(&req.endpoints, &state.app.presence.relay_bootstrap_tcp_snapshot())?;
-    let endpoints = crate::endpoint_expand::expand_libp2p_circuit_endpoints(req.endpoints);
+    validate_endpoints(&req.endpoints)?;
+    let endpoints = req.endpoints;
 
     let store = Arc::clone(&state.app.presence);
     let peer = tokio::task::spawn_blocking(move || {
@@ -275,10 +216,7 @@ fn is_public_routable_tcp_host(host: &str) -> bool {
         && !(ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
 }
 
-fn validate_endpoints(
-    endpoints: &[PeerEndpoint],
-    relay_bootstraps: &HashSet<String>,
-) -> ApiResult<()> {
+fn validate_endpoints(endpoints: &[PeerEndpoint]) -> ApiResult<()> {
     if endpoints.is_empty() {
         return Err(ServerError::BadRequest("endpoints empty".into()));
     }
@@ -297,34 +235,8 @@ fn validate_endpoints(
                 if ep.scheme == "tcp" && !is_public_routable_tcp_host(&ep.host) {
                     return Err(ServerError::BadRequest(
                         "coord register accepts public routable IPv4 TCP only — \
-                         LAN uses mDNS; CGNAT/mobile WAN uses relay circuit on reservation"
+                         LAN uses mDNS; WAN text uses delivery server"
                             .into(),
-                    ));
-                }
-                if ep.scheme == "tcp"
-                    && relay_bootstraps.contains(&format!("{}:{}", ep.host.trim(), ep.port))
-                {
-                    return Err(ServerError::BadRequest(
-                        "coord register rejects relay bootstrap TCP — \
-                         POST only your own inbound DM listen; relay server registers /p2p-circuit"
-                            .into(),
-                    ));
-                }
-            }
-            "libp2p" => {
-                if ep.host.contains("/p2p-circuit") {
-                    return Err(ServerError::BadRequest(
-                        "relay circuit endpoints are registered by the relay server on reservation, not POST /v1/register".into(),
-                    ));
-                }
-                if ep.host.len() < 12 || ep.host.len() > 512 {
-                    return Err(ServerError::BadRequest(
-                        "libp2p multiaddr length invalid".into(),
-                    ));
-                }
-                if !ep.host.starts_with('/') {
-                    return Err(ServerError::BadRequest(
-                        "libp2p endpoint host must be a multiaddr".into(),
                     ));
                 }
             }

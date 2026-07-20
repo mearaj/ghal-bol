@@ -1,5 +1,6 @@
 //! Delivery-server text path (replaces P2P DM when `GHAL_BOL_DELIVERY_URL` is set).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -18,7 +19,6 @@ use crate::p2p::GossipChatEvent;
 use crate::p2p_runtime::enqueue_delivery_gossip_event;
 use crate::peer_id_util::peer_id_from_identity_wire;
 use crate::session_runtime::unlocked_identity_clone;
-use libp2p::PeerId;
 
 #[derive(Clone, Debug, Default)]
 struct DeliveryMirror {
@@ -42,6 +42,19 @@ fn stop_flag() -> &'static AtomicBool {
 fn worker_mx() -> &'static Mutex<Option<JoinHandle<()>>> {
     static W: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
     W.get_or_init(|| Mutex::new(None))
+}
+
+const DELIVERY_OUTBOX_RESEND_INTERVAL_MS: i64 = 1_000;
+const DELIVERY_OUTBOX_MAX_PER_TICK: usize = 16;
+
+fn outbox_last_attempt_mx() -> &'static Mutex<HashMap<String, i64>> {
+    static M: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn outbox_in_flight_mx() -> &'static Mutex<HashSet<String>> {
+    static M: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 fn delivery_url_mx() -> &'static Mutex<Option<String>> {
@@ -141,6 +154,7 @@ fn delivery_worker_loop(ws_url: String) {
             match connect_and_auth(&ws_url, &ident).await {
                 Ok(mut session) => {
                     update_mirror_connected(&session.quota, &session.policy);
+                    delivery_outbox_upkeep();
                     loop {
                         if stop_flag().load(Ordering::SeqCst) {
                             break;
@@ -156,6 +170,7 @@ fn delivery_worker_loop(ws_url: String) {
                             }
                             Ok(Ok(None)) | Err(_) => {
                                 delivery_read_ack_upkeep();
+                                delivery_outbox_upkeep();
                             }
                             Ok(Err(e)) => {
                                 set_mirror_error(&e);
@@ -289,7 +304,7 @@ fn set_mirror_error(err: &str) {
     native_log::warn("delivery", format!("delivery worker: {err}"));
 }
 
-fn peer_id_for_sender_wire(sender_wire: &str) -> Option<PeerId> {
+fn peer_id_for_sender_wire(sender_wire: &str) -> Option<String> {
     peer_id_from_identity_wire(sender_wire)
         .ok()
         .or_else(|| crate::p2p::libp2p_peer_for_contact_identity(sender_wire))
@@ -353,6 +368,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn existing_outbound_created_at_ms(ns: &str, conv_key: &str, message_id: &str) -> Option<i64> {
+    if message_id.trim().is_empty() {
+        return None;
+    }
+    load_merged(ns, &[conv_key.to_string()], None)
+        .ok()?
+        .into_iter()
+        .find(|row| row.outgoing && row.message_id.as_deref() == Some(message_id.trim()))
+        .and_then(|row| row.created_at_ms)
+}
+
 fn append_outbound_transcript(
     ns: &str,
     recipient_wire: &str,
@@ -364,6 +390,9 @@ fn append_outbound_transcript(
         return;
     }
     let now = now_ms();
+    // Preserve existing timestamp if message already persisted (Flutter saves before calling Rust)
+    // This ensures timestamps are immutable - once set, never changed
+    let created_at_ms = existing_outbound_created_at_ms(ns, &conv_key, message_id).unwrap_or(now);
     let line = StoredChatLine {
         local_id: message_id.to_string(),
         text: text.to_string(),
@@ -371,7 +400,7 @@ fn append_outbound_transcript(
         from: None,
         message_id: Some(message_id.to_string()),
         delivery: "pending".to_string(),
-        created_at_ms: Some(now),
+        created_at_ms: Some(created_at_ms),
         received_at_ms: None,
         read_ack_sent: false,
     };
@@ -379,10 +408,134 @@ fn append_outbound_transcript(
     let _ = record_thread_message_preview(ns, &conv_key, text, false, Some(now));
 }
 
-pub fn delivery_send_text_dm(recipient: &str, text: &str, message_id: &str) -> Value {
-    let Some(url) = delivery_url() else {
-        return json!({ "ok": false, "error": "GHAL_BOL_DELIVERY_URL not set" });
+fn mark_outbox_attempt(message_id: &str, now: i64) {
+    if let Ok(mut m) = outbox_last_attempt_mx().lock() {
+        m.insert(message_id.to_string(), now);
+    }
+}
+
+fn outbox_due_for_retry(message_id: &str, now: i64) -> bool {
+    let Ok(m) = outbox_last_attempt_mx().lock() else {
+        return true;
     };
+    match m.get(message_id) {
+        None => true,
+        Some(last) => now.saturating_sub(*last) >= DELIVERY_OUTBOX_RESEND_INTERVAL_MS,
+    }
+}
+
+fn try_claim_outbox_upload(message_id: &str) -> bool {
+    let Ok(mut g) = outbox_in_flight_mx().lock() else {
+        return false;
+    };
+    if g.contains(message_id) {
+        return false;
+    }
+    g.insert(message_id.to_string());
+    true
+}
+
+fn release_outbox_upload(message_id: &str) {
+    if let Ok(mut g) = outbox_in_flight_mx().lock() {
+        g.remove(message_id);
+    }
+}
+
+fn apply_delivery_upload_ok(recipient: &str, message_id: &str, resp: &Value) {
+    if let Some(ns) = active_app_namespace() {
+        let _ = patch_outgoing_delivery(&ns, recipient, message_id, "sent");
+    }
+    enqueue_delivery_gossip_event(GossipChatEvent::OutboundSent {
+        message_id: message_id.to_string(),
+    });
+    if let Ok(mut m) = mirror_mx().lock() {
+        if let Some(q) = resp.get("quota") {
+            m.quota = q.clone();
+        }
+    }
+    native_log::info("delivery", format!("upload ok message_id={message_id}"));
+}
+
+fn spawn_delivery_upload(recipient: String, text: String, message_id: String) {
+    let Some(url) = delivery_url() else {
+        return;
+    };
+    if !try_claim_outbox_upload(&message_id) {
+        return;
+    }
+    mark_outbox_attempt(&message_id, now_ms());
+    std::thread::Builder::new()
+        .name("delivery_upload".into())
+        .spawn(move || {
+            let result =
+                blocking_upload_text(&url, &recipient, &text, &message_id, None);
+            release_outbox_upload(&message_id);
+            match result {
+                Ok(resp) => apply_delivery_upload_ok(&recipient, &message_id, &resp),
+                Err(e) => {
+                    native_log::warn(
+                        "delivery",
+                        format!("upload failed message_id={message_id}: {e}"),
+                    );
+                }
+            }
+        })
+        .ok();
+}
+
+/// Retry outbound transcript rows stuck at `delivery=pending` (failed one-shot uploads).
+pub fn delivery_outbox_upkeep() {
+    if !delivery_mode_enabled() {
+        return;
+    }
+    let Some(ns) = active_app_namespace() else {
+        return;
+    };
+    let contacts = match crate::contacts_v1::list_contacts(&ns) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let now = now_ms();
+    let mut due = Vec::new();
+    for contact in contacts {
+        let pk = contact.public_key_hex.trim();
+        if !is_valid_public_key_hex(pk) {
+            continue;
+        }
+        let rows = match load_merged(&ns, &[pk.to_string()], None) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for row in rows {
+            if !row.outgoing || row.delivery != "pending" {
+                continue;
+            }
+            let Some(mid) = row.message_id.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            if !outbox_due_for_retry(mid, now) {
+                continue;
+            }
+            due.push((pk.to_string(), mid.to_string(), row.text.clone()));
+        }
+    }
+    if due.is_empty() {
+        return;
+    }
+    native_log::debug(
+        "delivery",
+        format!("outbox resync {} pending upload(s)", due.len()),
+    );
+    for (recipient, message_id, text) in due.into_iter().take(DELIVERY_OUTBOX_MAX_PER_TICK) {
+        spawn_delivery_upload(recipient, text, message_id);
+    }
+}
+
+pub fn delivery_send_text_dm(recipient: &str, text: &str, message_id: &str) -> Value {
+    if delivery_url().is_none() {
+        return json!({ "ok": false, "error": "GHAL_BOL_DELIVERY_URL not set" });
+    }
     let recipient_trim = recipient.trim().to_lowercase();
     if let Ok(ident) = unlocked_identity_clone() {
         let my_pk = ident.public_key_hex().trim().to_lowercase();
@@ -393,40 +546,11 @@ pub fn delivery_send_text_dm(recipient: &str, text: &str, message_id: &str) -> V
     if let Some(ns) = active_app_namespace() {
         append_outbound_transcript(&ns, recipient, message_id, text);
     }
-    let upload_url = url.clone();
-    let recipient_owned = recipient.to_string();
-    let text_owned = text.to_string();
-    let message_id_owned = message_id.to_string();
-    std::thread::Builder::new()
-        .name("delivery_upload".into())
-        .spawn(move || {
-            match blocking_upload_text(&upload_url, &recipient_owned, &text_owned, &message_id_owned, None) {
-                Ok(resp) => {
-                    if let Some(ns) = active_app_namespace() {
-                        let _ = patch_outgoing_delivery(&ns, &recipient_owned, &message_id_owned, "sent");
-                    }
-                    enqueue_delivery_gossip_event(GossipChatEvent::OutboundSent {
-                        message_id: message_id_owned.clone(),
-                    });
-                    if let Ok(mut m) = mirror_mx().lock() {
-                        if let Some(q) = resp.get("quota") {
-                            m.quota = q.clone();
-                        }
-                    }
-                    native_log::info(
-                        "delivery",
-                        format!("upload ok message_id={message_id_owned}"),
-                    );
-                }
-                Err(e) => {
-                    native_log::warn(
-                        "delivery",
-                        format!("upload failed message_id={message_id_owned}: {e}"),
-                    );
-                }
-            }
-        })
-        .ok();
+    spawn_delivery_upload(
+        recipient.to_string(),
+        text.to_string(),
+        message_id.to_string(),
+    );
     json!({
         "ok": true,
         "message_id": message_id,

@@ -2,7 +2,7 @@
 
 use crate::coord::{CoordEndpoint, CoordHttpClient};
 use crate::dm_transport::{DmDialAddr, coord_endpoints_to_dial_addrs};
-use libp2p::Multiaddr;
+use crate::multiaddr_local::Multiaddr;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -40,13 +40,19 @@ static COORD_LAST_OK_MS: AtomicU64 = AtomicU64::new(0);
 static COORD_LAST_REG_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
 /// Avoid flapping `coord_registered` on one transient mobile-data failure.
 static COORD_CONSEC_FAILS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
 static RELAY_PRESENCE_CHECK_PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(not(test))]
 static RELAY_PRESENCE_POLL_LAST_END_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Fast poll after reservation (coord HTTP flap ~seconds); slow poll until mirror or circuit down.
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_FAST_MS: u64 = 500;
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_FAST_ATTEMPTS: u32 = 12;
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_SLOW_MS: u64 = 2_000;
+#[cfg(not(test))]
 const RELAY_PRESENCE_POLL_SLOW_ATTEMPTS: u32 = 30;
 const RELAY_PRESENCE_RESCHEDULE_MIN_MS: u64 = 5_000;
 /// When already registered, relay self-poll is guardrail-only — do not spawn every coord_tick.
@@ -130,10 +136,10 @@ fn coord_globals() -> &'static CoordGlobals {
     })
 }
 
-/// Set once when the libp2p swarm starts (coord POST TCP must end with this peer id).
-pub fn coord_set_local_peer_id(peer: libp2p::PeerId) {
+/// Legacy no-op — native connect uses identity wire, not libp2p PeerId.
+pub fn coord_set_local_peer_id(peer: String) {
     if let Ok(mut g) = coord_globals().local_peer_id.lock() {
-        *g = Some(peer.to_string());
+        *g = Some(peer);
     }
 }
 
@@ -264,16 +270,8 @@ fn suspend_coord_presence_waiting_endpoints() {
         .store(true, Ordering::Relaxed);
 }
 
-/// Called when libp2p accepts a relay reservation — register the matching circuit on coord.
-pub fn coord_note_relay_reservation(relay_peer_id: libp2p::PeerId) {
-    if !coord_is_configured() {
-        return;
-    }
-    let relay = relay_peer_id.to_string();
-    if let Ok(mut g) = coord_globals().preferred_relay_peer_id.lock() {
-        *g = Some(relay);
-    }
-}
+/// Legacy no-op — relay reservations removed with libp2p.
+pub fn coord_note_relay_reservation(_relay_peer_id: String) {}
 
 /// Coord URL is set — WAN peer discovery requires coord/relay lookup (TRANSPORT.md).
 /// mDNS/LAN still works without coord; coord HTTP retries continue in the background.
@@ -408,6 +406,16 @@ fn peer_record_has_relay_circuit(record: &crate::coord::CoordPeerRecord) -> bool
     })
 }
 
+/// Native-connect or legacy row visible on coord (client TCP register or relay circuit).
+fn peer_record_has_coord_presence(record: &crate::coord::CoordPeerRecord) -> bool {
+    if peer_record_has_relay_circuit(record) {
+        return true;
+    }
+    record.endpoints.iter().any(|e| {
+        e.scheme == "tcp" && !e.host.trim().is_empty() && e.port != 0
+    })
+}
+
 /// During LAN↔WAN handover coord HTTP may flap while the relay server still has our circuit.
 /// Blocking HTTP — call only from a std thread (heartbeat, relay-presence poll, spawn_blocking).
 /// Do **not** call from the libp2p tokio task (reqwest::blocking runtime drop panics).
@@ -434,7 +442,7 @@ fn refresh_relay_presence_from_coord(pk: &str) -> bool {
             continue;
         };
         match client.lookup(pk) {
-            Ok(rec) if peer_record_has_relay_circuit(&rec) => {
+            Ok(rec) if peer_record_has_coord_presence(&rec) => {
                 any_http_ok = true;
                 any_visible = true;
                 registered.insert(base.clone());
@@ -545,60 +553,10 @@ pub fn coord_invalidate_presence_on_network_change() {
     }
 }
 
-/// Fetch the coordinator's co-located relay (`GET /v1/relay`): `(peer_id, base_addrs)`.
-///
-/// Blocking HTTP — call from a blocking context (e.g. `spawn_blocking`). A few quick retries
-/// absorb a transient coord hiccup at startup. Live HTTP only — no on-disk relay cache
-/// (TRANSPORT.md § “Caching policy (canonical)”).
-fn fetch_ghalbol_relay_for_base(base: &str, remap: bool) -> Option<(String, Vec<String>)> {
-    let base_norm = base.trim().trim_end_matches('/');
-    let client = client_for(base).ok()?;
-    for attempt in 0..3 {
-        match client.get_relay_remap(remap) {
-            Ok((peer, addrs)) if !peer.is_empty() && !addrs.is_empty() => {
-                return Some((peer, addrs));
-            }
-            Ok(_) => {
-                crate::flow_log::warn(
-                    "relay",
-                    format!(
-                        "coord {base_norm} GET /v1/relay empty — WAN blocked until server exposes relay"
-                    ),
-                );
-                return None;
-            }
-            Err(_) if attempt + 1 < 3 => std::thread::sleep(Duration::from_millis(500)),
-            Err(e) => {
-                crate::flow_log::warn(
-                    "relay",
-                    format!("coord {base_norm} GET /v1/relay failed ({e})"),
-                );
-                return None;
-            }
-        }
-    }
-    None
-}
 
-/// Fetch `/v1/relay` from **every** configured coord server (one relay per host).
-///
-/// Pass `remap=true` only after bootstrap TCP failure on a home UPnP coord relay.
-pub fn fetch_all_ghal_bol_relays(remap: bool) -> Vec<(String, Vec<String>)> {
-    let urls = coord_base_urls();
-    if urls.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut seen_peer = HashSet::new();
-    for base in urls.iter() {
-        if let Some((peer, addrs)) = fetch_ghalbol_relay_for_base(base, remap) {
-            coord_note_relay_bootstrap_addrs(&addrs);
-            if seen_peer.insert(peer.clone()) {
-                out.push((peer, addrs));
-            }
-        }
-    }
-    out
+/// Relay removed — returns empty.
+pub fn fetch_all_ghal_bol_relays(_remap: bool) -> Vec<(String, Vec<String>)> {
+    Vec::new()
 }
 
 /// Delete legacy `ghalbol_relay*.json` files from the identity data dir (`:p2p` start).
@@ -629,6 +587,11 @@ pub fn invalidate_cached_ghalbol_relay(data_dir: Option<&std::path::Path>) {
 /// True when at least one coordination server URL was configured.
 pub fn coord_is_configured() -> bool {
     !coord_base_urls().is_empty()
+}
+
+/// Insecure TLS flag for the configured coord URL list (always false for all-HTTPS).
+pub fn coord_insecure_tls() -> bool {
+    coord_globals().insecure_tls.load(Ordering::Relaxed)
 }
 
 /// True after a successful `POST /v1/peers/register` for this session.
@@ -966,9 +929,15 @@ fn multiaddr_to_coord_endpoints(ma: &Multiaddr) -> Vec<CoordEndpoint> {
 }
 
 /// Rebuild coord registration from the current libp2p publishable listen set (relay + TCP).
-/// Call with [`SessionState::published_listen_snapshot`] after listen addrs change.
+/// Native connect passes an empty snapshot — endpoints come from [`on_listen_dm_addr`].
 pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
     if !coord_is_configured() {
+        return;
+    }
+    if addrs.is_empty() {
+        if has_coord_endpoints() && !COORD_REGISTERED.load(Ordering::Relaxed) {
+            spawn_register_presence_inner(false);
+        }
         return;
     }
     let has_relay = addrs
@@ -1023,9 +992,14 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
         if !was_registered {
             suspend_coord_presence_waiting_endpoints();
             if cgnat_only {
-                crate::flow_log::info(
+                crate::flow_log::debug(
                     "coord",
-                    "CGNAT listen addr only — not WAN-dialable; waiting for libp2p relay circuit",
+                    "CGNAT — no public TCP for coord register; WAN text uses delivery, LAN uses mDNS",
+                );
+            } else if !crate::wan_coord::local_relay_circuit_listening() {
+                crate::flow_log::debug(
+                    "coord",
+                    "no public TCP endpoint yet — WAN text uses delivery; LAN uses mDNS",
                 );
             } else {
                 crate::flow_log::warn(
@@ -1077,6 +1051,9 @@ pub fn ensure_coord_presence_polling() {
     if !coord_is_configured() || COORD_REGISTERED.load(Ordering::Relaxed) {
         return;
     }
+    if !crate::wan_coord::local_relay_circuit_listening() {
+        return;
+    }
     if coord_heartbeat_running() {
         return;
     }
@@ -1093,13 +1070,11 @@ pub fn coord_register_tick(listen_snapshot: &[Multiaddr]) {
     }
     rebuild_coord_endpoints_from_listen(listen_snapshot);
     if !COORD_REGISTERED.load(Ordering::Relaxed) {
-        ensure_coord_presence_polling();
-        if crate::wan_coord::local_relay_circuit_listening() {
-            schedule_check_relay_presence_once();
-        }
         if has_coord_endpoints() {
             spawn_register_presence_inner(false);
-        } else {
+        }
+        if crate::wan_coord::local_relay_circuit_listening() {
+            ensure_coord_presence_polling();
             schedule_check_relay_presence_once();
         }
     } else if COORD_REG_PENDING.swap(false, Ordering::AcqRel) {

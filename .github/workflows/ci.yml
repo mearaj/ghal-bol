@@ -26,6 +26,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Reject libp2p in core/coord lockfile
+        run: |
+          if rg '^name = "libp2p' Cargo.lock; then
+            echo "libp2p must not appear in Cargo.lock for ghal_bol_core / ghal_bol_coord"
+            exit 1
+          fi
+
       - name: Install native deps (cpal/ALSA + libopus for voice)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev pkg-config
 

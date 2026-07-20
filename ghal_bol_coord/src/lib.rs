@@ -2,30 +2,26 @@
 //!
 //! Does not store message content or transcripts. See workspace `README.md`.
 
-mod agent_pk;
 mod auth;
+mod bridge;
+mod bridge_auth;
 mod config;
 mod db;
-mod endpoint_expand;
 mod error;
 mod godaddy_ddns;
-mod identity;
+pub mod identity;
 mod presence;
-mod relay_live;
-mod relay_nat;
-pub mod relay;
 mod routes;
 
 pub use auth::{registration_challenge_bytes, registration_message_digest};
+pub use bridge::BridgeRegistry;
 pub use config::ServerConfig;
 pub use error::ServerError;
 pub use presence::{PeerEndpoint, PeerRecord, PresenceStore};
 pub use godaddy_ddns::{DdnsConfig, spawn_ddns_task};
-pub use relay_live::RelayLiveRegistry;
-pub use relay::{RelayConfig, RelayInfo};
 
 use axum::Router;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
@@ -36,10 +32,7 @@ pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 pub struct AppState {
     pub config: ServerConfig,
     pub presence: Arc<PresenceStore>,
-    /// Relay coordinates advertised at `GET /v1/relay` (set once the relay node starts).
-    pub relay_info: Mutex<Option<RelayInfo>>,
-    /// Home UPnP dynamic relay — remap on client `/v1/relay` refetch (event-driven, not periodic poll).
-    upnp_remap_tx: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
+    pub bridge: BridgeRegistry,
 }
 
 impl AppState {
@@ -49,8 +42,7 @@ impl AppState {
         Ok(Self {
             config,
             presence: Arc::new(presence),
-            relay_info: Mutex::new(None),
-            upnp_remap_tx: Mutex::new(None),
+            bridge: BridgeRegistry::from_env(),
         })
     }
 
@@ -60,32 +52,8 @@ impl AppState {
         Ok(Self {
             config,
             presence: Arc::new(presence),
-            relay_info: Mutex::new(None),
-            upnp_remap_tx: Mutex::new(None),
+            bridge: BridgeRegistry::from_env(),
         })
-    }
-
-    /// Publish the relay coordinates returned by [`relay::start`].
-    pub fn set_relay_info(&self, info: RelayInfo) {
-        self.presence.set_relay_bootstrap_addrs(&info.addrs);
-        if let Ok(mut g) = self.relay_info.lock() {
-            *g = Some(info);
-        }
-    }
-
-    pub(crate) fn set_upnp_remap_tx(&self, tx: tokio::sync::mpsc::Sender<()>) {
-        if let Ok(mut g) = self.upnp_remap_tx.lock() {
-            *g = Some(tx);
-        }
-    }
-
-    /// Clients refetch `/v1/relay?remap=true` after bootstrap TCP failure — triggers throttled UPnP fresh map.
-    pub fn request_upnp_remap(&self) {
-        if let Ok(g) = self.upnp_remap_tx.lock() {
-            if let Some(tx) = g.as_ref() {
-                let _ = tx.try_send(());
-            }
-        }
     }
 }
 

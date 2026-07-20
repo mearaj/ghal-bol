@@ -1,10 +1,10 @@
 # Direct messages — `ghal_bol_msg_v1`
 
-Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/1.0.0`**. **Gossipsub is not used.** Messages are **signed JSON envelopes** (`format_version`: **2**) with **algorithm-specific identity signatures** and **transport-layer ciphertext** for text bodies. See [MULTI_ALGO.md](MULTI_ALGO.md). Transport details: [TRANSPORT.md](TRANSPORT.md).
+Ghal Bol uses **one-to-one framed streams** on native protocol **`/ghal-bol/msg/1.0.0`**. **Gossipsub is not used.** Messages are **signed JSON envelopes** (`format_version`: **2**) with **algorithm-specific identity signatures** and **transport-layer ciphertext** for text bodies. See [MULTI_ALGO.md](MULTI_ALGO.md). Transport details: [TRANSPORT.md](TRANSPORT.md).
 
 **Design overview** (layers, chat-room rules, asymmetric contacts): see **[DESIGN.md](DESIGN.md)** first.
 
-> **Scope (2026):** **`GHAL_BOL_DELIVERY_URL`** handles **WAN text** (E2E encrypted mailbox). This spec covers **LAN libp2p text** (`mDNS`/direct TCP) and **call signaling** on `/ghal-bol/msg/1.0.0`. WAN text ticks: [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md). Pure P2P WAN text was removed — see [DESIGN.md](DESIGN.md) § “Why pure P2P WAN text was dropped”.
+> **Scope (2026):** **`GHAL_BOL_DELIVERY_URL`** handles **WAN text** (E2E encrypted mailbox). This spec covers **LAN native connect text** (`mDNS`/direct TCP) and **call signaling** on `/ghal-bol/msg/1.0.0`. WAN text ticks: [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md). native connect WAN text was removed — see [DESIGN.md](DESIGN.md) § “Why native connect WAN text was dropped”.
 
 ## Transport stack
 
@@ -12,7 +12,7 @@ Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/
 |-------|--------|
 | App framing | 4-byte little-endian length + UTF-8 JSON envelope |
 | Envelope tag | `ghal_bol_msg_v1` (`format_version`: **`2`**) |
-| **Transport (libp2p)** | Stream protocol `/ghal-bol/msg/1.0.0`; underneath QUIC/TCP, Noise, Yamux; **LAN** mDNS; WAN relay for **calls** ([TRANSPORT.md](TRANSPORT.md)) |
+| **Transport (native connect)** | Stream protocol `/ghal-bol/msg/1.0.0`; underneath QUIC/TCP, Noise, Yamux; **LAN** mDNS; WAN relay for **calls** ([TRANSPORT.md](TRANSPORT.md)) |
 
 **Long-lived session:** one bidirectional channel per remote **PeerId** when possible. A dedicated writer task sends frames; inbound read loop on the same session.
 
@@ -20,17 +20,17 @@ Ghal Bol uses **one-to-one framed streams** on libp2p protocol **`/ghal-bol/msg/
 
 | Key | Use |
 |-----|-----|
-| **Identity key** (e.g. secp256k1 compressed, **66 hex**) | libp2p **PeerId** (secp256k1), envelope **signatures** |
+| **Identity key** (e.g. secp256k1 compressed, **66 hex**) | native connect **PeerId** (secp256k1), envelope **signatures** |
 | **Transport key** (X25519, per DM stream) | Message **encryption** for text bodies (`DM_CIPHER_TRANSPORT_V2`) |
 
 **PeerId** is derived from the secp256k1 public key (`ghal_bol_core::peer_id_util`). The keystore holds one logical identity; DM payload confidentiality uses **transport KEM keys** exchanged via `transport_kem_hello`, not the identity private key.
 
-**Trust on the wire:** libp2p **Noise** proves the remote party owns the connection’s **PeerId**. App-layer frames must additionally satisfy:
+**Trust on the wire:** native connect **Noise** proves the remote party owns the connection’s **PeerId**. App-layer frames must additionally satisfy:
 
 - Valid **secp256k1** signature on the envelope.
-- `sender_public_key_hex` must **derive to** the libp2p **PeerId** on that stream (binding check in `chat_server.rs`).
+- `sender_public_key_hex` must **derive to** the native connect **PeerId** on that stream (binding check in `chat_server.rs`).
 
-Remote keys are known from the **connect invite** (`public_key_hex`) and/or derived from the remote libp2p **PeerId** (secp256k1 identity). After connect the node opens `/ghal-bol/msg/1.0.0`, exchanges `transport_kem_hello`, then speaks signed `ghal_bol_msg_v1` text frames.
+Remote keys are known from the **connect invite** (`public_key_hex`) and/or derived from the remote native connect **PeerId** (secp256k1 identity). After connect the node opens `/ghal-bol/msg/1.0.0`, exchanges `transport_kem_hello`, then speaks signed `ghal_bol_msg_v1` text frames.
 
 ## Envelope (`ghal_bol_msg_v1`)
 
@@ -173,13 +173,13 @@ Before changing ack policy, verify:
 
 ### Android background listener
 
-After unlock, native libp2p runs in a **Rust worker thread** (not the Flutter UI isolate). The **1 s upkeep** loop (sender text resend, **recipient** delivery/read ack retries) keeps running while the process lives.
+After unlock, native native connect runs in a **Rust worker thread** (not the Flutter UI isolate). The **1 s upkeep** loop (sender text resend, **recipient** delivery/read ack retries) keeps running while the process lives.
 
-`GhalBolP2pService` is a **foreground service** in process **`:p2p`** so libp2p can run when the Flutter activity is backgrounded or swiped away. It holds a **multicast lock** for mDNS. Flutter only **polls** events for UI over `p2p.sock`; **sending `ack_received` / `ack_read` does not depend on the poll timer** — only on the native upkeep loop in `chat_server.rs`.
+`GhalBolP2pService` is a **foreground service** in process **`:p2p`** so native connect can run when the Flutter activity is backgrounded or swiped away. It holds a **multicast lock** for mDNS. Flutter only **polls** events for UI over `p2p.sock`; **sending `ack_received` / `ack_read` does not depend on the poll timer** — only on the native upkeep loop in `chat_server.rs`.
 
-**Android:** P2P runs in process **`:p2p`** (`GhalBolP2pService` foreground + `filesDir/.../p2p.sock`). The Flutter UI process only polls over the socket — libp2p CPU/RAM is not on the UI thread/process. OEMs can still kill `:p2p`; do **not** call `p2p_stop` / stop the service except logout/delete identity. UI lock keeps P2P running.
+**Android:** P2P runs in process **`:p2p`** (`GhalBolP2pService` foreground + `filesDir/.../p2p.sock`). The Flutter UI process only polls over the socket — native connect CPU/RAM is not on the UI thread/process. OEMs can still kill `:p2p`; do **not** call `p2p_stop` / stop the service except logout/delete identity. UI lock keeps P2P running.
 
-**Linux desktop:** P2P runs in **`ghal_bol_core_daemon`** (Unix socket). Closing the Flutter UI does **not** stop libp2p. Rebuild: `scripts/sync_ghal_bol_native_for_flutter.sh` (copies `lib_ghal_bol_core.so` + daemon into `ghal_bol_ui/linux/`).
+**Linux desktop:** P2P runs in **`ghal_bol_core_daemon`** (Unix socket). Closing the Flutter UI does **not** stop native connect. Rebuild: `scripts/sync_ghal_bol_native_for_flutter.sh` (copies `lib_ghal_bol_core.so` + daemon into `ghal_bol_ui/linux/`).
 
 **Android:** Rebuild: `scripts/pack_android_workspace_jni_libs.sh` only → `build/android-native-ndk/` (Gradle `jniLibs`; shared by UI and `:p2p`). Do not use `sync` on the phone workflow.
 
@@ -216,13 +216,13 @@ On **Linux and Android**, Flutter calls **`p2p_start`** on the **`:p2p` / `ghal_
 
 `bootstrap_peers` is optional; **public-key / PeerId** operation does not require invite multiaddrs. Empty array is normal.
 
-**`already_running`:** If libp2p is already up (daemon survived UI restart), native must still call `set_p2p_handler_context(app_namespace)` and re-register every `public_key_hex` in `dm_peers`. Otherwise inbound events log `handler context not set` and stores do not update.
+**`already_running`:** If native connect is already up (daemon survived UI restart), native must still call `set_p2p_handler_context(app_namespace)` and re-register every `public_key_hex` in `dm_peers`. Otherwise inbound events log `handler context not set` and stores do not update.
 
 ## FFI send / poll / register
 
 | Symbol | Role |
 |--------|------|
-| `ghal_bol_core_ffi_p2p_start(config_json)` | Start background libp2p node |
+| `ghal_bol_core_ffi_p2p_start(config_json)` | Start background native connect node |
 | `ghal_bol_core_ffi_p2p_register_dm_peer(peer_id, public_key_hex)` | Hot-register contact (`peer_id` may be null) |
 | `ghal_bol_core_ffi_p2p_set_foreground_peer(peer_id_utf8)` | Open chat = peer id string; `null`/empty = none |
 | `ghal_bol_core_ffi_p2p_send_text_dm(recipient_public_key_hex, text)` | Queue send; returns `{ "ok", "message_id", "queued"?: true }`; non-blocking |
@@ -238,7 +238,7 @@ Poll responses may include **`stores_updated": true`** after `dm_event_handler` 
 | `kind` | Meaning |
 |--------|---------|
 | `listening` | Local listen multiaddr |
-| `peer_connected` | libp2p connection up |
+| `peer_connected` | native connection up |
 | `peer_identified` | Remote `public_key_hex` |
 | `chat_ready` | Outbound stream open; safe to send |
 | `dm_message` | Inbound `text` or ack (`msg_kind`, `id`, `text`, `ref_id`, `sender_public_key_hex`, …) |

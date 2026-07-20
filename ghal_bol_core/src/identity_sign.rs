@@ -5,21 +5,40 @@ use p256::ecdsa::{
     Signature as EcdsaSig, VerifyingKey as EcdsaVerifyingKey,
     signature::Verifier as EcdsaVerifier,
 };
+use secp256k1::{ecdsa::Signature as Secp256k1Sig, Message, Secp256k1};
+use sha2::{Digest, Sha256};
 
 use crate::identity::{Identity, IdentityAlgorithm};
 use crate::keystore_v1::DecryptedIdentity;
+
+fn secp256k1_sign(secret: &secp256k1::SecretKey, msg: &[u8]) -> Result<Vec<u8>, String> {
+    let secp = Secp256k1::new();
+    let digest: [u8; 32] = Sha256::digest(msg).into();
+    let message = Message::from_digest(digest);
+    Ok(secp
+        .sign_ecdsa(message, secret)
+        .serialize_compact()
+        .to_vec())
+}
+
+fn secp256k1_verify(pk_bytes: &[u8], msg: &[u8], signature: &[u8]) -> Result<(), String> {
+    let secp = Secp256k1::new();
+    let pk = secp256k1::PublicKey::from_slice(pk_bytes)
+        .map_err(|e| format!("secp256k1 public key: {e}"))?;
+    let digest: [u8; 32] = Sha256::digest(msg).into();
+    let message = Message::from_digest(digest);
+    let sig = Secp256k1Sig::from_compact(signature)
+        .map_err(|e| format!("secp256k1 signature: {e}"))?;
+    secp.verify_ecdsa(message, &sig, &pk)
+        .map_err(|e| format!("secp256k1 verify: {e}"))?;
+    Ok(())
+}
 
 impl DecryptedIdentity {
     /// Sign a message with this identity's private key (algorithm-specific wire format).
     pub fn sign_message(&self, msg: &[u8]) -> Result<Vec<u8>, String> {
         match self.algorithm() {
-            IdentityAlgorithm::Secp256k1 => {
-                let sig = self
-                    .keypair()
-                    .sign(msg)
-                    .map_err(|e| format!("secp256k1 sign: {e}"))?;
-                Ok(sig)
-            }
+            IdentityAlgorithm::Secp256k1 => secp256k1_sign(self.secp256k1_secret(), msg),
             IdentityAlgorithm::Ed25519 => {
                 let signing = self
                     .ed25519_signing_key()
@@ -46,15 +65,7 @@ pub fn verify_identity_signature(
 ) -> Result<(), String> {
     let id = Identity::parse(sender_identity_wire)?;
     match id.algorithm {
-        IdentityAlgorithm::Secp256k1 => {
-            let pk = libp2p_identity::secp256k1::PublicKey::try_from_bytes(&id.public_key)
-                .map_err(|e| format!("secp256k1 public key: {e}"))?;
-            let libp2p_pk = libp2p_identity::PublicKey::from(pk);
-            if !libp2p_pk.verify(msg, signature) {
-                return Err("signature verification failed".to_string());
-            }
-            Ok(())
-        }
+        IdentityAlgorithm::Secp256k1 => secp256k1_verify(&id.public_key, msg, signature),
         IdentityAlgorithm::Ed25519 => {
             let arr: [u8; 32] = id
                 .public_key
@@ -88,6 +99,15 @@ mod tests {
     use crate::create_keystore_v1_with_algorithm;
 
     #[test]
+    fn secp256k1_sign_verify_roundtrip() {
+        let (_ks, id) =
+            create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::Secp256k1, None).unwrap();
+        let msg = b"ghal_bol envelope canonical";
+        let sig = id.sign_message(msg).unwrap();
+        verify_identity_signature(&id.identity_wire(), msg, &sig).unwrap();
+    }
+
+    #[test]
     fn ed25519_sign_verify_roundtrip() {
         let (_ks, id) =
             create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::Ed25519, None).unwrap();
@@ -104,5 +124,4 @@ mod tests {
         let sig = id.sign_message(msg).unwrap();
         verify_identity_signature(&id.identity_wire(), msg, &sig).unwrap();
     }
-
 }

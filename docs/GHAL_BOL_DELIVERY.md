@@ -43,9 +43,9 @@ Messaging should prioritize:
 - simplicity
 - predictable behaviour
 
-instead of forcing pure P2P messaging for **WAN text**.
+instead of forcing native connect messaging for **WAN text**.
 
-**Why WAN text left libp2p:** relay-based DM required both peers online at once; offline or sleeping recipients lost messages; mobile CGNAT + handover made outbox/ack paths unreliable. Chat’s core job is **guaranteed delivery when the recipient returns** — a mailbox model fits; realtime P2P does not. **Privacy unchanged:** payloads are E2E encrypted with the same contact identity keys; the server stores opaque ciphertext and cannot read content.
+**Why WAN text left native connect:** relay-based DM required both peers online at once; offline or sleeping recipients lost messages; mobile CGNAT + handover made outbox/ack paths unreliable. Chat’s core job is **guaranteed delivery when the recipient returns** — a mailbox model fits; realtime P2P does not. **Privacy unchanged:** payloads are E2E encrypted with the same contact identity keys; the server stores opaque ciphertext and cannot read content.
 
 Voice and video remain P2P-first because they are inherently realtime sessions.
 
@@ -97,7 +97,7 @@ Recipient ─────► Delivery Server ─────► Sender
 
 # Outbound ticks (sender UI)
 
-When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server — not libp2p DM acks. The sender sees **four** outbound states. Flutter **displays** native transcript `delivery` only; it does not invent ticks.
+When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server — not native connect DM acks. The sender sees **four** outbound states. Flutter **displays** native transcript `delivery` only; it does not invent ticks.
 
 | UI (sender) | Transcript `delivery` | Meaning | Authority / wire |
 |-------------|----------------------|---------|------------------|
@@ -108,7 +108,7 @@ When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server 
 
 **Monotonic only:** `pending` → `sent` → `delivered` → `read`. Never downgrade.
 
-**Not the same as legacy P2P ticks:** libp2p DM used `pending` → single tick at `delivered` (`ack_received`) → blue double at `read` (`ack_read`). Delivery mode adds an explicit **server-received** step (`sent`) and uses **double black** for recipient delivery. See [DESIGN.md](DESIGN.md) § “Delivery mode — outbound ticks”.
+**Not the same as legacy P2P ticks:** native connect DM used `pending` → single tick at `delivered` (`ack_received`) → blue double at `read` (`ack_read`). Delivery mode adds an explicit **server-received** step (`sent`) and uses **double black** for recipient delivery. See [DESIGN.md](DESIGN.md) § “Delivery mode — outbound ticks”.
 
 **Truthful UI:** never show `sent` until the server returns `message.upload.ok`; never show `delivered` / `read` until the server relays recipient acks. Upload HTTP/WSS failure leaves `pending` (or `failed` on hard send error).
 

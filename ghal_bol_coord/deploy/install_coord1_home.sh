@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install home coord + relay for coord1.ghalbol.com (user systemd, no root for server).
+# Install home coord for coord1.ghalbol.com (user systemd, no root for server).
 #
 #   ./ghal_bol_coord/deploy/install_coord1_home.sh
 #
@@ -13,12 +13,7 @@ WORKSPACE_ROOT="$(cd "${DEPLOY_DIR}/../.." && pwd)"
 COORD1_USER="$(id -un)"
 COORD1_BIN="/home/${COORD1_USER}/bin/ghal_bol_coord"
 GHAL_BOL_COORD_LISTEN="127.0.0.1:8765"
-GHAL_BOL_RELAY_LISTEN="0.0.0.0:55002"
-GHAL_BOL_RELAY_DYNAMIC="0"
-GHAL_BOL_RELAY_UPNP="0"
-GHAL_BOL_RELAY_PUBLIC_HOST="coord1.ghalbol.com"
-GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES="0"
-GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER="16"
+GHAL_BOL_COORD_PUBLIC_URL="https://coord1.ghalbol.com:8443"
 GHAL_BOL_DDNS_CREDENTIALS="${DEPLOY_DIR}/godaddy-ddns-coord1.credentials"
 # --- end config ---
 
@@ -33,12 +28,7 @@ render_unit() {
   sed -e "s|REPLACE_COORD1_USER|${COORD1_USER}|g" \
     -e "s|REPLACE_COORD1_BIN|${COORD1_BIN}|g" \
     -e "s|REPLACE_GHAL_BOL_COORD_LISTEN|${GHAL_BOL_COORD_LISTEN}|g" \
-    -e "s|REPLACE_GHAL_BOL_RELAY_LISTEN|${GHAL_BOL_RELAY_LISTEN}|g" \
-    -e "s|REPLACE_GHAL_BOL_RELAY_DYNAMIC|${GHAL_BOL_RELAY_DYNAMIC}|g" \
-    -e "s|REPLACE_GHAL_BOL_RELAY_UPNP|${GHAL_BOL_RELAY_UPNP}|g" \
-    -e "s|REPLACE_GHAL_BOL_RELAY_PUBLIC_HOST|${GHAL_BOL_RELAY_PUBLIC_HOST}|g" \
-    -e "s|REPLACE_GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES|${GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES}|g" \
-    -e "s|REPLACE_GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER|${GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER}|g" \
+    -e "s|REPLACE_GHAL_BOL_COORD_PUBLIC_URL|${GHAL_BOL_COORD_PUBLIC_URL}|g" \
     -e "s|REPLACE_GHAL_BOL_DDNS_CREDENTIALS|${GHAL_BOL_DDNS_CREDENTIALS}|g" \
     "${DEPLOY_DIR}/ghal-bol-coord1.user.service"
 }
@@ -87,5 +77,5 @@ if ! systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
 fi
 
 echo ""
-echo "OK — coord1 on ${GHAL_BOL_COORD_LISTEN}, relay ${GHAL_BOL_RELAY_LISTEN}"
+echo "OK — coord1 on ${GHAL_BOL_COORD_LISTEN} (bridge WSS via ${GHAL_BOL_COORD_PUBLIC_URL})"
 echo "     Verify: ./ghal_bol_coord/deploy/verify_coord1.sh"

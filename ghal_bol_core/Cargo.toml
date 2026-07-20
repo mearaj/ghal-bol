@@ -14,15 +14,17 @@ required-features = []
 
 [dependencies]
 base64 = "0.22"
+bytes = "1"
+flume = "0.12"
+mdns-sd = "0.20"
+snow = "0.10"
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
 directories = "6"
 aes-gcm = "0.10"
+bs58 = "0.5"
 hex = "0.4"
 hkdf = "0.13"
-libp2p-identity = { version = "0.2.13", default-features = false, features = ["secp256k1", "ed25519", "ecdsa", "peerid", "rand"] }
-libp2p-stream = "0.4.0-alpha"
-multihash = "0.19"
 secp256k1 = { version = "0.31", features = ["rand", "serde"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
@@ -42,24 +44,6 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 webpki-roots = "0.26"
 tokio-rustls = "0.26"
-libp2p = { version = "0.56", features = [
-    "tokio",
-    "macros",
-    "tcp",
-    "tls",
-    "noise",
-    "yamux",
-    "relay",
-    "dcutr",
-    "identify",
-    "autonat",
-    "upnp",
-    "quic",
-    "dns",
-    "mdns",
-    "ping",
-    "rsa",
-] }
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",
@@ -72,23 +56,15 @@ tokio = { version = "1", features = [
 if-addrs = "0.14"
 fs4 = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
-# Opus voice codec (vendored libopus build) for native call media.
 audiopus = "0.2"
 
-# Desktop microphone capture + speaker playback for native call media (P4).
-# Android audio (AAudio/Oboe) is added in P6; until then Android uses the silence backend.
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 cpal = "0.15"
-# Native H.264 video codec (bundled OpenH264 source, built via cc — needs a C++
-# toolchain; `nasm` on PATH enables SIMD). Desktop-first; Android gets its codec
-# (MediaCodec / cross-built openh264) in its own phase. See docs/GHAL_BOL_VIDEO_NATIVE_V1.md.
 openh264 = "0.9"
-# Desktop camera capture for native video (V4L2 / AVFoundation / MSMF).
 nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
 
 [features]
 default = []
-# CI / integration tests: compile-time TCP-only transport, no mDNS/UPnP (GHA stack limits).
 test-minimal-swarm = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -96,19 +72,12 @@ notify-rust = "4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22", default-features = false }
-# reqwest/rustls on Android needs JVM hooks for system cert verification (coord HTTPS).
 rustls-platform-verifier = { version = "0.7", features = ["jni"] }
-# Android voice capture/playback via Oboe (AAudio/OpenSL) behind cpal (P6).
-# `oboe-shared-stdcxx` links libc++_shared.so (already shipped by the Flutter app).
 cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
-# Hands cpal/Oboe the JavaVM + Android Context (set once from the `:p2p` JNI init).
 ndk-context = "0.1"
-# Native H.264 video (OpenH264 bundled source, NDK C++ toolchain) — same codec as desktop
-# so Linux↔Android calls share one bitstream format. See docs/GHAL_BOL_VIDEO_NATIVE_V1.md.
 openh264 = "0.9"
 
 [dev-dependencies]
-libp2p = { version = "0.56", features = ["tcp"] }
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ghal_bol_coord = { path = "../ghal_bol_coord" }

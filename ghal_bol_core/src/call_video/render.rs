@@ -154,30 +154,6 @@ pub fn track_call(call_id: &str) {
     }
 }
 
-/// Remove shm files for `call_id` when the video session ends.
-pub fn release_call(call_id: &str) {
-    let remove = tracked_calls()
-        .lock()
-        .ok()
-        .and_then(|mut m| {
-            let c = m.get_mut(call_id)?;
-            *c = c.saturating_sub(1);
-            if *c == 0 {
-                m.remove(call_id);
-                Some(true)
-            } else {
-                Some(false)
-            }
-        })
-        .unwrap_or(true);
-    if !remove {
-        return;
-    }
-    for track in ["local", "remote"] {
-        let p = shm_path(call_id, track);
-        let _ = fs::remove_file(&p);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -200,6 +176,5 @@ mod tests {
         let info = info.unwrap();
         assert!(info.generation == 1);
         assert!(info.width > 0 && info.height > 0);
-        release_call(call_id);
     }
 }

@@ -164,10 +164,7 @@ fn install_identity_session(ns: &str, ident: crate::DecryptedIdentity) -> *mut c
     let wire = ident.identity_wire();
     let algorithm = ident.algorithm().wire_id();
     let p2p_ready = ident.p2p_ready();
-    let libp2p_peer_id = ident
-        .to_libp2p_keypair()
-        .ok()
-        .map(|kp| kp.public().to_peer_id().to_string());
+    let libp2p_peer_id = Some(wire.clone());
     if let Err(e) = crate::session_runtime::install_unlocked_identity(ident) {
         return json_err(e);
     }

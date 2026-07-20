@@ -39,6 +39,8 @@ pub struct ServerConfig {
     pub presence_ttl: Duration,
     /// Background purge interval.
     pub purge_interval: Duration,
+    /// Public HTTPS base for bridge connect URLs (e.g. `https://coord.ghalbol.com`).
+    pub public_base_url: String,
 }
 
 impl Default for ServerConfig {
@@ -49,6 +51,7 @@ impl Default for ServerConfig {
             challenge_ttl: Duration::from_secs(120),
             presence_ttl: Duration::from_secs(90),
             purge_interval: Duration::from_secs(30),
+            public_base_url: "https://coord.ghalbol.com".to_string(),
         }
     }
 }
@@ -98,6 +101,14 @@ impl ServerConfig {
         {
             if let Ok(secs) = s.parse::<u64>() {
                 cfg.purge_interval = Duration::from_secs(secs.max(5));
+            }
+        }
+        if let Ok(s) = std::env::var("GHAL_BOL_COORD_PUBLIC_URL")
+            .or_else(|_| std::env::var("GHAL_BOL_COORD_BASE_URL"))
+        {
+            let t = s.trim().trim_end_matches('/');
+            if !t.is_empty() {
+                cfg.public_base_url = t.to_string();
             }
         }
         cfg

@@ -614,6 +614,10 @@ class CallController {
       return;
     }
     CallFlowLog.step("invite_queued", {"peer": CallFlowLog.shortPk(pk)});
+    // Dial tone while native obtains LAN or WAN bridge — do not wait for invite_on_wire.
+    statusMessage = "Calling…";
+    unawaited(CallRingtone.startOutgoing());
+    _notify();
   }
 
   void _handleCallSignalSentEvent(Map<String, dynamic> ev) {
@@ -626,7 +630,7 @@ class CallController {
     if (phase != CallUiPhase.outgoingRinging) return;
     CallFlowLog.step("invite_on_wire", {"peer": CallFlowLog.shortPk(pk)});
     statusMessage = "Ringing…";
-    unawaited(CallRingtone.startOutgoing());
+    // Ringtone already started on invite_queued; keep playing until accept/end.
     _notify();
   }
 

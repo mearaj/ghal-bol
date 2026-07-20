@@ -121,19 +121,6 @@ pub fn incoming_ring_age_ms(now_ms: i64) -> Option<i64> {
     None
 }
 
-/// True while our outbound `invite` for [call_id] is still the active ringing call.
-pub fn outbound_invite_active(peer_pk_hex: &str, call_id: &str) -> bool {
-    let key = peer_pk_hex.trim().to_ascii_lowercase();
-    let cid = call_id.trim();
-    store()
-        .lock()
-        .ok()
-        .and_then(|g| {
-            g.get(&key)
-                .map(|c| c.phase == CallPhase::OutgoingRinging && c.call_id == cid)
-        })
-        .unwrap_or(false)
-}
 
 #[cfg(test)]
 pub fn phase_for_peer(peer_pk_hex: &str) -> CallPhase {

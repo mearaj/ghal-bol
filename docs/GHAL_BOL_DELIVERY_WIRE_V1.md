@@ -250,7 +250,7 @@ Canonical sender-side `delivery` values when `GHAL_BOL_DELIVERY_URL` is set:
 | `delivered` | Double black ✓✓ | `message.ack_to_sender` |
 | `read` | Double blue ✓✓ | `message.read_to_sender` |
 
-P2P libp2p DM (no delivery URL) keeps `pending` → `delivered` → `read` via `ack_received` / `ack_read` on `/ghal-bol/msg/1.0.0` — see [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md).
+P2P native connect DM (no delivery URL) keeps `pending` → `delivered` → `read` via `ack_received` / `ack_read` on `/ghal-bol/msg/1.0.0` — see [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md).
 
 ### `inbox.read` (client → server)
 

@@ -75,7 +75,7 @@ Previous: v1.0.0 — initial release (P2P encrypted chat, QR invites, coordinati
 
 Path: **App content → Foreground service permissions** (or the declaration shown when uploading a build that uses `FOREGROUND_SERVICE_*`).
 
-Ghal Bol runs libp2p in a separate Android process (`:p2p`, `GhalBolP2pService`). The same foreground service may combine types when the user has granted the matching runtime permissions:
+Ghal Bol runs native connect in a separate Android process (`:p2p`, `GhalBolP2pService`). The same foreground service may combine types when the user has granted the matching runtime permissions:
 
 | Permission | Play task checkbox | When used |
 |------------|-------------------|-----------|

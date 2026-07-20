@@ -1,10 +1,8 @@
 //! Linux network truth — Wi‑Fi operstate + default IPv4 route iface.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::p2p::network_transport::{OsDefaultTransport, OsNetworkSnapshot};
 
-static WIFI_OPER_UP: AtomicBool = AtomicBool::new(true);
 
 fn operstate_is_up(state: &str) -> bool {
     matches!(state.trim(), "up" | "unknown" | "dormant")
@@ -80,17 +78,7 @@ fn linux_default_ipv4_route_iface() -> Option<String> {
     best.map(|(_, iface)| iface)
 }
 
-/// Current Wi‑Fi operstate (any `wl*` interface up). Non‑Wi‑Fi desktops always true.
-pub fn wifi_oper_up() -> bool {
-    WIFI_OPER_UP.load(Ordering::Relaxed)
-}
 
-/// Poll once per network tick; returns true on down→up transition (Wi‑Fi back).
-pub fn poll_wifi_link_up_transition() -> bool {
-    let up = read_any_wifi_oper_up();
-    let prev = WIFI_OPER_UP.swap(up, Ordering::Relaxed);
-    up && !prev
-}
 
 /// Authoritative Linux connectivity snapshot for `LocalNetworkProfile`.
 pub fn probe_connectivity_truth() -> OsNetworkSnapshot {

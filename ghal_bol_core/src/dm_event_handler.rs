@@ -309,7 +309,7 @@ fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
     }
 
     let mut skip_unread =
-        crate::p2p::chat_server::inbound_suppresses_hub_unread(&sender_pk, &from_key);
+        crate::connect::ui_session::inbound_suppresses_hub_unread(&sender_pk, &from_key);
 
     let contact = if is_valid_public_key_hex(&sender_pk) {
         find_by_public_key(ns, &sender_pk).ok().flatten()

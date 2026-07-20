@@ -342,16 +342,6 @@ pub fn packed_to_i420(
     })
 }
 
-/// Drop frame slots for a call that has ended.
-pub fn clear_decoded_frames(call_id: &str) {
-    if let Ok(mut m) = remote_registry().lock() {
-        m.remove(call_id);
-    }
-    if let Ok(mut m) = local_registry().lock() {
-        m.remove(call_id);
-    }
-    render::release_call(call_id);
-}
 
 /// Shm path + dimensions for GPU texture registration (Flutter embedder).
 pub fn texture_shm_info(call_id: &str, track: &str) -> Option<render::TextureShmInfo> {
