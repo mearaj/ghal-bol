@@ -7,15 +7,14 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::select;
 
-use super::lan_discovery::{spawn_event_forwarder, LanDiscovery, LanDiscoveryEvent};
+use super::lan_discovery::{LanDiscovery, LanDiscoveryEvent, spawn_event_forwarder};
 use super::outbound::process_outbound_cmds;
 use super::outbox_acks::run_ack_upkeep;
-use super::peer_session::{
-    accept_inbound_tcp, dial_peer_tcp, PeerSessionRegistry, SessionWriters,
-};
-use super::session::{chrono_now_ms, SessionState};
+use super::peer_session::{PeerSessionRegistry, SessionWriters, accept_inbound_tcp, dial_peer_tcp};
+use super::session::{SessionState, chrono_now_ms};
 use super::types::{
-    ConnectConfig, ConnectError, GossipChatEvent, OutboundCmd, SessionPeer, MAX_OUTBOUND_CMDS_PER_TICK,
+    ConnectConfig, ConnectError, GossipChatEvent, MAX_OUTBOUND_CMDS_PER_TICK, OutboundCmd,
+    SessionPeer,
 };
 use crate::dm_transport::DmDialAddr;
 use crate::p2p::native_log;
@@ -66,7 +65,13 @@ pub async fn run_connect_node_with_std_io(
     let listen_port = local_addr.port();
     let listen_str = format!("{}:{}", local_addr.ip(), local_addr.port());
     let _ = events_tx.send(GossipChatEvent::Listening(listen_str.clone()));
-    native_log::info("connect", format!("TCP listen {listen_str} pattern={}", super::noise_session::NOISE_PATTERN));
+    native_log::info(
+        "connect",
+        format!(
+            "TCP listen {listen_str} pattern={}",
+            super::noise_session::NOISE_PATTERN
+        ),
+    );
 
     let mut discovery = LanDiscovery::new().map_err(ConnectError::Other)?;
     for p in &config.dm_peers {
@@ -136,7 +141,9 @@ pub async fn run_connect_node_with_std_io(
                         tokio::spawn(dial_peer_tcp(reg, sess, id, ev, peer, host, port));
                     }
                 }
-                LanDiscoveryEvent::Expired { identity_commitment } => {
+                LanDiscoveryEvent::Expired {
+                    identity_commitment,
+                } => {
                     if let Some(peer) = discovery
                         .lock()
                         .ok()

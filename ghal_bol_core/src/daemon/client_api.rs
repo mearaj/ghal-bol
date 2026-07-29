@@ -26,6 +26,10 @@ pub enum DaemonMethod {
     NetworkSnapshot,
     P2pPoll,
     P2pSendTextDm,
+    P2pSendVoiceDm,
+    P2pSendAttachment,
+    P2pAttachmentFetch,
+    P2pAttachmentCancel,
     P2pCallSignal,
     P2pCallMedia,
     P2pCallStatus,
@@ -44,6 +48,8 @@ pub enum DaemonMethod {
     P2pSendAckDm,
     P2pDialBootstrap,
     P2pRegisterDmPeer,
+    P2pSetAvailabilityStatus,
+    P2pGetAvailabilityStatus,
     /// Deprecated — use [`DaemonMethod::P2pSyncUiSession`].
     P2pSetAppAckReadEnabled,
     /// Deprecated — use [`DaemonMethod::P2pSyncUiSession`].
@@ -76,6 +82,10 @@ impl DaemonMethod {
             Self::NetworkSnapshot => "network_snapshot",
             Self::P2pPoll => "p2p_poll",
             Self::P2pSendTextDm => "p2p_send_text_dm",
+            Self::P2pSendVoiceDm => "p2p_send_voice_dm",
+            Self::P2pSendAttachment => "p2p_send_attachment",
+            Self::P2pAttachmentFetch => "p2p_attachment_fetch",
+            Self::P2pAttachmentCancel => "p2p_attachment_cancel",
             Self::P2pCallSignal => "p2p_call_signal",
             Self::P2pCallMedia => "p2p_call_media",
             Self::P2pCallStatus => "p2p_call_status",
@@ -94,6 +104,8 @@ impl DaemonMethod {
             Self::P2pSendAckDm => "p2p_send_ack_dm",
             Self::P2pDialBootstrap => "p2p_dial_bootstrap",
             Self::P2pRegisterDmPeer => "p2p_register_dm_peer",
+            Self::P2pSetAvailabilityStatus => "p2p_set_availability_status",
+            Self::P2pGetAvailabilityStatus => "p2p_get_availability_status",
             Self::P2pSetAppAckReadEnabled => "p2p_set_app_ack_read_enabled",
             Self::P2pSetAppUiVisible => "p2p_set_app_ui_visible",
             Self::P2pSyncUiSession => "p2p_sync_ui_session",
@@ -122,6 +134,10 @@ impl DaemonMethod {
             "network_snapshot" => Self::NetworkSnapshot,
             "p2p_poll" => Self::P2pPoll,
             "p2p_send_text_dm" => Self::P2pSendTextDm,
+            "p2p_send_voice_dm" => Self::P2pSendVoiceDm,
+            "p2p_send_attachment" => Self::P2pSendAttachment,
+            "p2p_attachment_fetch" => Self::P2pAttachmentFetch,
+            "p2p_attachment_cancel" => Self::P2pAttachmentCancel,
             "p2p_call_signal" => Self::P2pCallSignal,
             "p2p_call_media" => Self::P2pCallMedia,
             "p2p_call_status" => Self::P2pCallStatus,
@@ -140,6 +156,8 @@ impl DaemonMethod {
             "p2p_send_ack_dm" => Self::P2pSendAckDm,
             "p2p_dial_bootstrap" => Self::P2pDialBootstrap,
             "p2p_register_dm_peer" => Self::P2pRegisterDmPeer,
+            "p2p_set_availability_status" => Self::P2pSetAvailabilityStatus,
+            "p2p_get_availability_status" => Self::P2pGetAvailabilityStatus,
             "p2p_set_app_ack_read_enabled" => Self::P2pSetAppAckReadEnabled,
             "p2p_set_app_ui_visible" => Self::P2pSetAppUiVisible,
             "p2p_sync_ui_session" => Self::P2pSyncUiSession,
@@ -169,6 +187,10 @@ impl DaemonMethod {
         Self::NetworkSnapshot,
         Self::P2pPoll,
         Self::P2pSendTextDm,
+        Self::P2pSendVoiceDm,
+        Self::P2pSendAttachment,
+        Self::P2pAttachmentFetch,
+        Self::P2pAttachmentCancel,
         Self::P2pCallSignal,
         Self::P2pCallMedia,
         Self::P2pCallStatus,
@@ -187,6 +209,8 @@ impl DaemonMethod {
         Self::P2pSendAckDm,
         Self::P2pDialBootstrap,
         Self::P2pRegisterDmPeer,
+        Self::P2pSetAvailabilityStatus,
+        Self::P2pGetAvailabilityStatus,
         Self::P2pSetAppAckReadEnabled,
         Self::P2pSetAppUiVisible,
         Self::P2pSyncUiSession,
@@ -309,6 +333,18 @@ pub fn dispatch_method(method: DaemonMethod, params: &Value) -> Result<Value, St
             let text = param_str(params, "text")?;
             Ok(p2p_runtime::p2p_send_text_dm(&recipient, &text))
         }
+        DaemonMethod::P2pSendVoiceDm => {
+            let recipient = param_str(params, "recipient_public_key_hex")?;
+            Ok(p2p_runtime::p2p_send_voice_dm_from_config(
+                &recipient, params,
+            ))
+        }
+        DaemonMethod::P2pSendAttachment => {
+            let recipient = param_str(params, "recipient_public_key_hex")?;
+            Ok(p2p_runtime::p2p_send_attachment(&recipient, params))
+        }
+        DaemonMethod::P2pAttachmentFetch => Ok(p2p_runtime::p2p_attachment_fetch(params)),
+        DaemonMethod::P2pAttachmentCancel => Ok(p2p_runtime::p2p_attachment_cancel(params)),
         DaemonMethod::P2pCallSignal => Ok(p2p_runtime::p2p_call_signal(params)),
         DaemonMethod::P2pCallMedia => Ok(p2p_runtime::p2p_call_media(params)),
         DaemonMethod::P2pCallStatus => Ok(p2p_runtime::p2p_call_status(params)),
@@ -336,7 +372,9 @@ pub fn dispatch_method(method: DaemonMethod, params: &Value) -> Result<Value, St
             crate::daemon::ui_process_exiting();
             Ok(serde_json::json!({ "ok": true }))
         }
-        DaemonMethod::P2pTranscriptLoadMerged => Ok(p2p_runtime::p2p_transcript_load_merged(params)),
+        DaemonMethod::P2pTranscriptLoadMerged => {
+            Ok(p2p_runtime::p2p_transcript_load_merged(params))
+        }
         DaemonMethod::P2pCallVideo => Ok(p2p_runtime::p2p_call_video(params)),
         DaemonMethod::P2pCallVideoFrame => Ok(p2p_runtime::p2p_call_video_frame(params)),
         DaemonMethod::P2pCallVideoTexture => Ok(p2p_runtime::p2p_call_video_texture(params)),
@@ -380,6 +418,11 @@ pub fn dispatch_method(method: DaemonMethod, params: &Value) -> Result<Value, St
             let pk = param_str(params, "public_key_hex")?;
             Ok(p2p_runtime::p2p_register_dm_peer(&pk))
         }
+        DaemonMethod::P2pSetAvailabilityStatus => {
+            let status = params.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            Ok(p2p_runtime::p2p_set_availability_status(status))
+        }
+        DaemonMethod::P2pGetAvailabilityStatus => Ok(p2p_runtime::p2p_get_availability_status()),
         DaemonMethod::P2pSetAppAckReadEnabled => {
             let enabled = params
                 .get("enabled")
@@ -442,7 +485,9 @@ pub fn dispatch_method(method: DaemonMethod, params: &Value) -> Result<Value, St
                 .get("include_expired")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            Ok(crate::delivery_runtime::delivery_mailbox_list(include_expired))
+            Ok(crate::delivery_runtime::delivery_mailbox_list(
+                include_expired,
+            ))
         }
         DaemonMethod::DeliveryExtendTtl => {
             let message_id = param_str(params, "message_id")?;
@@ -457,7 +502,9 @@ pub fn dispatch_method(method: DaemonMethod, params: &Value) -> Result<Value, St
         }
         DaemonMethod::DeliveryResendMessage => {
             let message_id = param_str(params, "message_id")?;
-            Ok(crate::delivery_runtime::delivery_resend_message(&message_id))
+            Ok(crate::delivery_runtime::delivery_resend_message(
+                &message_id,
+            ))
         }
     }
 }
@@ -487,7 +534,11 @@ mod tests {
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         for method in DaemonMethod::ALL {
-            assert!(seen.insert(method.wire_name()), "duplicate {}", method.wire_name());
+            assert!(
+                seen.insert(method.wire_name()),
+                "duplicate {}",
+                method.wire_name()
+            );
         }
         assert_eq!(seen.len(), DaemonMethod::ALL.len());
     }
@@ -503,7 +554,7 @@ mod tests {
     #[test]
     fn all_method_count_matches_dart_mirror() {
         /// Keep in sync with `ghal_bol_ui/lib/daemon_client_api.dart` `DaemonMethod.all`.
-        const DART_MIRROR_METHOD_COUNT: usize = 41;
+        const DART_MIRROR_METHOD_COUNT: usize = 47;
         assert_eq!(DaemonMethod::ALL.len(), DART_MIRROR_METHOD_COUNT);
     }
 

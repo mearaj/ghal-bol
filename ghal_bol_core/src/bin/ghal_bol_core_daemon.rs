@@ -33,10 +33,10 @@ fn main() {
 fn spawn_unlock_reminder() {
     #[cfg(target_os = "linux")]
     {
-        use ghal_bol_core::detect_keystore_app_namespace;
         use ghal_bol_core::daemon::{ui_presence_active, ui_session_active};
-        use ghal_bol_core::wake_for_unlock;
+        use ghal_bol_core::detect_keystore_app_namespace;
         use ghal_bol_core::session_unlocked;
+        use ghal_bol_core::wake_for_unlock;
 
         let Some(app_id) = detect_keystore_app_namespace() else {
             return;

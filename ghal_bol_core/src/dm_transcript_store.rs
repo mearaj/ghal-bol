@@ -103,16 +103,37 @@ pub fn thread_revision_for_keys(app_namespace: &str, conversation_keys: &[String
 pub struct TranscriptThreadView {
     pub revision: u64,
     pub lines: Vec<StoredChatLine>,
+    /// True when older lines exist before the returned window (paginated load only).
+    pub has_more: bool,
 }
 
-pub fn thread_view(
+/// Paginated thread view: when [limit] is `Some(n)`, returns at most the newest `n`
+/// lines and sets `has_more` if older lines exist. `None` returns the full thread
+/// (`has_more = false`). Lines stay in ascending (oldest-first) order either way.
+///
+/// The UI grows `limit` on scroll-up rather than fetching the entire transcript at
+/// once; the full merged set is still read from disk, but only a bounded window is
+/// serialized to the UI, which is the dominant rendering cost.
+pub fn thread_view_limited(
     app_namespace: &str,
     conversation_keys: &[String],
     match_inbound_from_peer_id: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<TranscriptThreadView, TranscriptStoreError> {
-    let lines = load_merged(app_namespace, conversation_keys, match_inbound_from_peer_id)?;
+    let all = load_merged(app_namespace, conversation_keys, match_inbound_from_peer_id)?;
     let revision = thread_revision_for_keys(app_namespace, conversation_keys);
-    Ok(TranscriptThreadView { revision, lines })
+    let (lines, has_more) = match limit {
+        Some(n) if n < all.len() => {
+            let start = all.len() - n;
+            (all[start..].to_vec(), true)
+        }
+        _ => (all, false),
+    };
+    Ok(TranscriptThreadView {
+        revision,
+        lines,
+        has_more,
+    })
 }
 
 /// One in-process mutex + cross-process flock for the duration of a read/modify/write.
@@ -174,6 +195,15 @@ pub struct StoredChatLine {
     /// Inbound: when this device first accepted the text. Outbound: peer's `ack_received.received_at_ms`.
     pub received_at_ms: Option<i64>,
     pub read_ack_sent: bool,
+    /// `"text"` (default), `"voice"`, `"attachment_offer"`, …
+    pub msg_kind: String,
+    pub duration_ms: Option<u32>,
+    /// Local Opus/file path after decrypt (per-device; not on the wire).
+    pub audio_path: Option<String>,
+    pub file_name: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub local_path: Option<String>,
 }
 
 impl StoredChatLine {
@@ -199,6 +229,28 @@ impl StoredChatLine {
         if self.read_ack_sent {
             m["read_ack_sent"] = Value::Bool(true);
         }
+        let kind = self.msg_kind.trim();
+        if !kind.is_empty() && kind != "text" {
+            m["msg_kind"] = Value::String(kind.to_string());
+        }
+        if let Some(d) = self.duration_ms {
+            m["duration_ms"] = Value::Number(d.into());
+        }
+        if let Some(p) = &self.audio_path {
+            m["audio_path"] = Value::String(p.clone());
+        }
+        if let Some(n) = &self.file_name {
+            m["file_name"] = Value::String(n.clone());
+        }
+        if let Some(mt) = &self.mime_type {
+            m["mime_type"] = Value::String(mt.clone());
+        }
+        if let Some(sz) = self.size_bytes {
+            m["size_bytes"] = Value::Number(sz.into());
+        }
+        if let Some(p) = &self.local_path {
+            m["local_path"] = Value::String(p.clone());
+        }
         m
     }
 
@@ -208,7 +260,40 @@ impl StoredChatLine {
         if local_id.is_empty() {
             return None;
         }
-        let text = obj.get("text")?.as_str()?.to_string();
+        let text = obj
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let file_name = obj
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let t = text.trim();
+                t.strip_prefix('📎').map(|rest| rest.trim()).and_then(|name| {
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name.to_string())
+                    }
+                })
+            });
+        let raw_kind = obj
+            .get("msg_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let msg_kind = if !raw_kind.is_empty() && raw_kind != "text" {
+            raw_kind.to_string()
+        } else if file_name.is_some() || text.trim_start().starts_with('📎') {
+            // Legacy / clobbered rows lost msg_kind — still render as attachments.
+            "attachment_offer".to_string()
+        } else {
+            "text".to_string()
+        };
         Some(Self {
             local_id: local_id.to_string(),
             text,
@@ -226,6 +311,25 @@ impl StoredChatLine {
             created_at_ms: obj.get("created_at_ms").and_then(|v| v.as_i64()),
             received_at_ms: obj.get("received_at_ms").and_then(|v| v.as_i64()),
             read_ack_sent: obj.get("read_ack_sent").and_then(|v| v.as_bool()) == Some(true),
+            msg_kind,
+            duration_ms: obj
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32),
+            audio_path: obj
+                .get("audio_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            file_name,
+            mime_type: obj
+                .get("mime_type")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            size_bytes: obj.get("size_bytes").and_then(|v| v.as_u64()),
+            local_path: obj
+                .get("local_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         })
     }
 }
@@ -301,6 +405,7 @@ fn delivery_rank(delivery: &str) -> i32 {
         "failed" => 1,
         "delivered" => 2,
         "read" => 3,
+        "downloaded" => 3,
         _ => 0,
     }
 }
@@ -325,12 +430,7 @@ fn pick_better_duplicate(a: &StoredChatLine, b: &StoredChatLine) -> StoredChatLi
 fn line_sort_key(line: &StoredChatLine) -> (i64, String, String) {
     (
         line.created_at_ms.unwrap_or(0),
-        line
-            .message_id
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_string(),
+        line.message_id.as_deref().unwrap_or("").trim().to_string(),
         line.local_id.clone(),
     )
 }
@@ -734,6 +834,50 @@ pub fn patch_outgoing_received_at(
     Ok(changed)
 }
 
+pub fn patch_attachment_local_path(
+    app_namespace: &str,
+    conversation_key: &str,
+    message_id: &str,
+    local_path: &str,
+) -> Result<bool, TranscriptStoreError> {
+    let mid = message_id.trim();
+    let path_value = local_path.trim();
+    if mid.is_empty() || conversation_key.trim().is_empty() || path_value.is_empty() {
+        return Ok(false);
+    }
+    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
+    let mut all = read_root_unlocked(&path)?;
+    let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
+        return Ok(false);
+    };
+    let keys = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
+    let mut changed = false;
+    for ck in keys {
+        let Some(thread) = ns_obj.get_mut(ck.as_str()).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for item in thread.iter_mut() {
+            let Some(parsed) = StoredChatLine::from_json(item) else {
+                continue;
+            };
+            if parsed.message_id.as_deref().unwrap_or("").trim() == mid
+                && parsed.msg_kind.trim() == "attachment_offer"
+                && parsed.local_path.as_deref().unwrap_or("") != path_value
+            {
+                let mut next = parsed;
+                next.local_path = Some(path_value.to_string());
+                *item = next.to_json();
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        write_root_unlocked(&path, &all)?;
+        bump_transcript_revision(app_namespace, conversation_key);
+    }
+    Ok(changed)
+}
+
 pub fn patch_inbound_read_ack_sent_for_thread(
     app_namespace: &str,
     conversation_key: &str,
@@ -887,6 +1031,13 @@ mod tests {
             created_at_ms: Some(1000),
             received_at_ms: None,
             read_ack_sent: false,
+            msg_kind: "text".into(),
+            duration_ms: None,
+            audio_path: None,
+            file_name: None,
+            mime_type: None,
+            size_bytes: None,
+            local_path: None,
         };
         append_if_new(ns, pk, line).unwrap();
         assert!(patch_outgoing_delivery(ns, pk, "mid-sent", "sent").unwrap());
@@ -906,6 +1057,13 @@ mod tests {
             created_at_ms: Some(100),
             received_at_ms: None,
             read_ack_sent: false,
+            msg_kind: "text".into(),
+            duration_ms: None,
+            audio_path: None,
+            file_name: None,
+            mime_type: None,
+            size_bytes: None,
+            local_path: None,
         };
         let read = StoredChatLine {
             delivery: "read".into(),
@@ -917,6 +1075,62 @@ mod tests {
         // WAN ack_received after LAN ack_read must not downgrade
         let picked2 = pick_better_duplicate(&read, &delivered);
         assert_eq!(picked2.delivery, "read");
+    }
+
+    #[test]
+    fn thread_view_limited_returns_newest_window_with_has_more() {
+        use crate::c_ffi::configure_android_data_directory;
+        use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
+        use tempfile::TempDir;
+
+        let _guard = crate::c_ffi::test_storage_isolation_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let td = TempDir::new().unwrap();
+        configure_android_data_directory(td.path().to_str().unwrap());
+        let ns = "dev.transcript.page";
+        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
+        let pk = "peerpk";
+        for i in 0..5 {
+            append_if_new(
+                ns,
+                pk,
+                StoredChatLine {
+                    local_id: format!("l{i}"),
+                    text: format!("m{i}"),
+                    outgoing: false,
+                    from: Some("peer".into()),
+                    message_id: Some(format!("mid{i}")),
+                    delivery: "pending".into(),
+                    created_at_ms: Some(1000 + i as i64),
+                    received_at_ms: Some(1000 + i as i64),
+                    read_ack_sent: false,
+                    msg_kind: "text".into(),
+                    duration_ms: None,
+                    audio_path: None,
+                    file_name: None,
+                    mime_type: None,
+                    size_bytes: None,
+                    local_path: None,
+                },
+            )
+            .unwrap();
+        }
+        // Window of 2 → newest two lines, has_more true.
+        let page = thread_view_limited(ns, &[pk.to_string()], None, Some(2)).unwrap();
+        assert_eq!(page.lines.len(), 2);
+        assert_eq!(page.lines[0].text, "m3");
+        assert_eq!(page.lines[1].text, "m4");
+        assert!(page.has_more);
+        // Window >= total → full thread, has_more false.
+        let full = thread_view_limited(ns, &[pk.to_string()], None, Some(10)).unwrap();
+        assert_eq!(full.lines.len(), 5);
+        assert!(!full.has_more);
+        // None → full thread, has_more false.
+        let none = thread_view_limited(ns, &[pk.to_string()], None, None).unwrap();
+        assert_eq!(none.lines.len(), 5);
+        assert!(!none.has_more);
     }
 
     #[test]
@@ -943,6 +1157,13 @@ mod tests {
             created_at_ms: Some(2000),
             received_at_ms: None,
             read_ack_sent: false,
+            msg_kind: "text".into(),
+            duration_ms: None,
+            audio_path: None,
+            file_name: None,
+            mime_type: None,
+            size_bytes: None,
+            local_path: None,
         };
         let late = StoredChatLine {
             local_id: "early-recv".into(),
@@ -954,6 +1175,13 @@ mod tests {
             created_at_ms: Some(1000),
             received_at_ms: Some(1500),
             read_ack_sent: false,
+            msg_kind: "text".into(),
+            duration_ms: None,
+            audio_path: None,
+            file_name: None,
+            mime_type: None,
+            size_bytes: None,
+            local_path: None,
         };
         append_if_new(ns, "peerpk", early).unwrap();
         append_if_new(ns, "peerpk", late).unwrap();

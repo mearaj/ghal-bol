@@ -6,13 +6,10 @@ use super::chat_room_session::read_ack_cutoff_ms;
 use super::frames::{
     build_call_signal_frame, build_pending_outbound_frame, new_ack_msg_id, send_frame_to_peer,
 };
-use super::peer_session::{writer_open_for_peer, SessionWriters};
+use super::peer_session::{SessionWriters, writer_open_for_peer};
 use super::prelude::*;
-use super::session::{chrono_now_ms, SessionState};
-use super::types::{
-    GossipChatEvent, PendingOutbound, SessionPeer,
-    OUTBOX_RESEND_INTERVAL_MS,
-};
+use super::session::{SessionState, chrono_now_ms};
+use super::types::{GossipChatEvent, OUTBOX_RESEND_INTERVAL_MS, PendingOutbound, SessionPeer};
 use super::ui_session::{may_send_in_room_read_ack, read_ack_catchup_throttled};
 
 const READ_ACK_UPKEEP_MAX_OPS: usize = 32;
@@ -176,8 +173,7 @@ fn seed_read_acks_for_peer_from_transcript(
     else {
         return;
     };
-    let lookup_keys =
-        crate::dm_event_handler::inbound_transcript_lookup_keys(ns, peer, peer, peer);
+    let lookup_keys = crate::dm_event_handler::inbound_transcript_lookup_keys(ns, peer, peer, peer);
     let Ok(rows) = crate::dm_transcript_store::load_merged(ns, &lookup_keys, Some(peer)) else {
         return;
     };
@@ -192,7 +188,11 @@ fn seed_read_acks_for_peer_from_transcript(
         if received_at > cutoff_ms {
             continue;
         }
-        let Some(message_id) = row.message_id.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        let Some(message_id) = row
+            .message_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         else {
             continue;
         };
@@ -238,7 +238,14 @@ pub(crate) async fn run_ack_upkeep(
             seed_read_acks_for_peer_from_transcript(session.as_ref(), peer, cutoff);
         }
     }
-    run_ack_upkeep_limited(session, writers, connected_peers, READ_ACK_UPKEEP_MAX_OPS, true).await;
+    run_ack_upkeep_limited(
+        session,
+        writers,
+        connected_peers,
+        READ_ACK_UPKEEP_MAX_OPS,
+        true,
+    )
+    .await;
 }
 
 async fn run_ack_upkeep_limited(
@@ -349,7 +356,10 @@ pub(crate) async fn resync_pending_outbox(
         let frame = match build_pending_outbound_frame(session.as_ref(), &p) {
             Ok(f) => f,
             Err(e) => {
-                native_log::warn("outbox", format!("resync skip msg_id={}: {e}", p.message_id));
+                native_log::warn(
+                    "outbox",
+                    format!("resync skip msg_id={}: {e}", p.message_id),
+                );
                 continue;
             }
         };
@@ -374,11 +384,10 @@ pub(crate) async fn resync_outbox_burst_for_peer(
     events_tx: Option<std::sync::mpsc::Sender<GossipChatEvent>>,
 ) {
     let now = chrono_now_ms();
-    let rows: Vec<PendingOutbound> = session.pending_outbox_for_peer(&peer)
+    let rows: Vec<PendingOutbound> = session
+        .pending_outbox_for_peer(&peer)
         .into_iter()
-        .filter(|p| {
-            !p.on_wire || now.saturating_sub(p.last_send_ms) >= OUTBOX_RESEND_INTERVAL_MS
-        })
+        .filter(|p| !p.on_wire || now.saturating_sub(p.last_send_ms) >= OUTBOX_RESEND_INTERVAL_MS)
         .collect();
     if rows.is_empty() {
         return;
@@ -470,7 +479,14 @@ pub(crate) async fn run_ack_upkeep_limited_delivery(
     writers: SessionWriters,
     connected_peers: &[SessionPeer],
 ) {
-    run_ack_upkeep_limited(session, writers, connected_peers, READ_ACK_UPKEEP_MAX_OPS, false).await;
+    run_ack_upkeep_limited(
+        session,
+        writers,
+        connected_peers,
+        READ_ACK_UPKEEP_MAX_OPS,
+        false,
+    )
+    .await;
 }
 
 pub(crate) async fn handle_send_ack_cmd(

@@ -154,7 +154,6 @@ pub fn track_call(call_id: &str) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

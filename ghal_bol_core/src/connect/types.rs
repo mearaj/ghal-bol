@@ -8,7 +8,6 @@ use thiserror::Error;
 pub const CONNECT_MDNS_SERVICE: &str = "_ghalbol._tcp.local.";
 pub const DEFAULT_GOSSIP_TOPIC: &str = "ghal-bol-chat";
 
-
 /// Remote peer key — normalized contact identity wire (no PeerId).
 pub type SessionPeer = String;
 
@@ -77,6 +76,7 @@ pub enum GossipChatEvent {
         sender_public_key_hex: String,
         created_at_ms: i64,
         received_at_ms: Option<i64>,
+        duration_ms: Option<u32>,
     },
     PeerIdentified {
         peer_id: SessionPeer,
@@ -144,6 +144,36 @@ pub enum OutboundCmd {
         created_at_ms: i64,
         done: Option<std::sync::mpsc::Sender<Result<(), String>>>,
     },
+    SendVoice {
+        recipient_public_key_hex: String,
+        message_id: String,
+        created_at_ms: i64,
+        duration_ms: u32,
+        opus_blob: Vec<u8>,
+        done: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+    },
+    SendAttachmentOffer {
+        recipient_public_key_hex: String,
+        message_id: String,
+        created_at_ms: i64,
+        preview_text: String,
+        offer_json: Value,
+        done: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+    },
+    SendAvailabilityStatus {
+        recipient_public_key_hex: String,
+        status: Option<String>,
+        updated_at_ms: i64,
+    },
+    FetchAttachment {
+        peer_public_key_hex: String,
+        offer_id: String,
+        save_path: Option<String>,
+        done: std::sync::mpsc::Sender<Result<String, String>>,
+    },
+    CancelAttachment {
+        blob_id: String,
+    },
     SendAck {
         recipient_public_key_hex: String,
         ref_id: String,
@@ -206,6 +236,10 @@ pub(crate) struct PendingOutbound {
     pub(crate) peer: SessionPeer,
     pub(crate) recipient_public_key_hex: String,
     pub(crate) text: String,
+    pub(crate) msg_kind: String,
+    pub(crate) attachment_offer: Option<Value>,
+    pub(crate) voice_opus: Option<Vec<u8>>,
+    pub(crate) duration_ms: Option<u32>,
     pub(crate) created_at_ms: i64,
     pub(crate) last_send_ms: i64,
     pub(crate) first_on_wire_ms: i64,

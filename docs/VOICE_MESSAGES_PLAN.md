@@ -1,10 +1,10 @@
 # Voice messages — implementation plan
 
-**Status:** Plan only — **not shipped.** Agents implement from this doc only when the user explicitly asks.
+**Status:** Implemented in Rust and Flutter; continue using this doc for limits and follow-up testing.
 
 **Depends on:** [DESIGN.md](DESIGN.md), [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md), [AGENTS.md](../AGENTS.md) (golden rules 1, 7).
 
-**Related (later):** [ATTACHMENTS_PLAN.md](ATTACHMENTS_PLAN.md) — sender-served files; different transport model.
+**Related:** [ATTACHMENTS_PLAN.md](ATTACHMENTS_PLAN.md) — same E2E mailbox rail for normal-sized files; LAN mux only for oversized local transfers.
 
 ---
 

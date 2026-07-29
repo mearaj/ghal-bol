@@ -13,6 +13,10 @@ abstract final class DaemonMethod {
   static const networkSnapshot = "network_snapshot";
   static const p2pPoll = "p2p_poll";
   static const p2pSendTextDm = "p2p_send_text_dm";
+  static const p2pSendVoiceDm = "p2p_send_voice_dm";
+  static const p2pSendAttachment = "p2p_send_attachment";
+  static const p2pAttachmentFetch = "p2p_attachment_fetch";
+  static const p2pAttachmentCancel = "p2p_attachment_cancel";
   static const p2pCallSignal = "p2p_call_signal";
   static const p2pCallMedia = "p2p_call_media";
   static const p2pCallStatus = "p2p_call_status";
@@ -31,6 +35,8 @@ abstract final class DaemonMethod {
   static const p2pSendAckDm = "p2p_send_ack_dm";
   static const p2pDialBootstrap = "p2p_dial_bootstrap";
   static const p2pRegisterDmPeer = "p2p_register_dm_peer";
+  static const p2pSetAvailabilityStatus = "p2p_set_availability_status";
+  static const p2pGetAvailabilityStatus = "p2p_get_availability_status";
   static const p2pSetAppAckReadEnabled = "p2p_set_app_ack_read_enabled";
   static const p2pSetAppUiVisible = "p2p_set_app_ui_visible";
   static const p2pSyncUiSession = "p2p_sync_ui_session";
@@ -58,6 +64,10 @@ abstract final class DaemonMethod {
     networkSnapshot,
     p2pPoll,
     p2pSendTextDm,
+    p2pSendVoiceDm,
+    p2pSendAttachment,
+    p2pAttachmentFetch,
+    p2pAttachmentCancel,
     p2pCallSignal,
     p2pCallMedia,
     p2pCallStatus,
@@ -76,6 +86,8 @@ abstract final class DaemonMethod {
     p2pSendAckDm,
     p2pDialBootstrap,
     p2pRegisterDmPeer,
+    p2pSetAvailabilityStatus,
+    p2pGetAvailabilityStatus,
     p2pSetAppAckReadEnabled,
     p2pSetAppUiVisible,
     p2pSyncUiSession,

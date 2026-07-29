@@ -24,7 +24,13 @@ Informal product notes — **not** agent implementation specs. Agents must **not
 
 ## Planned / not shipped
 
-- Change password flow
-- Chat history: paginated load on scroll (avoid empty gaps when scroll math misses the fetch trigger; do not load entire transcript at once)
-- Attachments (docs, photos, etc.)
-- Status feature (WhatsApp-style)
+- (none for Scope A app features — change password, transcript pagination, voice notes, attachments, and availability status are implemented; see their docs under `docs/`)
+
+## Shipped (Scope A backlog)
+
+- Change password — [change_password_flow.md](change_password_flow.md)
+- Create-time encrypted keystore backup — [IDENTITY.md](IDENTITY.md)
+- Chat history pagination — [chat_history_pagination.md](chat_history_pagination.md)
+- Voice messages — [VOICE_MESSAGES_PLAN.md](VOICE_MESSAGES_PLAN.md)
+- Attachments (E2E mailbox; LAN mux for oversized) — [ATTACHMENTS_PLAN.md](ATTACHMENTS_PLAN.md)
+- Availability status (roster text, not Stories) — [status.md](status.md)

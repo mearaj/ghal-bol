@@ -33,7 +33,9 @@ unsafe fn utf8(c: *const c_char, ctx: &'static str) -> Result<String, String> {
 ///
 /// Requires an unlocked identity session from [`crate::ghal_bol_core_ffi_create_or_unlock_identity`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_start(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_start(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "p2p config") } {
             Ok(s) => s,
@@ -75,6 +77,92 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_send_text_dm(
             Err(e) => return json_err(e),
         };
         json_ok(p2p_runtime::p2p_send_text_dm(&recipient, &text))
+    };
+    run()
+}
+
+/// Send a signed, encrypted voice DM. Config JSON:
+/// `{ "duration_ms": 1234, "opus_b64": "..." }` or `{ "duration_ms": 1234, "pcm_path": "..." }`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_send_voice_dm(
+    recipient_public_key_hex_utf8: *const c_char,
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let recipient = match unsafe { utf8(recipient_public_key_hex_utf8, "recipient public key") }
+        {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let cfg_s = match unsafe { utf8(config_json_utf8, "voice config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("voice config json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_send_voice_dm_from_config(&recipient, &v))
+    };
+    run()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_send_attachment(
+    recipient_public_key_hex_utf8: *const c_char,
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let recipient = match unsafe { utf8(recipient_public_key_hex_utf8, "recipient public key") }
+        {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let cfg_s = match unsafe { utf8(config_json_utf8, "attachment config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("attachment config json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_send_attachment(&recipient, &v))
+    };
+    run()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_attachment_fetch(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "attachment fetch config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("attachment fetch json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_attachment_fetch(&v))
+    };
+    run()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_attachment_cancel(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let cfg_s = match unsafe { utf8(config_json_utf8, "attachment cancel config") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let v: serde_json::Value = match serde_json::from_str(&cfg_s) {
+            Ok(v) => v,
+            Err(e) => return json_err(format!("attachment cancel json: {e}")),
+        };
+        json_ok(p2p_runtime::p2p_attachment_cancel(&v))
     };
     run()
 }
@@ -147,9 +235,30 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_register_dm_peer(
     run()
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_set_availability_status(
+    status_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let status = match unsafe { utf8(status_utf8, "availability_status") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        json_ok(p2p_runtime::p2p_set_availability_status(&status))
+    };
+    run()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_get_availability_status() -> *mut c_char {
+    json_ok(p2p_runtime::p2p_get_availability_status())
+}
+
 /// When `enabled` is 0, native stops all `ack_read` (background / UI destroyed). Delivery acks continue.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_set_app_ack_read_enabled(enabled: u8) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_core_ffi_p2p_set_app_ack_read_enabled(
+    enabled: u8,
+) -> *mut c_char {
     json_ok(p2p_runtime::p2p_set_app_ack_read_enabled(enabled != 0))
 }
 

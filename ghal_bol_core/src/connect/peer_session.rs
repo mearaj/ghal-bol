@@ -10,9 +10,9 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::channel_mux::{CHANNEL_KEEPALIVE, CHANNEL_MSG, MUX_HEADER_LEN};
-use super::frames::{dispatch_mux_payload, on_session_ready, WireDispatchCtx};
-use super::noise_session::{transport_static_secret_for_identity, ConnectNoiseSession};
-use super::session::{chrono_now_ms, SessionState};
+use super::frames::{WireDispatchCtx, dispatch_mux_payload, on_session_ready};
+use super::noise_session::{ConnectNoiseSession, transport_static_secret_for_identity};
+use super::session::{SessionState, chrono_now_ms};
 use super::types::{GossipChatEvent, SessionPeer};
 use super::worker::{mark_peer_connected, mark_peer_disconnected};
 use crate::p2p::native_log;
@@ -86,20 +86,9 @@ impl PeerSessionRegistry {
         self.has_session(peer_wire) && self.local_identity_wire.as_str() < peer_wire.as_str()
     }
 
-    pub fn register_session(
-        &self,
-        peer: SessionPeer,
-        is_outbound: bool,
-        abort: Arc<AtomicBool>,
-    ) {
+    pub fn register_session(&self, peer: SessionPeer, is_outbound: bool, abort: Arc<AtomicBool>) {
         if let Ok(mut g) = self.sessions.write() {
-            g.insert(
-                peer,
-                ActiveSession {
-                    is_outbound,
-                    abort,
-                },
-            );
+            g.insert(peer, ActiveSession { is_outbound, abort });
         }
     }
 
@@ -184,13 +173,7 @@ pub(crate) async fn dial_peer_tcp(
         }
     };
     start_session(
-        registry,
-        session,
-        identity,
-        events_tx,
-        peer_wire,
-        true,
-        stream,
+        registry, session, identity, events_tx, peer_wire, true, stream,
     )
     .await;
 }

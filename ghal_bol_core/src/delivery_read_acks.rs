@@ -77,7 +77,9 @@ fn enqueue_pending(message_id: &str, sender_wire: &str) {
     let Ok(mut q) = pending_mx().lock() else {
         return;
     };
-    if q.iter().any(|p| p.message_id == mid && p.sender_wire == sender) {
+    if q.iter()
+        .any(|p| p.message_id == mid && p.sender_wire == sender)
+    {
         return;
     }
     q.push(PendingDeliveryReadAck {
@@ -326,8 +328,7 @@ fn row_eligible_for_leave_read(sender_pk: &str, message_id: &str, cutoff_ms: i64
         if r.message_id.as_deref().map(str::trim) != Some(message_id.trim()) {
             return false;
         }
-        inbound_received_at_for_row(r)
-            .is_some_and(|t| t <= cutoff_ms)
+        inbound_received_at_for_row(r).is_some_and(|t| t <= cutoff_ms)
     })
 }
 

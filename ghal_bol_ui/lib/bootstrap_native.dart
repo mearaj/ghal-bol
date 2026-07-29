@@ -547,6 +547,16 @@ class _IdentityScreenState extends State<IdentityScreen> {
         "pk": SessionFlowLog.shortPk(r.publicKeyHex),
         "peer_id": r.libp2pPeerId ?? "?",
       });
+      // App-generated identities have no other copy — force an encrypted backup
+      // before entering the app. Import paths already imply the user holds a key.
+      if (firstTimeSetup &&
+          _createNewIdentity &&
+          widget.onUnlockedSession != null &&
+          mounted) {
+        SessionFlowLog.step("force_backup_after_create");
+        await showMandatoryKeystoreBackupDialog(context);
+        if (!mounted) return;
+      }
       if (widget.onUnlockedSession != null) {
         SessionFlowLog.step("enter_app");
         widget.onUnlockedSession!(r);

@@ -12,9 +12,7 @@ use crate::identity_sign::verify_identity_signature;
 use crate::keystore_v1::DecryptedIdentity;
 use crate::public_key_util::normalize_contact_identity_wire;
 use crate::symmetric_seal::{open_symmetric, seal_symmetric};
-use crate::transport_kem_v1::{
-    CALL_CIPHER_TRANSPORT_V2, derive_call_sig_transport_message_key,
-};
+use crate::transport_kem_v1::{CALL_CIPHER_TRANSPORT_V2, derive_call_sig_transport_message_key};
 
 pub const CALL_SHARE: &str = "ghal_bol_call_v1";
 pub const CALL_FORMAT_VERSION: u64 = 1;
@@ -113,7 +111,10 @@ fn canonical_sign_bytes(env: &CallSigEnvelope) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&clone).map_err(|e| format!("canonical json: {e}"))
 }
 
-pub fn sign_call_envelope(env: &mut CallSigEnvelope, sender: &DecryptedIdentity) -> Result<(), String> {
+pub fn sign_call_envelope(
+    env: &mut CallSigEnvelope,
+    sender: &DecryptedIdentity,
+) -> Result<(), String> {
     let bytes = canonical_sign_bytes(env)?;
     let sig = sender.sign_message(&bytes)?;
     env.signature_hex = Some(hex::encode(sig));
@@ -272,9 +273,8 @@ fn open_call_payload_ciphertext(
     if sealed.first() != Some(&CALL_CIPHER_TRANSPORT_V2) {
         return Err("call ciphertext: unsupported cipher prefix".to_string());
     }
-    let transport = transport.ok_or_else(|| {
-        "call decrypt: transport kem context required for ciphertext".to_string()
-    })?;
+    let transport = transport
+        .ok_or_else(|| "call decrypt: transport kem context required for ciphertext".to_string())?;
     let key = derive_call_sig_transport_message_key(
         transport.local_sk,
         transport.peer_pk,

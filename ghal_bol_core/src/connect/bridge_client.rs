@@ -18,8 +18,10 @@ pub fn bridge_request(
 ) -> Result<BridgeRequestResult, String> {
     let caller = ident.identity_wire();
     let ch_url = format!("{}/v1/bridge/challenge", client.base_url());
-    let ch: serde_json::Value = client
-        .post_json(&ch_url, &serde_json::json!({ "caller_identity_wire": caller }))?;
+    let ch: serde_json::Value = client.post_json(
+        &ch_url,
+        &serde_json::json!({ "caller_identity_wire": caller }),
+    )?;
     let nonce_hex = ch["nonce_hex"].as_str().ok_or("missing nonce_hex")?;
     let mut nonce = [0u8; 32];
     nonce.copy_from_slice(&hex::decode(nonce_hex).map_err(|e| e.to_string())?);
@@ -56,12 +58,7 @@ pub fn bridge_request(
     })
 }
 
-fn bridge_request_bytes(
-    nonce: &[u8; 32],
-    caller: &str,
-    peer: &str,
-    call_id: &str,
-) -> Vec<u8> {
+fn bridge_request_bytes(nonce: &[u8; 32], caller: &str, peer: &str, call_id: &str) -> Vec<u8> {
     format!(
         "ghal_bol:bridge:request:v1\n{}\n{}\n{}\n{}",
         hex::encode(nonce),

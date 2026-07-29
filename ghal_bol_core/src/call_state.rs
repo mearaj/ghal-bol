@@ -121,7 +121,6 @@ pub fn incoming_ring_age_ms(now_ms: i64) -> Option<i64> {
     None
 }
 
-
 #[cfg(test)]
 pub fn phase_for_peer(peer_pk_hex: &str) -> CallPhase {
     snapshot_for_peer(peer_pk_hex).phase

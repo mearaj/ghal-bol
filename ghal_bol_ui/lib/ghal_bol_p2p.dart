@@ -18,13 +18,14 @@ abstract final class GhalBolP2p {
 
   static bool get usesDaemon => Platform.isLinux || Platform.isAndroid;
 
-  static bool get isAvailable =>
-      usesDaemon || GhalBolFfi.isP2pAvailable;
+  static bool get isAvailable => usesDaemon || GhalBolFfi.isP2pAvailable;
 
   static bool get isRequeueAvailable =>
       usesDaemon || GhalBolFfi.isP2pRequeueAvailable;
 
-  static Future<Map<String, dynamic>> startJson(Map<String, dynamic> config) async {
+  static Future<Map<String, dynamic>> startJson(
+    Map<String, dynamic> config,
+  ) async {
     if (usesDaemon) {
       await GhalBolDaemonClient.ensureDaemonRunning();
       return GhalBolDaemonClient.instance.call(
@@ -66,6 +67,31 @@ abstract final class GhalBolP2p {
     GhalBolFfi.p2pRegisterDmPeer("", publicKeyHex);
   }
 
+  static Future<Map<String, dynamic>> setAvailabilityStatus(
+    String status,
+  ) async {
+    if (usesDaemon) {
+      return GhalBolDaemonClient.instance.callState(
+        DaemonMethod.p2pSetAvailabilityStatus,
+        params: {"status": status},
+        ensureDaemon: true,
+      );
+    }
+    return GhalBolFfi.p2pSetAvailabilityStatus(status);
+  }
+
+  static Future<String?> getAvailabilityStatus() async {
+    final r = usesDaemon
+        ? await GhalBolDaemonClient.instance.callState(
+            DaemonMethod.p2pGetAvailabilityStatus,
+            ensureDaemon: true,
+          )
+        : GhalBolFfi.p2pGetAvailabilityStatus();
+    if (r["ok"] != true) return null;
+    final s = r["status"]?.toString().trim() ?? "";
+    return s.isEmpty ? null : s;
+  }
+
   static Future<Map<String, dynamic>> sendTextDm(
     String recipientPublicKeyHex,
     String text,
@@ -81,6 +107,65 @@ abstract final class GhalBolP2p {
       );
     }
     return GhalBolFfi.p2pSendTextDm(recipientPublicKeyHex, text);
+  }
+
+  static Future<Map<String, dynamic>> sendAttachment(
+    String recipientPublicKeyHex,
+    Map<String, dynamic> config,
+  ) async {
+    if (usesDaemon) {
+      return _callStateWithDaemonRecovery(
+        DaemonMethod.p2pSendAttachment,
+        params: {"recipient_public_key_hex": recipientPublicKeyHex, ...config},
+      );
+    }
+    return GhalBolFfi.p2pSendAttachment(recipientPublicKeyHex, config);
+  }
+
+  static Future<Map<String, dynamic>> attachmentFetch(
+    Map<String, dynamic> config,
+  ) async {
+    if (usesDaemon) {
+      return _callStateWithDaemonRecovery(
+        DaemonMethod.p2pAttachmentFetch,
+        params: config,
+      );
+    }
+    return GhalBolFfi.p2pAttachmentFetch(config);
+  }
+
+  static Future<Map<String, dynamic>> attachmentCancel(
+    Map<String, dynamic> config,
+  ) async {
+    if (usesDaemon) {
+      return _callStateWithDaemonRecovery(
+        DaemonMethod.p2pAttachmentCancel,
+        params: config,
+      );
+    }
+    return GhalBolFfi.p2pAttachmentCancel(config);
+  }
+
+  static Future<Map<String, dynamic>> sendVoiceDm({
+    required String recipientPublicKeyHex,
+    required int durationMs,
+    String? pcmPath,
+    String? opusB64,
+  }) async {
+    final config = <String, dynamic>{
+      "duration_ms": durationMs,
+      if (pcmPath != null && pcmPath.trim().isNotEmpty)
+        "pcm_path": pcmPath.trim(),
+      if (opusB64 != null && opusB64.trim().isNotEmpty)
+        "opus_b64": opusB64.trim(),
+    };
+    if (usesDaemon) {
+      return _callStateWithDaemonRecovery(
+        DaemonMethod.p2pSendVoiceDm,
+        params: {"recipient_public_key_hex": recipientPublicKeyHex, ...config},
+      );
+    }
+    return GhalBolFfi.p2pSendVoiceDm(recipientPublicKeyHex, config);
   }
 
   static Future<Map<String, dynamic>> _callStateWithDaemonRecovery(
@@ -173,14 +258,17 @@ abstract final class GhalBolP2p {
     return {"ok": true, "ui_visible": uiVisible, "read_receipts": false};
   }
 
-  static Future<Map<String, dynamic>> _inProcessSetAppAckReadEnabled(bool enabled) async =>
-      GhalBolFfi.p2pSetAppAckReadEnabled(enabled);
+  static Future<Map<String, dynamic>> _inProcessSetAppAckReadEnabled(
+    bool enabled,
+  ) async => GhalBolFfi.p2pSetAppAckReadEnabled(enabled);
 
-  static Future<Map<String, dynamic>> _inProcessSetAppUiVisible(bool visible) async =>
-      GhalBolFfi.p2pSetAppUiVisible(visible);
+  static Future<Map<String, dynamic>> _inProcessSetAppUiVisible(
+    bool visible,
+  ) async => GhalBolFfi.p2pSetAppUiVisible(visible);
 
-  static Future<Map<String, dynamic>> _inProcessSetForegroundPeer(String? publicKeyHex) async =>
-      GhalBolFfi.p2pSetForegroundPeer(publicKeyHex);
+  static Future<Map<String, dynamic>> _inProcessSetForegroundPeer(
+    String? publicKeyHex,
+  ) async => GhalBolFfi.p2pSetForegroundPeer(publicKeyHex);
 
   /// Re-run in-room `ack_read` catch-up without re-issuing foreground room enter (Linux nudge).
   static Future<Map<String, dynamic>> nudgeReadCatchup() async {
@@ -194,7 +282,9 @@ abstract final class GhalBolP2p {
   }
 
   /// Voice/video call signaling (`invite`, `accept`, `sdp_offer`, `ice`, `video_on`, …).
-  static Future<Map<String, dynamic>> callSignal(Map<String, dynamic> config) async {
+  static Future<Map<String, dynamic>> callSignal(
+    Map<String, dynamic> config,
+  ) async {
     if (usesDaemon) {
       // State socket — must not queue behind `p2p_call_video_frame` polls on main (~60/s in-call).
       return GhalBolDaemonClient.instance.callState(
@@ -207,7 +297,9 @@ abstract final class GhalBolP2p {
 
   /// Native voice **media** control plane (Rust-owned Opus over libp2p substream).
   /// `action`: `start` (needs `recipient_public_key_hex`), `stop`, `set_mic_muted`.
-  static Future<Map<String, dynamic>> callMedia(Map<String, dynamic> config) async {
+  static Future<Map<String, dynamic>> callMedia(
+    Map<String, dynamic> config,
+  ) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
         DaemonMethod.p2pCallMedia,
@@ -334,38 +426,58 @@ abstract final class GhalBolP2p {
   }
 
   /// Read-only transcript merge via background `:p2p` (same process that writes on poll).
-  static Future<({int revision, List<Map<String, dynamic>> lines})> transcriptLoadThreadView({
+  ///
+  /// When [limit] is set, returns at most the newest [limit] lines and `hasMore`
+  /// when older lines exist (UI grows the window on scroll-up).
+  static Future<
+    ({int revision, bool hasMore, List<Map<String, dynamic>> lines})
+  >
+  transcriptLoadThreadView({
     required String appNamespace,
     required List<String> conversationKeys,
     String? matchInboundFromPeerId,
+    int? limit,
   }) async {
     final params = <String, dynamic>{
       "app_namespace": appNamespace,
       "conversation_keys": conversationKeys,
-      if (matchInboundFromPeerId != null && matchInboundFromPeerId.trim().isNotEmpty)
+      if (matchInboundFromPeerId != null &&
+          matchInboundFromPeerId.trim().isNotEmpty)
         "match_inbound_from_peer_id": matchInboundFromPeerId.trim(),
+      if (limit != null && limit > 0) "limit": limit,
     };
     if (usesDaemon) {
       final r = await GhalBolDaemonClient.instance.callState(
         DaemonMethod.p2pTranscriptLoadMerged,
         params: params,
       );
-      if (r["ok"] != true) return (revision: 0, lines: <Map<String, dynamic>>[]);
+      if (r["ok"] != true) {
+        return (revision: 0, hasMore: false, lines: <Map<String, dynamic>>[]);
+      }
       final revRaw = r["revision"];
       final revision = revRaw is num ? revRaw.toInt() : 0;
+      final hasMore = r["has_more"] == true;
       final lines = r["lines"];
-      if (lines is! List) return (revision: revision, lines: <Map<String, dynamic>>[]);
+      if (lines is! List) {
+        return (
+          revision: revision,
+          hasMore: hasMore,
+          lines: <Map<String, dynamic>>[],
+        );
+      }
       final parsed = lines
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
-      return (revision: revision, lines: parsed);
+      return (revision: revision, hasMore: hasMore, lines: parsed);
     }
     return GhalBolFfi.transcriptLoadThreadView(appNamespace, params);
   }
 
   /// Native **video** control plane (H.264 over `/ghal-bol/call-video/1.0.0`).
-  static Future<Map<String, dynamic>> callVideo(Map<String, dynamic> config) async {
+  static Future<Map<String, dynamic>> callVideo(
+    Map<String, dynamic> config,
+  ) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
         DaemonMethod.p2pCallVideo,
@@ -443,10 +555,7 @@ abstract final class GhalBolP2p {
     required String callId,
     String track = "remote",
   }) async {
-    final config = {
-      "call_id": callId,
-      "track": track,
-    };
+    final config = {"call_id": callId, "track": track};
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
         DaemonMethod.p2pCallVideoTexture,
@@ -623,7 +732,9 @@ abstract final class GhalBolP2p {
     return {"ok": false, "error": "delivery requires daemon"};
   }
 
-  static Future<Map<String, dynamic>> deliveryResendMessage(String messageId) async {
+  static Future<Map<String, dynamic>> deliveryResendMessage(
+    String messageId,
+  ) async {
     if (usesDaemon) {
       return GhalBolDaemonClient.instance.callState(
         DaemonMethod.deliveryResendMessage,

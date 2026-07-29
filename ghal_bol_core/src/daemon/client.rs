@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::client_api::DaemonMethod;
 use super::IntegratorConfig;
+use super::client_api::DaemonMethod;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
@@ -87,7 +87,11 @@ impl DaemonClient {
         let path = config.socket_path();
         let main = RpcSocket::connect(&path)?;
         let state = RpcSocket::connect(&path)?;
-        Ok(Self { config, main, state })
+        Ok(Self {
+            config,
+            main,
+            state,
+        })
     }
 
     pub fn ping(&self) -> Result<bool, RpcError> {

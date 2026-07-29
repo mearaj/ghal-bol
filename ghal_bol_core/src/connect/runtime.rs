@@ -101,7 +101,7 @@ async fn connect_sidecar(
     connected: Arc<Mutex<HashSet<String>>>,
     cmd_rx: std::sync::mpsc::Receiver<ConnectOutboundCmd>,
 ) {
-    use super::lan_discovery::{spawn_event_forwarder, LanDiscovery, LanDiscoveryEvent};
+    use super::lan_discovery::{LanDiscovery, LanDiscoveryEvent, spawn_event_forwarder};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
@@ -146,7 +146,9 @@ async fn connect_sidecar(
                 LanDiscoveryEvent::Discovered { host, port, .. } => {
                     native_log::info("connect", format!("mdns discovered {host}:{port}"));
                 }
-                LanDiscoveryEvent::Expired { identity_commitment } => {
+                LanDiscoveryEvent::Expired {
+                    identity_commitment,
+                } => {
                     native_log::info("connect", format!("mdns expired {identity_commitment}"));
                 }
             }

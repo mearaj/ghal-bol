@@ -18,15 +18,12 @@ pub fn wan_text_via_delivery_server() -> bool {
     delivery_primary_text()
 }
 
-
 /// LAN fast-path text mirror is enabled (additive; does not disable delivery worker).
 pub fn lan_fast_path_enabled() -> bool {
     true
 }
 
-
 /// Whether LAN P2P read/delivery acks may mirror alongside delivery-server acks.
 pub fn lan_p2p_ack_mirror_enabled(recipient_wire: &str) -> bool {
-    lan_fast_path_enabled()
-        && crate::p2p::contact_has_lan_p2p_text_path(recipient_wire)
+    lan_fast_path_enabled() && crate::p2p::contact_has_lan_p2p_text_path(recipient_wire)
 }

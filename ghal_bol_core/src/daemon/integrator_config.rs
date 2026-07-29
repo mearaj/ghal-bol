@@ -47,9 +47,9 @@ impl IntegratorConfig {
     }
 
     pub fn socket_path(&self) -> PathBuf {
-        self.socket_path.clone().unwrap_or_else(|| {
-            default_socket_path_for_app_namespace(&self.app_namespace)
-        })
+        self.socket_path
+            .clone()
+            .unwrap_or_else(|| default_socket_path_for_app_namespace(&self.app_namespace))
     }
 
     pub fn daemon_spawn_env(&self) -> HashMap<String, String> {

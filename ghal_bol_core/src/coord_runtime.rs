@@ -144,7 +144,11 @@ pub fn coord_set_local_peer_id(peer: String) {
 }
 
 fn coord_local_peer_id() -> Option<String> {
-    coord_globals().local_peer_id.lock().ok().and_then(|g| g.clone())
+    coord_globals()
+        .local_peer_id
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
 }
 
 fn coord_relay_bootstrap_tcp_keys() -> HashSet<String> {
@@ -401,9 +405,10 @@ fn schedule_check_relay_presence_once_impl() {
 }
 
 fn peer_record_has_relay_circuit(record: &crate::coord::CoordPeerRecord) -> bool {
-    record.endpoints.iter().any(|e| {
-        e.scheme == "libp2p" && e.host.contains("/p2p-circuit")
-    })
+    record
+        .endpoints
+        .iter()
+        .any(|e| e.scheme == "libp2p" && e.host.contains("/p2p-circuit"))
 }
 
 /// Native-connect or legacy row visible on coord (client TCP register or relay circuit).
@@ -411,9 +416,10 @@ fn peer_record_has_coord_presence(record: &crate::coord::CoordPeerRecord) -> boo
     if peer_record_has_relay_circuit(record) {
         return true;
     }
-    record.endpoints.iter().any(|e| {
-        e.scheme == "tcp" && !e.host.trim().is_empty() && e.port != 0
-    })
+    record
+        .endpoints
+        .iter()
+        .any(|e| e.scheme == "tcp" && !e.host.trim().is_empty() && e.port != 0)
 }
 
 /// During LAN↔WAN handover coord HTTP may flap while the relay server still has our circuit.
@@ -552,7 +558,6 @@ pub fn coord_invalidate_presence_on_network_change() {
         *g = None;
     }
 }
-
 
 /// Relay removed — returns empty.
 pub fn fetch_all_ghal_bol_relays(_remap: bool) -> Vec<(String, Vec<String>)> {
@@ -795,7 +800,9 @@ fn listen_addrs_to_coord_endpoints(addrs: &[Multiaddr]) -> Vec<CoordEndpoint> {
                 || (e.scheme == "tcp"
                     && is_coord_publishable_host(&e.host)
                     && !crate::p2p::network_transport::is_relay_bootstrap_tcp(
-                        &e.host, e.port, &bootstraps,
+                        &e.host,
+                        e.port,
+                        &bootstraps,
                     ))
         });
     }
@@ -832,10 +839,7 @@ fn spawn_register_presence() {
 /// `force` bypasses throttle (endpoint set changed while already registered).
 fn spawn_register_presence_inner(force: bool) {
     #[cfg(test)]
-    if coord_base_urls()
-        .iter()
-        .any(|b| b.contains("example.test"))
-    {
+    if coord_base_urls().iter().any(|b| b.contains("example.test")) {
         return;
     }
     if !force && should_throttle_register() {
@@ -946,23 +950,22 @@ pub fn rebuild_coord_endpoints_from_listen(addrs: &[Multiaddr]) {
     let publishable: Vec<Multiaddr> = addrs
         .iter()
         .filter(|ma| {
-            crate::p2p::network_transport::is_coord_ipv4_relay_listen(ma)
-                || {
-                    let local = coord_local_peer_id();
-                    let preferred = coord_globals()
-                        .preferred_relay_peer_id
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.clone());
-                    local.is_some_and(|local| {
-                        crate::p2p::network_transport::is_peer_own_coord_register_tcp(
-                            ma,
-                            &local,
-                            &coord_relay_bootstrap_tcp_keys(),
-                            preferred.as_deref(),
-                        )
-                    })
-                }
+            crate::p2p::network_transport::is_coord_ipv4_relay_listen(ma) || {
+                let local = coord_local_peer_id();
+                let preferred = coord_globals()
+                    .preferred_relay_peer_id
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone());
+                local.is_some_and(|local| {
+                    crate::p2p::network_transport::is_peer_own_coord_register_tcp(
+                        ma,
+                        &local,
+                        &coord_relay_bootstrap_tcp_keys(),
+                        preferred.as_deref(),
+                    )
+                })
+            }
         })
         .cloned()
         .collect();
@@ -1168,10 +1171,7 @@ fn coord_endpoints_to_dial_multiaddrs(endpoints: &[CoordEndpoint]) -> Vec<Multia
 
 /// Client POST /v1/register: public routable TCP only. Relay `/p2p-circuit` is server-registered.
 fn endpoints_for_coord_register(eps: Vec<CoordEndpoint>) -> Vec<CoordEndpoint> {
-    let tcp: Vec<CoordEndpoint> = eps
-        .into_iter()
-        .filter(|e| e.scheme == "tcp")
-        .collect();
+    let tcp: Vec<CoordEndpoint> = eps.into_iter().filter(|e| e.scheme == "tcp").collect();
     if !coord_is_configured() {
         return tcp;
     }
@@ -1654,8 +1654,12 @@ mod tests {
 
     #[test]
     fn coord_lookup_404_counts_as_http_reachable() {
-        assert!(coord_lookup_err_means_http_reachable("HTTP 404 peer_not_on_server"));
-        assert!(!coord_lookup_err_means_http_reachable("error sending request for url"));
+        assert!(coord_lookup_err_means_http_reachable(
+            "HTTP 404 peer_not_on_server"
+        ));
+        assert!(!coord_lookup_err_means_http_reachable(
+            "error sending request for url"
+        ));
     }
 
     #[test]
@@ -1692,4 +1696,3 @@ mod tests {
         );
     }
 }
-

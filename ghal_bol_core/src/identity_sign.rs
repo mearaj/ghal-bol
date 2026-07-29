@@ -2,10 +2,9 @@
 
 use ed25519_dalek::{Signature as Ed25519Sig, Signer, Verifier, VerifyingKey};
 use p256::ecdsa::{
-    Signature as EcdsaSig, VerifyingKey as EcdsaVerifyingKey,
-    signature::Verifier as EcdsaVerifier,
+    Signature as EcdsaSig, VerifyingKey as EcdsaVerifyingKey, signature::Verifier as EcdsaVerifier,
 };
-use secp256k1::{ecdsa::Signature as Secp256k1Sig, Message, Secp256k1};
+use secp256k1::{Message, Secp256k1, ecdsa::Signature as Secp256k1Sig};
 use sha2::{Digest, Sha256};
 
 use crate::identity::{Identity, IdentityAlgorithm};
@@ -27,8 +26,8 @@ fn secp256k1_verify(pk_bytes: &[u8], msg: &[u8], signature: &[u8]) -> Result<(),
         .map_err(|e| format!("secp256k1 public key: {e}"))?;
     let digest: [u8; 32] = Sha256::digest(msg).into();
     let message = Message::from_digest(digest);
-    let sig = Secp256k1Sig::from_compact(signature)
-        .map_err(|e| format!("secp256k1 signature: {e}"))?;
+    let sig =
+        Secp256k1Sig::from_compact(signature).map_err(|e| format!("secp256k1 signature: {e}"))?;
     secp.verify_ecdsa(message, &sig, &pk)
         .map_err(|e| format!("secp256k1 verify: {e}"))?;
     Ok(())
@@ -72,10 +71,10 @@ pub fn verify_identity_signature(
                 .as_slice()
                 .try_into()
                 .map_err(|_| "ed25519 public key: invalid length".to_string())?;
-            let vk = VerifyingKey::from_bytes(&arr)
-                .map_err(|e| format!("ed25519 public key: {e}"))?;
-            let sig = Ed25519Sig::from_slice(signature)
-                .map_err(|e| format!("ed25519 signature: {e}"))?;
+            let vk =
+                VerifyingKey::from_bytes(&arr).map_err(|e| format!("ed25519 public key: {e}"))?;
+            let sig =
+                Ed25519Sig::from_slice(signature).map_err(|e| format!("ed25519 signature: {e}"))?;
             vk.verify(msg, &sig)
                 .map_err(|e| format!("ed25519 verify: {e}"))?;
             Ok(())
@@ -86,8 +85,7 @@ pub fn verify_identity_signature(
             let sig = EcdsaSig::from_der(signature)
                 .or_else(|_| EcdsaSig::from_slice(signature))
                 .map_err(|e| format!("ecdsa-p256 signature: {e}"))?;
-            EcdsaVerifier::verify(&vk, msg, &sig)
-                .map_err(|e| format!("ecdsa-p256 verify: {e}"))?;
+            EcdsaVerifier::verify(&vk, msg, &sig).map_err(|e| format!("ecdsa-p256 verify: {e}"))?;
             Ok(())
         }
     }

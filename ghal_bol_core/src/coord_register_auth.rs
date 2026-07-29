@@ -29,9 +29,7 @@ pub fn sign_coord_registration(
             let sig = secp256k1::Secp256k1::new().sign_ecdsa(msg, ident.secp256k1_secret());
             Ok(sig.serialize_der().to_vec())
         }
-        IdentityAlgorithm::Ed25519 | IdentityAlgorithm::EcdsaP256 => {
-            ident.sign_message(&bytes)
-        }
+        IdentityAlgorithm::Ed25519 | IdentityAlgorithm::EcdsaP256 => ident.sign_message(&bytes),
     }
 }
 
@@ -66,5 +64,4 @@ mod tests {
         let bytes = registration_challenge_bytes(&nonce, &wire);
         verify_identity_signature(&wire, &bytes, &sig).unwrap();
     }
-
 }

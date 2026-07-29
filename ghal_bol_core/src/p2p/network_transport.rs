@@ -133,10 +133,7 @@ fn log_ui_network_if_changed(snap: &OsNetworkSnapshot, source: &str) {
         return;
     }
     *g = Some(key);
-    let route = snap
-        .default_route_iface
-        .as_deref()
-        .unwrap_or("-");
+    let route = snap.default_route_iface.as_deref().unwrap_or("-");
     native_log::info(
         "network",
         format!(
@@ -173,7 +170,6 @@ pub(crate) struct LocalNetworkProfile {
 
 /// Detects Wi‑Fi ↔ mobile, CGNAT/LAN IP changes, and direct public IPv4 churn.
 
-
 /// Relay circuit listen addr we register on coord and fingerprint (IPv4/dns4 only).
 /// libp2p may also open a `/dns6/.../p2p-circuit` listener; treating that as a WAN
 /// path change clears bootstrap HOP state and invalidates the live reservation.
@@ -200,8 +196,6 @@ impl LocalNetworkProfile {
             OsDefaultTransport::Wifi | OsDefaultTransport::Ethernet
         )
     }
-
-
 }
 
 /// Android Wi‑Fi return can lag `if_addrs` while libp2p is already listening on RFC1918 TCP.
@@ -322,10 +316,8 @@ pub(crate) fn is_public_bootstrap_ipv4(ip: std::net::Ipv4Addr) -> bool {
         && !is_cgnat_ipv4(ip)
 }
 
-
 /// Resolve a Ghal Bol relay advertised by coord (`GET /v1/relay`) into concrete TCP dial
 /// multiaddrs `(PeerId, /ip4/<public-ip>/tcp/<port>/p2p/<id>)`.
-
 
 /// Append `/p2p-circuit` to the connected bootstrap TCP multiaddr (preserves live port).
 
@@ -422,14 +414,10 @@ pub(crate) fn is_dm_listen_tcp_multiaddr(ma: &Multiaddr) -> bool {
     is_publishable_listen_addr(ma)
 }
 
-
 /// Inbound coord lookup addrs to dial when coord is primary (WAN paths only).
 /// WAN = `/p2p-circuit` only — bare public TCP from coord is often relay bootstrap, not the peer.
 
 /// Sort order for DM dials: LAN TCP first, then relay, then public WAN.
-
-
-
 
 /// LAN-first when [peer_on_local_lan] (mDNS); WAN-first (relay, then public) otherwise.
 
@@ -448,21 +436,11 @@ pub(crate) fn relay_bootstrap_tcp_keys(addrs: &[String]) -> HashSet<String> {
 pub(crate) fn relay_base_tcp_host_port(addr: &str) -> Option<(String, u16)> {
     let s = addr.trim();
     let host = s.split("/ip4/").nth(1)?.split('/').next()?.to_string();
-    let port = s
-        .split("/tcp/")
-        .nth(1)?
-        .split('/')
-        .next()?
-        .parse()
-        .ok()?;
+    let port = s.split("/tcp/").nth(1)?.split('/').next()?.parse().ok()?;
     Some((host, port))
 }
 
-pub(crate) fn is_relay_bootstrap_tcp(
-    host: &str,
-    port: u16,
-    bootstraps: &HashSet<String>,
-) -> bool {
+pub(crate) fn is_relay_bootstrap_tcp(host: &str, port: u16, bootstraps: &HashSet<String>) -> bool {
     bootstraps.contains(&format!("{}:{port}", host.trim()))
 }
 
@@ -570,7 +548,6 @@ pub(crate) fn filter_coord_relay_dial_platform(mut addrs: Vec<Multiaddr>) -> Vec
     addrs
 }
 
-
 /// docker0 / podman / common CNI bridges — not reachable for DM dial (see user logs: 172.17–172.20).
 pub(crate) fn is_docker_or_link_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
     let o = ip.octets();
@@ -580,7 +557,6 @@ pub(crate) fn is_docker_or_link_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
 /// Dial only well-known bootstrap hosts at their resolved public IPs (or relay circuit).
 
 /// Expand `0.0.0.0` / `::` listeners into concrete LAN addresses for coord/mDNS peerstore.
-
 
 #[cfg(test)]
 mod tests {
@@ -611,8 +587,9 @@ mod tests {
             &bootstraps,
             Some(relay),
         ));
-        let bootstrap_as_own: Multiaddr =
-            format!("/ip4/159.223.110.159/tcp/28048/p2p/{local}").parse().unwrap();
+        let bootstrap_as_own: Multiaddr = format!("/ip4/159.223.110.159/tcp/28048/p2p/{local}")
+            .parse()
+            .unwrap();
         assert!(!is_peer_own_coord_register_tcp(
             &bootstrap_as_own,
             local,
@@ -664,5 +641,4 @@ mod tests {
         assert_eq!(j["default_route_iface"], "wlan0");
         assert_eq!(j["source"], "test");
     }
-
 }

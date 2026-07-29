@@ -69,9 +69,8 @@ pub fn legacy_public_key_from_peer_id_str(peer_id_str: &str) -> Option<String> {
     if let Ok(wire) = normalize_contact_identity_wire(peer_id_str) {
         return Some(wire);
     }
-    secp256k1_hex_from_legacy_peer_id(peer_id_str).or_else(|| {
-        crate::peer_id_util::identity_wire_from_peer_id(peer_id_str)
-    })
+    secp256k1_hex_from_legacy_peer_id(peer_id_str)
+        .or_else(|| crate::peer_id_util::identity_wire_from_peer_id(peer_id_str))
 }
 
 /// Pre–pk-only transcript threads were keyed by libp2p PeerId strings — include when loading.
@@ -97,6 +96,9 @@ mod tests {
         let (_ks, id) = create_keystore_v1("t", None).unwrap();
         let pk = id.public_key_hex();
         let pid = legacy_libp2p_peer_id_str_from_public_key_hex(&pk).unwrap();
-        assert_eq!(legacy_public_key_from_peer_id_str(&pid).as_deref(), Some(pk.as_str()));
+        assert_eq!(
+            legacy_public_key_from_peer_id_str(&pid).as_deref(),
+            Some(pk.as_str())
+        );
     }
 }

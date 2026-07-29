@@ -1,7 +1,7 @@
 use super::chat_room_session::freeze_open_chat_room_session;
 use super::notify::{drop_pending_call_invite, notify_dm_presence_wake};
-use super::types::{GossipChatEvent, OutboundCmd, READ_ACK_CATCHUP_THROTTLE_MS, SessionPeer};
 use super::session::SessionState;
+use super::types::{GossipChatEvent, OutboundCmd, READ_ACK_CATCHUP_THROTTLE_MS, SessionPeer};
 use crate::dm_transport::ContactPk;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -56,7 +56,6 @@ pub fn bump_foreground_peer_cmd_gen() -> u64 {
     FOREGROUND_PEER_CMD_GEN.fetch_add(1, Ordering::SeqCst) + 1
 }
 
-
 pub fn sync_foreground_peer_now(peer: Option<ContactPk>) {
     if let Ok(mut g) = live_foreground_peer_mx().write() {
         *g = peer.clone();
@@ -80,9 +79,7 @@ pub fn live_foreground_peer_pk() -> Option<ContactPk> {
 }
 
 pub(crate) fn is_live_foreground_peer(peer: &SessionPeer) -> bool {
-    live_foreground_peer().is_some_and(|pk| {
-        crate::public_key_util::same_contact_pk(&pk, peer)
-    })
+    live_foreground_peer().is_some_and(|pk| crate::public_key_util::same_contact_pk(&pk, peer))
 }
 
 pub(crate) fn emit_call_media(
@@ -145,9 +142,8 @@ fn app_ack_read_enabled_mx() -> &'static AtomicBool {
 pub fn may_send_read_ack_for_contact_pk(sender_pk: &str) -> bool {
     app_ui_visible()
         && app_ack_read_enabled()
-        && live_foreground_peer().is_some_and(|f| {
-            crate::public_key_util::same_contact_pk(&f, sender_pk)
-        })
+        && live_foreground_peer()
+            .is_some_and(|f| crate::public_key_util::same_contact_pk(&f, sender_pk))
 }
 
 pub(crate) fn may_send_in_room_read_ack(_session: &SessionState, peer: &SessionPeer) -> bool {

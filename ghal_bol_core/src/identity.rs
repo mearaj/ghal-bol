@@ -67,12 +67,8 @@ impl IdentityAlgorithm {
             Self::Secp256k1 => {
                 "Default — secp256k1 identity; full chat, calls, and P2P on this build."
             }
-            Self::Ed25519 => {
-                "Ed25519 identity — full chat, calls, and P2P on this build."
-            }
-            Self::EcdsaP256 => {
-                "NIST P-256 identity — full chat, calls, and P2P on this build."
-            }
+            Self::Ed25519 => "Ed25519 identity — full chat, calls, and P2P on this build.",
+            Self::EcdsaP256 => "NIST P-256 identity — full chat, calls, and P2P on this build.",
         }
     }
 
@@ -132,7 +128,10 @@ impl Identity {
         hex::encode(&self.public_key)
     }
 
-    pub fn from_public_key_bytes(algorithm: IdentityAlgorithm, public_key: Vec<u8>) -> Result<Self, String> {
+    pub fn from_public_key_bytes(
+        algorithm: IdentityAlgorithm,
+        public_key: Vec<u8>,
+    ) -> Result<Self, String> {
         validate_public_key(algorithm, &public_key)?;
         Ok(Self {
             algorithm,
@@ -190,7 +189,11 @@ pub fn public_key_from_secret(
         IdentityAlgorithm::EcdsaP256 => {
             let sk = p256::ecdsa::SigningKey::from_slice(secret)
                 .map_err(|e| format!("ecdsa-p256 secret: {e}"))?;
-            Ok(sk.verifying_key().to_encoded_point(false).as_bytes().to_vec())
+            Ok(sk
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec())
         }
     }
 }
@@ -295,7 +298,8 @@ mod tests {
     #[test]
     fn ed25519_wire_roundtrip() {
         let (_ks, id) =
-            crate::create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::Ed25519, None).unwrap();
+            crate::create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::Ed25519, None)
+                .unwrap();
         let wire = id.identity_wire();
         assert!(wire.starts_with("ed25519:"));
         let parsed = Identity::parse(&wire).unwrap();

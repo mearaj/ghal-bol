@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, RwLock};
 
 use super::types::{
-    DmPeer, PendingCallSignal, PendingDeliveryAck, PendingOutbound, PendingReadAck, SessionPeer,
-    SEEN_INBOUND_MAX, session_peer_from_identity_wire,
+    DmPeer, PendingCallSignal, PendingDeliveryAck, PendingOutbound, PendingReadAck,
+    SEEN_INBOUND_MAX, SessionPeer, session_peer_from_identity_wire,
 };
 
 /// Same KDF as [`SessionState`] local DM transport secret — peer pk is deterministic
@@ -112,7 +112,6 @@ impl SessionState {
         session_peer_from_identity_wire(pk).ok()
     }
 
-
     pub fn set_peer_connected(&self, peer: &SessionPeer, up: bool) {
         if let Ok(mut g) = self.connected.write() {
             if up {
@@ -133,8 +132,6 @@ impl SessionState {
         }
     }
 
-
-
     pub fn set_peer_on_local_lan(&self, peer: &SessionPeer, on: bool) {
         if let Ok(mut g) = self.peers_on_local_lan.write() {
             if on {
@@ -145,13 +142,11 @@ impl SessionState {
         }
     }
 
-
     pub fn set_foreground_peer(&self, peer: Option<SessionPeer>) {
         if let Ok(mut g) = self.foreground_peer.write() {
             *g = peer;
         }
     }
-
 
     pub fn track_outbound(&self, row: PendingOutbound) {
         if let Ok(mut g) = self.outbox.write() {
@@ -159,17 +154,11 @@ impl SessionState {
         }
     }
 
-
     pub fn pending_outbox_for_peer(&self, peer: &SessionPeer) -> Vec<PendingOutbound> {
         self.outbox
             .read()
             .ok()
-            .map(|g| {
-                g.values()
-                    .filter(|r| &r.peer == peer)
-                    .cloned()
-                    .collect()
-            })
+            .map(|g| g.values().filter(|r| &r.peer == peer).cloned().collect())
             .unwrap_or_default()
     }
 
@@ -179,13 +168,20 @@ impl SessionState {
         }
     }
 
-
     pub fn call_media_stop(&self, call_id: &str) -> bool {
-        self.call_media.lock().ok().map(|mut g| g.remove(call_id).is_some()).unwrap_or(false)
+        self.call_media
+            .lock()
+            .ok()
+            .map(|mut g| g.remove(call_id).is_some())
+            .unwrap_or(false)
     }
 
     pub fn call_video_stop(&self, call_id: &str) -> bool {
-        self.call_video.lock().ok().map(|mut g| g.remove(call_id).is_some()).unwrap_or(false)
+        self.call_video
+            .lock()
+            .ok()
+            .map(|mut g| g.remove(call_id).is_some())
+            .unwrap_or(false)
     }
 
     pub fn call_media_set_mic_muted(&self, call_id: &str, muted: bool) -> bool {
@@ -205,15 +201,20 @@ impl SessionState {
         self.call_video
             .lock()
             .ok()
-            .and_then(|g| g.get(call_id).map(|e| {
-                e.controls.set_camera_off(off);
-                true
-            }))
+            .and_then(|g| {
+                g.get(call_id).map(|e| {
+                    e.controls.set_camera_off(off);
+                    true
+                })
+            })
             .unwrap_or(false)
     }
 
     pub fn call_media_active(&self, call_id: &str) -> bool {
-        self.call_media.lock().ok().is_some_and(|g| g.contains_key(call_id))
+        self.call_media
+            .lock()
+            .ok()
+            .is_some_and(|g| g.contains_key(call_id))
     }
 
     pub fn dm_local_transport_sk(&self) -> &x25519_dalek::StaticSecret {
@@ -263,7 +264,11 @@ impl SessionState {
             }
             g.insert(id.to_string(), now_ms);
             if g.len() > SEEN_INBOUND_MAX {
-                if let Some((old, _)) = g.iter().min_by_key(|(_, t)| *t).map(|(k, v)| (k.clone(), *v)) {
+                if let Some((old, _)) = g
+                    .iter()
+                    .min_by_key(|(_, t)| *t)
+                    .map(|(k, v)| (k.clone(), *v))
+                {
                     g.remove(&old);
                 }
             }
@@ -346,7 +351,8 @@ impl SessionState {
                 g.values()
                     .filter(|p| {
                         !p.on_wire
-                            || now_ms.saturating_sub(p.last_send_ms) >= super::types::OUTBOX_RESEND_INTERVAL_MS
+                            || now_ms.saturating_sub(p.last_send_ms)
+                                >= super::types::OUTBOX_RESEND_INTERVAL_MS
                     })
                     .cloned()
                     .collect()
@@ -437,7 +443,11 @@ impl SessionState {
         }
     }
 
-    pub(crate) fn try_claim_read_ack_wire_send(&self, peer: &SessionPeer, inbound_id: &str) -> bool {
+    pub(crate) fn try_claim_read_ack_wire_send(
+        &self,
+        peer: &SessionPeer,
+        inbound_id: &str,
+    ) -> bool {
         let id = inbound_id.trim();
         if id.is_empty() {
             return false;
@@ -509,7 +519,11 @@ impl SessionState {
     }
 
     pub(crate) fn pending_read_ack_len(&self) -> usize {
-        self.pending_read_acks.read().ok().map(|q| q.len()).unwrap_or(0)
+        self.pending_read_acks
+            .read()
+            .ok()
+            .map(|q| q.len())
+            .unwrap_or(0)
     }
 
     pub(crate) fn read_acks_due_for_upkeep(&self, limit: usize) -> Vec<PendingReadAck> {
@@ -589,7 +603,10 @@ impl SessionState {
     }
 
     pub(crate) fn call_video_active(&self, call_id: &str) -> bool {
-        self.call_video.lock().ok().is_some_and(|g| g.contains_key(call_id))
+        self.call_video
+            .lock()
+            .ok()
+            .is_some_and(|g| g.contains_key(call_id))
     }
 
     pub(crate) fn call_video_wire_in_any(

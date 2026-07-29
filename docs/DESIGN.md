@@ -80,11 +80,15 @@ Set `GHAL_BOL_DELIVERY_URL` in app env for WAN text. Without it, text works **LA
 | Channel | E2E mechanism | Keys |
 |---------|----------------|------|
 | Text DM (WAN) | `ghal_bol_delivery` + `delivery_msg_v1` | E2E envelope; server stores ciphertext only |
-| Text DM (LAN) | `ghal_bol_msg_v1` on native connect stream | Ephemeral ECDH + AES-GCM; P2P acks |
+| Text DM (LAN) | `ghal_bol_msg_v1` on native connect stream | Transport KEM v2 + AES-GCM; P2P acks |
+| Voice DM (WAN) | `ghal_bol_delivery` + sealed `VoiceInner` | Same identity seal as WAN text |
+| Voice DM (LAN) | `ghal_bol_msg_v1` `kind: voice` | Same transport KEM v2 seal as LAN text |
+| Attachment (WAN) | `ghal_bol_delivery` + sealed `AttachmentInner` (`file_b64`) | Same identity seal as WAN text; ≤3 MB sealed inner |
+| Attachment (LAN) | Mailbox-sized: sealed DM inner; oversized: LAN attach mux | Transport KEM / content-key mux — **never coord** |
 | **Call signaling** (invite, video_on/off, …) | `ghal_bol_call_v1` | Same seal + signature on DM stream |
 | **Call media** (audio + in-call video) | Per-frame AES-GCM seal on native connect substreams | `call_media_key.rs`: ECDH(local secret, peer `public_key_hex`) + HKDF(`call_id`, both pubkeys); see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md), [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) |
 
-**Noise** encrypts the transport; it is not a substitute for app-layer E2E above. New features (voice messages, attachments, group chat) must follow the same rule unless explicitly scoped otherwise in design docs.
+**Noise** encrypts the transport; it is not a substitute for app-layer E2E above. **WAN chat content** (text, voice notes, attachments) uses delivery — not peer-to-peer or coord. P2P is for **LAN** chat and **calls**.
 
 Implementation detail: [GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md) (calls), [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) (chat). [AGENTS.md](../AGENTS.md) golden rule 7.
 
