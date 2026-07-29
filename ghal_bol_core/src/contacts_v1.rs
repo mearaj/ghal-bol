@@ -13,9 +13,7 @@ use crate::app_paths::{contacts_v1_path, storage_config_for_namespace};
 use crate::dm_transport::normalize_contact_pk;
 use crate::flow_log::{self, short_hex};
 use crate::identity::Identity;
-use crate::public_key_util::{
-    legacy_public_key_from_peer_id_str, normalize_contact_identity_wire,
-};
+use crate::public_key_util::{legacy_public_key_from_peer_id_str, normalize_contact_identity_wire};
 use crate::storage::KeystoreStorageError;
 
 static CHANGE_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -37,6 +35,7 @@ pub fn contacts_change_version() -> u64 {
 pub struct SavedContact {
     pub public_key_hex: String,
     pub display_alias: Option<String>,
+    pub availability_status: Option<String>,
     pub last_message_preview: Option<String>,
     pub last_message_at_ms: Option<i64>,
     pub unread_count: u32,
@@ -72,6 +71,11 @@ impl SavedContact {
         if let Some(a) = &self.display_alias {
             if !a.is_empty() {
                 m["display_alias"] = Value::String(a.clone());
+            }
+        }
+        if let Some(s) = &self.availability_status {
+            if !s.is_empty() {
+                m["availability_status"] = Value::String(s.clone());
             }
         }
         if let Some(p) = &self.last_message_preview {
@@ -126,6 +130,10 @@ impl SavedContact {
                 .get("display_alias")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            availability_status: obj
+                .get("availability_status")
+                .and_then(|v| v.as_str())
+                .and_then(crate::preferences_v1::sanitize_peer_display_alias),
             last_message_preview: obj
                 .get("last_message_preview")
                 .and_then(|v| v.as_str())
@@ -311,13 +319,11 @@ pub fn find_by_public_key(
         Ok(id) => id,
         Err(_) => return Ok(None),
     };
-    Ok(list_contacts(app_namespace)?
-        .into_iter()
-        .find(|c| {
-            Identity::parse(c.public_key_hex.trim())
-                .ok()
-                .is_some_and(|id| id == target)
-        }))
+    Ok(list_contacts(app_namespace)?.into_iter().find(|c| {
+        Identity::parse(c.public_key_hex.trim())
+            .ok()
+            .is_some_and(|id| id == target)
+    }))
 }
 
 /// Lookup by public key hex, or legacy libp2p PeerId string on disk (migrated to pk).
@@ -352,8 +358,9 @@ pub fn upsert_contact(
             contact.clone()
         };
         let pk_norm = if contact.has_public_key() {
-            normalize_contact_identity_wire(contact.public_key_hex.trim())
-                .map_err(|e| ContactsError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?
+            normalize_contact_identity_wire(contact.public_key_hex.trim()).map_err(|e| {
+                ContactsError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            })?
         } else {
             base.public_key_hex.clone()
         };
@@ -363,6 +370,11 @@ pub fn upsert_contact(
             display_alias: match &contact.display_alias {
                 Some(s) => crate::preferences_v1::sanitize_peer_display_alias(s.as_str()),
                 None => base.display_alias.clone(),
+            },
+            // `Some(_)` updates status (empty → clear); `None` keeps existing.
+            availability_status: match &contact.availability_status {
+                Some(s) => crate::preferences_v1::sanitize_peer_display_alias(s.as_str()),
+                None => base.availability_status.clone(),
             },
             last_message_preview: contact
                 .last_message_preview
@@ -380,9 +392,7 @@ pub fn upsert_contact(
             updated_at_ms: Some(now),
             is_known: contact.is_known || base.is_known,
             is_blocked: contact.is_blocked || base.is_blocked,
-            chat_room_exit_at_ms: contact
-                .chat_room_exit_at_ms
-                .or(base.chat_room_exit_at_ms),
+            chat_room_exit_at_ms: contact.chat_room_exit_at_ms.or(base.chat_room_exit_at_ms),
         };
         if let Some(i) = idx {
             list[i] = next.clone();
@@ -428,6 +438,7 @@ pub fn merge_discovered_peer_id(
         SavedContact {
             public_key_hex: pk,
             display_alias: None,
+            availability_status: None,
             last_message_preview: None,
             last_message_at_ms: None,
             unread_count: 0,
@@ -439,6 +450,43 @@ pub fn merge_discovered_peer_id(
         },
     )?;
     Ok(())
+}
+
+pub fn set_contact_availability_status(
+    app_namespace: &str,
+    public_key_hex: &str,
+    status: Option<&str>,
+) -> Result<SavedContact, ContactsError> {
+    let pk = public_key_hex.trim().to_lowercase();
+    if !is_valid_public_key_hex(&pk) {
+        return Err(ContactsError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid public_key_hex",
+        )));
+    }
+    let now = now_ms();
+    with_store(app_namespace, |_path, mut all| {
+        let list = all.entry(app_namespace.to_string()).or_default();
+        let Some(i) = list.iter().position(|c| c.public_key_hex == pk) else {
+            return Err(ContactsError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "contact not found",
+            )));
+        };
+        let mut c = list[i].clone();
+        c.availability_status = status.and_then(crate::preferences_v1::sanitize_peer_display_alias);
+        c.updated_at_ms = Some(now);
+        list[i] = c.clone();
+        flow_log::info(
+            "Contacts",
+            format!(
+                "availability_status pk={} set={}",
+                short_hex(&pk),
+                c.availability_status.is_some()
+            ),
+        );
+        Ok((c, all))
+    })
 }
 
 /// Update trust flags for an existing contact (Add / Block / unblock).
@@ -515,8 +563,7 @@ pub fn chat_room_exit_at_ms(
     app_namespace: &str,
     public_key_hex: &str,
 ) -> Result<Option<i64>, ContactsError> {
-    Ok(find_by_public_key(app_namespace, public_key_hex)?
-        .and_then(|c| c.chat_room_exit_at_ms))
+    Ok(find_by_public_key(app_namespace, public_key_hex)?.and_then(|c| c.chat_room_exit_at_ms))
 }
 
 /// Hub preview for the latest line in a DM thread (`contact_public_key_hex` is the **other** party).
@@ -572,6 +619,7 @@ pub fn record_inbound_preview(
         list[i] = SavedContact {
             public_key_hex: c.public_key_hex.clone(),
             display_alias: c.display_alias.clone(),
+            availability_status: c.availability_status.clone(),
             last_message_preview: Some(p),
             last_message_at_ms: Some(at),
             // Foreground room clears via `clear_unread`; in-room inbound uses mark_unread false without wiping backlog.
@@ -589,7 +637,6 @@ pub fn record_inbound_preview(
         Ok(((), all))
     })
 }
-
 
 pub fn clear_unread(app_namespace: &str, public_key_hex: &str) -> Result<(), ContactsError> {
     let pk = public_key_hex.trim().to_lowercase();
@@ -652,6 +699,7 @@ mod tests {
             SavedContact {
                 public_key_hex: pk.to_string(),
                 display_alias: Some("Alice".to_string()),
+                availability_status: None,
                 last_message_preview: None,
                 last_message_at_ms: None,
                 unread_count: 0,
@@ -669,6 +717,7 @@ mod tests {
             SavedContact {
                 public_key_hex: pk.to_string(),
                 display_alias: Some("Bob".to_string()),
+                availability_status: None,
                 last_message_preview: None,
                 last_message_at_ms: None,
                 unread_count: 0,
@@ -688,6 +737,7 @@ mod tests {
             SavedContact {
                 public_key_hex: pk.to_string(),
                 display_alias: Some("".to_string()),
+                availability_status: None,
                 last_message_preview: None,
                 last_message_at_ms: None,
                 unread_count: 0,
@@ -715,6 +765,7 @@ mod tests {
             SavedContact {
                 public_key_hex: REMOTE_PK.to_string(),
                 display_alias: None,
+                availability_status: None,
                 last_message_preview: None,
                 last_message_at_ms: None,
                 unread_count: 0,
@@ -750,6 +801,7 @@ mod tests {
             SavedContact {
                 public_key_hex: wire.clone(),
                 display_alias: Some("Ed peer".to_string()),
+                availability_status: None,
                 last_message_preview: None,
                 last_message_at_ms: None,
                 unread_count: 0,
@@ -766,5 +818,4 @@ mod tests {
         assert_eq!(found.public_key_hex, wire);
         assert_eq!(found.display_alias.as_deref(), Some("Ed peer"));
     }
-
 }

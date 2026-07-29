@@ -17,18 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static LOCAL_RELAY_LISTENING: AtomicBool = AtomicBool::new(false);
 
-
 pub fn local_relay_circuit_listening() -> bool {
     LOCAL_RELAY_LISTENING.load(Ordering::Relaxed)
 }
-
-
-
-
-
-
-
-
-
-
-

@@ -3,7 +3,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-use crate::identity::{same_contact_identity, Identity, IdentityAlgorithm};
+use crate::identity::{Identity, IdentityAlgorithm, same_contact_identity};
 use crate::keystore_v1::parse_secret_bytes_for_algorithm;
 use crate::public_key_util::normalize_contact_identity_wire;
 
@@ -71,12 +71,11 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_identity_validate_import_secret(
             Err(e) => return json_err(e),
         };
         if !IdentityAlgorithm::creatable_algorithms().contains(&algorithm) {
-            return json_err(format!("identity algorithm not available for creation: {algo_s}"));
+            return json_err(format!(
+                "identity algorithm not available for creation: {algo_s}"
+            ));
         }
-        let secret = v
-            .get("secret_hex")
-            .and_then(|x| x.as_str())
-            .unwrap_or("");
+        let secret = v.get("secret_hex").and_then(|x| x.as_str()).unwrap_or("");
         parse_secret_bytes_for_algorithm(algorithm, secret).map_or_else(
             |e| json_err(e.to_string()),
             |_| json_value(serde_json::json!({ "ok": true })),
@@ -108,7 +107,9 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_identity_parse(wire_utf8: *const c_ch
 
 /// Compare two identity wires: `{ "a": "...", "b": "..." }` → `{ ok, same }`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_core_ffi_identity_same(config_json_utf8: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn ghal_bol_core_ffi_identity_same(
+    config_json_utf8: *const c_char,
+) -> *mut c_char {
     let run = || -> *mut c_char {
         let cfg_s = match unsafe { utf8(config_json_utf8, "identity same") } {
             Ok(s) => s,

@@ -1,6 +1,5 @@
 //! HTTP client for [`ghal_bol_coord`](../../ghal_bol_coord) coordination API (Tier 1).
 
-
 use serde::{Deserialize, Serialize};
 
 use crate::coord_register_auth::sign_coord_registration;
@@ -103,15 +102,16 @@ impl CoordHttpClient {
 
         let reg_url = format!("{}/v1/register", self.base);
         let resp = self.send_with_transport_retry(|http| {
-            self.with_headers(http.post(&reg_url)).json(&serde_json::json!({
-                "public_key_hex": wire,
-                "nonce_hex": nonce_hex,
-                "signature_hex": sig_hex,
-                "endpoints": endpoints,
-                "ipv4": ipv4,
-                "ipv6": ipv6,
-                "transport_capabilities": ["tcp", "sync-v1"]
-            }))
+            self.with_headers(http.post(&reg_url))
+                .json(&serde_json::json!({
+                    "public_key_hex": wire,
+                    "nonce_hex": nonce_hex,
+                    "signature_hex": sig_hex,
+                    "endpoints": endpoints,
+                    "ipv4": ipv4,
+                    "ipv6": ipv6,
+                    "transport_capabilities": ["tcp", "sync-v1"]
+                }))
         })?;
         if !resp.status().is_success() {
             return Err(format!(
@@ -147,9 +147,8 @@ impl CoordHttpClient {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let resp = self.send_with_transport_retry(|http| {
-            self.with_headers(http.post(url)).json(body)
-        })?;
+        let resp =
+            self.send_with_transport_retry(|http| self.with_headers(http.post(url)).json(body))?;
         if !resp.status().is_success() {
             return Err(format!(
                 "POST {} HTTP {}: {}",
@@ -184,12 +183,8 @@ impl CoordHttpClient {
         if !status.is_success() {
             return Err(format!("lookup HTTP {}: {}", status, truncate_body(&body)));
         }
-        serde_json::from_str(&body).map_err(|e| {
-            format!(
-                "lookup JSON parse: {e} (body: {})",
-                truncate_body(&body)
-            )
-        })
+        serde_json::from_str(&body)
+            .map_err(|e| format!("lookup JSON parse: {e} (body: {})", truncate_body(&body)))
     }
 }
 

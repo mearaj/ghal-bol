@@ -39,15 +39,34 @@ Common fields:
 | Field | Notes |
 |-------|-------|
 | `id` | Opaque message id; used for acks and dedupe |
-| `kind` | `text` \| `ack_received` \| `ack_read` \| `transport_kem_hello` (`ack_request` reserved — **never sent**) |
+| `kind` | `text` \| `voice` \| `attachment_offer` \| `ack_received` \| `ack_read` \| `attachment_complete` \| `transport_kem_hello` (`ack_request` reserved — **never sent**) |
 | `sender_public_key_hex` | Sender identity wire (bare secp256k1 hex or `algo:hex`) |
 | `recipient_public_key_hex` | Recipient identity wire |
-| `ciphertext_hex` | Sealed inner `{"text":"…"}` for `kind: text`; empty for acks and `transport_kem_hello` |
+| `ciphertext_hex` | Sealed inner JSON for `text`, `voice`, and `attachment_offer`; empty for acks and `transport_kem_hello` |
 | `transport_x25519_hex` | On **`transport_kem_hello` only:** this node's X25519 transport public key (64 hex chars) |
 | `created_at_ms` | Unix milliseconds (frame construction time) |
 | `received_at_ms` | On **`ack_received` only:** when the recipient **first** accepted the referenced text (`ref_id`). Recipient authority; **stable on duplicate text retries**; omitted on `ack_read`. |
 | `signature_hex` | Signature over canonical JSON (all fields except `signature_hex`) |
 | `ref_id` | On acks: original text message `id` |
+
+### Attachments (`attachment_offer`)
+
+**WAN (delivery):** same E2E mailbox rail as text/voice. Sealed inner carries the file:
+
+```json
+{
+  "attachment_version": 2,
+  "file_name": "report.pdf",
+  "mime_type": "application/pdf",
+  "size_plaintext": 123456,
+  "sha256_plaintext": "<hex>",
+  "file_b64": "<plaintext bytes>"
+}
+```
+
+Delivery seal = identity offline seal (`delivery_msg_v1`); LAN DM seal = transport KEM v2 (`msg_v1`). Cap: **3 MB** sealed inner (`ATTACH_MAX_SEALED_INNER_BYTES`). Recipient writes `ghal_bol/attach/downloads/…` and sets transcript `local_path` — no separate download hop. **Coord is not used.**
+
+**LAN oversized only:** native-connect mux `/ghal-bol/attach/1.0.0` (`CHANNEL_ATTACH`). Offer inner has `blob_id`, `content_key_b64`, hashes, `expires_at_ms` (no `file_b64`). Recipient fetches ciphertext chunks over the **LAN** session, decrypts, then may send `attachment_complete`. See [ATTACHMENTS_PLAN.md](ATTACHMENTS_PLAN.md).
 
 ### Text encryption
 
@@ -58,6 +77,10 @@ Inner JSON `{"text":"…"}` is AES-256-GCM via `ghal_bol_core::symmetric_seal`. 
 | `0x03` | **Transport KEM v2** — X25519 ECDH + HKDF(`ghal_bol_dm_transport_v2` + sorted identity wire pair) | After both peers exchanged `transport_kem_hello` on the DM stream |
 
 **Transport hello:** on stream open each node sends one signed `transport_kem_hello` frame advertising `transport_x25519_hex`. Outbound text is queued until the peer's transport key is known. Payload confidentiality is decoupled from identity **private** keys (identity wires still bind HKDF `info`).
+
+### Voice messages
+
+`kind: voice` uses the same signed envelope, transport KEM v2 seal, outbox retry, transcript patch, and `ack_received` / `ack_read` authority as native-connect text. The sealed inner JSON carries one Opus voice-note payload and metadata such as `duration_ms`, `sample_rate_hz`, and `channels`; poll/transcript rows expose only playback metadata (`msg_kind: "voice"`, `duration_ms`, `audio_path` / `local_path`) after native persists the local audio file.
 
 ## Delivery, read state, and sync
 

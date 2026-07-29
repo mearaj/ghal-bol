@@ -1,8 +1,6 @@
 //! Linux network truth — Wi‑Fi operstate + default IPv4 route iface.
 
-
 use crate::p2p::network_transport::{OsDefaultTransport, OsNetworkSnapshot};
-
 
 fn operstate_is_up(state: &str) -> bool {
     matches!(state.trim(), "up" | "unknown" | "dormant")
@@ -78,8 +76,6 @@ fn linux_default_ipv4_route_iface() -> Option<String> {
     best.map(|(_, iface)| iface)
 }
 
-
-
 /// Authoritative Linux connectivity snapshot for `LocalNetworkProfile`.
 pub fn probe_connectivity_truth() -> OsNetworkSnapshot {
     let wifi_up = read_any_wifi_oper_up();
@@ -92,10 +88,7 @@ pub fn probe_connectivity_truth() -> OsNetworkSnapshot {
         } else {
             OsDefaultTransport::None
         });
-    let route_oper_up = default_iface
-        .as_deref()
-        .map(iface_oper_up)
-        .unwrap_or(true);
+    let route_oper_up = default_iface.as_deref().map(iface_oper_up).unwrap_or(true);
     OsNetworkSnapshot {
         default_transport,
         internet_validated: route_oper_up && default_transport != OsDefaultTransport::None,

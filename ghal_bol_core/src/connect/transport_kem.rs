@@ -58,7 +58,8 @@ mod tests {
     fn transport_kem_missing_peer_derives_from_identity_wire() {
         let (_ks, id) = crate::create_keystore_v1("pw", None).unwrap();
         crate::session_runtime::install_unlocked_identity(id).unwrap();
-        let peer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        // Derive path normalizes, so this must be a real compressed identity wire.
+        let peer = "02f229f167ac2337144dbeba4392a6300c8fe97fb061efdb4f81ec9f29dec76936";
         let (sk, got) = transport_kem_for_peer(peer).unwrap();
         assert_eq!(got.len(), 32);
         let _ = PublicKey::from(got);

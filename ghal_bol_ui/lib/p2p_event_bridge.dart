@@ -1,6 +1,7 @@
 import "dart:async";
 
-import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import "package:flutter/foundation.dart"
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:ghal_bol_ui/app_log.dart";
 import "package:ghal_bol_ui/user_flow_log.dart";
 import "package:ghal_bol_ui/call/call_incoming_alert.dart";
@@ -44,6 +45,7 @@ class P2pEventBridge {
   /// Latest hub room target; pump applies until it matches native (coalesces rapid enter/leave).
   String? _foregroundDesired;
   Future<void>? _uiSessionPumpFuture;
+
   /// App interactive + visible (resumed, not inactive/paused). Gates read receipts with room.
   bool _uiVisibleDesired = false;
 
@@ -62,18 +64,22 @@ class P2pEventBridge {
     }
   }
 
-  void removeLinuxWindowCloseListener(void Function(bool closedByUser) listener) {
+  void removeLinuxWindowCloseListener(
+    void Function(bool closedByUser) listener,
+  ) {
     _linuxWindowCloseListeners.remove(listener);
   }
 
   void _notifyLinuxWindowCloseListeners(bool closedByUser) {
-    for (final l
-        in List<void Function(bool closedByUser)>.from(_linuxWindowCloseListeners)) {
+    for (final l in List<void Function(bool closedByUser)>.from(
+      _linuxWindowCloseListeners,
+    )) {
       l(closedByUser);
     }
   }
 
   bool get isRunning => _poll != null;
+
   /// Best LAN IPv4 from `listening` events (diagnostics / future use).
   String? get primaryLanIpv4 => _pickBestLanIpv4(_lanIpv4Candidates);
   String get appNamespace => _appNs;
@@ -152,7 +158,10 @@ class P2pEventBridge {
           }
         }
         await _applyUiSession(wantVisible, wantRoom);
-        if (_foregroundDesired == wantRoom && _uiVisibleDesired == wantVisible) break;
+        if (_foregroundDesired == wantRoom &&
+            _uiVisibleDesired == wantVisible) {
+          break;
+        }
       }
     });
     _uiSessionPumpFuture = pump.catchError((_) {});
@@ -170,11 +179,15 @@ class P2pEventBridge {
       roomPublicKeyHex: roomPublicKeyHex,
     );
     if (r["ok"] != true) {
-      P2pFlowLog.issue("sync_ui_session_failed", detail: r["error"]?.toString());
+      P2pFlowLog.issue(
+        "sync_ui_session_failed",
+        detail: r["error"]?.toString(),
+      );
     } else {
       SessionFlowLog.step("ui_session_applied", {
         "visible": uiVisible.toString(),
-        "room": roomPublicKeyHex != null && isValidPublicKeyHex(roomPublicKeyHex)
+        "room":
+            roomPublicKeyHex != null && isValidPublicKeyHex(roomPublicKeyHex)
             ? P2pFlowLog.shortPk(roomPublicKeyHex)
             : "(none)",
         "read": r["read_receipts"]?.toString() ?? "?",
@@ -219,7 +232,8 @@ class P2pEventBridge {
         P2pFlowLog.issue("bootstrap_unavailable");
         return;
       }
-      if (GhalBolP2p.usesDaemon && !await SessionCredentials.ensureDaemonUnlocked()) {
+      if (GhalBolP2p.usesDaemon &&
+          !await SessionCredentials.ensureDaemonUnlocked()) {
         return;
       }
       P2pFlowLog.step("bootstrap_start");
@@ -229,7 +243,10 @@ class P2pEventBridge {
         appNamespace: _appNs,
       );
       if (r["ok"] != true) {
-        P2pFlowLog.issue("bootstrap_sync_failed", detail: r["error"]?.toString());
+        P2pFlowLog.issue(
+          "bootstrap_sync_failed",
+          detail: r["error"]?.toString(),
+        );
         return;
       }
       _networkBootstrapOk = await GhalBolP2p.isRunning();
@@ -308,7 +325,10 @@ class P2pEventBridge {
           appNamespace: _appNs,
         );
         if (r["ok"] != true) {
-          P2pFlowLog.issue("recover_sync_failed", detail: r["error"]?.toString());
+          P2pFlowLog.issue(
+            "recover_sync_failed",
+            detail: r["error"]?.toString(),
+          );
           return;
         }
         final ready = await GhalBolP2p.waitNodeReady(
@@ -326,6 +346,7 @@ class P2pEventBridge {
         AppLog.instance.e("P2P", "recover failed", e, st);
       }
     }
+
     _p2pRecoverInFlight = run();
     try {
       await _p2pRecoverInFlight;
@@ -439,6 +460,7 @@ class P2pEventBridge {
         }
       }
     }
+
     final next = (_drainChain ?? Future<void>.value()).then((_) => run());
     final guarded = next.catchError((Object error, StackTrace stack) {
       AppLog.instance.w("Daemon", "event poll interrupted — reconnecting");
@@ -493,7 +515,9 @@ class P2pEventBridge {
   void _dispatch(Map<String, dynamic> ev) {
     _handleCore(ev);
     CallController.instance.handlePollEvent(ev);
-    for (final l in List<void Function(Map<String, dynamic>)>.from(_listeners)) {
+    for (final l in List<void Function(Map<String, dynamic>)>.from(
+      _listeners,
+    )) {
       l(ev);
     }
   }
@@ -502,7 +526,7 @@ class P2pEventBridge {
     final kind = ev["kind"]?.toString();
     if (kind == "dm_message") {
       final msgKind = ev["msg_kind"]?.toString() ?? "";
-      if (msgKind == "text") {
+      if (msgKind == "text" || msgKind == "voice") {
         // Native may have persisted on wire before this poll replay — still refresh roster badge.
         ContactStore.previewChangeCount.value++;
       }
@@ -515,8 +539,9 @@ class P2pEventBridge {
       if (kind == "peer_identified") {
         ContactStore.rosterChangeCount.value++;
         _scheduleCoordDialIfNeeded();
-      } else if (kind == "dm_message" && msgKind == "text") {
-        // Already bumped above for every inbound text poll event.
+      } else if (kind == "dm_message" &&
+          (msgKind == "text" || msgKind == "voice")) {
+        // Already bumped above for every inbound chat-message poll event.
       } else {
         ContactStore.bumpListFromPoll();
       }
@@ -651,6 +676,7 @@ class P2pEventBridge {
       if (ip.startsWith("10.")) return 2;
       return 1;
     }
+
     String? best;
     var bestScore = -1;
     for (final ip in candidates) {

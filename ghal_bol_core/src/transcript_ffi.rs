@@ -83,10 +83,16 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_transcript_load_merged(
             })
             .unwrap_or_default();
         let from_peer = q.get("match_inbound_from_peer_id").and_then(|v| v.as_str());
-        match crate::dm_transcript_store::thread_view(&ns, &keys, from_peer) {
+        let limit = q
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .filter(|n| *n > 0)
+            .map(|n| n as usize);
+        match crate::dm_transcript_store::thread_view_limited(&ns, &keys, from_peer, limit) {
             Ok(view) => json_ok(serde_json::json!({
                 "ok": true,
                 "revision": view.revision,
+                "has_more": view.has_more,
                 "lines": view.lines.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
             })),
             Err(e) => json_err(format!("{e}")),

@@ -13,6 +13,13 @@ class StoredChatLine {
     this.createdAtMs,
     this.readAckSent = false,
     this.receivedAtMs,
+    this.msgKind = "text",
+    this.durationMs,
+    this.audioPath,
+    this.fileName,
+    this.mimeType,
+    this.sizeBytes,
+    this.localPath,
   });
 
   final String localId;
@@ -24,6 +31,13 @@ class StoredChatLine {
   final int? createdAtMs;
   final bool readAckSent;
   final int? receivedAtMs;
+  final String msgKind;
+  final int? durationMs;
+  final String? audioPath;
+  final String? fileName;
+  final String? mimeType;
+  final int? sizeBytes;
+  final String? localPath;
 
   Map<String, dynamic> toJson() => {
     "local_id": localId,
@@ -35,25 +49,54 @@ class StoredChatLine {
     if (createdAtMs != null) "created_at_ms": createdAtMs,
     if (receivedAtMs != null) "received_at_ms": receivedAtMs,
     if (readAckSent) "read_ack_sent": true,
+    if (msgKind != "text") "msg_kind": msgKind,
+    if (durationMs != null) "duration_ms": durationMs,
+    if (audioPath != null) "audio_path": audioPath,
+    if (fileName != null) "file_name": fileName,
+    if (mimeType != null) "mime_type": mimeType,
+    if (sizeBytes != null) "size_bytes": sizeBytes,
+    if (localPath != null) "local_path": localPath,
   };
 
-  StoredChatLine copyWith({String? delivery, bool? readAckSent}) => StoredChatLine(
-    localId: localId,
-    text: text,
-    outgoing: outgoing,
-    from: from,
-    messageId: messageId,
-    delivery: delivery ?? this.delivery,
-    createdAtMs: createdAtMs,
-    readAckSent: readAckSent ?? this.readAckSent,
-    receivedAtMs: receivedAtMs,
-  );
+  StoredChatLine copyWith({String? delivery, bool? readAckSent}) =>
+      StoredChatLine(
+        localId: localId,
+        text: text,
+        outgoing: outgoing,
+        from: from,
+        messageId: messageId,
+        delivery: delivery ?? this.delivery,
+        createdAtMs: createdAtMs,
+        readAckSent: readAckSent ?? this.readAckSent,
+        receivedAtMs: receivedAtMs,
+        msgKind: msgKind,
+        durationMs: durationMs,
+        audioPath: audioPath,
+        fileName: fileName,
+        mimeType: mimeType,
+        sizeBytes: sizeBytes,
+        localPath: localPath,
+      );
 
   static StoredChatLine? fromJson(dynamic raw) {
     if (raw is! Map) return null;
     final localId = raw["local_id"]?.toString();
-    final text = raw["text"]?.toString();
-    if (localId == null || localId.isEmpty || text == null) return null;
+    final text = raw["text"]?.toString() ?? "";
+    final fileNameRaw = raw["file_name"]?.toString().trim();
+    final fileName = (fileNameRaw != null && fileNameRaw.isNotEmpty)
+        ? fileNameRaw
+        : _fileNameFromAttachmentPreview(text);
+    final msgKind = raw["msg_kind"]?.toString().trim();
+    var kind = msgKind == null || msgKind.isEmpty ? "text" : msgKind;
+    // Legacy rows sometimes kept only "📎 name" with msg_kind stripped.
+    if (kind == "text" &&
+        (fileName != null || text.trimLeft().startsWith("📎"))) {
+      kind = "attachment_offer";
+    }
+    if (localId == null || localId.isEmpty) return null;
+    if (kind != "voice" && kind != "attachment_offer" && text.isEmpty) {
+      return null;
+    }
     return StoredChatLine(
       localId: localId,
       text: text,
@@ -61,19 +104,50 @@ class StoredChatLine {
       from: raw["from"]?.toString(),
       messageId: raw["message_id"]?.toString(),
       delivery: raw["delivery"]?.toString() ?? "pending",
-      createdAtMs: raw["created_at_ms"] is int ? raw["created_at_ms"] as int : null,
-      receivedAtMs: raw["received_at_ms"] is int ? raw["received_at_ms"] as int : null,
+      createdAtMs: raw["created_at_ms"] is int
+          ? raw["created_at_ms"] as int
+          : null,
+      receivedAtMs: raw["received_at_ms"] is int
+          ? raw["received_at_ms"] as int
+          : null,
       readAckSent: raw["read_ack_sent"] == true,
+      msgKind: kind,
+      durationMs: _intField(raw["duration_ms"]),
+      audioPath: raw["audio_path"]?.toString(),
+      fileName: fileName,
+      mimeType: raw["mime_type"]?.toString(),
+      sizeBytes: _intField(raw["size_bytes"]),
+      localPath: raw["local_path"]?.toString(),
     );
+  }
+
+  static String? _fileNameFromAttachmentPreview(String text) {
+    final t = text.trim();
+    if (!t.startsWith("📎")) return null;
+    final name = t.substring("📎".length).trim();
+    return name.isEmpty ? null : name;
+  }
+
+  static int? _intField(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return null;
   }
 }
 
 /// Native transcript snapshot for UI paint (revision + merged lines).
 class TranscriptThreadView {
-  const TranscriptThreadView({required this.revision, required this.lines});
+  const TranscriptThreadView({
+    required this.revision,
+    required this.lines,
+    this.hasMore = false,
+  });
 
   final int revision;
   final List<StoredChatLine> lines;
+
+  /// True when older lines exist before this (paginated) window.
+  final bool hasMore;
 }
 
 /// Local transcript — persisted in **`ghal_bol`**.
@@ -87,8 +161,16 @@ class ChatTranscriptStore {
 
   static bool get _backgroundOwnsWrites => GhalBolP2p.usesDaemon;
 
-  static String _threadCacheKey(String appNamespace, Set<String> conversationKeys) {
-    final keys = conversationKeys.map((e) => e.trim()).where((e) => e.isNotEmpty).toList()..sort();
+  static String _threadCacheKey(
+    String appNamespace,
+    Set<String> conversationKeys,
+  ) {
+    final keys =
+        conversationKeys
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList()
+          ..sort();
     return "${appNamespace.trim()}|${keys.join("|")}";
   }
 
@@ -110,7 +192,10 @@ class ChatTranscriptStore {
       _threadMemoryCache.removeWhere((k, _) => k.startsWith("$ns|"));
       return;
     }
-    final keys = conversationKeys.map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    final keys = conversationKeys
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
     if (keys.length == 1) {
       _threadMemoryCache.remove(_threadCacheKey(ns, {keys.first}));
       return;
@@ -134,12 +219,14 @@ class ChatTranscriptStore {
     String? conversationKey,
     Set<String>? conversationKeys,
   }) async {
-    final keys = conversationKeys ??
+    final keys =
+        conversationKeys ??
         (conversationKey != null && conversationKey.trim().isNotEmpty
             ? {conversationKey.trim()}
             : <String>{});
     if (keys.isEmpty) return;
-    final canon = conversationKey?.trim() ?? (keys.length == 1 ? keys.first : "");
+    final canon =
+        conversationKey?.trim() ?? (keys.length == 1 ? keys.first : "");
     await loadMerged(
       appNamespace: appNamespace,
       conversationKeys: keys,
@@ -156,26 +243,41 @@ class ChatTranscriptStore {
     required Set<String> conversationKeys,
     String? matchInboundFromPeerId,
     String? cacheUnderConversationKey,
+    int? limit,
   }) async {
     final r = await GhalBolP2p.transcriptLoadThreadView(
       appNamespace: appNamespace,
       conversationKeys: conversationKeys.toList(),
       matchInboundFromPeerId: matchInboundFromPeerId,
+      limit: limit,
     );
-    final lines = r.lines.map(StoredChatLine.fromJson).whereType<StoredChatLine>().toList();
+    final lines = r.lines
+        .map(StoredChatLine.fromJson)
+        .whereType<StoredChatLine>()
+        .toList();
     final cached = List<StoredChatLine>.from(lines);
-    _threadMemoryCache[_threadCacheKey(appNamespace, conversationKeys)] = cached;
-    final canon = cacheUnderConversationKey?.trim() ?? "";
-    if (canon.isNotEmpty) {
-      _threadMemoryCache[_threadCacheKey(appNamespace, {canon})] = cached;
+    // Only the full (unlimited) view is a complete thread snapshot safe to reuse as
+    // a cache for other surfaces (hub warm, peek). A limited window is not.
+    if (!r.hasMore) {
+      _threadMemoryCache[_threadCacheKey(appNamespace, conversationKeys)] =
+          cached;
+      final canon = cacheUnderConversationKey?.trim() ?? "";
+      if (canon.isNotEmpty) {
+        _threadMemoryCache[_threadCacheKey(appNamespace, {canon})] = cached;
+      }
     }
-    return TranscriptThreadView(revision: r.revision, lines: lines);
+    return TranscriptThreadView(
+      revision: r.revision,
+      lines: lines,
+      hasMore: r.hasMore,
+    );
   }
 
   static Future<List<StoredChatLine>> loadMerged({
     required String appNamespace,
     required Set<String> conversationKeys,
     String? matchInboundFromPeerId,
+
     /// When set, also cache under this single key (for hub warm + peek by canonical conv).
     String? cacheUnderConversationKey,
   }) async {
@@ -191,8 +293,10 @@ class ChatTranscriptStore {
   static Future<List<StoredChatLine>> load({
     required String appNamespace,
     required String conversationKey,
-  }) =>
-      loadMerged(appNamespace: appNamespace, conversationKeys: {conversationKey});
+  }) => loadMerged(
+    appNamespace: appNamespace,
+    conversationKeys: {conversationKey},
+  );
 
   static Future<void> appendIfNew({
     required String appNamespace,
@@ -219,7 +323,9 @@ class ChatTranscriptStore {
     if (_backgroundOwnsWrites) return;
   }
 
-  static Future<void> repairCorruptOutgoingDeliveryOnce({required String appNamespace}) async {}
+  static Future<void> repairCorruptOutgoingDeliveryOnce({
+    required String appNamespace,
+  }) async {}
 
   static Future<void> save({
     required String appNamespace,

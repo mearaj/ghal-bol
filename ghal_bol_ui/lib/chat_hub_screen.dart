@@ -52,8 +52,10 @@ class ChatHubScreen extends StatefulWidget {
   });
 
   final GhalBolIdentityResult session;
+
   /// UI-only: hide hub; P2P and poll keep running.
   final VoidCallback onUiLock;
+
   /// Logout / delete identity: tear down session.
   final VoidCallback onEndSession;
 
@@ -61,7 +63,8 @@ class ChatHubScreen extends StatefulWidget {
   State<ChatHubScreen> createState() => ChatHubScreenState();
 }
 
-class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserver {
+class ChatHubScreenState extends State<ChatHubScreen>
+    with WidgetsBindingObserver {
   /// Shell tab: 0 = Chats, 1 = Identity, 2 = More.
   int _navTab = 0;
 
@@ -83,10 +86,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   /// Custom display name from [IdentityAliasStore]; `null` means use signing-key hex default.
   String? _storedCustomAlias;
   int _aliasSaveNonce = 0;
+  String? _availabilityStatus;
+  bool _availabilitySaving = false;
 
   List<SavedContact> _contacts = [];
+
   /// Selected roster row — [SavedContact.conversationKey] (`public_key_hex`).
   String? _selectedConversationKey;
+
   /// Contact from the last [_selectContact] tap — stable before roster reload finds the row.
   SavedContact? _openRoomContact;
   String _searchQuery = "";
@@ -104,14 +111,15 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     return null;
   }
 
-  bool _hubShellSplit(BuildContext context) => ghalBolUseChatShellSplit(context);
+  bool _hubShellSplit(BuildContext context) =>
+      ghalBolUseChatShellSplit(context);
 
   HubHistoryEntry _hubHistorySnapshot() => HubHistoryEntry(
-        navTab: _navTab,
-        narrowShowRoom: _narrowShowRoom,
-        splitChatEngaged: _splitChatEngaged,
-        conversationKey: _selectedConversationKey,
-      );
+    navTab: _navTab,
+    narrowShowRoom: _narrowShowRoom,
+    splitChatEngaged: _splitChatEngaged,
+    conversationKey: _selectedConversationKey,
+  );
 
   void _recordHubNavigation() {
     _hubHistory.recordNavigate(_hubHistorySnapshot());
@@ -128,7 +136,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
         if (_openRoomContact?.conversationKey != incomingKey) {
           _openRoomContact = _selectedContact;
         }
-      } else if (!entry.narrowShowRoom && !entry.splitChatEngaged && _navTab == 0) {
+      } else if (!entry.narrowShowRoom &&
+          !entry.splitChatEngaged &&
+          _navTab == 0) {
         // Roster-only back — keep stable thread key for mounted [ChatScreen] (DESIGN.md hubThreadKey).
       } else {
         _selectedConversationKey = null;
@@ -139,8 +149,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   /// Hub chrome still above root (room open or non-Chats tab) — used if history desyncs.
-  bool _hubHasChromeToUnwind() =>
-      _isHubChatRoomOpen(context) || _navTab != 0;
+  bool _hubHasChromeToUnwind() => _isHubChatRoomOpen(context) || _navTab != 0;
 
   /// One step back without relying on history (same UI + foreground contract as before).
   void _hubUnwindChromeFallback() {
@@ -339,12 +348,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       if (pk == null) return;
       GhalBolUiSession.setVisible(true);
       GhalBolUiSession.setRoom(pk);
-      unawaited(GhalBolUiSession.awaitApplied().then((_) {
-        if (mounted && epoch == _foregroundSyncEpoch) {
-          _layoutSyncedRoomOpen = true;
-          _lastSyncedForegroundPk = pk;
-        }
-      }));
+      unawaited(
+        GhalBolUiSession.awaitApplied().then((_) {
+          if (mounted && epoch == _foregroundSyncEpoch) {
+            _layoutSyncedRoomOpen = true;
+            _lastSyncedForegroundPk = pk;
+          }
+        }),
+      );
     });
   }
 
@@ -377,7 +388,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     );
     final c = _selectedContact;
     if (c != null) {
-      unawaited(ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c));
+      unawaited(
+        ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c),
+      );
     }
     GhalBolUiSession.setVisible(true);
     GhalBolUiSession.setRoom(pk);
@@ -415,11 +428,14 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     _hubHistory.reset(_hubHistorySnapshot());
     WidgetsBinding.instance.addObserver(this);
     _loadStoredAlias();
+    _loadAvailabilityStatus();
     ContactStore.rosterChangeCount.addListener(_onRosterChanged);
     ContactStore.changeCount.addListener(_onContactsUiChanged);
     ContactStore.previewChangeCount.addListener(_onPreviewPollChanged);
     P2pEventBridge.instance.addListener(_routeHubP2pEvent);
-    P2pEventBridge.instance.addLinuxWindowCloseListener(_onLinuxWindowCloseChanged);
+    P2pEventBridge.instance.addLinuxWindowCloseListener(
+      _onLinuxWindowCloseChanged,
+    );
     InviteDeepLink.onInviteUri = (uri) {
       if (mounted) unawaited(_joinFromUri(uri));
     };
@@ -446,7 +462,10 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
           );
           break;
         }
-        AppLog.instance.flow("Hub", "lifecycle inactive → ui not visible (room unchanged)");
+        AppLog.instance.flow(
+          "Hub",
+          "lifecycle inactive → ui not visible (room unchanged)",
+        );
         GhalBolUiSession.setVisible(false);
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
@@ -480,7 +499,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       InviteDeepLink.onInviteUri = null;
     }
     P2pEventBridge.instance.removeListener(_routeHubP2pEvent);
-    P2pEventBridge.instance.removeLinuxWindowCloseListener(_onLinuxWindowCloseChanged);
+    P2pEventBridge.instance.removeLinuxWindowCloseListener(
+      _onLinuxWindowCloseChanged,
+    );
     GhalBolUiSession.setRoom(null);
     unawaited(() async {
       await GhalBolUiSession.awaitApplied();
@@ -550,10 +571,10 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   }
 
   String? _localIdentityWire() => identityWireFromSession(
-        identityWire: _s.identityWire,
-        publicKeyHex: _s.publicKeyHex,
-        identityAlgorithm: _s.identityAlgorithm,
-      );
+    identityWire: _s.identityWire,
+    publicKeyHex: _s.publicKeyHex,
+    identityAlgorithm: _s.identityAlgorithm,
+  );
 
   String? _computeInviteUri() {
     final wire = _localIdentityWire();
@@ -649,7 +670,8 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     if (!mounted) return;
     final fpAfter = P2pNetworkCoordinator.dmPeersFingerprint(_contacts);
     final countAfter = _contacts.length;
-    final needsSync = forceSync || fpBefore != fpAfter || countBefore != countAfter;
+    final needsSync =
+        forceSync || fpBefore != fpAfter || countBefore != countAfter;
     AppLog.instance.flow(
       "Hub",
       "roster reload count=$countBefore→$countAfter needsSync=$needsSync force=$forceSync",
@@ -670,7 +692,10 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       _reloadContactsAndSyncP2pIfNeeded(awaitP2p: awaitP2p, forceSync: true);
 
   Future<SavedContact?> _onContactJoined(SavedContact contact) async {
-    final saved = await ContactStore.upsertContact(appNamespace: _appNs, contact: contact);
+    final saved = await ContactStore.upsertContact(
+      appNamespace: _appNs,
+      contact: contact,
+    );
     if (!mounted) return null;
     _openRoomContact = saved;
     setState(() => _selectedConversationKey = saved.conversationKey);
@@ -708,7 +733,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       if (!mounted) return;
       _attachedHubChat?.onHubReattached();
     });
-    unawaited(ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c));
+    unawaited(
+      ContactStore.clearUnreadForContact(appNamespace: _appNs, contact: c),
+    );
     unawaited(
       ChatTranscriptStore.warmThreadCache(
         appNamespace: _appNs,
@@ -719,10 +746,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     if (c.hasFullKeys) {
       unawaited(P2pNetworkCoordinator.registerContacts([c]));
       unawaited(
-        P2pNetworkCoordinator.refreshCoordDial(
-          [c],
-          appNamespace: _appNs,
-        ),
+        P2pNetworkCoordinator.refreshCoordDial([c], appNamespace: _appNs),
       );
     }
     // New [ChatScreen] mounts via [ValueKey] — [onHubChatAttach] reloads the right thread.
@@ -742,16 +766,19 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       if (pk.isEmpty) return;
       final sel = _selectedContact?.publicKeyHex.trim() ?? "";
       if (sel.isNotEmpty && publicKeysEqual(sel, pk)) {
-        AppLog.instance.flow("Hub", "selected peer disconnected pk=${pk.substring(0, 8)}…");
+        AppLog.instance.flow(
+          "Hub",
+          "selected peer disconnected pk=${pk.substring(0, 8)}…",
+        );
         _attachedHubChat?.onHubPeerLinkLost();
       }
     }
     if (kind == "dm_message") {
       final msgKind = ev["msg_kind"]?.toString() ?? "";
-      if (msgKind == "text") {
+      if (msgKind == "text" || msgKind == "voice") {
         final pk = contactKeyFromEvent(ev);
         if (_openRoomMatchesPeerKey(pk)) {
-          _scheduleReadGateNudge(reason: "inbound_text");
+          _scheduleReadGateNudge(reason: "inbound_$msgKind");
           if (ev["stores_updated"] == true) {
             setState(() {});
           }
@@ -855,9 +882,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     final text = data?.text?.trim();
     if (text == null || text.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Clipboard is empty.")),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("Clipboard is empty.")));
       return;
     }
     await _joinFromUri(text);
@@ -888,7 +915,10 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       );
       return;
     }
-    AppLog.instance.i("Invite", "scan ok public_key_hex=${inv.publicKeyHex.substring(0, 8)}…");
+    AppLog.instance.i(
+      "Invite",
+      "scan ok public_key_hex=${inv.publicKeyHex.substring(0, 8)}…",
+    );
     final saved = await _onContactJoined(SavedContact.fromInvite(inv));
     if (!mounted || saved == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -905,10 +935,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       if (saved.hasFullKeys) {
         unawaited(P2pNetworkCoordinator.registerContacts([saved]));
         unawaited(
-          P2pNetworkCoordinator.refreshCoordDial(
-            [saved],
-            appNamespace: _appNs,
-          ),
+          P2pNetworkCoordinator.refreshCoordDial([saved], appNamespace: _appNs),
         );
       }
       P2pEventBridge.instance.drainNow();
@@ -926,14 +953,91 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     setState(() => _storedCustomAlias = v);
   }
 
+  Future<void> _loadAvailabilityStatus() async {
+    final status = await GhalBolP2p.getAvailabilityStatus();
+    if (!mounted) return;
+    setState(() => _availabilityStatus = status);
+  }
+
+  Future<void> _setAvailabilityStatus(String raw) async {
+    setState(() => _availabilitySaving = true);
+    final r = await GhalBolP2p.setAvailabilityStatus(raw);
+    if (!mounted) return;
+    final ok = r["ok"] == true;
+    final status = r["status"]?.toString().trim() ?? "";
+    setState(() {
+      _availabilitySaving = false;
+      if (ok) _availabilityStatus = status.isEmpty ? null : status;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? "Availability status updated"
+              : "Status update failed: ${r["error"] ?? "native unavailable"}",
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAvailabilityStatusPicker(BuildContext context) async {
+    const presets = <String>["", "Available", "Busy", "Away", "In a call"];
+    final customCtrl = TextEditingController(text: _availabilityStatus ?? "");
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text("Availability status"),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final preset in presets)
+                  ListTile(
+                    dense: true,
+                    title: Text(preset.isEmpty ? "Clear status" : preset),
+                    onTap: () => Navigator.pop(ctx, preset),
+                  ),
+                const Divider(),
+                TextField(
+                  controller: customCtrl,
+                  maxLength: 64,
+                  decoration: const InputDecoration(
+                    labelText: "Custom status",
+                    hintText: "e.g. Out for lunch",
+                  ),
+                  onSubmitted: (v) => Navigator.pop(ctx, v),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Cancel"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, customCtrl.text),
+              child: const Text("Save custom"),
+            ),
+          ],
+        );
+      },
+    );
+    customCtrl.dispose();
+    if (selected == null) return;
+    await _setAvailabilityStatus(selected);
+  }
+
   Future<void> _copyPublicKey(BuildContext context) async {
     final wire = _localIdentityWire();
     if (wire == null || !isValidPublicKeyHex(wire)) return;
     await Clipboard.setData(ClipboardData(text: wire));
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Identity public key copied")),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text("Identity public key copied")));
   }
 
   Future<void> _copyInvitationFromHub(BuildContext context) async {
@@ -947,9 +1051,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     if (uri == null) return;
     await Clipboard.setData(ClipboardData(text: uri));
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Invitation copied")),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text("Invitation copied")));
   }
 
   Future<void> _shareInvitationFromHub(BuildContext context) async {
@@ -980,9 +1084,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   String? _selectedContactCallPk() {
     final c = _selectedContact;
     if (c == null) return null;
-    final pk = resolvePublicKeyHex(
-      storedHex: c.publicKeyHex,
-    );
+    final pk = resolvePublicKeyHex(storedHex: c.publicKeyHex);
     return isValidPublicKeyHex(pk) ? pk!.toLowerCase() : null;
   }
 
@@ -1074,16 +1176,25 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     );
   }
 
-  PreferredSizeWidget _listAppBar(BuildContext context, {required bool showLockInAppBar}) {
+  PreferredSizeWidget _listAppBar(
+    BuildContext context, {
+    required bool showLockInAppBar,
+  }) {
     final p = GhalBolChatRoomPalette.of(context);
     return AppBar(
-      title: Text("Ghal Bol", style: TextStyle(color: p.appBarFg, fontWeight: FontWeight.w600)),
+      title: Text(
+        "Ghal Bol",
+        style: TextStyle(color: p.appBarFg, fontWeight: FontWeight.w600),
+      ),
       backgroundColor: p.appBarBg,
       foregroundColor: p.appBarFg,
       surfaceTintColor: Colors.transparent,
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
-        child: Container(height: 1, color: p.appBarDivider.withValues(alpha: 0.45)),
+        child: Container(
+          height: 1,
+          color: p.appBarDivider.withValues(alpha: 0.45),
+        ),
       ),
       actions: [
         IconButton(
@@ -1093,7 +1204,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
         ),
         IconButton(
           tooltip: "Show my QR invitation",
-          onPressed: GhalBolFfi.isP2pAvailable ? () => unawaited(_showMyQrInvitation()) : null,
+          onPressed: GhalBolFfi.isP2pAvailable
+              ? () => unawaited(_showMyQrInvitation())
+              : null,
           icon: Icon(Icons.qr_code, color: p.appBarFg),
         ),
         IconButton(
@@ -1140,7 +1253,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                 decoration: InputDecoration(
                   hintText: "Search contacts…",
                   border: InputBorder.none,
-                  icon: Icon(Icons.search, size: 22, color: colorScheme.onSurfaceVariant),
+                  icon: Icon(
+                    Icons.search,
+                    size: 22,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
                   isDense: true,
                 ),
                 onChanged: (v) => setState(() => _searchQuery = v),
@@ -1156,7 +1273,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.chat_outlined, size: 48, color: colorScheme.outline),
+                        Icon(
+                          Icons.chat_outlined,
+                          size: 48,
+                          color: colorScheme.outline,
+                        ),
                         const SizedBox(height: 12),
                         Text(
                           _contacts.isEmpty ? "No chats yet" : "No matches",
@@ -1179,22 +1300,33 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                   itemCount: filtered.length,
                   itemBuilder: (ctx, i) {
                     final c = filtered[i];
-                    final selected = c.conversationKey == _selectedConversationKey;
+                    final selected =
+                        c.conversationKey == _selectedConversationKey;
                     final hasUnread = c.unreadCount > 0;
                     final label = ghalBolIdName(
                       publicKeyHex: c.publicKeyHex,
                       customAlias: c.displayAlias,
                     );
+                    final status = c.availabilityStatus?.trim() ?? "";
                     final preview = c.lastMessagePreview ?? "Tap to open chat";
                     return DecoratedBox(
                       decoration: BoxDecoration(
-                        color: selected && !ghalBolUseChatShellSplit(context) && _narrowShowRoom
-                            ? colorScheme.primaryContainer.withValues(alpha: 0.35)
+                        color:
+                            selected &&
+                                !ghalBolUseChatShellSplit(context) &&
+                                _narrowShowRoom
+                            ? colorScheme.primaryContainer.withValues(
+                                alpha: 0.35,
+                              )
                             : selected && ghalBolUseChatShellSplit(context)
-                                ? colorScheme.primaryContainer.withValues(alpha: 0.25)
-                                : hasUnread
-                                    ? colorScheme.secondaryContainer.withValues(alpha: 0.45)
-                                    : Colors.transparent,
+                            ? colorScheme.primaryContainer.withValues(
+                                alpha: 0.25,
+                              )
+                            : hasUnread
+                            ? colorScheme.secondaryContainer.withValues(
+                                alpha: 0.45,
+                              )
+                            : Colors.transparent,
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: Material(
@@ -1203,39 +1335,72 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                           onTap: () => unawaited(_selectContact(c)),
                           borderRadius: BorderRadius.circular(12),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 10,
+                            ),
                             child: Row(
                               children: [
                                 CircleAvatar(
                                   backgroundColor: colorScheme.primaryContainer,
-                                  foregroundColor: colorScheme.onPrimaryContainer,
+                                  foregroundColor:
+                                      colorScheme.onPrimaryContainer,
                                   child: Text(
-                                    label.isNotEmpty ? label.substring(0, 1).toUpperCase() : "?",
+                                    label.isNotEmpty
+                                        ? label.substring(0, 1).toUpperCase()
+                                        : "?",
                                   ),
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         label,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                              fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w500,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleMedium
+                                            ?.copyWith(
+                                              fontWeight: hasUnread
+                                                  ? FontWeight.w600
+                                                  : FontWeight.w500,
                                             ),
                                       ),
                                       const SizedBox(height: 4),
+                                      if (status.isNotEmpty) ...[
+                                        Text(
+                                          status,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .bodySmall
+                                              ?.copyWith(
+                                                color: colorScheme.primary,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                      ],
                                       Text(
                                         preview,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
                                               color: hasUnread
                                                   ? colorScheme.onSurface
-                                                  : colorScheme.onSurfaceVariant,
-                                              fontWeight: hasUnread ? FontWeight.w500 : FontWeight.normal,
+                                                  : colorScheme
+                                                        .onSurfaceVariant,
+                                              fontWeight: hasUnread
+                                                  ? FontWeight.w500
+                                                  : FontWeight.normal,
                                             ),
                                       ),
                                     ],
@@ -1245,29 +1410,44 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                                   Padding(
                                     padding: const EdgeInsets.only(left: 6),
                                     child: FilledButton.tonal(
-                                      onPressed: () => unawaited(_selectContact(c)),
+                                      onPressed: () =>
+                                          unawaited(_selectContact(c)),
                                       style: FilledButton.styleFrom(
-                                        backgroundColor: colorScheme.tertiaryContainer,
-                                        foregroundColor: colorScheme.onTertiaryContainer,
-                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                        backgroundColor:
+                                            colorScheme.tertiaryContainer,
+                                        foregroundColor:
+                                            colorScheme.onTertiaryContainer,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 8,
+                                        ),
                                         minimumSize: Size.zero,
-                                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
                                       ),
                                       child: const Text("Unknown"),
                                     ),
                                   ),
                                 if (c.unreadCount > 0)
                                   Padding(
-                                    padding: EdgeInsets.only(left: c.showUnknownChip ? 6 : 0),
+                                    padding: EdgeInsets.only(
+                                      left: c.showUnknownChip ? 6 : 0,
+                                    ),
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 2,
+                                      ),
                                       decoration: BoxDecoration(
                                         color: colorScheme.primary,
                                         borderRadius: BorderRadius.circular(12),
                                       ),
                                       child: Text(
                                         "${c.unreadCount}",
-                                        style: TextStyle(color: colorScheme.onPrimary, fontSize: 12),
+                                        style: TextStyle(
+                                          color: colorScheme.onPrimary,
+                                          fontSize: 12,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -1330,7 +1510,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   FilledButton.icon(
-                    onPressed: GhalBolFfi.isP2pAvailable ? _openChatInvitationFromHub : null,
+                    onPressed: GhalBolFfi.isP2pAvailable
+                        ? _openChatInvitationFromHub
+                        : null,
                     icon: const Icon(Icons.qr_code),
                     label: const Text("Show QR invitation"),
                   ),
@@ -1347,7 +1529,8 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                         label: const Text("Share invitation"),
                       ),
                       FilledButton.tonalIcon(
-                        onPressed: () => unawaited(_copyInvitationFromHub(context)),
+                        onPressed: () =>
+                            unawaited(_copyInvitationFromHub(context)),
                         icon: const Icon(Icons.link),
                         label: const Text("Copy invitation"),
                       ),
@@ -1367,75 +1550,134 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
                 // Plain Text only — SelectableText/SelectionArea here regresses with
                 // Show private key dialogs (DESIGN.md § Identity tab regression guard).
                 child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text("Your identity", style: Theme.of(context).textTheme.titleLarge),
-                      const SizedBox(height: 8),
-                      Text(
-                        "QR and invitation links encode your identity public key — not IP addresses. "
-                        "secp256k1 identities use bare hex; other algorithms include an algorithm prefix. "
-                        "After they add you, the app finds you via coordination, same Wi‑Fi (mDNS), or when you connect to them.",
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: colorScheme.onSurfaceVariant,
-                            ),
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Your identity",
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      "QR and invitation links encode your identity public key — not IP addresses. "
+                      "secp256k1 identities use bare hex; other algorithms include an algorithm prefix. "
+                      "After they add you, the app finds you via coordination, same Wi‑Fi (mDNS), or when you connect to them.",
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
                       ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      "Namespace: $ns",
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      "Algorithm: $algo",
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      "Identity (share this):\n$wire",
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    if (_s.libp2pPeerId != null &&
+                        _s.libp2pPeerId!.isNotEmpty) ...[
                       const SizedBox(height: 12),
-                      Text("Namespace: $ns", style: Theme.of(context).textTheme.bodySmall),
-                      const SizedBox(height: 8),
-                      Text("Algorithm: $algo", style: Theme.of(context).textTheme.bodySmall),
-                      const SizedBox(height: 12),
-                      Text("Identity (share this):\n$wire", style: Theme.of(context).textTheme.bodyMedium),
-                      if (_s.libp2pPeerId != null && _s.libp2pPeerId!.isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        Text(
-                          "libp2p PeerId (derived):\n$peer",
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                      if (GhalBolFfi.isIdentityKeyManagementAvailable) ...[
-                        const Divider(height: 28),
-                        Text("Backup & private key", style: Theme.of(context).textTheme.titleSmall),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            OutlinedButton.icon(
-                              onPressed: () => unawaited(showRevealPrivateKeyDialog(context)),
-                              icon: const Icon(Icons.vpn_key_outlined, size: 18),
-                              label: const Text("Show private key"),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: () => unawaited(exportKeystoreBackup(context)),
-                              icon: const Icon(Icons.save_alt_outlined, size: 18),
-                              label: const Text("Export backup"),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          "App password is always required to view the secret. "
-                          "You may import any supported key or backup; cryptocurrency wallet keys are not recommended. "
-                          "You are responsible for what you import.",
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                      ],
-                      if (wire != "—" && isValidPublicKeyHex(wire)) ...[
-                        const Divider(height: 28),
-                        IdentityAliasForm(
-                          appNamespace: _s.appNamespace ?? kGhalBolAppNamespace,
-                          publicKeyHex: wire,
-                          onSaved: (v) {
-                            setState(() {
-                              _storedCustomAlias = v;
-                              _aliasSaveNonce++;
-                            });
-                          },
-                        ),
-                      ],
+                      Text(
+                        "libp2p PeerId (derived):\n$peer",
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ],
+                    if (GhalBolFfi.isIdentityKeyManagementAvailable) ...[
+                      const Divider(height: 28),
+                      Text(
+                        "Backup & private key",
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: () =>
+                                unawaited(showRevealPrivateKeyDialog(context)),
+                            icon: const Icon(Icons.vpn_key_outlined, size: 18),
+                            label: const Text("Show private key"),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: () =>
+                                unawaited(exportKeystoreBackup(context)),
+                            icon: const Icon(Icons.save_alt_outlined, size: 18),
+                            label: const Text("Export backup"),
+                          ),
+                          if (GhalBolFfi.isChangePasswordAvailable)
+                            OutlinedButton.icon(
+                              onPressed: () =>
+                                  unawaited(showChangePasswordDialog(context)),
+                              icon: const Icon(
+                                Icons.password_outlined,
+                                size: 18,
+                              ),
+                              label: const Text("Change password"),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "App password is always required to view the secret. "
+                        "You may import any supported key or backup; cryptocurrency wallet keys are not recommended. "
+                        "You are responsible for what you import.",
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                    if (wire != "—" && isValidPublicKeyHex(wire)) ...[
+                      const Divider(height: 28),
+                      Text(
+                        "Availability",
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 8),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(
+                          Icons.info_outline,
+                          color: colorScheme.primary,
+                        ),
+                        title: Text(_availabilityStatus ?? "No status set"),
+                        subtitle: const Text(
+                          "Shown under your name in contacts. This is not online/offline presence.",
+                        ),
+                        trailing: _availabilitySaving
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.edit_outlined),
+                        onTap: _availabilitySaving
+                            ? null
+                            : () => unawaited(
+                                _showAvailabilityStatusPicker(context),
+                              ),
+                      ),
+                      const SizedBox(height: 8),
+                      IdentityAliasForm(
+                        appNamespace: _s.appNamespace ?? kGhalBolAppNamespace,
+                        publicKeyHex: wire,
+                        onSaved: (v) {
+                          setState(() {
+                            _storedCustomAlias = v;
+                            _aliasSaveNonce++;
+                          });
+                        },
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),
@@ -1464,7 +1706,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
           ListTile(
             leading: Icon(Icons.contacts_outlined, color: colorScheme.primary),
             title: const Text("Contacts"),
-            subtitle: const Text("Add, edit display names, or remove by public key"),
+            subtitle: const Text(
+              "Add, edit display names, or remove by public key",
+            ),
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -1475,7 +1719,10 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
           ),
           const Divider(height: 1),
           ListTile(
-            leading: Icon(Icons.person_off_outlined, color: colorScheme.primary),
+            leading: Icon(
+              Icons.person_off_outlined,
+              color: colorScheme.primary,
+            ),
             title: const Text("Blocked contacts"),
             subtitle: const Text("People you blocked on this device"),
             onTap: () {
@@ -1495,9 +1742,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
             subtitle: const Text("Session diagnostics log"),
             onTap: () {
               Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => const AppLogScreen(),
-                ),
+                MaterialPageRoute<void>(builder: (_) => const AppLogScreen()),
               );
             },
           ),
@@ -1505,14 +1750,22 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
           ListTile(
             leading: const Icon(Icons.lock_outline),
             title: const Text("Lock"),
-            subtitle: const Text("Hide chats until you unlock (network stays on)"),
+            subtitle: const Text(
+              "Hide chats until you unlock (network stays on)",
+            ),
             onTap: widget.onUiLock,
           ),
           if (GhalBolFfi.isDeleteKeystoreAvailable) ...[
             const Divider(height: 1),
             ListTile(
-              leading: Icon(Icons.delete_forever_outlined, color: colorScheme.error),
-              title: Text("Delete identity from this device", style: TextStyle(color: colorScheme.error)),
+              leading: Icon(
+                Icons.delete_forever_outlined,
+                color: colorScheme.error,
+              ),
+              title: Text(
+                "Delete identity from this device",
+                style: TextStyle(color: colorScheme.error),
+              ),
               subtitle: const Text(
                 "Stops chat, removes encrypted keys and saved display names. Requires your unlock password.",
               ),
@@ -1527,7 +1780,11 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
   Future<void> _confirmDeleteIdentityFromDevice(BuildContext context) async {
     if (!GhalBolFfi.isDeleteKeystoreAvailable) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("This build’s native library does not support delete. Re-sync lib_ghal_bol_core.")),
+        const SnackBar(
+          content: Text(
+            "This build’s native library does not support delete. Re-sync lib_ghal_bol_core.",
+          ),
+        ),
       );
       return;
     }
@@ -1543,9 +1800,9 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     final r = GhalBolFfi.deleteKeystoreVerified(appNamespace: ns, password: pw);
     if (!context.mounted) return;
     if (!r.ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(r.error ?? "Delete failed")),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(r.error ?? "Delete failed")));
       return;
     }
     widget.onEndSession();
@@ -1567,7 +1824,8 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       );
     }
     final contact = _selectedContact;
-    final convKey = _selectedConversationKey ?? contact?.conversationKey ?? "none";
+    final convKey =
+        _selectedConversationKey ?? contact?.conversationKey ?? "none";
     final split = ghalBolUseChatShellSplit(context);
     return ChatScreen(
       key: ValueKey("hub-chat-$convKey"),
@@ -1618,53 +1876,72 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       body: Row(
         children: [
           NavigationRail(
-          extended: railExtended,
-          backgroundColor: p.appBarBg,
-          selectedIndex: _navTab,
-          selectedIconTheme: IconThemeData(color: colorScheme.primary, size: 26),
-          selectedLabelTextStyle: TextStyle(
-            color: colorScheme.primary,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-          ),
-          unselectedIconTheme: IconThemeData(color: p.metaText, size: 24),
-          unselectedLabelTextStyle: TextStyle(color: p.metaText, fontSize: 11),
-          labelType: railExtended ? NavigationRailLabelType.none : NavigationRailLabelType.all,
-          onDestinationSelected: _onHubNavTabSelected,
-          leading: Padding(
-            padding: const EdgeInsets.only(top: 8, bottom: 12),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.asset(
-                "assets/app_icon.png",
-                width: railExtended ? 28 : 26,
-                height: railExtended ? 28 : 26,
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => Icon(
-                  Icons.chat_bubble,
-                  color: colorScheme.primary,
-                  size: railExtended ? 28 : 26,
+            extended: railExtended,
+            backgroundColor: p.appBarBg,
+            selectedIndex: _navTab,
+            selectedIconTheme: IconThemeData(
+              color: colorScheme.primary,
+              size: 26,
+            ),
+            selectedLabelTextStyle: TextStyle(
+              color: colorScheme.primary,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+            unselectedIconTheme: IconThemeData(color: p.metaText, size: 24),
+            unselectedLabelTextStyle: TextStyle(
+              color: p.metaText,
+              fontSize: 11,
+            ),
+            labelType: railExtended
+                ? NavigationRailLabelType.none
+                : NavigationRailLabelType.all,
+            onDestinationSelected: _onHubNavTabSelected,
+            leading: Padding(
+              padding: const EdgeInsets.only(top: 8, bottom: 12),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.asset(
+                  "assets/app_icon.png",
+                  width: railExtended ? 28 : 26,
+                  height: railExtended ? 28 : 26,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => Icon(
+                    Icons.chat_bubble,
+                    color: colorScheme.primary,
+                    size: railExtended ? 28 : 26,
+                  ),
                 ),
               ),
             ),
-          ),
-          trailing: Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: IconButton(
-              tooltip: "Lock",
-              onPressed: widget.onUiLock,
-              icon: Icon(Icons.lock_outline, color: p.appBarFg),
+            trailing: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: IconButton(
+                tooltip: "Lock",
+                onPressed: widget.onUiLock,
+                icon: Icon(Icons.lock_outline, color: p.appBarFg),
+              ),
             ),
+            destinations: _navDestinations,
           ),
-          destinations: _navDestinations,
+          VerticalDivider(
+            width: 1,
+            thickness: 1,
+            color: colorScheme.outlineVariant,
           ),
-          VerticalDivider(width: 1, thickness: 1, color: colorScheme.outlineVariant),
           Expanded(
             child: switch (_navTab) {
               0 => Row(
                 children: [
-                  SizedBox(width: listWidth, child: _listPaneWide(context, showLockInAppBar: false)),
-                  VerticalDivider(width: 1, thickness: 1, color: colorScheme.outlineVariant),
+                  SizedBox(
+                    width: listWidth,
+                    child: _listPaneWide(context, showLockInAppBar: false),
+                  ),
+                  VerticalDivider(
+                    width: 1,
+                    thickness: 1,
+                    color: colorScheme.outlineVariant,
+                  ),
                   Expanded(
                     child: Listener(
                       behavior: HitTestBehavior.translucent,
@@ -1715,7 +1992,10 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
             surfaceTintColor: Colors.transparent,
             bottom: PreferredSize(
               preferredSize: const Size.fromHeight(1),
-              child: Container(height: 1, color: p.appBarDivider.withValues(alpha: 0.45)),
+              child: Container(
+                height: 1,
+                color: p.appBarDivider.withValues(alpha: 0.45),
+              ),
             ),
             actions: [_hubChatRoomPopupMenu(context, p)],
           );
@@ -1724,13 +2004,19 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       case 1:
         final p = GhalBolChatRoomPalette.of(context);
         return AppBar(
-          title: Text("Identity", style: TextStyle(color: p.appBarFg, fontWeight: FontWeight.w600)),
+          title: Text(
+            "Identity",
+            style: TextStyle(color: p.appBarFg, fontWeight: FontWeight.w600),
+          ),
           backgroundColor: p.appBarBg,
           foregroundColor: p.appBarFg,
           surfaceTintColor: Colors.transparent,
           bottom: PreferredSize(
             preferredSize: const Size.fromHeight(1),
-            child: Container(height: 1, color: p.appBarDivider.withValues(alpha: 0.45)),
+            child: Container(
+              height: 1,
+              color: p.appBarDivider.withValues(alpha: 0.45),
+            ),
           ),
           actions: [
             TextButton(
@@ -1742,13 +2028,19 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       case 2:
         final p2 = GhalBolChatRoomPalette.of(context);
         return AppBar(
-          title: Text("More", style: TextStyle(color: p2.appBarFg, fontWeight: FontWeight.w600)),
+          title: Text(
+            "More",
+            style: TextStyle(color: p2.appBarFg, fontWeight: FontWeight.w600),
+          ),
           backgroundColor: p2.appBarBg,
           foregroundColor: p2.appBarFg,
           surfaceTintColor: Colors.transparent,
           bottom: PreferredSize(
             preferredSize: const Size.fromHeight(1),
-            child: Container(height: 1, color: p2.appBarDivider.withValues(alpha: 0.45)),
+            child: Container(
+              height: 1,
+              color: p2.appBarDivider.withValues(alpha: 0.45),
+            ),
           ),
         );
       default:
@@ -1762,10 +2054,7 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
       index: _narrowShowRoom ? 1 : 0,
       sizing: StackFit.expand,
       children: [
-        ColoredBox(
-          color: p.hubListBackground,
-          child: _chatListColumn(context),
-        ),
+        ColoredBox(color: p.hubListBackground, child: _chatListColumn(context)),
         _chatBody(),
       ],
     );
@@ -1776,9 +2065,15 @@ class ChatHubScreenState extends State<ChatHubScreen> with WidgetsBindingObserve
     final p = GhalBolChatRoomPalette.of(context);
 
     return Scaffold(
-      backgroundColor: _navTab == 0 && _narrowShowRoom ? p.chatBackground : p.hubListBackground,
+      backgroundColor: _navTab == 0 && _narrowShowRoom
+          ? p.chatBackground
+          : p.hubListBackground,
       appBar: _narrowAppBar(context),
-      floatingActionButton: _navTab == 0 && !_narrowShowRoom && _selectedContact == null && GhalBolFfi.isP2pAvailable
+      floatingActionButton:
+          _navTab == 0 &&
+              !_narrowShowRoom &&
+              _selectedContact == null &&
+              GhalBolFfi.isP2pAvailable
           ? FloatingActionButton(
               onPressed: _openNewChatMenu,
               tooltip: "New chat",

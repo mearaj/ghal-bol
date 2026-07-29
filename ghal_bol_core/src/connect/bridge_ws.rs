@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::bridge_client::BridgeRequestResult;
-use super::peer_session::{start_session_io, PeerSessionRegistry};
+use super::peer_session::{PeerSessionRegistry, start_session_io};
 use super::session::SessionState;
 use super::types::{GossipChatEvent, SessionPeer};
 use crate::coord::CoordHttpClient;
@@ -164,20 +164,14 @@ pub fn poll_bridge_pending_blocking(identity_wire: &str) -> Result<Vec<BridgePen
     if let Some(items) = v.get("pending").and_then(|x| x.as_array()) {
         for item in items {
             out.push(BridgePendingItem {
-                bridge_id: item["bridge_id"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string(),
+                bridge_id: item["bridge_id"].as_str().unwrap_or_default().to_string(),
                 call_id: item["call_id"].as_str().unwrap_or_default().to_string(),
                 caller_identity_wire: item["caller_identity_wire"]
                     .as_str()
                     .unwrap_or_default()
                     .to_string(),
                 token: item["token"].as_str().unwrap_or_default().to_string(),
-                connect_url: item["connect_url"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string(),
+                connect_url: item["connect_url"].as_str().unwrap_or_default().to_string(),
             });
         }
     }

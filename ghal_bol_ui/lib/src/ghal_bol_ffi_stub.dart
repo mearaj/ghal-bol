@@ -29,7 +29,8 @@ abstract final class GhalBolFfi {
     );
   }
 
-  static List<IdentityAlgorithmOption> supportedIdentityAlgorithms() => const [];
+  static List<IdentityAlgorithmOption> supportedIdentityAlgorithms() =>
+      const [];
 
   static bool identityImportSecretValid({
     required String algorithm,
@@ -52,6 +53,21 @@ abstract final class GhalBolFfi {
     required String password,
   }) {
     _ignorePassword(password);
+    return GhalBolIdentityResult(
+      ok: false,
+      error: "$loadErrorText (namespace=$appNamespace)",
+    );
+  }
+
+  static bool get isChangePasswordAvailable => false;
+
+  static GhalBolIdentityResult changePassword({
+    required String appNamespace,
+    required String oldPassword,
+    required String newPassword,
+  }) {
+    _ignorePassword(oldPassword);
+    _ignorePassword(newPassword);
     return GhalBolIdentityResult(
       ok: false,
       error: "$loadErrorText (namespace=$appNamespace)",
@@ -92,7 +108,8 @@ abstract final class GhalBolFfi {
     String? secretKeyHex,
     String? identityAlgorithm,
     String? error,
-  }) revealSecretKeyHex({
+  })
+  revealSecretKeyHex({
     required String appNamespace,
     required String password,
   }) => (
@@ -120,10 +137,7 @@ abstract final class GhalBolFfi {
   static Map<String, dynamic> coordSetBaseUrls({
     required List<String> baseUrls,
     bool insecureTls = false,
-  }) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
+  }) => {"ok": false, "error": loadErrorText ?? "unavailable"};
 
   static bool get isP2pAvailable => false;
 
@@ -131,7 +145,8 @@ abstract final class GhalBolFfi {
 
   static String? peerIdFromPublicKeyHex(String _) => null;
 
-  static String? peerIdFromSigningPublicKeyHex(String pk) => peerIdFromPublicKeyHex(pk);
+  static String? peerIdFromSigningPublicKeyHex(String pk) =>
+      peerIdFromPublicKeyHex(pk);
 
   static Map<String, dynamic> identityParse(String wire) => {
     "ok": false,
@@ -163,20 +178,43 @@ abstract final class GhalBolFfi {
 
   static Future<bool> waitP2pNodeReady({
     Duration timeout = const Duration(seconds: 8),
-  }) async =>
-      false;
+  }) async => false;
 
   static void ensureChatListenerRunning() {}
 
   static void p2pRegisterDmPeer(String peerId, String publicKeyHex) {}
 
-  static Map<String, dynamic> p2pSendTextDm(
-    String recipientPublicKeyHex,
-    String text,
-  ) => {
+  static Map<String, dynamic> p2pSetAvailabilityStatus(String status) => {
     "ok": false,
     "error": loadErrorText ?? "unavailable",
   };
+
+  static Map<String, dynamic> p2pGetAvailabilityStatus() => {
+    "ok": false,
+    "error": loadErrorText ?? "unavailable",
+  };
+
+  static Map<String, dynamic> p2pSendTextDm(
+    String recipientPublicKeyHex,
+    String text,
+  ) => {"ok": false, "error": loadErrorText ?? "unavailable"};
+
+  static Map<String, dynamic> p2pSendVoiceDm(
+    String recipientPublicKeyHex,
+    Map<String, dynamic> config,
+  ) => {"ok": false, "error": loadErrorText ?? "unavailable"};
+
+  static Map<String, dynamic> p2pSendAttachment(
+    String recipientPublicKeyHex,
+    Map<String, dynamic> config,
+  ) => {"ok": false, "error": loadErrorText ?? "unavailable"};
+
+  static Map<String, dynamic> p2pAttachmentFetch(Map<String, dynamic> config) =>
+      {"ok": false, "error": loadErrorText ?? "unavailable"};
+
+  static Map<String, dynamic> p2pAttachmentCancel(
+    Map<String, dynamic> config,
+  ) => {"ok": false, "error": loadErrorText ?? "unavailable"};
 
   static Map<String, dynamic> p2pCallSignal(Map<String, dynamic> config) => {
     "ok": false,
@@ -195,10 +233,9 @@ abstract final class GhalBolFfi {
 
   static Future<void> p2pDismissIncomingCallAlert() async {}
 
-  static Map<String, dynamic> p2pForceEndActiveCall(Map<String, dynamic> config) => {
-    "ok": true,
-    "ended": false,
-  };
+  static Map<String, dynamic> p2pForceEndActiveCall(
+    Map<String, dynamic> config,
+  ) => {"ok": true, "ended": false};
 
   static Map<String, dynamic> p2pTakeIncomingCallWake() => {
     "ok": true,
@@ -210,20 +247,16 @@ abstract final class GhalBolFfi {
     "error": loadErrorText ?? "unavailable",
   };
 
-  static Map<String, dynamic> p2pCallVideoFrame(Map<String, dynamic> config) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
+  static Map<String, dynamic> p2pCallVideoFrame(Map<String, dynamic> config) =>
+      {"ok": false, "error": loadErrorText ?? "unavailable"};
 
-  static Map<String, dynamic> p2pCallVideoTexture(Map<String, dynamic> config) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
+  static Map<String, dynamic> p2pCallVideoTexture(
+    Map<String, dynamic> config,
+  ) => {"ok": false, "error": loadErrorText ?? "unavailable"};
 
-  static Map<String, dynamic> p2pCallVideoPushCameraFrame(Map<String, dynamic> config) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
-  };
+  static Map<String, dynamic> p2pCallVideoPushCameraFrame(
+    Map<String, dynamic> config,
+  ) => {"ok": false, "error": loadErrorText ?? "unavailable"};
 
   static bool get isP2pRequeueAvailable => false;
 
@@ -231,16 +264,20 @@ abstract final class GhalBolFfi {
     required String messageId,
     required String recipientPublicKeyHex,
     required String text,
-  }) => {
-    "ok": false,
-    "error": loadErrorText ?? "unavailable",
+  }) => {"ok": false, "error": loadErrorText ?? "unavailable"};
+
+  static Map<String, dynamic> p2pSetForegroundPeer(String? libp2pPeerId) => {
+    "ok": true,
   };
 
-  static Map<String, dynamic> p2pSetForegroundPeer(String? libp2pPeerId) => {"ok": true};
+  static Map<String, dynamic> p2pSetAppAckReadEnabled(bool enabled) => {
+    "ok": true,
+  };
 
-  static Map<String, dynamic> p2pSetAppAckReadEnabled(bool enabled) => {"ok": true};
-
-  static Map<String, dynamic> p2pSetAppUiVisible(bool visible) => {"ok": true, "visible": visible};
+  static Map<String, dynamic> p2pSetAppUiVisible(bool visible) => {
+    "ok": true,
+    "visible": visible,
+  };
 
   static Map<String, dynamic>? p2pPollEventMap() => null;
 
@@ -254,31 +291,39 @@ abstract final class GhalBolFfi {
 
   static List<Map<String, dynamic>> contactsList(String _) => [];
 
-  static Map<String, dynamic> contactsUpsert(String _, Map<String, dynamic> _) => {"ok": false};
+  static Map<String, dynamic> contactsUpsert(
+    String _,
+    Map<String, dynamic> _,
+  ) => {"ok": false};
 
   static bool contactsRemove(String _, Map<String, dynamic> _) => false;
 
-  static Map<String, dynamic>? contactsFind(String _, Map<String, dynamic> _) => null;
+  static Map<String, dynamic>? contactsFind(String _, Map<String, dynamic> _) =>
+      null;
 
   static bool contactsMergeDiscovered(String _, String _, String _) => false;
 
-  static bool contactsRecordInboundPreview(String _, Map<String, dynamic> _) => false;
+  static bool contactsRecordInboundPreview(String _, Map<String, dynamic> _) =>
+      false;
 
   static bool contactsClearUnread(String _, String _) => false;
 
-  static Map<String, dynamic> contactsSetTrust(String _, Map<String, dynamic> _) => {"ok": false};
+  static Map<String, dynamic> contactsSetTrust(
+    String _,
+    Map<String, dynamic> _,
+  ) => {"ok": false};
 
-  static Map<String, dynamic>? coordSettingsGet({required String appNamespace}) => null;
+  static Map<String, dynamic>? coordSettingsGet({
+    required String appNamespace,
+  }) => null;
 
   static String? daemonSocketPath() => null;
 
   static String? transcriptResolvePath(String _) => null;
 
-  static ({int revision, List<Map<String, dynamic>> lines}) transcriptLoadThreadView(
-    String _,
-    Map<String, dynamic> _,
-  ) =>
-      (revision: 0, lines: <Map<String, dynamic>>[]);
+  static ({int revision, bool hasMore, List<Map<String, dynamic>> lines})
+  transcriptLoadThreadView(String _, Map<String, dynamic> _) =>
+      (revision: 0, hasMore: false, lines: <Map<String, dynamic>>[]);
 
   static String? buildConnectInviteUri(Map<String, dynamic> params) =>
       buildConnectInviteLinks(params)?.httpsUri;
@@ -306,7 +351,10 @@ abstract final class GhalBolFfi {
       map = Map<String, dynamic>.from(raw);
     }
     if (map == null) {
-      return const GhalBolIdentityResult(ok: false, error: "JSON was not an object");
+      return const GhalBolIdentityResult(
+        ok: false,
+        error: "JSON was not an object",
+      );
     }
     final ok = map["ok"] == true;
     if (!ok) {

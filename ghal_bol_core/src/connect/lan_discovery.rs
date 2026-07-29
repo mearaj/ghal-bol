@@ -18,7 +18,9 @@ pub enum LanDiscoveryEvent {
         host: String,
         port: u16,
     },
-    Expired { identity_commitment: String },
+    Expired {
+        identity_commitment: String,
+    },
 }
 
 pub struct LanDiscovery {
@@ -53,22 +55,14 @@ impl LanDiscovery {
         Ok(())
     }
 
-
     pub fn publish_listener(&self, identity_wire: &str, port: u16) -> Result<(), String> {
         let idc = identity_commitment_hex(identity_wire)?;
         let host = mdns_local_hostname();
         let mut props = HashMap::new();
         props.insert("v".to_string(), "1".to_string());
         props.insert("idc".to_string(), idc.clone());
-        let info = ServiceInfo::new(
-            CONNECT_MDNS_SERVICE,
-            &idc,
-            &host,
-            "",
-            port,
-            Some(props),
-        )
-        .map_err(|e| format!("mdns service info: {e}"))?;
+        let info = ServiceInfo::new(CONNECT_MDNS_SERVICE, &idc, &host, "", port, Some(props))
+            .map_err(|e| format!("mdns service info: {e}"))?;
         self.daemon
             .register(info)
             .map_err(|e| format!("mdns register: {e}"))?;
@@ -99,9 +93,7 @@ impl LanDiscovery {
     }
 
     pub fn wire_for_commitment(&self, identity_commitment: &str) -> Option<String> {
-        self.commitment_to_wire
-            .get(identity_commitment)
-            .cloned()
+        self.commitment_to_wire.get(identity_commitment).cloned()
     }
 
     fn resolved_to_event(&self, info: &ResolvedService) -> Option<LanDiscoveryEvent> {
@@ -139,7 +131,10 @@ fn pick_lan_ip(info: &ResolvedService) -> Option<String> {
             return Some(v4.to_string());
         }
     }
-    info.get_addresses_v4().into_iter().next().map(|v4| v4.to_string())
+    info.get_addresses_v4()
+        .into_iter()
+        .next()
+        .map(|v4| v4.to_string())
 }
 
 /// Async bridge: forward mDNS events to a tokio channel.

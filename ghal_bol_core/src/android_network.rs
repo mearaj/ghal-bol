@@ -81,7 +81,12 @@ mod imp {
             snap.wifi_link_up = any_network_has_transport(env, cm, TRANSPORT_WIFI)?;
 
             let active = env
-                .call_method(cm, jni_str!("getActiveNetwork"), jni_sig!( () -> android.net.Network), &[])?
+                .call_method(
+                    cm,
+                    jni_str!("getActiveNetwork"),
+                    jni_sig!( () -> android.net.Network),
+                    &[],
+                )?
                 .l()?;
             if active.is_null() {
                 return Ok(snap);
@@ -152,9 +157,18 @@ mod imp {
         })
     }
 
-    fn any_network_has_transport(env: &mut Env, cm: &JObject, transport: i32) -> jni::errors::Result<bool> {
+    fn any_network_has_transport(
+        env: &mut Env,
+        cm: &JObject,
+        transport: i32,
+    ) -> jni::errors::Result<bool> {
         let networks = env
-            .call_method(cm, jni_str!("getAllNetworks"), jni_sig!( () -> [android.net.Network]), &[])?
+            .call_method(
+                cm,
+                jni_str!("getAllNetworks"),
+                jni_sig!( () -> [android.net.Network]),
+                &[],
+            )?
             .l()?;
         let arr = JObjectArray::<JObject>::cast_local(env, networks)?;
         let len = arr.len(env)?;

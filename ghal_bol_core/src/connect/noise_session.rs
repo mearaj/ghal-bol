@@ -75,8 +75,7 @@ impl ConnectNoiseSession {
     {
         let mut hs = build_handshake(static_key, false)?;
         let msg1 = read_message(&mut read).await?;
-        hs.read_message(&msg1, &mut [])
-            .map_err(|e| e.to_string())?;
+        hs.read_message(&msg1, &mut []).map_err(|e| e.to_string())?;
 
         let proof = build_identity_proof(ident, &hs)?;
         let mut msg_buf = vec![0u8; MAX_NOISE_MSG];

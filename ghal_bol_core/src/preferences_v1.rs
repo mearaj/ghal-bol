@@ -20,6 +20,8 @@ pub struct PreferencesV1 {
     #[serde(default)]
     pub peer_display_aliases: HashMap<String, String>,
     #[serde(default)]
+    pub availability_status: Option<String>,
+    #[serde(default)]
     pub coord_base_url: Option<String>,
     #[serde(default)]
     pub coord_insecure_tls: bool,
@@ -30,6 +32,7 @@ impl Default for PreferencesV1 {
         Self {
             format_version: PREFERENCES_FORMAT_VERSION,
             peer_display_aliases: HashMap::new(),
+            availability_status: None,
             coord_base_url: None,
             coord_insecure_tls: false,
         }
@@ -119,6 +122,24 @@ pub fn sanitize_peer_display_alias(raw: &str) -> Option<String> {
     }
     let t = t.trim().to_string();
     if t.is_empty() { None } else { Some(t) }
+}
+
+pub fn availability_status_get(
+    cfg: &StorageConfig,
+) -> Result<Option<String>, KeystoreStorageError> {
+    let prefs = load_preferences_v1(cfg)?;
+    Ok(prefs.availability_status.clone())
+}
+
+pub fn availability_status_set(
+    cfg: &StorageConfig,
+    status_raw_utf8: &str,
+) -> Result<Option<String>, KeystoreStorageError> {
+    let mut prefs = load_preferences_v1(cfg)?;
+    prefs.availability_status = sanitize_peer_display_alias(status_raw_utf8);
+    let out = prefs.availability_status.clone();
+    save_preferences_v1(cfg, &prefs)?;
+    Ok(out)
 }
 
 /// Read stored display alias for the **current unlocked** identity (must match [public_key_hex]).
@@ -218,5 +239,23 @@ mod tests {
 
         let _ = peer_display_alias_set(&cfg, &id, &sig, "   ").unwrap();
         assert_eq!(peer_display_alias_get(&cfg, &id, &sig).unwrap(), None);
+    }
+
+    #[test]
+    fn roundtrip_availability_status() {
+        let td = TempDir::new().unwrap();
+        let cfg = StorageConfig::new("dev.prefs.status").with_override_data_dir(td.path());
+
+        assert_eq!(availability_status_get(&cfg).unwrap(), None);
+        let stored = availability_status_set(&cfg, "  Busy\nnow  ").unwrap();
+        assert_eq!(stored.as_deref(), Some("Busy now"));
+        assert_eq!(
+            availability_status_get(&cfg).unwrap().as_deref(),
+            Some("Busy now")
+        );
+
+        let cleared = availability_status_set(&cfg, "   ").unwrap();
+        assert_eq!(cleared, None);
+        assert_eq!(availability_status_get(&cfg).unwrap(), None);
     }
 }

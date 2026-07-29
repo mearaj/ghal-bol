@@ -50,9 +50,7 @@ pub fn transport_public_key_bytes(sk: &StaticSecret) -> [u8; TRANSPORT_PUBKEY_LE
 
 pub fn parse_transport_pubkey_hex(hex_s: &str) -> Result<[u8; TRANSPORT_PUBKEY_LEN], String> {
     let s = hex_s.trim();
-    if s.len() != TRANSPORT_PUBKEY_LEN * 2
-        || !s.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    if s.len() != TRANSPORT_PUBKEY_LEN * 2 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("transport x25519 public key: expected 64 hex chars".to_string());
     }
     let bytes = hex::decode(s).map_err(|e| format!("transport x25519 hex: {e}"))?;
@@ -147,10 +145,8 @@ mod tests {
         let (sk_b, pk_b) = generate_transport_keypair();
         let wire_a = alice.identity_wire();
         let wire_b = bob.identity_wire();
-        let k_ab =
-            derive_call_sig_transport_message_key(&sk_a, &pk_b, &wire_a, &wire_b).unwrap();
-        let k_ba =
-            derive_call_sig_transport_message_key(&sk_b, &pk_a, &wire_b, &wire_a).unwrap();
+        let k_ab = derive_call_sig_transport_message_key(&sk_a, &pk_b, &wire_a, &wire_b).unwrap();
+        let k_ba = derive_call_sig_transport_message_key(&sk_b, &pk_a, &wire_b, &wire_a).unwrap();
         assert_eq!(k_ab, k_ba);
     }
 
@@ -163,10 +159,10 @@ mod tests {
         let wire_a = alice.identity_wire();
         let wire_b = bob.identity_wire();
         let call_id = "call-transport-test";
-        let k_ab = derive_call_media_transport_keys(&sk_a, &pk_b, &wire_a, &wire_b, call_id)
-            .unwrap();
-        let k_ba = derive_call_media_transport_keys(&sk_b, &pk_a, &wire_b, &wire_a, call_id)
-            .unwrap();
+        let k_ab =
+            derive_call_media_transport_keys(&sk_a, &pk_b, &wire_a, &wire_b, call_id).unwrap();
+        let k_ba =
+            derive_call_media_transport_keys(&sk_b, &pk_a, &wire_b, &wire_a, call_id).unwrap();
         assert_eq!(k_ab, k_ba);
     }
 }

@@ -53,10 +53,10 @@ mod tests {
         let (_, pk_b) = generate_transport_keypair();
         let wire_a = alice.identity_wire();
         let wire_b = bob.identity_wire();
-        let k1 =
-            derive_call_media_keys_from_transport(&sk_a, &pk_b, &wire_a, &wire_b, "call-a").unwrap();
-        let k2 =
-            derive_call_media_keys_from_transport(&sk_a, &pk_b, &wire_a, &wire_b, "call-b").unwrap();
+        let k1 = derive_call_media_keys_from_transport(&sk_a, &pk_b, &wire_a, &wire_b, "call-a")
+            .unwrap();
+        let k2 = derive_call_media_keys_from_transport(&sk_a, &pk_b, &wire_a, &wire_b, "call-b")
+            .unwrap();
         assert_ne!(k1.frame_key, k2.frame_key);
         assert_ne!(k1.ratchet_salt, k2.ratchet_salt);
     }
@@ -66,6 +66,8 @@ mod tests {
         let (_ks_a, alice) = crate::create_keystore_v1("pw", None).unwrap();
         let (sk_a, pk_a) = generate_transport_keypair();
         let wire_a = alice.identity_wire();
-        assert!(derive_call_media_keys_from_transport(&sk_a, &pk_a, &wire_a, &wire_a, "x").is_err());
+        assert!(
+            derive_call_media_keys_from_transport(&sk_a, &pk_a, &wire_a, &wire_a, "x").is_err()
+        );
     }
 }

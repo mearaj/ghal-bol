@@ -7,9 +7,9 @@ use thiserror::Error;
 
 use crate::identity::IdentityAlgorithm;
 use crate::keystore_v1::{
-    DecryptedIdentity, KeystoreError, KeystoreV1,
-    create_keystore_v1_from_secret_with_algorithm, create_keystore_v1_with_algorithm,
-    parse_secret_bytes_for_algorithm, secret_key_hex_from_identity, unlock_keystore_v1,
+    DecryptedIdentity, KeystoreError, KeystoreV1, create_keystore_v1_from_secret_with_algorithm,
+    create_keystore_v1_with_algorithm, parse_secret_bytes_for_algorithm,
+    secret_key_hex_from_identity, unlock_keystore_v1,
 };
 
 /// Product / packaging id for **`ghal_bol`** (Rust keystore storage root via `directories`).
@@ -269,6 +269,36 @@ pub fn import_keystore_from_json_v1(
     Ok(id)
 }
 
+/// Re-encrypt the on-disk keystore under a new app password.
+///
+/// Verifies [old_password] unlocks the existing keystore, then rewraps the same
+/// secret (same identity, same algorithm) with [new_password] and persists it.
+/// The public key / identity wire is unchanged; only the at-rest encryption key
+/// differs. Any previously exported backup still needs the **old** password —
+/// callers should prompt the user to re-export after a successful change.
+pub fn change_password_v1(
+    cfg: &StorageConfig,
+    old_password: &str,
+    new_password: &str,
+) -> Result<DecryptedIdentity, KeystoreStorageError> {
+    if new_password.is_empty() {
+        return Err(KeystoreStorageError::Crypto(KeystoreError::Invalid(
+            "new password must not be empty",
+        )));
+    }
+    let stored = load_keystore_v1(cfg)?.ok_or(KeystoreStorageError::Crypto(
+        KeystoreError::Invalid("no keystore on disk"),
+    ))?;
+    let id = unlock_keystore_v1(old_password, &stored.keystore)?;
+    let algorithm = id.algorithm();
+    let secret_hex = secret_key_hex_from_identity(&id);
+    let secret = parse_secret_bytes_for_algorithm(algorithm, &secret_hex)?;
+    let (ks, new_id) =
+        create_keystore_v1_from_secret_with_algorithm(new_password, algorithm, &secret, None)?;
+    let _ = save_keystore_v1(cfg, &ks)?;
+    Ok(new_id)
+}
+
 /// Removes `keystore_v1.json` and `preferences_v1.json` for [cfg] if they exist.
 pub fn delete_stored_identity_v1(cfg: &StorageConfig) -> Result<(), KeystoreStorageError> {
     let kp = keystore_v1_path(cfg)?;
@@ -365,6 +395,51 @@ mod tests {
         assert!(id.identity_wire().starts_with("ed25519:"));
         assert!(id.p2p_ready());
         assert!(!id.identity_wire().is_empty());
+    }
+
+    #[test]
+    fn change_password_rewraps_same_identity() {
+        let td = TempDir::new().unwrap();
+        let cfg = StorageConfig::new("dev.chpw").with_override_data_dir(td.path());
+        let id1 = create_or_unlock_identity_v1(&cfg, "oldpw").unwrap();
+        let changed = change_password_v1(&cfg, "oldpw", "newpw").unwrap();
+        assert_eq!(id1.public_key_hex(), changed.public_key_hex());
+        // Old password no longer unlocks; new password does.
+        assert!(create_or_unlock_identity_v1(&cfg, "oldpw").is_err());
+        let id2 = create_or_unlock_identity_v1(&cfg, "newpw").unwrap();
+        assert_eq!(id1.public_key_hex(), id2.public_key_hex());
+    }
+
+    #[test]
+    fn change_password_wrong_old_fails() {
+        let td = TempDir::new().unwrap();
+        let cfg = StorageConfig::new("dev.chpw2").with_override_data_dir(td.path());
+        let _ = create_or_unlock_identity_v1(&cfg, "oldpw").unwrap();
+        assert!(change_password_v1(&cfg, "wrong", "newpw").is_err());
+        // Original password still works after a failed change.
+        assert!(create_or_unlock_identity_v1(&cfg, "oldpw").is_ok());
+    }
+
+    #[test]
+    fn change_password_empty_new_rejected() {
+        let td = TempDir::new().unwrap();
+        let cfg = StorageConfig::new("dev.chpw3").with_override_data_dir(td.path());
+        let _ = create_or_unlock_identity_v1(&cfg, "oldpw").unwrap();
+        assert!(change_password_v1(&cfg, "oldpw", "").is_err());
+    }
+
+    #[test]
+    fn change_password_preserves_algorithm() {
+        let td = TempDir::new().unwrap();
+        let cfg = StorageConfig::new("dev.chpw4").with_override_data_dir(td.path());
+        let _ = create_or_unlock_identity_v1_with_algorithm(
+            &cfg,
+            "oldpw",
+            Some(IdentityAlgorithm::Ed25519),
+        )
+        .unwrap();
+        let changed = change_password_v1(&cfg, "oldpw", "newpw").unwrap();
+        assert_eq!(changed.algorithm(), IdentityAlgorithm::Ed25519);
     }
 
     #[test]

@@ -56,7 +56,8 @@ typedef _NativeConfigureAndroid = Void Function(Pointer<Utf8> pathUtf8);
 
 typedef _NativeTwoStringsToPtr =
     Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b);
-typedef _NativeTwoStringsToPtrDart = Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b);
+typedef _NativeTwoStringsToPtrDart =
+    Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b);
 typedef _NativeLock = Void Function();
 typedef _NativeLockDart = void Function();
 
@@ -66,8 +67,10 @@ typedef _NativePtrToPtrDart = Pointer<Utf8> Function(Pointer<Utf8> a);
 typedef _NativePollPtr = Pointer<Utf8> Function();
 typedef _NativePollPtrDart = Pointer<Utf8> Function();
 
-typedef _NativeTwoPtrToPtr = Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b);
-typedef _NativeTwoPtrToPtrDart = Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b);
+typedef _NativeTwoPtrToPtr =
+    Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b);
+typedef _NativeTwoPtrToPtrDart =
+    Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b);
 
 typedef _NativeThreeStringsToPtr =
     Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c);
@@ -75,9 +78,20 @@ typedef _NativeThreeStringsToPtrDart =
     Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c);
 
 typedef _NativeFourStringsToPtr =
-    Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c, Pointer<Utf8> d);
+    Pointer<Utf8> Function(
+      Pointer<Utf8> a,
+      Pointer<Utf8> b,
+      Pointer<Utf8> c,
+      Pointer<Utf8> d,
+    );
 typedef _NativeFourStringsToPtrDart =
-    Pointer<Utf8> Function(Pointer<Utf8> a, Pointer<Utf8> b, Pointer<Utf8> c, Pointer<Utf8> d);
+    Pointer<Utf8> Function(
+      Pointer<Utf8> a,
+      Pointer<Utf8> b,
+      Pointer<Utf8> c,
+      Pointer<Utf8> d,
+    );
+
 /// FFI surface for **`lib_ghal_bol_core`** / **`_ghal_bol_core.dll`** (Rust crate **`ghal_bol_core`**).
 abstract final class GhalBolFfi {
   static DynamicLibrary? _lib;
@@ -85,8 +99,14 @@ abstract final class GhalBolFfi {
   static _NativePtrToPtrDart? _p2pStart;
   static _NativeLockDart? _p2pStop;
   static _NativeTwoStringsToPtrDart? _p2pSendTextDm;
+  static _NativeTwoStringsToPtrDart? _p2pSendVoiceDm;
+  static _NativeTwoStringsToPtrDart? _p2pSendAttachment;
+  static _NativePtrToPtrDart? _p2pAttachmentFetch;
+  static _NativePtrToPtrDart? _p2pAttachmentCancel;
   static _NativeThreeStringsToPtrDart? _p2pRequeueOutboundDm;
   static _NativeTwoStringsToPtrDart? _p2pRegisterDmPeer;
+  static _NativePtrToPtrDart? _p2pSetAvailabilityStatus;
+  static _NativePollPtrDart? _p2pGetAvailabilityStatus;
   static _NativePtrToPtrDart? _p2pCallSignal;
   static _NativePtrToPtrDart? _p2pCallMedia;
   static _NativePtrToPtrDart? _p2pCallStatus;
@@ -117,6 +137,7 @@ abstract final class GhalBolFfi {
   static _NativeTwoStringsToPtrDart? _peerDisplayAliasGet;
   static _NativeThreeStringsToPtrDart? _peerDisplayAliasSet;
   static _NativeTwoStringsToPtrDart? _deleteKeystore;
+  static _NativeThreeStringsToPtrDart? _changePassword;
   static _NativeTwoStringsToPtrDart? _revealSecretKeyHex;
   static _NativePtrToPtrDart? _exportKeystoreJson;
   static _NativeThreeStringsToPtrDart? _importKeystoreJson;
@@ -149,14 +170,16 @@ abstract final class GhalBolFfi {
     if (_loaded || _lib != null) return;
     try {
       final lib = _openLib();
-      _stringFree = lib.lookupFunction<_NativeStringFree, _NativeStringFreeDart>(
-        "ghal_bol_core_ffi_string_free",
-      );
+      _stringFree = lib
+          .lookupFunction<_NativeStringFree, _NativeStringFreeDart>(
+            "ghal_bol_core_ffi_string_free",
+          );
       try {
-        _createOrUnlockIdentity = lib.lookupFunction<
-          _NativeThreeStringsToPtr,
-          _NativeThreeStringsToPtrDart
-        >("ghal_bol_core_ffi_create_or_unlock_identity");
+        _createOrUnlockIdentity = lib
+            .lookupFunction<
+              _NativeThreeStringsToPtr,
+              _NativeThreeStringsToPtrDart
+            >("ghal_bol_core_ffi_create_or_unlock_identity");
       } catch (_) {
         _createOrUnlockIdentity = null;
       }
@@ -164,111 +187,176 @@ abstract final class GhalBolFfi {
         _p2pStart = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
           "ghal_bol_core_ffi_p2p_start",
         );
-        _p2pStop = lib.lookupFunction<_NativeLock, _NativeLockDart>("ghal_bol_core_ffi_p2p_stop");
-        _p2pSendTextDm = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
-          "ghal_bol_core_ffi_p2p_send_text_dm",
+        _p2pStop = lib.lookupFunction<_NativeLock, _NativeLockDart>(
+          "ghal_bol_core_ffi_p2p_stop",
         );
+        _p2pSendTextDm = lib
+            .lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
+              "ghal_bol_core_ffi_p2p_send_text_dm",
+            );
         try {
-          _p2pRequeueOutboundDm = lib.lookupFunction<_NativeThreeStringsToPtr, _NativeThreeStringsToPtrDart>(
-            "ghal_bol_core_ffi_p2p_requeue_outbound_dm",
-          );
+          _p2pSendVoiceDm = lib
+              .lookupFunction<
+                _NativeTwoStringsToPtr,
+                _NativeTwoStringsToPtrDart
+              >("ghal_bol_core_ffi_p2p_send_voice_dm");
+        } catch (_) {
+          _p2pSendVoiceDm = null;
+        }
+        try {
+          _p2pSendAttachment = lib
+              .lookupFunction<
+                _NativeTwoStringsToPtr,
+                _NativeTwoStringsToPtrDart
+              >("ghal_bol_core_ffi_p2p_send_attachment");
+        } catch (_) {
+          _p2pSendAttachment = null;
+        }
+        try {
+          _p2pAttachmentFetch = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_attachment_fetch",
+              );
+        } catch (_) {
+          _p2pAttachmentFetch = null;
+        }
+        try {
+          _p2pAttachmentCancel = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_attachment_cancel",
+              );
+        } catch (_) {
+          _p2pAttachmentCancel = null;
+        }
+        try {
+          _p2pRequeueOutboundDm = lib
+              .lookupFunction<
+                _NativeThreeStringsToPtr,
+                _NativeThreeStringsToPtrDart
+              >("ghal_bol_core_ffi_p2p_requeue_outbound_dm");
         } catch (_) {
           _p2pRequeueOutboundDm = null;
         }
-        _p2pRegisterDmPeer = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
-          "ghal_bol_core_ffi_p2p_register_dm_peer",
-        );
+        _p2pRegisterDmPeer = lib
+            .lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
+              "ghal_bol_core_ffi_p2p_register_dm_peer",
+            );
         try {
-          _p2pCallSignal = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_call_signal",
-          );
+          _p2pSetAvailabilityStatus = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_set_availability_status",
+              );
+          _p2pGetAvailabilityStatus = lib
+              .lookupFunction<_NativePollPtr, _NativePollPtrDart>(
+                "ghal_bol_core_ffi_p2p_get_availability_status",
+              );
+        } catch (_) {
+          _p2pSetAvailabilityStatus = null;
+          _p2pGetAvailabilityStatus = null;
+        }
+        try {
+          _p2pCallSignal = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_call_signal",
+              );
         } catch (_) {
           _p2pCallSignal = null;
         }
         try {
-          _p2pCallMedia = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_call_media",
-          );
+          _p2pCallMedia = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_call_media",
+              );
         } catch (_) {
           _p2pCallMedia = null;
         }
         try {
-          _p2pCallStatus = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_call_status",
-          );
+          _p2pCallStatus = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_call_status",
+              );
         } catch (_) {
           _p2pCallStatus = null;
         }
         try {
-          _p2pDismissIncomingCallAlert = lib.lookupFunction<
-              _NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_dismiss_incoming_call_alert",
-          );
+          _p2pDismissIncomingCallAlert = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_dismiss_incoming_call_alert",
+              );
         } catch (_) {
           _p2pDismissIncomingCallAlert = null;
         }
         try {
-          _p2pForceEndActiveCall = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_force_end_active_call",
-          );
+          _p2pForceEndActiveCall = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_force_end_active_call",
+              );
         } catch (_) {
           _p2pForceEndActiveCall = null;
         }
         try {
-          _p2pTakeIncomingCallWake = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_take_incoming_call_wake",
-          );
+          _p2pTakeIncomingCallWake = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_take_incoming_call_wake",
+              );
         } catch (_) {
           _p2pTakeIncomingCallWake = null;
         }
         try {
-          _p2pCallVideo = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_call_video",
-          );
+          _p2pCallVideo = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_call_video",
+              );
         } catch (_) {
           _p2pCallVideo = null;
         }
         try {
-          _p2pCallVideoFrame = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_call_video_frame",
-          );
+          _p2pCallVideoFrame = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_call_video_frame",
+              );
         } catch (_) {
           _p2pCallVideoFrame = null;
         }
         try {
-          _p2pCallVideoTexture = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_call_video_texture",
-          );
+          _p2pCallVideoTexture = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_call_video_texture",
+              );
         } catch (_) {
           _p2pCallVideoTexture = null;
         }
         try {
-          _p2pCallVideoPushCameraFrame = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_call_video_push_camera_frame",
-          );
+          _p2pCallVideoPushCameraFrame = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_call_video_push_camera_frame",
+              );
         } catch (_) {
           _p2pCallVideoPushCameraFrame = null;
         }
         try {
-          _p2pSetForegroundPeer = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-            "ghal_bol_core_ffi_p2p_set_foreground_peer",
-          );
+          _p2pSetForegroundPeer = lib
+              .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+                "ghal_bol_core_ffi_p2p_set_foreground_peer",
+              );
         } catch (_) {
           _p2pSetForegroundPeer = null;
         }
         try {
-          _p2pSetAppAckReadEnabled = lib.lookupFunction<
-            Pointer<Utf8> Function(Uint8),
-            Pointer<Utf8> Function(int)
-          >("ghal_bol_core_ffi_p2p_set_app_ack_read_enabled");
+          _p2pSetAppAckReadEnabled = lib
+              .lookupFunction<
+                Pointer<Utf8> Function(Uint8),
+                Pointer<Utf8> Function(int)
+              >("ghal_bol_core_ffi_p2p_set_app_ack_read_enabled");
         } catch (_) {
           _p2pSetAppAckReadEnabled = null;
         }
         try {
-          _p2pSetAppUiVisible = lib.lookupFunction<
-            Pointer<Utf8> Function(Uint8),
-            Pointer<Utf8> Function(int)
-          >("ghal_bol_core_ffi_p2p_set_app_ui_visible");
+          _p2pSetAppUiVisible = lib
+              .lookupFunction<
+                Pointer<Utf8> Function(Uint8),
+                Pointer<Utf8> Function(int)
+              >("ghal_bol_core_ffi_p2p_set_app_ui_visible");
         } catch (_) {
           _p2pSetAppUiVisible = null;
         }
@@ -279,8 +367,11 @@ abstract final class GhalBolFfi {
         _p2pStart = null;
         _p2pStop = null;
         _p2pSendTextDm = null;
+        _p2pSendVoiceDm = null;
         _p2pRequeueOutboundDm = null;
         _p2pRegisterDmPeer = null;
+        _p2pSetAvailabilityStatus = null;
+        _p2pGetAvailabilityStatus = null;
         _p2pCallSignal = null;
         _p2pCallMedia = null;
         _p2pCallVideo = null;
@@ -298,41 +389,50 @@ abstract final class GhalBolFfi {
         _p2pIsRunning = null;
       }
       try {
-        _coordSetBaseUrl = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_coord_set_base_url",
-        );
+        _coordSetBaseUrl = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_coord_set_base_url",
+            );
       } catch (_) {
         _coordSetBaseUrl = null;
       }
       try {
-        _verifyGhalBolConnectInvite = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_verify_ghal_bol_connect_invite",
-        );
+        _verifyGhalBolConnectInvite = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_verify_ghal_bol_connect_invite",
+            );
       } catch (_) {
         _verifyGhalBolConnectInvite = null;
       }
       try {
-        _peerIdFromSigningPk = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_peer_id_from_public_key_hex",
-        );
-        _publicKeyHexFromPeerId = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_public_key_hex_from_peer_id",
-        );
-        _identityParse = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_identity_parse",
-        );
-        _identitySame = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_identity_same",
-        );
-        _identityNormalize = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_identity_normalize",
-        );
-        _identitySupportedAlgorithms = lib.lookupFunction<_NativePollPtr, _NativePollPtrDart>(
-          "ghal_bol_core_ffi_identity_supported_algorithms",
-        );
-        _identityValidateImportSecret = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_identity_validate_import_secret",
-        );
+        _peerIdFromSigningPk = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_peer_id_from_public_key_hex",
+            );
+        _publicKeyHexFromPeerId = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_public_key_hex_from_peer_id",
+            );
+        _identityParse = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_identity_parse",
+            );
+        _identitySame = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_identity_same",
+            );
+        _identityNormalize = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_identity_normalize",
+            );
+        _identitySupportedAlgorithms = lib
+            .lookupFunction<_NativePollPtr, _NativePollPtrDart>(
+              "ghal_bol_core_ffi_identity_supported_algorithms",
+            );
+        _identityValidateImportSecret = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_identity_validate_import_secret",
+            );
       } catch (_) {
         _peerIdFromSigningPk = null;
         _publicKeyHexFromPeerId = null;
@@ -343,47 +443,67 @@ abstract final class GhalBolFfi {
         _identityValidateImportSecret = null;
       }
       try {
-        _keystoreExistsQuery = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_keystore_exists",
-        );
+        _keystoreExistsQuery = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_keystore_exists",
+            );
       } catch (_) {
         _keystoreExistsQuery = null;
       }
       try {
-        _peerDisplayAliasGet = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
-          "ghal_bol_core_ffi_peer_display_alias_get",
-        );
-        _peerDisplayAliasSet = lib.lookupFunction<_NativeThreeStringsToPtr, _NativeThreeStringsToPtrDart>(
-          "ghal_bol_core_ffi_peer_display_alias_set",
-        );
+        _peerDisplayAliasGet = lib
+            .lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
+              "ghal_bol_core_ffi_peer_display_alias_get",
+            );
+        _peerDisplayAliasSet = lib
+            .lookupFunction<
+              _NativeThreeStringsToPtr,
+              _NativeThreeStringsToPtrDart
+            >("ghal_bol_core_ffi_peer_display_alias_set");
       } catch (_) {
         _peerDisplayAliasGet = null;
         _peerDisplayAliasSet = null;
       }
       try {
-        _deleteKeystore = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
-          "ghal_bol_core_ffi_delete_keystore",
-        );
+        _deleteKeystore = lib
+            .lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
+              "ghal_bol_core_ffi_delete_keystore",
+            );
       } catch (_) {
         _deleteKeystore = null;
       }
       try {
-        _importIdentityFromSecretHex =
-            lib.lookupFunction<_NativeFourStringsToPtr, _NativeFourStringsToPtrDart>(
-              "ghal_bol_core_ffi_import_identity_from_secret_hex",
+        _changePassword = lib
+            .lookupFunction<
+              _NativeThreeStringsToPtr,
+              _NativeThreeStringsToPtrDart
+            >("ghal_bol_core_ffi_change_password");
+      } catch (_) {
+        _changePassword = null;
+      }
+      try {
+        _importIdentityFromSecretHex = lib
+            .lookupFunction<
+              _NativeFourStringsToPtr,
+              _NativeFourStringsToPtrDart
+            >("ghal_bol_core_ffi_import_identity_from_secret_hex");
+        _revealSecretKeyHex = lib
+            .lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
+              "ghal_bol_core_ffi_reveal_secret_key_hex",
             );
-        _revealSecretKeyHex = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
-          "ghal_bol_core_ffi_reveal_secret_key_hex",
-        );
-        _exportKeystoreJson = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_export_keystore_json",
-        );
-        _importKeystoreJson = lib.lookupFunction<_NativeThreeStringsToPtr, _NativeThreeStringsToPtrDart>(
-          "ghal_bol_core_ffi_import_keystore_json",
-        );
-        _resetFirstTimeIdentity = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-          "ghal_bol_core_ffi_reset_first_time_identity",
-        );
+        _exportKeystoreJson = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_export_keystore_json",
+            );
+        _importKeystoreJson = lib
+            .lookupFunction<
+              _NativeThreeStringsToPtr,
+              _NativeThreeStringsToPtrDart
+            >("ghal_bol_core_ffi_import_keystore_json");
+        _resetFirstTimeIdentity = lib
+            .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+              "ghal_bol_core_ffi_reset_first_time_identity",
+            );
       } catch (_) {
         _importIdentityFromSecretHex = null;
         _revealSecretKeyHex = null;
@@ -393,16 +513,20 @@ abstract final class GhalBolFfi {
       }
       _loadServiceSymbols(lib);
       try {
-        _networkSnapshot = lib.lookupFunction<_NativePollPtr, _NativePollPtrDart>(
-          "ghal_bol_core_ffi_network_snapshot",
-        );
+        _networkSnapshot = lib
+            .lookupFunction<_NativePollPtr, _NativePollPtrDart>(
+              "ghal_bol_core_ffi_network_snapshot",
+            );
       } catch (_) {
         _networkSnapshot = null;
       }
       _lib = lib;
       _loaded = true;
       _loadError = null;
-      AppLog.instance.i("FFI", "lib_ghal_bol_core loaded (${Platform.operatingSystem})");
+      AppLog.instance.i(
+        "FFI",
+        "lib_ghal_bol_core loaded (${Platform.operatingSystem})",
+      );
     } catch (e, st) {
       // `flutter test` on CI has no bundled `lib_ghal_bol_core.so` — expected, not an error.
       final inFlutterTest = Platform.environment["FLUTTER_TEST"] == "true";
@@ -414,6 +538,7 @@ abstract final class GhalBolFfi {
       _p2pStart = null;
       _p2pStop = null;
       _p2pSendTextDm = null;
+      _p2pSendVoiceDm = null;
       _p2pRequeueOutboundDm = null;
       _p2pRegisterDmPeer = null;
       _p2pCallSignal = null;
@@ -430,6 +555,7 @@ abstract final class GhalBolFfi {
       _peerDisplayAliasGet = null;
       _peerDisplayAliasSet = null;
       _deleteKeystore = null;
+      _changePassword = null;
       _importIdentityFromSecretHex = null;
       _revealSecretKeyHex = null;
       _exportKeystoreJson = null;
@@ -460,9 +586,9 @@ abstract final class GhalBolFfi {
     final lib = _lib;
     if (lib == null) return;
     try {
-      final sym = lib.lookup<
-        NativeFunction<_NativeConfigureAndroid>
-      >("ghal_bol_core_ffi_configure_android_data_directory");
+      final sym = lib.lookup<NativeFunction<_NativeConfigureAndroid>>(
+        "ghal_bol_core_ffi_configure_android_data_directory",
+      );
       final f = sym.asFunction<void Function(Pointer<Utf8>)>();
       final p = path.toNativeUtf8();
       try {
@@ -515,12 +641,18 @@ abstract final class GhalBolFfi {
     required String password,
     String? identityAlgorithm,
   }) {
-    AppLog.instance.i("Identity", "create_or_unlock start namespace=$appNamespace");
+    AppLog.instance.i(
+      "Identity",
+      "create_or_unlock start namespace=$appNamespace",
+    );
     _ensure();
     final create = _createOrUnlockIdentity;
     final free = _stringFree;
     if (create == null || free == null) {
-      AppLog.instance.e("Identity", "create_or_unlock: native library unavailable");
+      AppLog.instance.e(
+        "Identity",
+        "create_or_unlock: native library unavailable",
+      );
       return GhalBolIdentityResult(
         ok: false,
         error: _loadError ?? NativeBuildHint.libraryUnavailable,
@@ -550,7 +682,10 @@ abstract final class GhalBolFfi {
       });
       final pid = r.libp2pPeerId?.trim() ?? "";
       if (pid.isNotEmpty && AppLog.logNativeDebug) {
-        AppLog.instance.d("Identity", "derived libp2p_peer_id=$pid (not on invite QR)");
+        AppLog.instance.d(
+          "Identity",
+          "derived libp2p_peer_id=$pid (not on invite QR)",
+        );
       }
     } else {
       AppLog.instance.w("Identity", "$action failed: ${r.error}");
@@ -564,15 +699,16 @@ abstract final class GhalBolFfi {
     final lib = _lib;
     if (lib == null) return;
     try {
-      final f =
-          lib
-              .lookupFunction<_NativeLock, void Function()>("ghal_bol_core_ffi_lock");
+      final f = lib.lookupFunction<_NativeLock, void Function()>(
+        "ghal_bol_core_ffi_lock",
+      );
       f();
     } catch (_) {}
   }
 
   /// Native exposes [`ghal_bol_core_ffi_delete_keystore`] (rebuild `lib_ghal_bol_core` if false).
-  static bool get isDeleteKeystoreAvailable => _loaded && _deleteKeystore != null && _stringFree != null;
+  static bool get isDeleteKeystoreAvailable =>
+      _loaded && _deleteKeystore != null && _stringFree != null;
 
   /// Native identity import/export/reveal (`ghal_bol_core_ffi_*`); rebuild lib if false.
   static bool get isIdentityKeyManagementAvailable =>
@@ -611,7 +747,8 @@ abstract final class GhalBolFfi {
     if (f == null) {
       return const GhalBolIdentityResult(
         ok: false,
-        error: "Import identity is not available in this native build. Re-sync lib_ghal_bol_core.",
+        error:
+            "Import identity is not available in this native build. Re-sync lib_ghal_bol_core.",
       );
     }
     final a = appNamespace.toNativeUtf8();
@@ -705,10 +842,8 @@ abstract final class GhalBolFfi {
     String? secretKeyHex,
     String? identityAlgorithm,
     String? error,
-  }) revealSecretKeyHex({
-    required String appNamespace,
-    required String password,
-  }) {
+  })
+  revealSecretKeyHex({required String appNamespace, required String password}) {
     _ensure();
     final f = _revealSecretKeyHex;
     if (f == null) {
@@ -759,13 +894,21 @@ abstract final class GhalBolFfi {
     _ensure();
     final f = _exportKeystoreJson;
     if (f == null) {
-      return (ok: false, keystoreJson: null, error: "Export is not available in this native build.");
+      return (
+        ok: false,
+        keystoreJson: null,
+        error: "Export is not available in this native build.",
+      );
     }
     final a = appNamespace.toNativeUtf8();
     try {
       final map = _parseRustJsonMap(f(a));
       if (map["ok"] != true) {
-        return (ok: false, keystoreJson: null, error: map["error"]?.toString() ?? "export failed");
+        return (
+          ok: false,
+          keystoreJson: null,
+          error: map["error"]?.toString() ?? "export failed",
+        );
       }
       final json = map["keystore_json"]?.toString() ?? "";
       if (json.isEmpty) {
@@ -826,7 +969,10 @@ abstract final class GhalBolFfi {
     required String appNamespace,
     required String password,
   }) {
-    AppLog.instance.w("Identity", "delete_keystore start namespace=$appNamespace");
+    AppLog.instance.w(
+      "Identity",
+      "delete_keystore start namespace=$appNamespace",
+    );
     _ensure();
     final del = _deleteKeystore;
     final free = _stringFree;
@@ -854,9 +1000,51 @@ abstract final class GhalBolFfi {
     }
   }
 
+  /// Whether native `ghal_bol` exposes keystore password change (rebuild if false).
+  static bool get isChangePasswordAvailable =>
+      _loaded && _changePassword != null && _stringFree != null;
+
+  /// Re-encrypt the on-disk keystore under [newPassword] after verifying [oldPassword].
+  /// Identity is unchanged; previously exported backups still need the old password.
+  static GhalBolIdentityResult changePassword({
+    required String appNamespace,
+    required String oldPassword,
+    required String newPassword,
+  }) {
+    AppLog.instance.w("Identity", "change_password start");
+    _ensure();
+    final f = _changePassword;
+    if (f == null) {
+      return GhalBolIdentityResult(
+        ok: false,
+        error:
+            "Change password is not available in this native build. ${NativeBuildHint.rebuildInstructions}",
+      );
+    }
+    final a = appNamespace.toNativeUtf8();
+    final b = oldPassword.toNativeUtf8();
+    final c = newPassword.toNativeUtf8();
+    try {
+      final r = _parseRustJsonPayload(f(a, b, c));
+      if (r.ok) {
+        AppLog.instance.i("Identity", "change_password ok");
+      } else {
+        AppLog.instance.w("Identity", "change_password failed: ${r.error}");
+      }
+      return r;
+    } finally {
+      calloc.free(a);
+      calloc.free(b);
+      calloc.free(c);
+    }
+  }
+
   /// Whether native `ghal_bol` exposes display-alias persistence (rebuild if false).
   static bool get isPeerDisplayAliasAvailable =>
-      _loaded && _peerDisplayAliasGet != null && _peerDisplayAliasSet != null && _stringFree != null;
+      _loaded &&
+      _peerDisplayAliasGet != null &&
+      _peerDisplayAliasSet != null &&
+      _stringFree != null;
 
   /// Read persisted display alias via **`ghal_bol`** (requires unlocked session).
   /// Returns `null` if unset, on error, or if symbols are missing.
@@ -974,10 +1162,7 @@ abstract final class GhalBolFfi {
     if (f == null || free == null) {
       return {"ok": false, "error": "coord not available in this build"};
     }
-    final j = jsonEncode({
-      "base_urls": baseUrls,
-      "insecure_tls": insecureTls,
-    });
+    final j = jsonEncode({"base_urls": baseUrls, "insecure_tls": insecureTls});
     final p = j.toNativeUtf8();
     try {
       return _parseSmallJson(f(p), free);
@@ -995,7 +1180,8 @@ abstract final class GhalBolFfi {
       _p2pPollEvent != null;
 
   /// Restores unacked outbound rows into the native outbox (same `message_id`).
-  static bool get isP2pRequeueAvailable => isP2pAvailable && _p2pRequeueOutboundDm != null;
+  static bool get isP2pRequeueAvailable =>
+      isP2pAvailable && _p2pRequeueOutboundDm != null;
 
   /// Start libp2p stream DM in a background thread. `config` is JSON, e.g.
   /// `{ "bootstrap_peers": [], "dm_peers": [{ "public_key_hex": "<identity-wire>" }] }`.
@@ -1111,7 +1297,41 @@ abstract final class GhalBolFfi {
     }
   }
 
-  static Map<String, dynamic> p2pSendTextDm(String recipientPublicKeyHex, String text) {
+  static Map<String, dynamic> p2pSetAvailabilityStatus(String status) {
+    _ensure();
+    final set = _p2pSetAvailabilityStatus;
+    final free = _stringFree;
+    if (set == null || free == null) {
+      return {
+        "ok": false,
+        "error": "availability status not available in this native build",
+      };
+    }
+    final p = status.toNativeUtf8();
+    try {
+      return _parseSmallJson(set(p), free);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  static Map<String, dynamic> p2pGetAvailabilityStatus() {
+    _ensure();
+    final get = _p2pGetAvailabilityStatus;
+    final free = _stringFree;
+    if (get == null || free == null) {
+      return {
+        "ok": false,
+        "error": "availability status not available in this native build",
+      };
+    }
+    return _parseSmallJson(get(), free);
+  }
+
+  static Map<String, dynamic> p2pSendTextDm(
+    String recipientPublicKeyHex,
+    String text,
+  ) {
     if (AppLog.logNativeDebug) {
       AppLog.instance.d("P2P", "send_text_dm len=${text.length}");
     }
@@ -1136,6 +1356,100 @@ abstract final class GhalBolFfi {
     }
   }
 
+  static Map<String, dynamic> p2pSendVoiceDm(
+    String recipientPublicKeyHex,
+    Map<String, dynamic> config,
+  ) {
+    _ensure();
+    final send = _p2pSendVoiceDm;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {
+        "ok": false,
+        "error": "voice DM not available in this native build",
+      };
+    }
+    final recipient = recipientPublicKeyHex.toNativeUtf8();
+    final cfg = jsonEncode(config).toNativeUtf8();
+    try {
+      final out = send(recipient, cfg);
+      final r = _parseSmallJson(out, free);
+      if (AppLog.logNativeDebug || r["ok"] != true) {
+        AppLog.instance.json("P2P", "send_voice_dm result", r);
+      }
+      return r;
+    } finally {
+      calloc.free(recipient);
+      calloc.free(cfg);
+    }
+  }
+
+  static Map<String, dynamic> p2pSendAttachment(
+    String recipientPublicKeyHex,
+    Map<String, dynamic> config,
+  ) {
+    _ensure();
+    final send = _p2pSendAttachment;
+    final free = _stringFree;
+    if (send == null || free == null) {
+      return {
+        "ok": false,
+        "error": "attachment send not available in this native build",
+      };
+    }
+    final recipient = recipientPublicKeyHex.toNativeUtf8();
+    final cfg = jsonEncode(config).toNativeUtf8();
+    try {
+      final out = send(recipient, cfg);
+      final r = _parseSmallJson(out, free);
+      if (AppLog.logNativeDebug || r["ok"] != true) {
+        AppLog.instance.json("P2P", "send_attachment result", r);
+      }
+      return r;
+    } finally {
+      calloc.free(recipient);
+      calloc.free(cfg);
+    }
+  }
+
+  static Map<String, dynamic> p2pAttachmentFetch(Map<String, dynamic> config) {
+    _ensure();
+    final fetch = _p2pAttachmentFetch;
+    final free = _stringFree;
+    if (fetch == null || free == null) {
+      return {
+        "ok": false,
+        "error": "attachment fetch not available in this native build",
+      };
+    }
+    final cfg = jsonEncode(config).toNativeUtf8();
+    try {
+      final out = fetch(cfg);
+      return _parseSmallJson(out, free);
+    } finally {
+      calloc.free(cfg);
+    }
+  }
+
+  static Map<String, dynamic> p2pAttachmentCancel(Map<String, dynamic> config) {
+    _ensure();
+    final cancel = _p2pAttachmentCancel;
+    final free = _stringFree;
+    if (cancel == null || free == null) {
+      return {
+        "ok": false,
+        "error": "attachment cancel not available in this native build",
+      };
+    }
+    final cfg = jsonEncode(config).toNativeUtf8();
+    try {
+      final out = cancel(cfg);
+      return _parseSmallJson(out, free);
+    } finally {
+      calloc.free(cfg);
+    }
+  }
+
   /// Re-queue a prior outbound text (history resync after restart).
   static Map<String, dynamic> p2pRequeueOutboundDm({
     required String messageId,
@@ -1146,7 +1460,10 @@ abstract final class GhalBolFfi {
     final requeue = _p2pRequeueOutboundDm;
     final free = _stringFree;
     if (requeue == null || free == null) {
-      return {"ok": false, "error": "P2P requeue not available (rebuild native lib)"};
+      return {
+        "ok": false,
+        "error": "P2P requeue not available (rebuild native lib)",
+      };
     }
     final a = messageId.toNativeUtf8();
     final b = recipientPublicKeyHex.toNativeUtf8();
@@ -1166,7 +1483,10 @@ abstract final class GhalBolFfi {
     final set = _p2pSetAppAckReadEnabled;
     final free = _stringFree;
     if (set == null || free == null) {
-      return {"ok": false, "error": "P2P app ack read gate not available (rebuild native lib)"};
+      return {
+        "ok": false,
+        "error": "P2P app ack read gate not available (rebuild native lib)",
+      };
     }
     final out = set(enabled ? 1 : 0);
     return _parseSmallJson(out, free);
@@ -1188,7 +1508,10 @@ abstract final class GhalBolFfi {
     final set = _p2pSetForegroundPeer;
     final free = _stringFree;
     if (set == null || free == null) {
-      return {"ok": false, "error": "P2P foreground peer not available (rebuild native lib)"};
+      return {
+        "ok": false,
+        "error": "P2P foreground peer not available (rebuild native lib)",
+      };
     }
     final pid = libp2pPeerId?.trim() ?? "";
     if (pid.isEmpty) {
@@ -1209,7 +1532,10 @@ abstract final class GhalBolFfi {
     final send = _p2pCallSignal;
     final free = _stringFree;
     if (send == null || free == null) {
-      return {"ok": false, "error": "call signaling not available in this build"};
+      return {
+        "ok": false,
+        "error": "call signaling not available in this build",
+      };
     }
     final j = jsonEncode(config);
     final p = j.toNativeUtf8();
@@ -1225,7 +1551,10 @@ abstract final class GhalBolFfi {
     final send = _p2pCallMedia;
     final free = _stringFree;
     if (send == null || free == null) {
-      return {"ok": false, "error": "native call media not available in this build"};
+      return {
+        "ok": false,
+        "error": "native call media not available in this build",
+      };
     }
     final j = jsonEncode(config);
     final p = j.toNativeUtf8();
@@ -1265,7 +1594,9 @@ abstract final class GhalBolFfi {
     }
   }
 
-  static Map<String, dynamic> p2pForceEndActiveCall(Map<String, dynamic> config) {
+  static Map<String, dynamic> p2pForceEndActiveCall(
+    Map<String, dynamic> config,
+  ) {
     _ensure();
     final send = _p2pForceEndActiveCall;
     final free = _stringFree;
@@ -1301,7 +1632,10 @@ abstract final class GhalBolFfi {
     final send = _p2pCallVideo;
     final free = _stringFree;
     if (send == null || free == null) {
-      return {"ok": false, "error": "native call video not available in this build"};
+      return {
+        "ok": false,
+        "error": "native call video not available in this build",
+      };
     }
     final j = jsonEncode(config);
     final p = j.toNativeUtf8();
@@ -1317,7 +1651,10 @@ abstract final class GhalBolFfi {
     final send = _p2pCallVideoFrame;
     final free = _stringFree;
     if (send == null || free == null) {
-      return {"ok": false, "error": "native call video frame pull not available in this build"};
+      return {
+        "ok": false,
+        "error": "native call video frame pull not available in this build",
+      };
     }
     final j = jsonEncode(config);
     final p = j.toNativeUtf8();
@@ -1333,7 +1670,10 @@ abstract final class GhalBolFfi {
     final send = _p2pCallVideoTexture;
     final free = _stringFree;
     if (send == null || free == null) {
-      return {"ok": false, "error": "native call video texture not available in this build"};
+      return {
+        "ok": false,
+        "error": "native call video texture not available in this build",
+      };
     }
     final j = jsonEncode(config);
     final p = j.toNativeUtf8();
@@ -1344,12 +1684,17 @@ abstract final class GhalBolFfi {
     }
   }
 
-  static Map<String, dynamic> p2pCallVideoPushCameraFrame(Map<String, dynamic> config) {
+  static Map<String, dynamic> p2pCallVideoPushCameraFrame(
+    Map<String, dynamic> config,
+  ) {
     _ensure();
     final send = _p2pCallVideoPushCameraFrame;
     final free = _stringFree;
     if (send == null || free == null) {
-      return {"ok": false, "error": "native call video push frame not available in this build"};
+      return {
+        "ok": false,
+        "error": "native call video push frame not available in this build",
+      };
     }
     final j = jsonEncode(config);
     final p = j.toNativeUtf8();
@@ -1441,7 +1786,12 @@ abstract final class GhalBolFfi {
     // Web/bootstrap builds without native identity FFI: accept bare secp256k1 hex only.
     if (RegExp(r"^[0-9a-fA-F]{66}$").hasMatch(s)) {
       final pk = s.toLowerCase();
-      return {"ok": true, "wire": pk, "algorithm": "secp256k1", "public_key_hex": pk};
+      return {
+        "ok": true,
+        "wire": pk,
+        "algorithm": "secp256k1",
+        "public_key_hex": pk,
+      };
     }
     return {"ok": false, "error": "identity ffi unavailable"};
   }
@@ -1610,70 +1960,83 @@ abstract final class GhalBolFfi {
       );
     } catch (_) {}
     try {
-      _contactsUpsert = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_core_ffi_contacts_upsert",
-      );
+      _contactsUpsert = lib
+          .lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
+            "ghal_bol_core_ffi_contacts_upsert",
+          );
     } catch (_) {}
     try {
-      _contactsRemove = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_core_ffi_contacts_remove",
-      );
+      _contactsRemove = lib
+          .lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
+            "ghal_bol_core_ffi_contacts_remove",
+          );
     } catch (_) {}
     try {
-      _contactsFind = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_core_ffi_contacts_find",
-      );
+      _contactsFind = lib
+          .lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
+            "ghal_bol_core_ffi_contacts_find",
+          );
     } catch (_) {}
     try {
-      _contactsMergeDiscovered =
-          lib.lookupFunction<_NativeThreeStringsToPtr, _NativeThreeStringsToPtrDart>(
-        "ghal_bol_core_ffi_contacts_merge_discovered_peer_id",
-      );
+      _contactsMergeDiscovered = lib
+          .lookupFunction<
+            _NativeThreeStringsToPtr,
+            _NativeThreeStringsToPtrDart
+          >("ghal_bol_core_ffi_contacts_merge_discovered_peer_id");
     } catch (_) {}
     try {
-      _contactsRecordPreview = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_core_ffi_contacts_record_inbound_preview",
-      );
+      _contactsRecordPreview = lib
+          .lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
+            "ghal_bol_core_ffi_contacts_record_inbound_preview",
+          );
     } catch (_) {}
     try {
-      _contactsClearUnread = lib.lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
-        "ghal_bol_core_ffi_contacts_clear_unread",
-      );
+      _contactsClearUnread = lib
+          .lookupFunction<_NativeTwoStringsToPtr, _NativeTwoStringsToPtrDart>(
+            "ghal_bol_core_ffi_contacts_clear_unread",
+          );
     } catch (_) {}
     try {
-      _coordSettingsGet = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-        "ghal_bol_core_ffi_coord_settings_get",
-      );
+      _coordSettingsGet = lib
+          .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_core_ffi_coord_settings_get",
+          );
     } catch (_) {}
     try {
-      _daemonSocketPath = lib.lookupFunction<_NativePollPtr, _NativePollPtrDart>(
-        "ghal_bol_core_ffi_daemon_socket_path",
-      );
+      _daemonSocketPath = lib
+          .lookupFunction<_NativePollPtr, _NativePollPtrDart>(
+            "ghal_bol_core_ffi_daemon_socket_path",
+          );
     } catch (_) {}
     try {
-      _contactsSetTrust = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_core_ffi_contacts_set_trust",
-      );
+      _contactsSetTrust = lib
+          .lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
+            "ghal_bol_core_ffi_contacts_set_trust",
+          );
     } catch (_) {}
     try {
-      _transcriptResolvePath = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-        "ghal_bol_core_ffi_transcript_resolve_path",
-      );
+      _transcriptResolvePath = lib
+          .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_core_ffi_transcript_resolve_path",
+          );
     } catch (_) {}
     try {
-      _transcriptLoadMerged = lib.lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
-        "ghal_bol_core_ffi_transcript_load_merged",
-      );
+      _transcriptLoadMerged = lib
+          .lookupFunction<_NativeTwoPtrToPtr, _NativeTwoPtrToPtrDart>(
+            "ghal_bol_core_ffi_transcript_load_merged",
+          );
     } catch (_) {}
     try {
-      _buildConnectInviteUri = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-        "ghal_bol_core_ffi_build_connect_invite_uri",
-      );
+      _buildConnectInviteUri = lib
+          .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_core_ffi_build_connect_invite_uri",
+          );
     } catch (_) {}
     try {
-      _parseConnectInviteUri = lib.lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
-        "ghal_bol_core_ffi_parse_connect_invite_uri",
-      );
+      _parseConnectInviteUri = lib
+          .lookupFunction<_NativePtrToPtr, _NativePtrToPtrDart>(
+            "ghal_bol_core_ffi_parse_connect_invite_uri",
+          );
     } catch (_) {}
   }
 
@@ -1759,11 +2122,22 @@ abstract final class GhalBolFfi {
     return r;
   }
 
-  static bool contactsRemove(String appNamespace, Map<String, dynamic> contact) {
-    return _callJson2Ptr(_contactsRemove, appNamespace, jsonEncode(contact))["ok"] == true;
+  static bool contactsRemove(
+    String appNamespace,
+    Map<String, dynamic> contact,
+  ) {
+    return _callJson2Ptr(
+          _contactsRemove,
+          appNamespace,
+          jsonEncode(contact),
+        )["ok"] ==
+        true;
   }
 
-  static Map<String, dynamic>? contactsFind(String appNamespace, Map<String, dynamic> query) {
+  static Map<String, dynamic>? contactsFind(
+    String appNamespace,
+    Map<String, dynamic> query,
+  ) {
     final r = _callJson2Ptr(_contactsFind, appNamespace, jsonEncode(query));
     if (r["ok"] != true) return null;
     final c = r["contact"];
@@ -1776,21 +2150,37 @@ abstract final class GhalBolFfi {
     String publicKeyHex,
     String libp2pPeerId,
   ) =>
-      _callJson3Ptr(_contactsMergeDiscovered, appNamespace, publicKeyHex, libp2pPeerId)["ok"] == true;
+      _callJson3Ptr(
+        _contactsMergeDiscovered,
+        appNamespace,
+        publicKeyHex,
+        libp2pPeerId,
+      )["ok"] ==
+      true;
 
-  static bool contactsRecordInboundPreview(String appNamespace, Map<String, dynamic> preview) =>
-      _callJson2Ptr(_contactsRecordPreview, appNamespace, jsonEncode(preview))["ok"] == true;
+  static bool contactsRecordInboundPreview(
+    String appNamespace,
+    Map<String, dynamic> preview,
+  ) =>
+      _callJson2Ptr(
+        _contactsRecordPreview,
+        appNamespace,
+        jsonEncode(preview),
+      )["ok"] ==
+      true;
 
   static bool contactsClearUnread(String appNamespace, String publicKeyHex) =>
-      _callJson2Ptr(_contactsClearUnread, appNamespace, publicKeyHex)["ok"] == true;
+      _callJson2Ptr(_contactsClearUnread, appNamespace, publicKeyHex)["ok"] ==
+      true;
 
   static Map<String, dynamic> contactsSetTrust(
     String appNamespace,
     Map<String, dynamic> trust,
-  ) =>
-      _callJson2Ptr(_contactsSetTrust, appNamespace, jsonEncode(trust));
+  ) => _callJson2Ptr(_contactsSetTrust, appNamespace, jsonEncode(trust));
 
-  static Map<String, dynamic>? coordSettingsGet({required String appNamespace}) {
+  static Map<String, dynamic>? coordSettingsGet({
+    required String appNamespace,
+  }) {
     final r = _callJsonPtr(_coordSettingsGet, appNamespace);
     if (r["ok"] != true) return null;
     return r;
@@ -1811,21 +2201,32 @@ abstract final class GhalBolFfi {
     return r["path"]?.toString();
   }
 
-  static ({int revision, List<Map<String, dynamic>> lines}) transcriptLoadThreadView(
-    String appNamespace,
-    Map<String, dynamic> query,
-  ) {
-    final r = _callJson2Ptr(_transcriptLoadMerged, appNamespace, jsonEncode(query));
-    if (r["ok"] != true) return (revision: 0, lines: <Map<String, dynamic>>[]);
+  static ({int revision, bool hasMore, List<Map<String, dynamic>> lines})
+  transcriptLoadThreadView(String appNamespace, Map<String, dynamic> query) {
+    final r = _callJson2Ptr(
+      _transcriptLoadMerged,
+      appNamespace,
+      jsonEncode(query),
+    );
+    if (r["ok"] != true) {
+      return (revision: 0, hasMore: false, lines: <Map<String, dynamic>>[]);
+    }
     final revRaw = r["revision"];
     final revision = revRaw is num ? revRaw.toInt() : 0;
+    final hasMore = r["has_more"] == true;
     final raw = r["lines"];
-    if (raw is! List) return (revision: revision, lines: <Map<String, dynamic>>[]);
+    if (raw is! List) {
+      return (
+        revision: revision,
+        hasMore: hasMore,
+        lines: <Map<String, dynamic>>[],
+      );
+    }
     final lines = raw
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
-    return (revision: revision, lines: lines);
+    return (revision: revision, hasMore: hasMore, lines: lines);
   }
 
   static String? buildConnectInviteUri(Map<String, dynamic> params) {
@@ -1840,7 +2241,9 @@ abstract final class GhalBolFfi {
     if (r["ok"] != true) return null;
     final https = r["uri"]?.toString();
     final app = r["app_uri"]?.toString();
-    if (https == null || https.isEmpty || app == null || app.isEmpty) return null;
+    if (https == null || https.isEmpty || app == null || app.isEmpty) {
+      return null;
+    }
     return GhalBolNativeInviteUris(httpsUri: https, appUri: app);
   }
 

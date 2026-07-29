@@ -65,15 +65,9 @@ pub struct KeystoreV1 {
 
 #[derive(Clone)]
 enum IdentityKeyMaterial {
-    Secp256k1 {
-        secret: SecretKey,
-    },
-    Ed25519 {
-        signing: ed25519_dalek::SigningKey,
-    },
-    EcdsaP256 {
-        signing: p256::ecdsa::SigningKey,
-    },
+    Secp256k1 { secret: SecretKey },
+    Ed25519 { signing: ed25519_dalek::SigningKey },
+    EcdsaP256 { signing: p256::ecdsa::SigningKey },
 }
 
 /// Unlocked device identity (multi-algorithm; shipping default is secp256k1).
@@ -193,7 +187,10 @@ fn keystore_algorithm(ks: &KeystoreV1) -> Result<IdentityAlgorithm, KeystoreErro
 }
 
 fn is_legacy_secp256k1_keystore(ks: &KeystoreV1) -> bool {
-    ks.identity_algorithm.as_deref().map(str::trim).is_none_or(|s| s.is_empty())
+    ks.identity_algorithm
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(|s| s.is_empty())
 }
 
 fn secp256k1_secret_from_bytes(sk: &[u8]) -> Result<SecretKey, KeystoreError> {
@@ -306,7 +303,9 @@ pub fn parse_secret_bytes_for_algorithm(
         return Err(KeystoreError::Invalid("invalid secret key hex"));
     }
     if s.len() % 2 != 0 {
-        return Err(KeystoreError::Invalid("secret key hex must have even length"));
+        return Err(KeystoreError::Invalid(
+            "secret key hex must have even length",
+        ));
     }
     let bytes = hex::decode(s).map_err(|_| KeystoreError::Invalid("invalid secret key hex"))?;
     match algorithm {
@@ -348,13 +347,8 @@ pub fn create_keystore_v1_from_secret_with_algorithm(
     kdf_override: Option<KeystoreV1KdfParams>,
 ) -> Result<(KeystoreV1, DecryptedIdentity), KeystoreError> {
     let id = decrypted_from_secret(algorithm, secret)?;
-    let keystore = encrypt_identity_secret(
-        password,
-        algorithm,
-        secret,
-        &id.public_key,
-        kdf_override,
-    )?;
+    let keystore =
+        encrypt_identity_secret(password, algorithm, secret, &id.public_key, kdf_override)?;
     Ok((keystore, id))
 }
 
@@ -481,10 +475,7 @@ mod tests {
     fn ed25519_roundtrip() {
         let (ks, id) =
             create_keystore_v1_with_algorithm("pw", IdentityAlgorithm::Ed25519, None).unwrap();
-        assert_eq!(
-            ks.identity_algorithm.as_deref(),
-            Some("ed25519")
-        );
+        assert_eq!(ks.identity_algorithm.as_deref(), Some("ed25519"));
         let id2 = unlock_keystore_v1("pw", &ks).unwrap();
         assert_eq!(id.algorithm(), IdentityAlgorithm::Ed25519);
         assert_eq!(id.public_key_hex(), id2.public_key_hex());

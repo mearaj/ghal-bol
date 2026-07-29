@@ -26,7 +26,10 @@ pub fn run_daemon(socket_path: &Path) -> Result<(), String> {
     }
     let listener = UnixListener::bind(socket_path)
         .map_err(|e| format!("bind {}: {e}", socket_path.display()))?;
-    eprintln!("ghal_bol_core_daemon listening on {}", socket_path.display());
+    eprintln!(
+        "ghal_bol_core_daemon listening on {}",
+        socket_path.display()
+    );
 
     let shutting_down = Arc::new(AtomicBool::new(false));
     for stream in listener.incoming() {
@@ -63,10 +66,7 @@ fn handle_client(stream: UnixStream, shutting_down: Arc<AtomicBool>) -> Result<(
         }
         let req: Value = serde_json::from_str(line).map_err(|e| format!("json request: {e}"))?;
         let id = req.get("id").cloned();
-        let method = req
-            .get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
+        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(Value::Null);
 
         if method == "shutdown" {

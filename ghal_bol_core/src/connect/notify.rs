@@ -1,6 +1,6 @@
 use super::util::chrono_now_ms;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 static NETWORK_CHANGE_NOTIFY: AtomicBool = AtomicBool::new(false);
 static RELAY_REFRESH_NOTIFY: AtomicBool = AtomicBool::new(false);
@@ -17,7 +17,6 @@ pub(crate) fn drop_pending_call_invite(call_id: &str) {
         f(call_id);
     }
 }
-
 
 pub fn notify_network_change() {
     NETWORK_CHANGE_NOTIFY.store(true, Ordering::SeqCst);

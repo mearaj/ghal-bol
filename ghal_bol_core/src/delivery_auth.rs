@@ -14,11 +14,7 @@ pub fn session_challenge_bytes(nonce: &[u8; 32], identity_wire: &str) -> Vec<u8>
     .into_bytes()
 }
 
-pub fn upload_challenge_bytes(
-    nonce: &[u8; 32],
-    message_id: &str,
-    recipient_wire: &str,
-) -> Vec<u8> {
+pub fn upload_challenge_bytes(nonce: &[u8; 32], message_id: &str, recipient_wire: &str) -> Vec<u8> {
     format!(
         "ghal_bol:delivery:upload:v1\n{}\n{}\n{}",
         hex::encode(nonce),
@@ -62,7 +58,7 @@ pub fn verify_delivery_signature(
         Signature as EcdsaSig, VerifyingKey as EcdsaVerifyingKey,
         signature::Verifier as EcdsaVerifier,
     };
-    use secp256k1::{ecdsa::Signature as Secp256k1Sig, Message, PublicKey, Secp256k1};
+    use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature as Secp256k1Sig};
 
     let wire = normalize_contact_identity_wire(identity_wire)?;
     let id = Identity::parse(&wire)?;
@@ -84,10 +80,10 @@ pub fn verify_delivery_signature(
                 .as_slice()
                 .try_into()
                 .map_err(|_| "ed25519 public key: invalid length".to_string())?;
-            let vk = VerifyingKey::from_bytes(&arr)
-                .map_err(|e| format!("ed25519 public key: {e}"))?;
-            let sig = Ed25519Sig::from_slice(signature)
-                .map_err(|e| format!("ed25519 signature: {e}"))?;
+            let vk =
+                VerifyingKey::from_bytes(&arr).map_err(|e| format!("ed25519 public key: {e}"))?;
+            let sig =
+                Ed25519Sig::from_slice(signature).map_err(|e| format!("ed25519 signature: {e}"))?;
             vk.verify(msg, &sig)
                 .map_err(|e| format!("ed25519 verify: {e}"))?;
         }
@@ -97,8 +93,7 @@ pub fn verify_delivery_signature(
             let sig = EcdsaSig::from_der(signature)
                 .or_else(|_| EcdsaSig::from_slice(signature))
                 .map_err(|e| format!("ecdsa-p256 signature: {e}"))?;
-            EcdsaVerifier::verify(&vk, msg, &sig)
-                .map_err(|e| format!("ecdsa-p256 verify: {e}"))?;
+            EcdsaVerifier::verify(&vk, msg, &sig).map_err(|e| format!("ecdsa-p256 verify: {e}"))?;
         }
     }
     Ok(())

@@ -15,10 +15,7 @@
 //! | `delivered`                      | peer got the text | no          |
 //! | `read`                           | peer read the text| no          |
 
-
 use thiserror::Error;
-
-
 
 #[derive(Debug, Error)]
 pub enum TranscriptError {
@@ -27,7 +24,4 @@ pub enum TranscriptError {
 
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-
 }
-
-

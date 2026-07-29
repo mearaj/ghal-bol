@@ -46,9 +46,6 @@ mod tests {
 
     #[test]
     fn dbus_object_path_from_app_id() {
-        assert_eq!(
-            dbus_object_path("com.ghalbol.debug"),
-            "/com/ghalbol/debug"
-        );
+        assert_eq!(dbus_object_path("com.ghalbol.debug"), "/com/ghalbol/debug");
     }
 }

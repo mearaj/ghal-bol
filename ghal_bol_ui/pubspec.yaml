@@ -33,18 +33,23 @@ dependencies:
   flutter_web_plugins:
     sdk: flutter
 
-  permission_handler: ^12.0.2
+  permission_handler: ^12.0.3
   ffi: ^2.1.0
   qr_flutter: ^4.1.0
-  mobile_scanner: ^7.2.0
-  share_plus: ^13.1.0
-  camera: ^0.11.2
-  camera_desktop: ^1.1.7
-  audioplayers: ^6.5.0
-  wakelock_plus: ^1.3.2
+  mobile_scanner: ^7.4.0
+  share_plus: ^13.3.0
+  camera: ^0.12.0
+  camera_desktop: ^1.2.1
+  audioplayers: ^6.8.1
+  # 12.x aligns win32 with share_plus/wakelock_plus; 11.x still requires win32 ^5.
+  file_picker: ^12.0.0-beta.7
+  record: ^7.1.1
+  # Pin <1.7: 1.7.0 breaks on AGP 8 + Kotlin 2.2.20 (default-package pigeon imports).
+  # https://github.com/fluttercommunity/wakelock_plus/issues/141
+  wakelock_plus: ">=1.6.1 <1.7.0"
 
-  path_provider: ^2.1.5
-  app_links: ^6.4.0
+  path_provider: ^2.1.6
+  app_links: ^7.2.1
   url_launcher: ^6.3.1
 
 dev_dependencies:
@@ -58,7 +63,7 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
 
-# For information on the generic Dart part of this file, see the
+# For information on the generic Dart part of this package, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
 # The following section is specific to Flutter packages.

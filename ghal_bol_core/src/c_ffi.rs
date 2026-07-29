@@ -95,7 +95,9 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_string_free(ptr: *mut c_char) {
 /// Optional: point keystore persistence at **`Context.getFilesDir()`** (or equivalent) on Android.
 /// Call before [`ghal_bol_core_ffi_create_or_unlock_identity`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ghal_bol_core_ffi_configure_android_data_directory(path_utf8: *const c_char) {
+pub unsafe extern "C" fn ghal_bol_core_ffi_configure_android_data_directory(
+    path_utf8: *const c_char,
+) {
     let run = || -> Result<(), String> {
         let s = unsafe { utf8_trace(path_utf8, "android data dir") }?;
         let mut g = android_data_dir_mx()
@@ -138,8 +140,7 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_create_or_unlock_identity(
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
-        let create_algorithm = match parse_optional_identity_algorithm(identity_algorithm_utf8)
-        {
+        let create_algorithm = match parse_optional_identity_algorithm(identity_algorithm_utf8) {
             Ok(v) => v,
             Err(e) => return json_err(e),
         };
@@ -202,8 +203,7 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_import_identity_from_secret_hex(
             Ok(s) => s,
             Err(e) => return json_err(e),
         };
-        let algorithm = match parse_optional_identity_algorithm(identity_algorithm_utf8)
-        {
+        let algorithm = match parse_optional_identity_algorithm(identity_algorithm_utf8) {
             Ok(Some(a)) => a,
             Ok(None) => crate::IdentityAlgorithm::Secp256k1,
             Err(e) => return json_err(e),
@@ -400,6 +400,41 @@ pub unsafe extern "C" fn ghal_bol_core_ffi_delete_keystore(
         crate::session_runtime::lock_identity();
         match crate::delete_stored_identity_v1(&cfg) {
             Ok(()) => json_ok(serde_json::json!({ "ok": true })),
+            Err(e) => json_err(format!("{e}")),
+        }
+    };
+    run()
+}
+
+/// Re-encrypt the keystore under a new app password after verifying the old one.
+/// Returns `{ ok, public_key_hex?, identity_algorithm? }`. The identity is unchanged;
+/// only the at-rest encryption differs. Does not alter the current in-memory session.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghal_bol_core_ffi_change_password(
+    app_namespace_utf8: *const c_char,
+    old_password_utf8: *const c_char,
+    new_password_utf8: *const c_char,
+) -> *mut c_char {
+    let run = || -> *mut c_char {
+        let ns = match unsafe { utf8_trace(app_namespace_utf8, "app_namespace") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let old_password = match unsafe { utf8_trace(old_password_utf8, "old_password") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let new_password = match unsafe { utf8_trace(new_password_utf8, "new_password") } {
+            Ok(s) => s,
+            Err(e) => return json_err(e),
+        };
+        let cfg = resolved_storage_config(&ns);
+        match crate::change_password_v1(&cfg, &old_password, &new_password) {
+            Ok(id) => json_ok(serde_json::json!({
+                "ok": true,
+                "public_key_hex": id.public_key_hex(),
+                "identity_algorithm": id.algorithm().wire_id(),
+            })),
             Err(e) => json_err(format!("{e}")),
         }
     };

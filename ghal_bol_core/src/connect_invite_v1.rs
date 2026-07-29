@@ -8,7 +8,7 @@
 
 use serde_json::Value;
 
-use crate::identity::{percent_decode_uri_component, percent_encode_uri_component, Identity};
+use crate::identity::{Identity, percent_decode_uri_component, percent_encode_uri_component};
 use crate::public_key_util::normalize_contact_identity_wire;
 
 const SHARE: &str = "ghal_bol_connect_v1";
@@ -157,7 +157,10 @@ pub fn build_connect_invite_wire_map(
 /// Parse v2 or v3 wire and return normalized identity wire.
 pub fn identity_wire_from_invite(v: &Value) -> Result<String, String> {
     verify_ghal_bol_connect_invite_value(v)?;
-    let fv = v.get("format_version").and_then(|x| x.as_u64()).unwrap_or(0);
+    let fv = v
+        .get("format_version")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
     if fv == CONNECT_INVITE_FORMAT_VERSION_V3 {
         let w = v
             .get("identity_wire")
@@ -422,8 +425,9 @@ mod tests {
     #[test]
     fn v3_wire_ok() {
         let (_ks, id) = create_keystore_v1("pw", None).unwrap();
-        let wire = build_connect_invite_wire_map("ghal-bol-chat", &id.public_key_hex(), Some("Bob"))
-            .unwrap();
+        let wire =
+            build_connect_invite_wire_map("ghal-bol-chat", &id.public_key_hex(), Some("Bob"))
+                .unwrap();
         verify_ghal_bol_connect_invite_value(&wire).unwrap();
         assert_eq!(wire["format_version"], CONNECT_INVITE_FORMAT_VERSION_V3);
         assert_eq!(wire["global_alias"], "Bob");

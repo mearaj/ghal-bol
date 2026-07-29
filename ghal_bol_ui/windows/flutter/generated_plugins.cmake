@@ -7,6 +7,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   camera_desktop
   permission_handler_windows
+  record_windows
   share_plus
   url_launcher_windows
 )

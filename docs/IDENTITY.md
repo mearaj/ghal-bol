@@ -121,6 +121,17 @@ The Identity tab is kept alive in an **`IndexedStack`**. Two Flutter pitfalls st
 
 ---
 
+## Mandatory backup after Create new (implemented)
+
+When the app **generates** a new identity (first-time **Create new** only), a **blocking backup step** runs after unlock and **before** entering the chat shell ([`showMandatoryKeystoreBackupDialog`](../ghal_bol_ui/lib/identity_key_management.dart), called from [`IdentityScreen._unlock`](../ghal_bol_ui/lib/bootstrap_native.dart)):
+
+1. Explains the identity is device-owned with no cloud copy.
+2. User must **Export encrypted backup** (share + clipboard) at least once.
+3. User must tick **"I have saved my encrypted backup"**.
+4. Only then does **Continue** enable.
+
+**Skipped for** import paths (Import key, Import encrypted keystore backup) and normal unlock — those imply the user already holds a key/backup. No-op if native key management is unavailable (cannot force an export the native layer cannot produce).
+
 ## Export and import
 
 Export is **manual, explicit, and user-controlled** — no automatic cloud escrow.

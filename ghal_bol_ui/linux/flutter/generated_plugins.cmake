@@ -6,6 +6,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
   camera_desktop
   gtk
+  record_linux
   url_launcher_linux
 )
 
