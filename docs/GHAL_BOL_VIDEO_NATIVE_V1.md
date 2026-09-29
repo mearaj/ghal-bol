@@ -6,7 +6,7 @@
 logic, #7 identity E2EE), [DESIGN.md](DESIGN.md), [TRANSPORT.md](TRANSPORT.md) (native connect
 stack), and [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) (the shipping
 native **voice** engine this extends). This doc reuses that engine's pipeline,
-crypto, transport, and FFI patterns — video is an **additional media track**, not a
+crypto and transport — video is an **additional media track**, not a
 new stack.
 
 ---
@@ -19,10 +19,10 @@ transport as native voice.
 
 | Principle | Consequence for video |
 |-----------|-----------------------|
-| **Rust owns media** (golden rule #1) | Capture→encode→seal→transport→jitter→decode happen in Rust; Flutter does camera-permission UI, the local/remote render surface, and toggle buttons via FFI. |
-| **Reuse the link** | Video frames ride the **same native connection** as chat + voice (a media substream), so we inherit NAT traversal, relay `/p2p-circuit` fallback, Noise, coord discovery, urgent-reconnect, keepalive, and the **LAN-shift** work in `chat_server.rs`. |
+| **Rust owns media** (golden rule #1) | Capture, encode, seal, transport, jitter, and decode happen in Rust. Makepad shows the call screen, camera permission, and the local and remote pictures from `host::call_picture_pngs`. |
+| **Reuse the link** | Video frames ride the **same native connection** as chat + voice (a media substream), so we inherit NAT traversal, coord bridge for WAN, Noise, discovery, urgent-reconnect, keepalive, and LAN-shift work in native connect. |
 | **One E2E story** (golden rule #7) | Video frames are sealed with the transport media key (`derive_call_media_keys_from_transport`). Per-frame AES-GCM; key never on the wire. |
-| **No new servers** | Direct when possible; relay (coord/native connect) only as fallback — identical to chat and voice. |
+| **No new servers** | Direct when possible; coord bridge only as WAN fallback — same as voice. |
 | **Truthful UI** | "Video connected" only when decoded frames actually flow (mirrors voice + DESIGN.md truthful-status rule). |
 
 **Why not MoQ:** see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § "Why not MoQ". For 1:1 interactive video we want the existing peer link + an unreliable-friendly media path, not a pub/sub broadcast protocol.
@@ -36,25 +36,25 @@ transport as native voice.
 | **Signaling** (`invite`/`accept`/`hangup`, `call_id`, phases) | `call_sig_v1.rs`, `call_state.rs` over the DM stream | **Reuse.** Add `video_engine: native_v1` negotiation; `video_on`/`video_off` + `key_request` (keyframe) signals. |
 | **Identity media key** | `call_media_key.rs` `derive_call_media_keys_from_transport` | **Reuse**, with a distinct HKDF `info` for the video stream (key separation from audio — see § E2E). |
 | **Per-frame crypto** | `call_media/crypto.rs` `MediaCrypto` (AES-256-GCM, `dir‖counter‖ct`) | **Reuse the construction**; separate `MediaCrypto` instance/counter per media kind so audio and video never share a nonce space. |
-| **Transport** | `/ghal-bol/call/1.0.0` substream (`chat_server.rs`) | **New `/ghal-bol/call-video/1.0.0` substream** on the **same** connection (parallel to audio so a large video frame never head-of-line-blocks a 20 ms audio packet). Same two-streams-per-call (TX open / RX accept) + length-prefix framing + drop-oldest backpressure. |
+| **Transport** | `/ghal-bol/call/1.0.0` substream (`connect/`) | **New `/ghal-bol/call-video/1.0.0` substream** on the **same** connection (parallel to audio so a large video frame never head-of-line-blocks a 20 ms audio packet). Same two-streams-per-call (TX open / RX accept) + length-prefix framing + drop-oldest backpressure. |
 | **Session lifecycle** | `call_media/session.rs`, `MediaControls`, `OutboundCmd::CallMedia*` | **Extend** `MediaControls` with camera on/off + a `VideoCodec` path; add `OutboundCmd::CallVideoStart/Stop/SetCameraEnabled`. |
 | **Codec** | `call_media/codec.rs` `AudioCodec` (Opus) | **New `VideoCodec` trait** + encoder/decoder (see § Codec). |
 | **Jitter / sync** | `call_media/jitter.rs` (20 ms audio frames) | **New frame-aware video jitter** (keyframe/delta aware) + A/V sync using `MediaFrame.ts` (already reserved, `mod.rs`). |
-| **Capture / render** | `call_media/audio_device.rs` (cpal/Oboe) | **New camera capture** + **render-to-Flutter-texture** platform layer (see § Platform). |
-| **FFI / poll** | `p2p_call_media`, `GhalBolP2p.callMedia*`, `call_media` log stats | **Add** `p2p_call_video` + `GhalBolP2p.callVideo*`; reuse poll/stats pattern. |
-| **Call UI** | `call_screen.dart`, `call_controller.dart` | **Reuse**; local PiP + remote view bind to a **native video texture** (`NativeCallVideoView`). |
+| **Capture / render** | `nokhwa` on desktop | Camera frames stay in Rust. The call screen shows PNG pictures from `host::call_picture_pngs`. |
+| **Controls** | `host::start_video_call`, `host::end_call` | The UI does not pass pixel buffers. |
+| **Call UI** | `call_view` in `ghal_bol_app` | Local preview and remote picture. |
 
 ---
 
 ## Architecture
 
 ```text
-┌───────────────────────── ghal_bol_ui (Flutter) ─────────────────────────┐
+┌───────────────────────── ghal_bol_app (Makepad) ─────────────────────────┐
 │ Call UI, camera-permission prompt, local PiP + remote video surface      │
-│ bound to a native Texture (Texture id from FFI); video on/off toggle      │
-│ Calls native via ghal_bol_core_ffi_call_video_* ; renders state from poll      │
+│ local and remote pictures from host::call_picture_pngs                     │
+│ Calls ghal_bol_core::host ; refreshes from poll                             │
 └───────────────────────────────┬─────────────────────────────────────────┘
-                                 │ FFI / daemon RPC (control + texture id only)
+                                 │ ghal_bol_core::host
 ┌───────────────────────────────▼─────────────────────────────────────────┐
 │ ghal_bol (Rust)                                                          │
 │  call_sig_v1 / call_state   — signaling on the DM stream (unchanged)     │
@@ -64,7 +64,7 @@ transport as native voice.
 │    RECV → unseal → reorder/jitter(keyframe-aware) → decode → render       │
 │    A/V sync via MediaFrame.ts vs the audio clock                          │
 │  call media keys            — derive_call_media_keys_from_transport        │
-│  chat_server.rs             — the peer connection + /ghal-bol/call-video  │
+│  connect/             — the peer connection + /ghal-bol/call-video  │
 │                               substream (parallel to audio + DM)          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -128,7 +128,7 @@ we keep MoQ's *per-track-independent-stream* idea but run it over **our own** di
 native connect/QUIC connection. Two phases, same as voice's Option A → Option B:
 
 - **Phase-1 transport — native connect substream `/ghal-bol/call-video/1.0.0`** — a third
-  protocol on the same native connection (`chat_server.rs`), opened/accepted exactly
+  protocol on the same native connection (`connect/`), opened/accepted exactly
   like `/ghal-bol/call/1.0.0` (CALL_STREAM_PROTOCOL): each side **opens TX** and
   **accepts RX**, first message is a `{"call_id"}` header, then length-prefixed sealed
   packets. Register in a `SessionState::call_video` map keyed by `call_id` (parallel to
@@ -143,7 +143,7 @@ native connect/QUIC connection. Two phases, same as voice's Option A → Option 
   fragmentation for video. Control/signaling stays on the reliable DM stream. See
   [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) § "Transport decision".
 - **Packetization:** the substream frame cap is `MAX_MEDIA_FRAME_BYTES` (64 KiB,
-  `chat_server.rs`) and a UDP datagram is far smaller, so fragment each encoded frame
+  `connect/`) and a UDP datagram is far smaller, so fragment each encoded frame
   into ordered chunks `{frame_seq, chunk_idx, chunk_cnt, keyframe, ts}`; reassemble on
   RX; drop the whole frame if any chunk is missing (then request a keyframe if it was a
   reference frame).
@@ -190,7 +190,7 @@ A 1:1 link still needs basic congestion control or video will bufferbloat the au
   counters guarantee no AES-GCM nonce reuse across the two media kinds.
 - Each chunk is sealed with `MediaCrypto` (`dir‖counter‖ciphertext`) before it hits the
   substream; the substream is also Noise-encrypted peer-to-peer (defense in depth — a
-  relay on the path never sees plaintext). Key never on the wire.
+  bridge/path never sees plaintext). Key never on the wire.
 - Keys derive in parallel with camera open; **failure to derive must fail the video
   E2E or surface it — never silently fall back to plaintext video** (golden rule #7).
   Audio and the call itself continue regardless.
@@ -209,23 +209,14 @@ Reuse `call_sig_v1.rs` / `call_state.rs`. Native video signaling:
 | `key_request` (**new**) | RX → TX: force an immediate keyframe (after loss / late join). |
 
 `call_state.rs` tracks `video_enabled` per call and which **video engine** is active.
-Negotiation mirrors `voice_engine: native_v2` in `call_controller.dart` (advertise →
+Negotiation mirrors `voice_engine: native_v2` in `host call controls` (advertise →
 parse remote → decide `_willUseNativeVideo`).
 
 ---
 
-## Control / FFI surface (additions)
+## Call screen
 
-Reuse the `ghal_bol_core_ffi_p2p_call_media` / `p2p_call_media` pattern. Dart sends
-**control only**; media + pixels never cross FFI as buffers — only a **texture id**
-(or platform surface handle) does.
-
-| FFI (proposed) | Purpose |
-|----------------|---------|
-| `ghal_bol_core_ffi_p2p_call_video` (action `start`/`stop`/`set_camera_enabled`/`switch_camera`) | Begin/end the video session + camera for `call_id` (after `accept` + `video_on`). |
-| `ghal_bol_core_ffi_call_video_remote_texture` | Returns the platform **texture id** the engine renders the decoded peer frames into; Flutter shows it in a `Texture(textureId:)`. |
-| `ghal_bol_core_ffi_call_video_local_texture` | Local camera preview texture id (or Flutter renders preview natively from the camera plugin — TBD per platform). |
-| (poll) `call_video_connected` / `call_video_stats` / `call_video_failed` | Truthful UI: "video connected" only on real decoded-frame flow; stats = rtt/loss/fps/bitrate/resolution/e2e-active. |
+`host::start_video_call` starts the camera and the video substream. `host::call_picture_pngs` returns a local or remote PNG when that picture's generation changes. `host::end_call` stops both video and voice. The call banner is the truthful status line.
 
 ---
 
@@ -234,11 +225,11 @@ Reuse the `ghal_bol_core_ffi_p2p_call_media` / `p2p_call_media` pattern. Dart se
 Rust owns codec/jitter/sync/crypto/transport/packetization on all platforms;
 **camera capture, hardware codec, and the render surface** need per-OS integration:
 
-| Platform | Camera capture | HW codec | Render to Flutter |
+| Platform | Camera capture | HW codec | Render to Makepad |
 |----------|----------------|----------|-------------------|
-| **Android** | Camera2 / CameraX → `Surface`/`ImageReader` (NV12) | `MediaCodec` (Surface in/out) | Decode into a `SurfaceTexture` → Flutter external `Texture` |
-| **iOS** | `AVCaptureSession` (`CVPixelBuffer`) | VideoToolbox (`yscv-video`) | `CVPixelBuffer` → Flutter `Texture` (Metal/CVMetalTexture) |
-| **Linux/desktop** | `nokhwa` (V4L2) — cpal's video analog | `cros-codecs` VAAPI / `yscv-video` NVDEC; SW `rav1e`+`rav1d`/`openh264` | Decode → BGRA/`wgpu` → Flutter `Texture` (pixel-buffer registrar) |
+| **Android** | Camera2 / CameraX → `Surface`/`ImageReader` (NV12) | `MediaCodec` (Surface in/out) | Decode into a `SurfaceTexture` → Makepad external `Texture` |
+| **iOS** | `AVCaptureSession` (`CVPixelBuffer`) | VideoToolbox (`yscv-video`) | `CVPixelBuffer` → Makepad `Texture` (Metal/CVMetalTexture) |
+| **Linux/desktop** | `nokhwa` (V4L2) — cpal's video analog | `cros-codecs` VAAPI / `yscv-video` NVDEC; SW `rav1e`+`rav1d`/`openh264` | Decode → BGRA/`wgpu` → Makepad `Texture` (pixel-buffer registrar) |
 
 **Crates that shrink this work:** **`nokhwa`** gives cross-platform camera capture on
 desktop (and is the camera path inside `yscv-video`); the iroh team's **`rusty-capture`**
@@ -258,8 +249,8 @@ tests.
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
 | **V0** | `VideoCodec` trait + `NullVideoCodec` + packetizer/reassembler + video jitter (keyframe-aware) + `MediaCrypto` video key — **engine core, no camera/transport**, unit-tested like the voice P0 | Round-trip + reorder/loss/keyframe-recovery unit tests pass (mirrors `call_media` tests) |
-| **V1** | `/ghal-bol/call-video/1.0.0` substream in `chat_server.rs` + SW codec (H.264) + **desktop** camera (`nokhwa`) + render texture; CLI/test harness | Two Linux desktops hold a clear 2-way video call over a real native connect link; measured rtt/fps/bitrate; audio stays native voice |
-| **V2** | Wire V1 into `call_controller`/`call_screen` via FFI on **Linux** (native texture); congestion control + `key_request` | Linux↔Linux native video |
+| **V1** | `/ghal-bol/call-video/1.0.0` substream in `connect/` + SW codec (H.264) + **desktop** camera (`nokhwa`) + render texture; CLI/test harness | Two Linux desktops hold a clear 2-way video call over a real native connect link; measured rtt/fps/bitrate; audio stays native voice |
+| **V2** | Wire into Makepad via **`host::start_video_call`** / `host::call_picture_pngs`; congestion + `key_request` | Linux↔Linux native video |
 | **V3** | **Android** Camera2 + `MediaCodec` HW encode/decode + SurfaceTexture render; switch-camera; route toggles | Android↔Android and Android↔Linux video solid on Wi-Fi + cellular within battery/thermal budget |
 | **V4** | **iOS** AVFoundation + VideoToolbox | iOS interop |
 | **V5** | Option B (QUIC datagrams) for video if substream HOL hurts on lossy cellular | Lower jitter / faster recovery on lossy links |
@@ -269,17 +260,17 @@ tests.
 ## Risks & open questions
 
 - **HW codec variance** (Android `MediaCodec` across vendors; color formats, latency).
-- **Zero-copy render** to a Flutter `Texture` on each platform (avoid per-frame CPU copies/thermals).
+- **Zero-copy render** to a Makepad `Texture` on each platform (avoid per-frame CPU copies/thermals).
 - **Congestion control quality** for 1:1 (GCC-lite vs something more principled).
 - **Battery/CPU/thermal** of camera + encode + decode + render on mobile.
 - **Substream HOL** under cellular loss (mitigation: drop-oldest, keyframe-on-request; escape hatch: Option B datagrams).
-- **Build size / NDK**: adding a video codec (+ HW codec glue) to the Android `:p2p` libs.
+- **Build size / NDK**: adding a video codec (+ HW codec glue) to the Android native build.
 
 ## Non-goals (v1)
 
 - Group video / SFU.
 - Screen share, recording, virtual backgrounds.
-- Browser/web video (FFI is native).
+- Browser/web video.
 - Replacing video on all platforms at once (phased; iOS not started).
 - MoQ.
 
@@ -291,25 +282,23 @@ tests.
 |-------|-------|
 | **V0 engine core** | **Done.** `ghal_bol_core/src/call_video/` — `RawVideoFrame`/`EncodedVideoFrame`, `VideoEncoder`/`VideoDecoder` traits + `NullVideoCodec`, frame **fragmentation/reassembly** (`packet.rs`, `Reassembler`), **keyframe-aware jitter** (`jitter.rs`, `VideoJitter` — waits for a keyframe, jumps to the next keyframe on a gap, raises a throttled `key_request`), and per-chunk **identity AES-256-GCM seal** reusing `call_media::MediaCrypto` with a distinct video key. `VideoEngine` drives `on_capture → wires`, `on_wire → reassemble+jitter`, `on_render → decoded frame`. **7 unit tests** (multi-chunk round-trip, out-of-order chunks, in-order render, single-frame loss recovery, keyframe-gating + request, tamper/wrong-key rejection). Unwired — does not touch the shipping voice/chat/networking paths. |
 | **V1 codec** | **Done (desktop).** `call_video/codec_h264.rs` — `H264Encoder`/`H264Decoder` over **OpenH264** (`openh264` 0.9, bundled source built via `cc`; realtime config: 2 Mbps / 30 fps, accurate keyframe flag via Annex-B NAL scan). I420 in/out. `VideoEngine::new_h264()`. **4 tests** incl. a **full two-engine pipeline** (encode → fragment → seal → wire → reassemble → keyframe-aware jitter → decode). Desktop-gated; Android codec (`MediaCodec` / cross-built openh264) lands in its phase so the Android build stays untouched now. |
-| **V1 transport + capture/render** | **Done (Linux desktop + Android).** `/ghal-bol/call-video/1.0.0` substream, `p2p_call_video` + `p2p_call_video_frame` FFI/daemon RPC. **Desktop:** `nokhwa` camera → I420. **Android:** Camera2 in `:p2p` (`AndroidVideoCapture.kt`) → JNI → Rust; OpenH264 cross-built via NDK (same bitstream as desktop). Flutter `NativeCallVideoView` pulls frames over daemon RPC on Android (UI process) or FFI on Linux. `CallController` negotiates `video_engine: native_v1` on **both** desktop and Android. |
+| **V1 transport + capture/render** | **Done (Linux desktop + Android).** `/ghal-bol/call-video/1.0.0` substream and `host::start_video_call`. **Desktop:** `nokhwa` camera → I420. **Android:** NDK Camera2 in this process → I420. The call screen loads PNG pictures from `host::call_picture_pngs` when the frame generation changes. If the camera cannot be opened, the video call reports that capture is unavailable. |
 | **V2 Android HW codec** | **Optional next.** `MediaCodec` H.264 encode/decode behind the same trait for lower CPU/battery (OpenH264 SW already ships). |
 | **V2 Linux wiring** | **Done.** Native video when both peers advertise `native_v1` (Linux↔Linux, Linux↔Android, Android↔Android). |
 | **V3 Android / V4 iOS / V5 datagrams** | Not started. |
 
-### Flutter video textures and call end (Linux + Android)
+### Makepad video textures and call end (Linux + Android)
 
 | Rule | Detail |
 |------|--------|
-| **Register** | `NativeCallVideoView` → `GhalBolP2p.callVideoTexture` → `CallVideoTextureBridge.register` (shm RGBA). Pooled per `(call_id, track)` in `CallVideoTexturePool`. |
-| **Release on hangup only** | `CallVideoTexturePool.releaseCall(call_id)` from `CallController._endLocal` / `_stopNativeCallIfStillActive` **after** `callVideoStop`. **`releaseWidget` is a no-op** — do not release on widget dispose/rebuild (PiP swap, route pop); that caused Linux Flutter **SIGSEGV** mid-call. |
-| **End order** | Stop UI phase → `callMediaStop` / `callVideoStop` → `CallDesktopNativeCamera.stop` → `releaseCall` → optional async `hangup` — UI must not block on RPC. |
-| **Privacy** | Same as voice: UI gone → `p2p_force_end_active_call` (daemon / `:p2p`). See [DESIGN.md](DESIGN.md) § “Call UI lifecycle and privacy”. |
+| **Pictures** | In-memory frames. `host::call_picture_pngs` returns a PNG only when that track's generation changes. |
+| **End** | `host::end_call` stops video and voice and sends hangup. Quit and shutdown call it too. |
 
 **Current shipping reality:** native **voice** (`native_v2`) + **native video** (`native_v1`) when both peers negotiate the tags. Voice detail: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
 
 ## References (June 2026)
 
-- **Native voice engine + transport/E2E/phasing rationale:** [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) (this video plan reuses its identity key, per-frame seal, substream/datagram transport, and FFI patterns).
+- **Native voice engine:** [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md). Video reuses its identity key, per-frame seal, and substream transport.
 - **HW-accelerated Rust video codecs (no FFmpeg):** **`cros-codecs`** (Google/ChromeOS, VAAPI/V4L2 H.264/HEVC/VP8/VP9/AV1 dec + H.264/VP9/AV1 enc, ~1.1M downloads), **`yscv-video`** (pure-Rust H.264/HEVC/AV1 + VideoToolbox/VAAPI/NVDEC/MediaFoundation HW + `nokhwa` camera), **`rav1e`** (AV1 enc) + **`rav1d`** (safe `dav1d` AV1 dec), **`openh264`** (H.264). Android `MediaCodec` / iOS VideoToolbox for mobile HW.
 - **Camera / capture:** `nokhwa` (desktop), the iroh team's **`rusty-capture`** (PipeWire/V4L2/X11/ScreenCaptureKit/AVFoundation), Camera2/CameraX (Android), AVFoundation (iOS).
 - **Reference architecture (full P2P A/V pipeline in Rust over QUIC):** **`iroh-live`** (n0-computer) and its `moq-media` (capture/encode/decode/playout + **adaptive bitrate**), `rusty-codecs` (codecs + HW + `wgpu` render), `rusty-capture` — validates the per-track-stream + adaptive-bitrate design we adopt over our own direct connection.

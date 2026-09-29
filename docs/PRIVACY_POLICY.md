@@ -61,7 +61,7 @@ When you send a message or place a call:
 
 **LAN discovery:** On local networks, the app may use **mDNS** to find configured contacts without using the coordination server.
 
-**NAT traversal:** If a direct connection is not possible, the app may use **coord bridge circuits** on **Ghal Bol coordination servers** (co-located with `coord.ghalbol.com` or other configured coord hosts). Traffic remains encrypted at the transport/protocol layers. The app does **not** use public native connect bootstrap peers or Kademlia DHT for peer discovery.
+**NAT traversal:** If a direct connection is not possible for a call, the app may use the **coord byte bridge** on **Ghal Bol coordination servers** (for example `coord.ghalbol.com` or other configured coord hosts). Traffic remains encrypted at the transport/protocol layers. WAN text uses the **delivery mailbox**, not the bridge.
 
 ---
 
@@ -90,7 +90,7 @@ Registration uses a **challenge–response**: you sign a server nonce with your 
 
 Calls use **native encrypted media** over the **same native connect peer connection** as chat (`/ghal-bol/call/1.0.0` for voice, `/ghal-bol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **same P2P messaging channel**, not through our coordination server.
 
-Media is intended to flow **peer-to-peer** (direct LAN or relayed via our coordination relay when NAT requires it). We do not operate a media server that decrypts call content.
+Media is intended to flow **peer-to-peer** (direct LAN, or through the coord byte bridge when NAT requires it). We do not operate a media server that decrypts call content.
 
 ---
 
@@ -102,7 +102,7 @@ Invites (e.g. `https://ghalbol.com/connect/<public_key_hex>` or `ghalbol://conne
 
 ## Android background processing
 
-On Android, networking runs in a separate **foreground service** (`:p2p` process) so P2P can continue when the app is in the background. This shows a **persistent notification** while the service is active. The service type is **`remoteMessaging`** (keeping a network path open to receive peer traffic), not cloud backup or file sync.
+On Android, networking runs in the app process. An incoming call and a locked keystore each post a notification. After a reboot, open the app once so it can connect again.
 
 ---
 
@@ -127,9 +127,9 @@ You can deny permissions; related features may not work (e.g. no QR scan without
 
 | Service | Role | Data involved |
 |---------|------|----------------|
-| **Ghal Bol coordination server** | Presence and endpoint lookup | Public key, endpoints, heartbeats (see above) |
-| **Ghal Bol relay** (co-located with coord, when needed) | NAT traversal for encrypted P2P (chat + calls) | Encrypted transit only; not message storage by Ghal Bol |
-| **QR scanner plugin** (`mobile_scanner`) | Decode QR on device | Processing is **on-device**; may use platform camera/ML APIs per device vendor |
+| **Ghal Bol coordination server** | Presence, endpoint lookup, WAN call byte bridge | Public key, endpoints, heartbeats; opaque bridged call bytes (not decrypted) |
+| **Ghal Bol delivery server** | Temporary WAN text mailbox | Opaque E2E ciphertext until delivery ack; metadata for acks/TTL |
+| **On-device camera / QR decode** | Decode invitation QR | Processing is **on-device** |
 
 We do **not** integrate advertising networks or third-party analytics SDKs in the core application code paths described in our open-source tree.
 

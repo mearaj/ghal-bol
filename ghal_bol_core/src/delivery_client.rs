@@ -11,8 +11,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::delivery_auth::{
-    extend_challenge_bytes, session_challenge_bytes, sign_delivery_challenge,
-    upload_challenge_bytes,
+    session_challenge_bytes, sign_delivery_challenge, upload_challenge_bytes,
 };
 use crate::delivery_msg_v1::{
     build_attachment_envelope, build_text_envelope, build_voice_envelope,
@@ -317,36 +316,6 @@ impl DeliverySession {
         .await
     }
 
-    pub async fn extend_ttl(
-        &mut self,
-        ident: &crate::DecryptedIdentity,
-        message_id: &str,
-        extend_secs: u64,
-    ) -> Result<Value, String> {
-        let op_nonce_hex = self.op_nonce_hex.as_deref().ok_or("missing op_nonce_hex")?;
-        let op_nonce = parse_nonce32(op_nonce_hex)?;
-        let sig = sign_delivery_challenge(ident, &extend_challenge_bytes(&op_nonce, message_id))?;
-        self.write
-            .send(Message::Text(
-                json!({
-                    "type": "mailbox.ttl.extend",
-                    "message_id": message_id,
-                    "extend_secs": extend_secs,
-                    "op_nonce_hex": op_nonce_hex,
-                    "signature_hex": hex::encode(sig),
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .map_err(|e| format!("extend send: {e}"))?;
-        let resp =
-            recv_until_type(&mut self.read, "mailbox.ttl.extended", &mut self.prefetched).await?;
-        if let Some(n) = resp.get("op_nonce_hex").and_then(|v| v.as_str()) {
-            self.op_nonce_hex = Some(n.to_string());
-        }
-        Ok(resp)
-    }
 
     pub async fn recv_push(&mut self) -> Result<Option<Value>, String> {
         if let Some(v) = self.prefetched.pop_front() {

@@ -2,7 +2,7 @@
 
 **Status:** Signaling implemented in Rust (`call_sig_v1.rs`, `call_state.rs`). **Voice and video media** run in Rust over native connect substreams — see [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) (voice) and [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md) (video).
 
-Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling and media**; Flutter is call UI, permissions, and FFI control only.
+Read [DESIGN.md](DESIGN.md) and [AGENTS.md](../AGENTS.md): **Rust owns signaling and media**. Makepad is the call screen and permissions. It calls `ghal_bol_core::host`.
 
 ---
 
@@ -48,12 +48,12 @@ All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encr
 
 ---
 
-## Flutter API
+## Makepad API
 
-- **Outbound:** `GhalBolCall.sendSignal(...)` → native `p2p_call_signal` (FFI or daemon).
-- **Inbound:** poll `kind: call_signal` → `CallController` drives UI + native media FFI.
-- **Media:** `GhalBolP2p.callMediaStart/Stop/SetMicMuted`, `callVideoStart/Stop`, textures via `NativeCallVideoView`.
-- **Do not** send call signals from Dart except through `GhalBolCall` (state checks stay in Rust for outbound).
+- **Outbound:** `host::start_voice_call` / `host::start_video_call` → `p2p_call_signal` in-process.
+- **Inbound:** poll `kind: call_signal`. The app shows `host::call_banner` and the call pictures.
+- **Media:** `host::accept_incoming_call`, `host::set_mic_muted`, `host::end_call`, `host::call_picture_pngs`.
+- The UI does not build call signals itself.
 
 ---
 
@@ -66,7 +66,7 @@ All envelopes use `ghalbol.share = ghal_bol_call_v1`, `ref_id` = `call_id`, encr
 
 ## Media (native — not in this doc)
 
-Voice pipeline, transport, FFI, and device-test steps: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
+Voice pipeline, transport, `host::` call APIs, and device-test steps: [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md).
 
 Video pipeline, textures, and call end: [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
@@ -96,7 +96,7 @@ ratchet_salt  = HKDF-SHA256(salt = call_id, ikm, info = "ghal_bol_call_media_rat
 
 Video uses a distinct HKDF `info` (e.g. `ghal_bol_call_video_v1`) — see [GHAL_BOL_VIDEO_NATIVE_V1.md](GHAL_BOL_VIDEO_NATIVE_V1.md).
 
-Rust: `ghal_bol_core/src/call_media_key.rs`, `call_media/crypto.rs`, FFI `ghal_bol_core_ffi_p2p_call_media` / `p2p_call_video`.
+Rust: `ghal_bol_core/src/call_media_key.rs`, `call_media/crypto.rs`. The app calls `host::start_voice_call`, `host::start_video_call`, `host::accept_incoming_call`, and `host::end_call`.
 
 ---
 

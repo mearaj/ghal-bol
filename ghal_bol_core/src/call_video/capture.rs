@@ -1,7 +1,6 @@
 //! Native camera capture → I420 [`RawVideoFrame`] stream feeding the video engine.
 //!
-//! Android: Camera2 in `:p2p`. Desktop: nokhwa in the daemon when available, else
-//! Flutter `camera` plugin pushes frames via [`super::desktop_video`].
+//! Android: Camera2 in the app process. Desktop: nokhwa owns the camera.
 
 use tokio::sync::mpsc;
 
@@ -15,18 +14,15 @@ use std::sync::atomic::{AtomicU8, Ordering};
 const BACKEND_NONE: u8 = 0;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 const BACKEND_NOKHWA: u8 = 1;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-const BACKEND_FLUTTER: u8 = 2;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 static DESKTOP_CAPTURE_BACKEND: AtomicU8 = AtomicU8::new(BACKEND_NONE);
 
-/// Which desktop capture path is active (`none`, `nokhwa`, `flutter`).
+/// Which desktop capture path is active (`none`, `nokhwa`, `makepad`).
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn desktop_capture_backend() -> &'static str {
     match DESKTOP_CAPTURE_BACKEND.load(Ordering::Relaxed) {
         BACKEND_NOKHWA => "nokhwa",
-        BACKEND_FLUTTER => "flutter",
         _ => "none",
     }
 }
@@ -58,16 +54,11 @@ pub fn spawn_camera_capture(
         DESKTOP_CAPTURE_BACKEND.store(BACKEND_NOKHWA, Ordering::Relaxed);
         crate::p2p::native_log::info(
             "call_video",
-            "desktop capture backend=nokhwa (daemon-owned camera)".to_string(),
+            "desktop capture backend=nokhwa".to_string(),
         );
         return Ok(rx);
     }
-    crate::p2p::native_log::info(
-        "call_video",
-        "desktop capture backend=flutter (UI pushes frames — nokhwa unavailable)".to_string(),
-    );
-    DESKTOP_CAPTURE_BACKEND.store(BACKEND_FLUTTER, Ordering::Relaxed);
-    super::desktop_video::spawn(controls)
+    Err("camera capture unavailable".to_string())
 }
 
 #[cfg(not(any(

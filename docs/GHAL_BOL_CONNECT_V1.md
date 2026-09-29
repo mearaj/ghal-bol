@@ -1,16 +1,16 @@
 # Ghal Bol Connect v1 — native transport wire spec
 
-Status: **shipping target** — replaces the native transport stack (mDNS + TCP + Noise + relay)
-with a purpose-built native stack. Zero `native connect*` crates in any workspace `Cargo.toml` or
-`Cargo.lock` once the migration lands.
+Status: **shipping** — the production native connect stack (mDNS + TCP + Noise + channel mux +
+coord bridge). WAN **text** is out of scope here: it always goes through
+[`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md).
 
 Scope of the connect layer:
 
 - **LAN text** — additive fast mirror next to the delivery server (never instead of it).
 - **LAN + WAN voice/video calls** — realtime media streams, E2E sealed on device.
 
-WAN **text** is out of scope here: it always goes through [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md)
-(E2E encrypted mailbox, offline guarantee). See "Parallel LAN + WAN invariant" below.
+WAN **text** always uses the delivery mailbox (E2E encrypted, offline guarantee). See
+"Parallel LAN + WAN invariant" below.
 
 ---
 
@@ -28,7 +28,7 @@ Only **popular, actively maintained** crates. Re-evaluate quarterly. As of **12 
 | Coord bridge server | `axum` | `0.8` | Already serving coord + delivery HTTP |
 | Optional media datagrams (later) | `quinn` + `rustls` | `0.11` / `0.23` | Pure-Rust QUIC; only if TCP bridge latency proves insufficient |
 
-**Explicitly rejected:** `native connect*` (all), obscure Noise forks, custom mDNS, `webrtc-rs` as default,
+**Explicitly rejected:** obscure Noise forks, custom mDNS, `webrtc-rs` as default,
 alpha (`0.0.x`) protocol crates.
 
 **In-house only where no popular crate fits:** the channel mux (8-byte header, ~100 LOC) and the
@@ -43,8 +43,8 @@ There is **no PeerId and no Multiaddr**. A remote peer is keyed by its normalize
 
 - Dial targets are `ip:port` (LAN, from mDNS) or a bridge token URL (WAN, from coord).
 - Session tables, outbox rows, foreground/room state, transcript keys — all identity-wire keyed.
-- `DecryptedIdentity::to_libp2p_keypair()` is deleted; the connect layer proves identity with a
-  detached signature from the same device identity key used for `msg_v1` envelopes.
+- The connect layer proves identity with a detached signature from the same device identity key
+  used for `msg_v1` envelopes.
 
 ### Identity commitment (mDNS privacy)
 
@@ -83,7 +83,7 @@ Events drive dial policy (never timers):
   touched** (see invariant below).
 
 Discovery cadence comes from the `mdns-sd` browse refresh — do not rebind the TCP listener or
-restart the daemon to force re-discovery.
+restart the node to force re-discovery.
 
 ---
 
@@ -177,10 +177,9 @@ engines may keep smaller frames for latency.
 
 ---
 
-## WAN call bridge (replaces coord bridge)
+## WAN call bridge (coord bridge)
 
-The coord server pairs two **outbound** client connections and pipes opaque bytes. No
-reservations, no `/p2p-circuit`, no Multiaddr, no relay v2.
+The coord server pairs two **outbound** client connections and pipes opaque bytes. No Multiaddr.
 
 ### Pairing flow
 
@@ -239,8 +238,8 @@ Concretely:
 
 ## Non-goals
 
-- Kademlia / DHT / gossipsub / mesh discovery — never.
-- native connect WAN without a server — CGNAT reality unchanged; the bridge is the call-reachability
-  equivalent of the delivery server.
+- DHT / gossip / mesh discovery — product WAN discovery is coord (+ delivery for text).
+- WAN calls without a server — CGNAT reality; the bridge is the call-reachability
+  equivalent of the delivery server for media.
 - WebRTC/ICE — only reconsidered if quinn datagrams prove insufficient for media.
 - Disk caching of ports, bridge tokens, or discovery results — live lookup only.

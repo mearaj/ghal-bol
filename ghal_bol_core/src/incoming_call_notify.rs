@@ -1,4 +1,4 @@
-//! Desktop incoming-call notification (Linux). Fired from `:p2p` / `ghal_bol_core_daemon` when an
+//! Desktop incoming-call notification (Linux). Fired from the in-process node when an
 //! invite arrives so the user can click to focus the app.
 
 #[cfg(target_os = "linux")]
@@ -11,7 +11,7 @@ mod linux {
     use notify_rust::{Hint, Notification, Timeout, Urgency};
 
     static ACTIVE: Mutex<Option<(String, u32)>> = Mutex::new(None);
-    /// GTK `application-id` — `com.ghalbol.debug` for `flutter run`, `com.ghalbol` for release.
+    /// GTK `application-id` — `com.ghalbol.debug` for `makepad run`, `com.ghalbol` for release.
     static DESKTOP_APP_ID: RwLock<String> = RwLock::new(String::new());
     /// Set while we programmatically close a notification (hangup/dismiss) — not a user tap.
     static DISMISSING: AtomicBool = AtomicBool::new(false);
@@ -56,7 +56,7 @@ mod linux {
             .unwrap_or_else(|| crate::storage::ANDROID_LIBRARY_NAMESPACE.to_string())
     }
 
-    /// Wake the Flutter UI: runtime wake file (polled by UI) + D-Bus activate + desktop entry.
+    /// Wake the Makepad UI: runtime wake file (polled by UI) + D-Bus activate + desktop entry.
     fn wake_ui() {
         crate::linux_desktop_launch::wake_for_incoming_call(&desktop_app_id());
     }

@@ -1,10 +1,12 @@
 # Transport — native connect data plane
 
-**Status:** **native connect is the production transport for LAN text and voice/video calls (WAN + LAN).** WAN **text** uses [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) — not coord bridge outbox. The legacy libp2p stack has been completely replaced by the native connect stack. This document is the canonical reference for how peers connect today.
+**Status:** **native connect** (`ghal_bol_core/src/connect/`) is the production transport for **LAN text (fast mirror)**, **LAN voice/video**, and **WAN voice/video** (via the coord byte bridge). **WAN text** uses [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) — not coord HTTP.
 
-**Scope:** native connect upkeep (coord, relay, mDNS, dial) serves **calls** and **LAN DM streams**. When `GHAL_BOL_DELIVERY_URL` is set, WAN text outbox/resync/acks on native connect are disabled — see `ghal_bol_core/src/text_transport.rs` and [DESIGN.md](DESIGN.md) § “Why pure P2P WAN text was dropped”.
+**Scope:** Coord register/heartbeat and mDNS upkeep serve **presence**, **LAN reachability**, and **WAN calls**. When `GHAL_BOL_DELIVERY_URL` is set, WAN text uses the delivery mailbox — see `ghal_bol_core/src/text_transport.rs` and [DESIGN.md](DESIGN.md) § Goals.
 
-**For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Flutter. **Start here for connectivity:** § **Connectivity lifecycle** → § **Network truth** → § **Parallel LAN + WAN** → § **Asymmetric LAN↔WAN mux recovery** . Transport reachability is **live-only** — see § “Caching policy (canonical)”.
+**For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Makepad. **Start here:** § **Connectivity lifecycle** → § **Network truth** → § **Parallel LAN + WAN** → § **LAN ↔ WAN handover**. Transport reachability is **live-only** — see § **Caching policy**.
+
+**Shipping coord (`ghal_bol_coord`):** signed presence (`POST /v1/register`, heartbeat), `GET /v1/peers/{identity}`, and **WAN call bridge** (`/v1/bridge/*` + WSS). See [COORDINATION_SERVER.md](COORDINATION_SERVER.md) and [ghal_bol_coord/README.md](../ghal_bol_coord/README.md).
 
 ---
 
@@ -15,214 +17,107 @@ Ghal Bol separates **chat protocol** from **transport**:
 | Layer | Implementation |
 |-------|----------------|
 | **WAN text** | `ghal_bol_delivery` WebSocket mailbox — E2E `delivery_msg_v1` ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)) |
-| **LAN text** | `ghal_bol_msg_v1` on native connect `/ghal-bol/msg/1.0.0` ([GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)) |
-| **Calls (LAN + WAN)** | native connect signaling + media substreams; WAN via coord bridge |
-| **Transport** | **native connect** in `ghal_bol_core/src/p2p/chat_server/` |
-| **Discovery** | `ghal_bol_coord` register/lookup + relay (WAN calls) + mDNS (LAN text/calls) |
-| **Policy** | WAN text: `delivery_runtime`; LAN text + calls: outbox/acks/foreground in `chat_server` |
-
-native connect is **not** the WAN text path. It provides encrypted connections, stream multiplexing, and dial/listen for **LAN text** and **calls**. WAN text semantics live in `delivery_runtime.rs`; LAN/call semantics in `chat_server/` and `dm_event_handler.rs`.
+| **LAN text (fast mirror)** | `ghal_bol_msg_v1` on native connect when both peers are on LAN ([GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)) |
+| **Calls (LAN + WAN)** | Noise + channel mux on native connect; **WAN** uses coord **byte bridge** ([GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md)) |
+| **Transport** | **native connect** in `ghal_bol_core/src/connect/` (tokio TCP + Noise + mux; mDNS LAN) |
+| **Discovery / presence** | `ghal_bol_coord` register/lookup + mDNS (`_ghalbol._tcp.local`) |
+| **Policy** | WAN text: `delivery_runtime`; LAN text mirror + calls: `connect/` + `dm_event_handler` |
 
 ---
 
 ## The prime directive — instant connect at any roster size (canonical)
 
-> **THE goal of this app:** whenever two peers have *any* technically reachable path to each
-> other — LAN, coord bridge, or future transport — they **connect within a few seconds**, and a
-> message flows. Everything else in this document (parallel LAN+WAN, mux recovery, caching,
-> backoff, event-driven async) exists **only** to serve this directive. If any rule, throttle, or
-> backoff is ever in tension with it, **the directive wins** — fix the rule, don't slow the connect.
+> Whenever two peers have *any* technically reachable path — same LAN (mDNS/direct TCP), coord **public TCP** (when registered), coord **bridge** (WAN calls), or delivery (WAN text) — they should **connect within a few seconds** for the relevant channel. Throttles and backoff exist to prevent **storms**, not to delay a peer with **active intent**.
 
 ### Scale invariant (non-negotiable)
 
-A user may have **thousands of contacts**, the vast majority **stale** — offline, never-registered,
-or returning `404` on coord lookup. **The cost of stale peers must be bounded and must NEVER delay
-a reachable peer's connect.** Stale peers are background noise; a peer with active intent is the
-foreground job and is never queued behind them.
-
-This is enforced by splitting every coordination-lookup pass (`run_dm_coord_lookup_pass` in
-`coord_lookup.rs`, used by both the ~1s upkeep tick **and** the post-handover / post-WAN-recovery
-burst) into three classes:
-
-| Class | Who | Cadence | Cap |
-|-------|-----|---------|-----|
-| **urgent** | connection just dropped (`urgent_reconnect_pks`, ~30 s window) | every pass | **uncapped** — bypasses the 404 backoff |
-| **priority** | active intent: pending outbox **or** the foreground chat | every pass | **uncapped** |
-| **background** | every other idle contact (the thousands) | LRU, oldest-looked-up first | **`COORD_BACKGROUND_LOOKUPS_PER_TICK`** per pass |
-
-Why this guarantees the directive:
-
-- **Urgent + priority are uncapped and looked up first**, so the peer you are talking to / just
-  dropped / queued mail for is dialed every ~1 s regardless of how many stale contacts exist. The
-  sequential `await` chain ahead of a live peer is bounded by the (naturally small) intent set, never
-  by roster size.
-- **Stale 404 peers never even enter the sweep** while inside their backoff window
-  (`should_skip_coord_lookup_pk`); when they are eligible they are swept **LRU** under a per-pass
-  cap, so they can neither flood coord nor starve a reachable peer late in the list.
-- **Symmetric drive** closes the gap for *idle* reachable peers: when peer B comes online it marks
-  presence-wake and looks **us** up (and we are in B's intent set if B wants to reach us), so the
-  pair resolves in seconds even if each side's background sweep would take longer to reach the
-  other on its own.
+A user may have **thousands of contacts**, most **stale** (offline, never registered, or coord lookup `404`). **Stale peers must not block a reachable peer.** Coord lookup passes split **urgent** (recent disconnect), **priority** (outbox or foreground chat), and **background** (LRU-capped sweep). Urgent and priority are **uncapped** and run first.
 
 ### Instant-connect acceptance criteria (testable)
 
-A change to transport/discovery is correct only if **all** of these still hold:
-
-1. **Reachable ⇒ connected within a few seconds.** Two peers with any live path (same LAN, or both
-   relay-reserved on a reachable coord) reach `chat_ready` within seconds of both being online —
-   independent of how many other contacts either has.
-2. **Roster-size independence.** Connect latency for a peer with active intent is **the same** with
-   1 contact or 10 000 contacts. Adding stale contacts must not regress it.
-3. **No stale-peer flood.** Coord HTTP lookups per pass are bounded; a huge stale roster produces a
-   bounded, fair (LRU) sweep — visible in the `coord: lookup pass …` log — never a per-tick storm.
-4. **Intent beats backoff.** Opening a chat, queueing a message, or a dropped connection makes that
-   peer's next lookup/dial **immediate**, skipping any 404/throttle backoff for the urgent window.
-5. **No assumed-timer stalls.** Reconnect after LAN/WAN change is event-driven (worker → subscriber),
-   never “wait N seconds then retry” — see § “Event-driven async”.
-
-### Findability is continuous across relay-reservation renewal (no advertise-gap)
-
-A peer must **never be momentarily un-findable on coord while a valid relay path still exists**.
-This is **already guaranteed — do not add a client-side “keep advertising the old circuit across
-renewal” overlap** (it would advertise a *dead* circuit if the reservation genuinely lapses, which
-is worse than a brief gap). The guarantee comes from three server-authoritative mechanisms
-(`ghal_bol_coord`):
-
-- **`merge_client_register` never drops the stored `/p2p-circuit`** — a client `POST /v1/register`
-  with a circuit-less endpoint list (e.g. during a client listener flap) does **not** strip the
-  server-authoritative coord bridge; it is re-merged from the stored record (`presence.rs`).
-- **`RelayLiveRegistry` is refcounted** — happy-eyeballs closing a spare TCP hop only decrements;
-  the live gate flips to 404 **only when the last reservation ref closes**, so hop churn never
-  flaps findability (`relay_live.rs`, test `happy_eyeballs_close_spare_hop_keeps_live_gate`).
-- **Renewal re-asserts `accepted` without touching the refcount** — `on_reservation_accepted(.,
-  renewed=true)` keeps the gate live across every renewal (test `renewed_accept_does_not_bump_refcount`).
-- **Presence keepalive re-touches the row every 30 s** — the live gate above only stops the circuit
-  being *stripped* from a **fresh** row; it does **not** stop the SQLite presence row itself from
-  expiring. The relay grants **hour-long** reservations (`reservation_duration = 3600 s`) but coord
-  rows expire after **`presence_ttl` (90 s)**, and `ReservationReqAccepted{renewed:true}` only fires
-  on the hourly native connect renewal — so without a keepalive a relay-only (NAT'd) peer became a coord
-  **404 ~90 s after reserving** even though it stayed dialable for the full hour (the exact symptom:
-  both peers `reservation accepted` / `relay presence visible`, then every contact lookup
-  `404 peer not registered or presence expired`, self-poll 404 too). `run_relay` now ticks a 30 s
-  `refresh_live_presence` that re-`upsert_relay_circuit`s every peer in `live_peers_with_pk()`,
-  keeping the row well inside the 90 s TTL while the reservation is held (`relay.rs`,
-  `relay_live.rs` test `live_peers_with_pk_lists_only_live_known_peers`). This is the only
-  time-based guardrail here (keepalive < TTL), not an assumed-duration reconnect timer.
-
-Client side, the reservation is kept continuous (no re-issue of `listen_on` on a clean
-`ListenerClosed` within `RELAY_RENEWAL_GAP_MS`; no re-reserve while a reservation is in flight), so
-the relay’s refcount never reaches 0 during normal renewal. The circuit only leaves coord when the
-relay path is **actually gone** — exactly when it *should* leave.
+1. **Reachable ⇒ connected within a few seconds** for the path that matters (LAN session, delivery poll, or call bridge) — independent of roster size.
+2. **Intent beats backoff** — open chat, queued message, or dropped session skips 404 backoff for the urgent window.
+3. **No assumed-timer stalls** — see § **Event-driven async**.
+4. **Bounded coord HTTP** — background lookup cap per tick; no full-roster sequential storms.
 
 ### What violates the directive (forbidden)
 
-- Iterating/looking-up the full roster with **unbounded sequential `await`** (old
-  `coord_lookup_dm_peers`) — a large roster blocks the swarm loop and delays live peers.
-- Letting a global wake bypass the **background cap** (re-introduces the flood on resume/handover).
-- Capping or backing off **urgent / priority** peers to “reduce coord load.”
-- Any throttle/backoff/grace-window that delays a peer with active intent because *other* peers are
-  stale.
+- Unbounded sequential coord lookups over the full roster.
+- Capping **urgent / priority** peers to “reduce coord load.”
+- Throttles that delay a peer with active intent because other peers are stale.
 
 ---
 
-## Parallel LAN + WAN transport (2026-06-17 — canonical)
+## Parallel LAN + WAN transport (canonical)
 
-**Policy:** LAN and WAN **always run in parallel** at the node level and per peer. They are not mutually exclusive modes.
+**Policy:** On Wi‑Fi, **LAN discovery** (mDNS + ephemeral TCP listen) and **coord presence** (register/heartbeat when publishable endpoints exist) **run together**. They are not mutually exclusive. **WAN text** does not use this stack when delivery is configured — it uses `delivery_runtime` in parallel (upload-first policy in `text_transport.rs`).
 
-### Both links active (product requirement)
+### Both stacks active (product requirement)
 
-When peer **A** and peer **B** are connected over **LAN and WAN at the same time**, **both paths stay up and keep doing their job**:
-
-| Path | Job while connected |
-|------|---------------------|
-| **LAN** (direct TCP via mDNS) | Local discovery, low-latency direct reachability, immediate LAN handover when both are on Wi‑Fi |
-| **WAN** (coord + coord bridge) | Coord phone-book presence, remote reachability, coord bridge for CGNAT peers, **instant failover** when LAN drops |
+| Path | Job while online |
+|------|------------------|
+| **LAN** (mDNS → direct TCP) | Low-latency LAN text mirror, LAN calls, immediate handover when both on Wi‑Fi |
+| **Coord HTTP** | Presence phone book (public routable TCP when any), heartbeat, bridge signaling for WAN calls |
+| **Delivery** (when configured) | Authoritative WAN text mailbox — always used for outbound WAN text |
 
 **Required behaviour:**
 
-- **Keep both native connections** — never `close_connection` on relay because direct LAN appeared, and never stop coord/reserve/mDNS because the other path succeeded.
-- **Both may dial in parallel** — throttled only to prevent storms, not to pick “one winner.”
-- **WAN stack stays on on Wi‑Fi** — coord register/poll, relay reservation, and per-peer circuit dials continue even when mDNS shows the contact on LAN.
-- **LAN stack stays on when WAN is up** — mDNS browse, ephemeral listen, and mDNS-driven dials continue even when relay is connected.
+- **Do not stop coord register/heartbeat** because mDNS found a contact on LAN.
+- **Do not stop mDNS browse/listen** because coord registered or a WAN call used the bridge.
+- **LAN connect is mDNS event-driven** — not a timer re-dial from cached ports (§ **Ephemeral LAN TCP ports**).
+- **WAN calls:** prefer live LAN writer; if none, `POST /v1/bridge/request` + outbound WSS (`connect/bridge_ws.rs`, `outbound.rs`).
+- **WAN text:** never gated on native connect `chat_ready`; delivery worker owns WAN send/recv.
 
-**One chat mux (wire constraint, not “one path”):** native connect carries at most **one** live `/ghal-bol/msg/1.0.0` stream per contact at a time. That is a **mux** limit, **not** permission to tear down the other link. While the mux is on one connection, the **other link stays connected** (keepalive ping, inbound accept, ready for stream reopen on failover). When opening a stream and **both** links exist, attach on direct first (lower latency) — the relay link **remains established**.
+**Wrong docs/code:** treating coord as “idle backup” on Wi‑Fi; skipping register while on LAN; inferring peer LAN location from local `profile=lan` without mDNS; UI-owned dial/ack policy.
 
-**Wrong docs/code:** treating WAN as “idle backup,” closing relay when direct connects, deferring coord lookup while LAN is up, **`coord_lookup_dm_peer` skipping lookup when `peer_on_local_lan`**, DCUtR hole-punch while coord is configured (blind multi-dial from identify), treating a LAN-only mux as stable while the peer is off-LAN without a relay link, or implying only one stack should run when both are reachable.
+| Layer | LAN | WAN (calls) | WAN (text) |
+|-------|-----|-------------|------------|
+| **Infrastructure** | mDNS browse + ephemeral TCP listen | coord bridge WSS (`/v1/bridge/connect`) | `ghal_bol_delivery` WSS |
+| **Per-peer** | Direct TCP session when discovered | Bridge-paired TCP (Noise+mux inside tunnel) | Mailbox only |
+| **Dial / discovery** | `Discovered` → dial **that** host:port | Bridge request + pending poll | Delivery register/poll |
 
-| Layer | LAN | WAN | Relationship |
-|-------|-----|-----|--------------|
-| **Infrastructure** | mDNS browse + ephemeral TCP listen | coord relay bootstrap + `/p2p-circuit` reserve + coord register/poll | **Both always on** on Wi‑Fi; WAN-only on mobile-data/CGNAT |
-| **Per-peer links** | Direct TCP when mDNS discovers the contact | Relay circuit when coord lookup succeeds | **Both may be connected simultaneously** — each doing its job; do not tear down either because the other succeeded |
-| **Discovery / dial** | mDNS `Discovered` → explicit LAN TCP multiaddr | coord lookup → explicit `/p2p-circuit` multiaddr | **Both may dial** the same peer — **independent throttles** (`lan_dial_last_ms` vs `circuit_coord_dial_last_ms`); neither path gates the other |
-| **Dial policy** | Live mDNS addr only — **no blind peerstore / identify dials** | Live coord circuit addr only — **no bare relay bootstrap TCP** | **DCUtR disabled** when coord is configured — no hole-punch multi-dials from stale identify addrs |
-| **Wire (mux)** | Hosts DM stream when attached | Same protocol — may also host stream on failover | **One mux at a time**; **both links stay up**; stream attach prefers direct when both exist |
-| **Application state** | — | — | **Single source of truth in Rust** — see [DESIGN.md](DESIGN.md) § “Unified message state (E)” |
+**Independence rule:** LAN health must **not** suppress coord heartbeat/register (and vice versa). Delivery ticks are independent of mDNS.
 
-**Independence rule:** LAN health must **not** suppress WAN dials (and vice versa). Skip redundant relay **dial** only when a **relay** link is already connected **and** carries a stable DM stream — not merely because direct LAN is up. WAN recovery must **not** block LAN listen/mDNS upkeep.
-
-**`dm_peer_chat_link_stable` vs additive relay (2026-06-24 — canonical):**
-
-| Signal | Meaning | Wrong interpretation |
-|--------|---------|----------------------|
-| `dm_peer_stream_up` | Live mux writer — **upkeep noop** for this contact | “Must dial coord every tick because WAN idle” |
-| `!peer_has_relay_connection` on Wi‑Fi | Need **background** additive relay dial (`needs_additive_relay_dial`) | “Mux is unstable — force coord lookup + disconnect every tick” |
-
-**What parallel does *not* mean:** uncoordinated dial **spam** (many `swarm.dial`/s for the same peer per second) or a second transcript/outbox in Flutter. Throttles and `PeerCondition::NotDialing` prevent storms; **all** message/ack/delivery state lives in one Rust store.
-
-**Handover:** When a peer leaves LAN, WAN is **already connected and active** — fallback is immediate. When mDNS discovers a peer on LAN, add the direct link **without** closing the relay link. Stream reopen may attach on direct when both links exist; relay stays up.
-
-**Supersedes:** older “defer coord relay while LAN in flight” / “close relay when direct connects” / “WAN is warm backup only” guidance in this file and DESIGN.md dial sections — those caused split-brain during LAN↔WAN transitions.
+**Handover:** Peer leaves LAN → mDNS `Expired` drops LAN session; **calls** fall back to bridge when placing/receiving; **text** continues on delivery.
 
 ---
 
-## Stream-first symmetric connect (wire layer)
+## Stream-first connect (wire layer)
 
-**Canonical model** — documented in [DESIGN.md](DESIGN.md) § “Stream-first symmetric connect”. Ghal Bol: one live DM stream per contact, ~1s `dm_upkeep`, stream reopen on mux failure without tearing down native connect links. Coord + relay + mDNS run **in parallel** as discovery inputs; the wire layer still has **one mux per contact**.
+One live **channel mux** per contact for native connect (text mirror, call signaling, media substreams). See [DESIGN.md](DESIGN.md) § stream-first model.
 
 ```text
-Per contact (every ~1s dm_upkeep):
-  if live DM stream writer (dm_peer_stream_up):
-    noop — no coord lookup, no disconnect, no identify dial
-  else if not native connect-connected:
-    LAN + WAN may both dial (parallel, throttled) — first success wins
-    open /ghal-bol/msg/1.0.0 OR accept inbound on same handler
-  else if connected but no stream:
-    open_stream once — attach on direct when both LAN + relay links exist (both links stay up)
-  if stream up && outbox pending → drain
+Per contact (connect worker ~1s upkeep + events):
+  if live mux writer for peer:
+    drain outbox/acks on that session
+  else if mDNS Discovered:
+    dial_peer_tcp(host, port) from event
+  else if WAN call needed and no LAN writer:
+    bridge_request → WSS connect_bridge_session
+  inbound TCP / bridge WSS → accept_inbound_tcp / bridge accept
 ```
 
 | Principle | Implementation |
-|-----------|------------------|
-| Both listen | Swarm listens; inbound streams accepted on `/ghal-bol/msg/1.0.0` |
-| One stream per contact | Stream writer map keyed by peer / `public_key_hex`; `dm_peer_stream_up` → upkeep noop |
-| Symmetric | Outbound `open_stream` and inbound accept use the same handler — no fixed caller/listener role |
-| Send = connect | `send_text_dm` / outbox retry share the stream-first path; hub room open not required |
-| Parallel transport | mDNS + coord lookup + relay reserve run concurrently; `dm_upkeep` triggers WAN when stream is down |
-| Dual links active | Keep relay + direct connections when both exist — both ping keepalive; do not `close_connection` on LAN upgrade |
-| No DCUtR with coord | `dcutr` behaviour off when coord configured — WAN = explicit `/p2p-circuit` dial only; LAN = mDNS explicit TCP; prevents `hole punch` storms on handover |
-| Stale LAN mux | Peer off LAN without relay link → `dm_peer_chat_link_stable` false + stream reopen — coord circuit dial (acks/ticks use live path) |
-
-**Discovery vs wire:** coord `GET /v1/peers`, coord bridge multiaddrs, and mDNS are **parallel discovery inputs**. Duplicate frames on the single DM stream are deduped in Rust (`append_if_new`); duplicate acks merge monotonically in `dm_transcript_store` (read ⊃ delivered).
-
-**Latency target:** seconds to `peer_connected` + `chat_ready` when the remote has finished WAN registration (phases A–D in § “WAN prerequisites”) — matching the original build’s feel.
+|-----------|----------------|
+| Symmetric | Inbound accept and outbound dial share the same Noise+mux handler |
+| Send = connect | Outbox/acks retry when session up; hub room open not required for LAN mirror |
+| Parallel inputs | mDNS events + coord endpoints (public TCP dial when used) + bridge pending poll |
+| One session per peer | `PeerSessionRegistry` — new dial skipped when writer open |
 
 ---
 
 ## native connect stack (current)
 
-Enabled in `ghal_bol_core/Cargo.toml` and wired in `chat_server.rs`:
+Wired in `ghal_bol_core/src/connect/`:
 
-| native connect piece | Role in Ghal Bol |
-|--------------|------------------|
-| **QUIC / TCP + Noise + Yamux** | Encrypted connections and multiplexing |
-| **`native-stream` `/ghal-bol/msg/1.0.0`** | Framed DM channel for `ghal_bol_msg_v1` |
-| **mDNS** | LAN discovery of configured peers |
-| **Ghal Bol relay (circuit)** | NAT traversal — reserve a circuit on a **Ghal Bol relay** (co-located with a configured coord server). **With coord configured, DCUtR is disabled** — stream-first uses explicit mDNS LAN + coord `/p2p-circuit` dials only (no identify hole-punch). **WAN peer discovery does not use Kademlia or public native connect bootstrap peers** — see § “Connectivity lifecycle” |
-| **AutoNAT, UPnP, Identify** | Reachability and peer metadata |
-| **Ping** | **Connection keepalive** — periodic pings keep an idle DM/relay link active so it is not dropped by `idle_connection_timeout`; also detects a dead route faster (`PING_INTERVAL_SECS` 10s < idle timeout) |
-| **Gossipsub** | **Not used** — do not reintroduce for 1:1 DM |
+| Piece | Role |
+|-------|------|
+| **Tokio TCP + Noise XX + channel mux** | Encrypted sessions; `/ghal-bol/msg/1.0.0` framed DM |
+| **mDNS-SD** (`lan_discovery.rs`, `_ghalbol._tcp.local`) | LAN peer discovery |
+| **Coord bridge** (`bridge_client.rs`, `bridge_ws.rs`) | WAN call byte pipe via coord WSS |
+| **OS network truth** | `p2p/network_transport.rs`, `android_network.rs`, `linux_network.rs` |
 
-Identity: one **secp256k1** keypair per device → native connect **PeerId** via `native-identity` (`keystore_v1.rs`, `peer_id_util.rs`).
+Identity: **secp256k1** device key ([IDENTITY.md](IDENTITY.md)). Product WAN discovery is **coord only** (plus delivery for text); no DHT or public bootstrap peers.
 
 ---
 
@@ -230,1036 +125,318 @@ Identity: one **secp256k1** keypair per device → native connect **PeerId** via
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
-│  ghal_bol_ui — screens, hub foreground, poll (unchanged role)   │
+│  ghal_bol_app — screens, hub, poll (display only)                │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ FFI / daemon JSON-RPC
+                             │ ghal_bol_core::host
 ┌────────────────────────────▼────────────────────────────────────┐
-│  ghal_bol — policy + stores (unchanged role)                       │
-│  msg_v1, outbox, pending_read_acks, dm_event_handler, stores     │
+│  delivery_runtime — WAN text                                      │
+│  connect/ — LAN + calls + bridge                                  │
+│  coord_runtime — register / heartbeat / lookup                    │
+│  dm_event_handler, transcripts, outbox policy                     │
 └────────────────────────────┬────────────────────────────────────┘
-                             │
+                             │ HTTPS + WSS
 ┌────────────────────────────▼────────────────────────────────────┐
-│  p2p/chat_server.rs — native connect swarm + sessions                    │
-│  Stream protocol /ghal-bol/msg/1.0.0; writer task per peer       │
-│  Outbox, ack_received/ack_read, foreground/leave drain         │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ register / heartbeat / lookup
-┌────────────────────────────▼────────────────────────────────────┐
-│  ghal_bol_coord — Tier-1 coordination (no message bodies)       │
+│  ghal_bol_coord — presence + bridge (no DM bodies)               │
+│  ghal_bol_delivery — WAN text mailbox (Tier 2)                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Process split (Linux / Android):** native connect runs **out-of-process** in `ghal_bol_core_daemon` or Android `:p2p` (`GhalBolP2pService`). The UI process loads `lib_ghal_bol_core.so` for identity and store I/O; both share the same data directory.
+**Process:** native connect and delivery run **in the same process** as `ghal_bol_app`. The UI calls `ghal_bol_core::host` in-process.
 
 ---
 
 ## Connectivity lifecycle (authoritative)
 
-This section encodes the **binding connectivity rules** — they take precedence over any other guidance here. The whole transport must behave this way; if any other doc disagrees, it is wrong and must be updated to match this.
+Binding rules — if another doc disagrees, update it to match this section.
 
-1. **Start on first unlock, run in the background.** After the user unlocks the first time, the node (`ghal_bol_core_daemon` / Android `:p2p`) starts and **keeps running** regardless of UI state. UI lock/suspend never stops the node, poll, or ack loops.
-2. **Watch the network continuously.** OS connectivity callbacks (`notify_network_change`) plus `refresh_os_network_truth` on each `network_tick` (~1s) read **default route transport** and internet validated — not `if_addrs` alone. Loss or change triggers recovery without user-visible disruption (`handle_network_path_change`, `run_wan_recovery_pass`). See § **Network truth**.
-3. **Find both addresses fast.** The node determines its **LAN** address (interface scan / mDNS) and its **globally reachable** address (public listen, AutoNAT/UPnP, or a relay `/p2p-circuit` when behind NAT/CGNAT).
-4. **Register at coord as soon as a reachable address exists, and keep it fresh.** Once a publishable global endpoint (public TCP or coord bridge) is known, register with `ghal_bol_coord`. **Re-register** on endpoint change, failed register, relay reservation accepted, handover, or stale presence — **not** on every heartbeat tick when endpoints are unchanged (`should_throttle_register` in `coord_runtime.rs`; details in [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § **Client register & heartbeat policy**).
-5. **WAN must always work when both peers have internet and coord is reachable.** This is the baseline guarantee — coord lookup + relay reservation + explicit **`/p2p-circuit` dial**, never gated off by being on Wi‑Fi/LAN. **DCUtR is not used** when coord is configured (see § Stream-first).
-6. **LAN is per-peer and additive.** Use the LAN path **only** for a contact actually discovered on the local LAN (mDNS), never globally. If the LAN is lost, that peer transparently falls back to the normal WAN path with no user-visible change.
-7. **Coord down ≠ app offline, but WAN discovery pauses.** When coord is unreachable, **do not** fall back to Kademlia DHT or public native connect bootstrap peers for WAN peer discovery (§ “Connectivity lifecycle”). **LAN (mDNS) still works** for contacts on the local network. Keep retrying **all configured coord servers** at a regular interval — never stop. **WAN requires coord bridge** when both peers have internet.
-8. **Internet/coord recovery is immediate** — when internet or coord comes back, the continuous watch detects it within seconds and resumes WAN registration/lookup across the coord list without a native connect restart.
-9. **Registration truthfulness.** Client `coord_registered` must match what coord actually lists — verified via `GET /v1/peers/{self}` (relay presence poll for CGNAT-only peers). Never treat the client as registered when HTTP self-lookup or the relay live gate disagrees.
-10. **Network switch readiness (Wi‑Fi ↔ mobile ↔ other).** Before the user sends again after a path change, `:p2p` must: re-register when **publishable endpoints change**, clear coord lookup backoff, mark urgent reconnect where streams are down, and reopen DM chat streams so delivery/read acks and outbox drain resume without user action.
-11. **No silent stall on a dead mux.** A native connect link that looks connected but whose `/ghal-bol/msg/1.0.0` stream died must trigger stream reopen and retry queued `ack_received`, `ack_read`, and outbox rows — not idle until a timer fires (see § “Steady connection”, stream mux recovery).
-12. **`:p2p` / daemon restart.** On `p2p_start` or service restart, re-fetch relay (`GET /v1/relay`), re-reserve when needed, and re-register when endpoints are known. Do not trust in-memory registration from a prior process.
+1. **Start on unlock, run until log out.** `host::start_network` starts connect + delivery workers. **Lock** leaves the node running. **Log out** stops it.
+2. **Watch the network continuously.** `notify_network_change` + `refresh_os_network_truth` on connect upkeep (~1s). See § **Network truth**.
+3. **Publish coord endpoints when they change.** Public routable **TCP** listen (from ephemeral port + public IP when available) → `POST /v1/register`. **Re-register** on endpoint change, failed register, handover, or stale presence — **throttle** when unchanged (`should_throttle_register`, heartbeat every ~25s). Details: [COORDINATION_SERVER.md](COORDINATION_SERVER.md).
+4. **CGNAT / mobile-only peers** often have **no** public TCP to register. They still **heartbeat** when registered empty/minimal; **WAN calls** use `/v1/bridge/*`; **WAN text** uses delivery only.
+5. **LAN is per-peer and additive.** mDNS `Discovered` → dial that contact on LAN. mDNS `Expired` → drop LAN session; do not block delivery or bridge.
+6. **Coord unreachable ≠ app offline.** LAN mDNS may still work. Retry **all** `GHAL_BOL_COORD_URLS` on the regular coord tick. Do not invent a second WAN discovery path when coord is down.
+7. **Internet/coord recovery is event-driven** — resume register/lookup/bridge poll when HTTP works again; no full-process restart required.
+8. **Network switch readiness.** Path change → re-register if publishable endpoints changed, clear coord lookup backoff where applicable, reopen native sessions for LAN mirror/calls.
+9. **Process restart.** On `host::start_network`, re-register when listen endpoints are known; do not trust in-memory presence from a prior process.
 
-**UI vs native (do not break):** `ghal_bol` owns ack policy, outbox, delivery/read ticks, contacts, transcript, dial, and coord/relay. `ghal_bol_ui` reports only app visible + open room via **`GhalBolUiSession`** → `p2p_sync_ui_session`. Poll / `peer_connected` / `isStreamReady` in Flutter are **display hints only** — never gate sends or acks in Dart. See [DESIGN.md](DESIGN.md) § `GhalBolUiSession`.
-
-The ultimate goal is **strong, reliable, smooth** peer interaction. coord + native connect are sufficient for this across WAN and LAN; do not regress these guarantees for performance or simplicity.
+**UI vs native:** `ghal_bol_core` owns ack policy, outbox, delivery/read ticks, dial, and coord. Makepad uses **`host::set_app_visible`** and **`host::set_open_room`** only. Poll is **display** — never gate sends or acks in the UI.
 
 ---
 
-## End-to-end WAN phases (both peers — read before changing transport)
+## Hybrid coord presence (WAN directory)
 
-WAN chat is a **pipeline with hard gates**. Each device must complete phases A→D before the **other** device can dial it. Opening a chat room or sending a new message does **not** substitute for these gates; `:p2p` drives them from `p2p_start`, outbox restore, `dm_upkeep`, and `coord_tick`.
+**Problem:** CGNAT/mobile peers cannot publish a dialable public inbound TCP port. They still need coord for **bridge call signaling** and optional **lookup of peers who do have public TCP**.
+
+**Model (shipping):**
+
+| What | Who | How |
+|------|-----|-----|
+| **Public routable TCP** (`tcp://host:port`) | **Client** | `POST /v1/register` when the device has a **globally routable** inbound listen (UPnP / port-forward / public IP). Must be the peer’s own socket — **not** RFC1918/CGNAT LAN. |
+| **LAN TCP** | **Never on coord** | Same-subnet peers use mDNS only. |
+| **WAN call reachability (CGNAT)** | **Bridge** | `POST /v1/bridge/request` + both sides dial `GET /v1/bridge/connect` (WSS). No server-side circuit row. |
+| **WAN text (CGNAT)** | **Delivery** | Tier-2 mailbox — not coord. |
+
+Server rejects non-routable “public” endpoints at `POST` ([`ghal_bol_coord` routes/presence](../ghal_bol_coord/src/routes.rs)). Client: `endpoints_for_coord_register`, `on_listen_dm_addr` in `coord_runtime.rs`.
+
+---
+
+## WAN call bridge (coord)
+
+Opaque byte pipe: coord pairs two **outbound** WebSocket connections; peers run the same Noise + mux as LAN inside the tunnel. Full flow: [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) § WAN call bridge; server limits: [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Bridge limits.
+
+**Client summary (`connect/bridge_client.rs`, `bridge_ws.rs`, `worker.rs`):**
+
+1. Caller: `POST /v1/bridge/challenge` → `POST /v1/bridge/request` (signed).
+2. Callee: delivery push and/or `GET /v1/bridge/pending?identity_wire=…` (polled ~3s in connect upkeep).
+3. Both dial `connect_url` as **WSS** with `bridge_id` + `token`.
+4. Coord forwards binary frames until hangup, idle timeout, or server caps.
+
+**nginx / home coord:** same vhost must proxy **`/v1/bridge/connect`** with WebSocket upgrade headers.
+
+---
+
+## LAN ↔ WAN handover
+
+**Policy:** LAN and coord/delivery are **additive** on Wi‑Fi. Per-peer native connect is usually **one TCP session** (LAN direct **or** bridge tunnel for calls).
 
 ```text
-Per device (Android :p2p / Linux daemon)
-──────────────────────────────────────
-A. Swarm up          p2p_start, dm_peers registered
-B. Relay bootstrap   TCP to GET /v1/relay peer (log: bootstrap connection)
-C. Own reservation   listen_on(…/p2p-circuit) after Identify on HOP
-                     (log: reservation accepted, relay listen addr)
-D. Coord presence    Client `POST /v1/register` with **public routable IPv4 TCP only** (peer’s own inbound DM listen);
-                     never LAN, never relay bootstrap, never `/p2p-circuit`.
-                     Relay server upserts `/p2p-circuit` on reservation (identify `;pk=`).
-                     CGNAT-only clients poll `GET /v1/peers/self` until circuit visible.
-                     (log: coord registered or relay presence visible, server: peer registered)
+mDNS Discovered → dial_peer_tcp (LAN session)
 
-Cross-device (after BOTH at phase D)
-────────────────────────────────────
-E. Coord lookup      GET /v1/peers/{remote_pk} → /p2p-circuit multiaddr
-F. Circuit dial      swarm.dial(peer’s circuit addr via coord relay)
-G. Stream + outbox   ConnectionEstablished → /ghal-bol/msg/1.0.0 → resync outbox
+mDNS Expired → remove_session; set_peer_on_local_lan false
+  → new WAN call: bridge_request path
+  → WAN text: unchanged (delivery)
+
+Device left LAN (mobile-data) → refresh_os_network_truth
+  → coord register if public endpoint changes
+  → mDNS state purged on LAN loss paths in network_transport / connect upkeep
+
+Wi‑Fi return → notify_network_change → fresh ephemeral listen + mDNS publish
+  → Discovered → LAN session again (calls/text mirror)
 ```
 
-**Android vs Linux transport:** Linux builds TCP+QUIC+Noise; Android `:p2p` is **TCP+Noise only** (no native connect DNS transport — coord expands `/dns4/…/p2p-circuit` to `/ip4/…` aliases at register). Both use the same relay-client state machine in `chat_server.rs`.
-
-### Phase-gate symptoms (from App log)
-
-| Log pattern | Phase stuck | Meaning |
-|-------------|-------------|---------|
-| `waiting for relay/public listen endpoint before coord register` | B or C | No publishable WAN addr yet — reservation not accepted |
-| `reservation accepted` but no `coord registered` | D | Relay OK; client register failed and relay presence poll did not see circuit yet |
-| `register HTTP 400` … `coord bridge endpoints are registered by the relay server` | D | Client must not POST `/p2p-circuit` — server owns circuit presence on reservation |
-| `register — reason=coord register HTTP transport failed` | D | **HTTPS** to coord broken (VPN/DNS/TLS) — not native connect |
-| `lookup — category=peer_not_on_coord` (404) | Remote still A–D | **Expected** until remote finishes pipeline; outbox waits; lookups stop after first 404 until real disconnect (`mark_dm_reconnect_urgent`) |
-| `lookup — category=coord_http_unreachable` | Coord HTTP flap (VPN/DNS/proxy) | **15s** per-peer transport throttle when `coord_http_degraded`; urgent reconnect does **not** bypass transport throttle; 404 clears degraded when HTTP responds |
-| `awaiting_coord_mirror` + local `relay_circuit=true` | D | Relay presence poll: 6s fast (500ms) then up to 60s slow; nudges `notify_relay_refresh` + `POST /v1/register` when public TCP available |
-| `issue=no_dial_addrs \| reason=no dial addrs — coord has no record` | E blocked by remote D | Same as 404 — do not treat as “dial broken” |
-| `coord_lookup_peer ok — dialing` but no `dm peer connected` | F | Circuit dial failing — check server `circuit ACCEPTED/DENIED`; check throttles not blocking all paths |
-| `mdns dialing` + `coord dialing` same peer on Wi‑Fi | OK (if throttled) | **Parallel transport** — both paths expected; unhealthy only if **no** `dm connection established` for minutes |
-| `mdns dialing` only for 15s+ then relay (no parallel race) | F (LAN path) | LAN TCP failing (firewall/wrong port); relay should follow after in-flight window — expected sequence |
-| `issue=… ResourceLimitExceeded` | F | Relay server rate limiters — redeploy `ghal_bol_coord` |
-| `dm peer connected` + `outbox resync` | G ✓ | Pending transcript outbox drains — no new user send required |
-
----
-
-## Hybrid coord presence (WAN directory + coord bridge)
-
-**Problem this solves:** CGNAT/mobile peers cannot publish a dialable public TCP port. They still need a **coord phone-book entry** so the other device can `GET /v1/peers/{pk}` and dial a `/p2p-circuit` multiaddr. Posting the circuit from the client was fragile (400 storms, wrong addrs, heartbeat blocking the swarm thread).
-
-**Model (shipping): split who owns what on coord**
-
-| Endpoint type | Who registers it | How |
-|---------------|------------------|-----|
-| **Public TCP** (`tcp://routable-ip:port`) | **Client** | `POST /v1/register` when the device has a **globally routable inbound** DM listen (UPnP / port-forward / public IP). Must be the peer’s own socket — **not** the coord relay bootstrap host:port from `GET /v1/relay`, **not** RFC1918/CGNAT LAN. Multiaddr must end with `/p2p/<local_peer_id>`. |
-| **LAN TCP** (`tcp://192.168.x:port`) | **Never on coord** | Same-subnet peers use mDNS direct TCP only — not in `POST /v1/register`. |
-| **`native connect` `/p2p-circuit/…`** | **Relay server** | On `reservation ACCEPTED` + identify `agent_version` `ghal_bol/<ver>;pk=<66-hex>`, `ghal_bol_coord` upserts the circuit into SQLite (`presence.rs`). Clients **must not** POST `/p2p-circuit` (server returns 400). |
-
-**Server lifecycle (coord must enforce):**
-
-1. **`POST /v1/register`** — accept only client **public routable IPv4 TCP** endpoints that are the peer’s own inbound listen. Reject `/p2p-circuit`, RFC1918, CGNAT-only, and **relay bootstrap** addresses (`/ip4/<relay>/tcp/<port>` from `GET /v1/relay` is for dialing the relay, not registering yourself).
-2. **Relay reservation accepted** — server **adds** the peer’s `/p2p-circuit` row (`upsert_relay_circuit`). This is how CGNAT/mobile peers become WAN-dialable.
-3. **Relay reservation ends** — server **removes only** the `/p2p-circuit` endpoint (`remove_relay_circuit`). If the peer still has a valid public TCP row from `POST`, **keep** that row. Delete the SQLite row only when **no** WAN-dialable endpoints remain.
-4. **Lookup** — WAN dials use `/p2p-circuit` multiaddrs only (`filter_coord_dial_addrs` in the client). A coord row with only relay bootstrap `tcp://159.223.x:28048` is **undialable** (`peer_on_coord_no_dial_addrs`). **Live gate (2026-06-19):** `GET /v1/peers` returns `/p2p-circuit` only while the relay still holds an **accepted reservation** for that peer (`relay_live.rs` + `RelayLiveRegistry`). SQLite may retain a circuit row after happy-eyeballs `ReservationClosed`; lookup strips it until `ReservationReqAccepted` again — dialers get **404** instead of **200 + Timeout**.
-
-**Client files:** `coord_runtime.rs` (`endpoints_for_coord_register`, `schedule_coord_presence_after_relay`, `promote_relay_presence_if_visible`), `chat_server.rs` (reservation hook, WAN recovery). **Server files:** `relay.rs`, `agent_pk.rs`, `presence.rs`, `routes.rs`.
-
-**CGNAT-only path (phone on mobile data):**
-
-1. Reserve circuit on coord relay (phases B–C).
-2. Server writes `/p2p-circuit` to coord on reservation.
-3. Client has **no** public/LAN tcp for `POST /v1/register` → `schedule_coord_presence_after_relay()` polls `GET /v1/peers/{self}` until circuit visible → sets `coord_registered=true` without blocking native connect (no synchronous heartbeat `join` on the swarm thread).
-
-**Coord HTTP client:** sends `Accept: application/json` on all requests (`coord.rs`). Lookup errors include response body snippets when JSON parse fails (HTML proxy interstitial).
-
-**Do not regress:**
-
-- Client `POST` of `native connect` circuit endpoints (400 + register storm).
-- Registering **relay bootstrap** TCP (`/ip4/<relay-host>/tcp/<relay-port>/p2p/<relay_peer>` or bare relay IP:port) as your own endpoint — not a DM listen socket.
-- Dropping WAN coord bridges on mobile-data because stale direct tracking still thinks “direct LAN up” after `left LAN` — use **`dm_direct_conn_ids`**, not `peers_direct_conns` alone; `prefer_direct_dm_path_over_relay` is **stream preference only**, not permission to close relay links on mobile-data.
-- **`coord_dial_from_lookup_addrs` stripping relay addrs** when `peer_has_direct_connection` — blocks WAN backup on Wi‑Fi; use additive relay dial instead.
-- **Blocking LAN upkeep during WAN recovery** — `lan_handover_upkeep_if_needed` runs **in parallel** with `ensure_wan_relay_circuit` (no early return). `try_recover_lan_after_wifi_available` must **not** treat `wan_recovery_active && !relay_circuit_listening` as `relay_lost_on_lan` (dev coord down would purge mDNS every 5s and LAN never discovers).
-- **`lan_handover_upkeep` kicking LAN for WAN-only roster peers** — offline contacts never seen on mDNS must not trigger `link down, no mDNS candidate yet` every 5s (churns ephemeral listen + `notify_stream_reopen`, breaks relay to mobile-data peers). Gate on **`peer_eligible_for_lan_handover`**: prior LAN/mDNS sighting (`peer_on_local_lan` / mDNS candidate / rediscovery requested), or **pending outbox on Wi‑Fi** when the peer was previously on LAN — **not** bare hub foreground room for a WAN-only contact (mobile data). Never all roster peers. Ghost `peer_not_on_coord` contacts with no outbox and no LAN history are WAN-only.
-- **`dial_mdns_lan_addr` clearing `circuit_dial_in_flight`** — LAN must not cancel WAN in-flight tracking; use `NotDialing`, parallel dial (§ Parallel LAN + WAN).
-- Re-issuing `listen_on(/p2p-circuit)` on every native connect “listener closed cleanly” during an in-flight re-reserve (renewal window).
-
----
-
-## WAN coordination (peer ↔ coord ↔ relay — 2026-06-17)
-
-**Problem:** Three layers can disagree: native connect shows `relay_circuit=true` and `coord_registered=true` locally while coord HTTP still returns a `/p2p-circuit` that the relay rejects with `NoReservation`. Symptom: `coord_lookup_peer ok` → dial fails → minutes until re-reserve.
-
-**Model:** One authoritative owner per fact; clients never invent WAN dialability.
-
-| Fact | Owner | Client behaviour |
-|------|--------|------------------|
-| `/p2p-circuit` row on coord | **Relay server** on `ReservationReqAccepted` + identify `pk=` | Never `POST` circuit; poll `GET /v1/peers/{self}` until visible (`schedule_coord_presence_after_relay`) |
-| Circuit row removed | **Relay server** on `ReservationTimedOut` / `CircuitReqDenied(NoReservation)` / `ConnectionFailed` when dst not live | Bootstrap TCP drop: `mark_coord_relay_hop_lost` (keeps `coord_registered` while local circuit listen up) + `ensure_wan_relay_circuit` |
-| Lookup circuit visibility | **Relay live registry** (`RelayLiveRegistry`) | Stale SQLite circuit rows hidden on `GET` until reservation live again |
-| `coord_registered` (client flag) | **Client** only after HTTP self-lookup shows WAN-dialable endpoint **and** local IPv4 coord bridge is listening (CGNAT) | `refresh_relay_presence_from_coord` clears flag if coord lists circuit but local listen is down |
-| Remote peer stale circuit | **Dial outcome** | `NoReservation` → `note_remote_peer_circuit_stale` (urgent re-lookup, no 404 backoff) |
-
-**Phase labels** (`Native/flow` `wan_coord=` — `wan_coord.rs`):
-
-```text
-awaiting_relay_bootstrap   — no coord-relay TCP
-awaiting_relay_circuit     — bootstrap up, no IPv4 /p2p-circuit listen
-awaiting_coord_mirror      — circuit listening, coord self-lookup not yet WAN-ready
-wan_ready                  — circuit + coord_registered + HTTP healthy
-http_degraded              — registered but coord HTTP failing (transport throttle)
-```
-
-**Event-driven sync (no timer-based “wait N seconds”):**
-
-- `sync_wan_coord_local_snapshot` on bootstrap connect/close, reservation accepted, relay `NewListenAddr`, flow snapshot tick.
-- Bootstrap HOP lost → immediate WAN recovery + `schedule_coord_presence_after_relay` (do not keep dialing stale coord circuits).
-- **Left LAN** (`lan` → mobile-data/CGNAT) → `wan_coord::on_left_lan()` — purge mDNS, refresh own phases B–D, phase E–F for all DM peers; **keep relay native connect links** (parallel transport). Close **direct** `ConnectionId`s only (`close_direct_dm_connections`).
-- **LAN restored** (mobile-data → Wi‑Fi) → `wan_coord::on_lan_path_restored()` — mDNS rediscovery + **keep relay reservation warm** (`ensure_wan_relay_circuit`); WAN relay links unchanged.
-- Remote peer off LAN → `wan_coord::on_peer_off_local_lan(pk)` — urgent coord lookup + stream reopen on existing relay; close direct links only.
-- LAN handover: do not churn relay for WAN-only roster peers (`peer_eligible_for_lan_handover`); when LAN upkeep needs full kick but a relay **circuit dial is in flight**, queue full kick and run **soft** interim only — § “Deferred full LAN kick”.
-
-**Server (`relay.rs`):** reservation refcount; `end_reservation` → `remove_relay_circuit` on coord; `NoReservation` on inbound circuit dial purges destination presence.
-
-**Do not regress:**
-
-- Setting `coord_registered=true` while local coord bridge is not listening (CGNAT).
-- Trusting coord lookup after `NoReservation` without urgent re-lookup.
-- Clearing coord presence on relay **client disconnect** (happy-eyeballs churn) — only reservation end events.
-- Client `POST` of `/p2p-circuit` (still 400).
-
----
-
-## LAN ↔ WAN handover (both directions — verified 2026-06-18)
-
-**Policy:** LAN and WAN are **additive and parallel**, not replacements. Wi‑Fi runs mDNS + coord/relay **at the same time**. Per-peer: both direct and relay links may stay up; one DM stream; unified Rust store for all frames/acks.
-
-```text
-On LAN (mDNS Discovered)
-  → direct TCP dial / upgrade (additive — relay link stays connected)
-
-Peer leaves LAN (mDNS Expired, last candidate gone)
-  → forget_peer_on_local_lan immediately
-  → close direct ConnectionIds only (coord bridges stay up)
-  → wan_coord::on_peer_off_local_lan + coord lookup + stream reopen
-
-left LAN / mobile-data (full handover)
-  → purge mDNS LAN state; keep coord heartbeats where possible
-  → WAN recovery: bootstrap + reserve + hybrid presence
-  → do NOT drop peer relay link because direct counter was stale
-
-Wi‑Fi return
-  → kick_lan_dm_rediscovery (fresh ephemeral TCP + mDNS restart)
-  → mDNS Discovered → direct path added alongside WAN (seconds)
-```
-
-**Wire layer unchanged:** one DM stream per contact; `dm_upkeep` owns stream reopen. **Transport layer:** LAN + WAN discovery/dial run in parallel — see § “Parallel LAN + WAN transport”.
-
-**Log signatures of healthy switching:**
-
-| Leg | Healthy signs |
-|-----|----------------|
-| **LAN** | `mdns discovered` → `dm connection established … (direct)` → `chat_ready` / `stream=true` |
-| **WAN** | `reservation accepted` → `relay listen addr` → `coord registered` or `relay presence visible` → `coord_lookup_peer ok — dialing` → `dm connection established … (relay)` |
-| **LAN return after WAN** | `mdns discovered` on new ephemeral port &lt; few s → `conn=true,stream=true` without manual restart |
-
-**Known noisy but OK during handover:** `LAN DM rediscovery — link down, no mDNS candidate yet` briefly before `mdns discovered`; ephemeral TCP port change every handover (by design — see § “Ephemeral LAN TCP ports”).
+**Healthy signs:** `mdns discovered` → `chat_ready` on LAN; `bridge request ok` → `wss connecting` for WAN calls; delivery logs for WAN text independent of connect.
 
 ---
 
 ## Network truth — OS default route (authoritative)
 
-**Problem (observed 2026-06-19):** After Wi‑Fi ↔ mobile-data toggle, `profile=lan` or `profile=mobile-data` in `Native/flow` could stay **wrong for seconds or minutes**. P2P then routed acks/outbox on the wrong path (zombie LAN mux, relay reset loops, `outbox_pending` stuck, ticks missing on WAN).
+**Problem:** After Wi‑Fi ↔ mobile-data toggle, `profile=lan` vs `profile=mobile-data` in `Native/flow` could stay wrong if inferred from `if_addrs` alone. Wrong profile breaks LAN kick timing and logging — not delivery WAN text.
 
-**Root cause:** `if_addrs` (interface names + IP addresses) **lags** the OS default route. On Android, `rmnet` / CGNAT addresses often **remain visible** after Wi‑Fi is default. Promoting `profile=lan` from a native connect RFC1918 listen addr **without** OS Wi‑Fi confirmation made the lag worse.
-
-**No third-party network library is required.** The OS already exposes truth; Rust must read it.
+**Root cause:** Interface lists **lag** the OS default route. On Android, cellular interfaces often remain visible after Wi‑Fi is default.
 
 ### Layered model (truth first)
 
-| Layer | Source | Typical latency | Used for |
-|-------|--------|-----------------|----------|
-| **OS default transport** | Android: `ConnectivityManager.getActiveNetwork()` + `hasTransport(WIFI\|CELLULAR\|ETHERNET)` + `NET_CAPABILITY_VALIDATED`. Linux: `/proc/net/route` default iface → classify `wl*` / `wwan` / `eth` + operstate | **Immediate** on Android connectivity callback; **~1s** on `network_tick` | `has_active_lan()`, `on_mobile_data_path()`, `profile=lan` vs `mobile-data`, `handle_network_path_change` |
-| **Wi‑Fi link** | Android: any registered network with `TRANSPORT_WIFI`. Linux: `/sys/class/net/wl*/operstate` | Same as above | `platform_wifi_linked`, LAN kick when Wi‑Fi returns while cellular is still default |
-| **Interface hints** | `if_addrs` crate | Often **30–120s** after toggle | RFC1918/CGNAT addresses, listen bind, logging only — **not** primary mode switch |
-| **Remote peer path** | mDNS `Discovered` / `Expired`; coord `GET /v1/peers` | Event-driven | Whether **that contact** is on LAN vs WAN — **not** derivable from local OS profile alone |
-| **Wire health** | `dm_peer_stream_up`, outbox drain, `dm_wire_activity_ms` | Event-driven | Zombie mux detection when stream is up but peer path is wrong |
+| Layer | Source | Used for |
+|-------|--------|----------|
+| **OS default transport** | Android `ConnectivityManager` + validated capability; Linux default route iface + `wl*` operstate | `has_active_lan()`, `on_mobile_data_path()`, `profile=` |
+| **Wi‑Fi link** | Android TRANSPORT_WIFI; Linux operstate | `platform_wifi_linked`, LAN recovery when Wi‑Fi returns |
+| **Interface hints** | `if_addrs` | Listen bind, logging — **not** primary mode switch |
+| **Remote peer path** | mDNS `Discovered` / `Expired` | Whether **that contact** is on LAN |
+| **Wire health** | connect session writer, outbox drain | Stuck LAN mirror vs live delivery |
 
-`Native/flow` (~30s) must show **both**:
-
-```text
-profile=mobile-data os=cell/validated/wifi_down …
-profile=lan os=wifi/validated/wifi_up route=wlan0 …
-```
-
-After a toggle, **`os=` should flip within ~1s** (callback) or on the next tick — not minutes after `profile=`.
+`Native/flow` (~30s) should show **`os=wifi|cell/...`** flipping within ~1s of a toggle.
 
 ### Code map
 
 | File | Role |
 |------|------|
-| `p2p/network_transport.rs` | `OsNetworkSnapshot`, `LocalNetworkProfile`, `merge_os_network_truth`, `refresh_os_network_truth`, `network_handover_key` (includes `os_default` + `os_validated`) |
-| `android_network.rs` | JNI probe on connectivity notify; `:p2p` Kotlin registers `NetworkCallback` only (no Flutter RPC) |
-| `linux_network.rs` | Default IPv4 route iface + `wl*` operstate |
-| `p2p/chat_server.rs` | `network_tick` calls `refresh_os_network_truth` then `handle_network_path_change`; `effective_network_profile` requires `platform_wifi_linked` before promoting LAN from listen addrs |
+| `p2p/network_transport.rs` | `OsNetworkSnapshot`, `merge_os_network_truth`, `refresh_os_network_truth` |
+| `android_network.rs` | JNI on connectivity notify |
+| `linux_network.rs` | Default route + Wi‑Fi operstate |
+| `connect/worker.rs` | Upkeep calls `refresh_os_network_truth` |
 
 ### Rules agents must not violate
 
-1. **`os default = cellular`** → `has_active_lan() = false` and `on_mobile_data_path() = true` **even if** `rmnet` / RFC1918 still appear in `if_addrs`.
-2. **`os default = wifi/ethernet` + wifi link up** → eligible for `profile=lan` (mDNS + direct TCP stack runs).
-3. **Do not** call `p2p_notify_network_change` from Flutter — Android `:p2p` + Linux `network_tick` own handover.
-4. **Do not** infer “peer is on LAN” from local `profile=lan` alone — use mDNS for that peer or coord circuit for WAN.
-5. **Internet validated** (`NET_CAPABILITY_VALIDATED` / route operstate) is logged and used for urgency; brief `unvalidated` right after Wi‑Fi associate is normal — handover still keys off **default transport**.
-6. **Flutter `NetworkHelper`** (`ghal_bol_ui/lib/network_helper.dart`) — thin poll loop for **UI display only**. OS truth from **`ghal_bol`** via daemon RPC `network_snapshot` (`:p2p` / `ghal_bol_core_daemon` → `android_network` / `linux_network`). Linux in-process FFI fallback only when daemon is off. Rust logs: `Native/network` `ui snapshot …`; Flutter App log tag **`Network`**. **Never** gates P2P dial/ack/coord policy in Dart.
-
-## Asymmetric LAN↔WAN mux recovery (one stream, parallel links)
-
-**Scenario:** Desktop on Wi‑Fi (`profile=lan`); phone on mobile-data (`profile=mobile-data`). Both may have **relay + direct** native connections at once (§ “Parallel LAN + WAN”). native connect allows **one** live `/ghal-bol/msg/1.0.0` writer per contact — if that mux sits on a **dead direct** path, the app shows `conn=true,stream=true` while acks and outbox go nowhere.
-
-### Detection (`coord_lookup.rs` + `session.rs`)
-
-| Check | Meaning |
-|-------|---------|
-| `peer_has_live_mdns_lan(peer)` | Remote currently on **our** LAN (live mDNS candidate) |
-| `peer_has_lingering_direct(peer)` | Direct `ConnectionId`s in `dm_direct_conn_ids` or `peer_has_direct_connection` |
-| `peer_has_relay_connection(peer)` | We have live **relay** `ConnectionId`s |
-| `lan_listen_rediscovery_requested(peer)` | LAN handover / soft kick active for this contact |
-| `peer_has_pending_outbound_blockers(peer)` | Pending outbox **or** pending delivery acks — outbound not draining |
-| `peer_lan_handover_outbound_stuck` | `lan_listen_rediscovery_requested` **and** outbound blockers — remote likely on WAN while we still hunt LAN |
-| `peer_needs_wan_mux_reopen` | Handover + outbound stuck **and** `dm_peer_stream_up` — zombie writer on dead mux |
-| `peer_wan_asymmetric_mux_likely` | Handover + outbound stuck **and** (lingering direct **or** stream up) — canonical asymmetric case |
-| `peer_relay_inbound_handover_mux_recovery` | Wi‑Fi side during `lan_listen_rediscovery` or `relay_inbound_handover_active`: relay up, mobile peer re-dialed inbound on relay. Symptom C skip when direct mux still draining (unless flag set) |
-| `should_mark_relay_inbound_handover` | `InboundCircuitEstablished` on Wi‑Fi: `lan_listen_rediscovery` **or** asymmetric **or** lingering direct + on-wire/pending outbox (05:56:22) |
-| `asymmetric_relay_recover_on_existing_link` | `peer_wan_asymmetric_mux_likely` **or** `peer_relay_inbound_handover_mux_recovery` **or** relay + `peer_has_stale_direct_lan_conn` — step 5/6 stream-open adopt + urgent reconcile |
-| `dm_peer_needs_wan_relay_path` | Need WAN mux recovery: `peer_wan_asymmetric_mux_likely`, **or** relay+stale-direct, **or** off-LAN without relay. **False** when live mDNS says peer is on our LAN (parallel LAN+WAN is intentional) |
-| `dm_peer_chat_link_stable` false | Upkeep may coord-dial / reopen even if `swarm.is_connected` |
-| `coord_lookup_upkeep_satisfied` false | Foreground/outbox peer during LAN rediscovery, or asymmetric mux — **must not skip coord lookup** |
-| `peer_outbound_stuck_for(peer, min_ms)` | Pending delivery ack we couldn't send, **or** outbound text queued ≥ `min_ms` and still unacked — owned writer is not draining |
-| `duplicate_mux_should_take_over` | A live duplicate inbound stream should adopt the writer (retransmit, asymmetric, or `peer_outbound_stuck_for` ≥ 3s) |
-| `dm_writer_generation` | Monotonic per-peer writer epoch; stale handlers skip teardown via `finalize_dm_writer_if_current` |
-
-**Stale direct rule (`peer_has_stale_direct_lan_conn`):** fresh private-IP direct on Wi‑Fi is **not** stale unless outbound is stuck. After remote leaves LAN, lingering mDNS cache or `peers_on_local_lan` TTL is stale when **`peer_lan_handover_outbound_stuck`** — do not wait for mDNS `Expired` (minutes).
-
-### Recovery (event-driven, throttled)
-
-On each `dm_upkeep` tick (~1s), **in order:**
-
-1. `reconcile_all_stale_lan_mux_for_wan` — **`WAN_MUX_RECONCILE_THROTTLE_MS` = 5s** per peer (one-shot bypass when `asymmetric_relay_recover_urgent` consumed after relay `InboundCircuitEstablished` — still stamps throttle so no storm); enters on stale direct **or** `peer_needs_wan_mux_reopen`; calls `clear_peer_stale_lan_cache` (forget `peers_on_local_lan`, purge mDNS candidates); **`close_direct_dm_connections`** when relay exists; on `close stale direct` with relay up: **`invalidate_dm_chat_stream`** only when `peer_outbound_stuck_for` ≥ 4s **and** writer still in map — otherwise flag-only `request_dm_stream_reopen` (Symptom C); full **`invalidate_dm_chat_stream` + `request_dm_stream_reopen`** when mux is zombie (`mux_reopen` path). Skips tear-down when writer is live **and** `dm_mux_recently_active` **and** outbound is **not** stuck (inbound-only duplicate mux must not block recovery).
-2. `apply_pending_dm_link_resets` — if relay up: drop **direct** mux or reopen stream on relay; full disconnect only when no relay
-3. `upkeep_dm_peers` — coord/LAN dial; `should_defer_stream_open_for_wan_mux` blocks opening stream on stale direct **before** relay exists; **does not defer** when relay is already up (that deadlocked outbox in 2026-06-25 logs)
-4. `run_dm_coord_lookup_pass` — foreground/outbox peer during `lan_listen_rediscovery_requested` or `peer_wan_asymmetric_mux_likely` is **never** skipped by `coord_lookup_upkeep_satisfied`
-5. **`InboundCircuitEstablished`** (relay client, DM contact) — during `lan_listen_rediscovery` on Wi‑Fi: **`mark_relay_inbound_handover_peer`** (event → adopt/defer). If `asymmetric_relay_recover_on_existing_link` **or** other asymmetric/mux reopen predicates → `request_dm_stream_reopen` + `notify_coord_lookup`; **`mark_asymmetric_relay_recover_urgent`** (one-shot 5s throttle bypass) **only** when `asymmetric_relay_recover_on_existing_link` (stale direct **or** relay handover — not zombie-alone)
-6. **Duplicate-mux writer adoption** (`frames.rs`) — **on duplicate stream open** (before first frame): adopt **only** when `asymmetric_relay_recover_on_existing_link` (includes `peer_relay_inbound_handover_mux_recovery` when mobile re-dials on relay during LAN rediscovery — lingering direct OK once `relay_inbound_handover_active`) so remote `open_stream` on relay does not wait for text or the 5s reconcile tick. **In the inbound read loop** (on frames): `duplicate_mux_should_take_over` (retransmitted inbound text = peer never got our ack, **`asymmetric_relay_recover_on_existing_link`** / `peer_wan_asymmetric_mux_likely` / `peer_needs_wan_mux_reopen`, **or** `peer_outbound_stuck_for` ≥ `DUPLICATE_MUX_TAKEOVER_STUCK_MS` = 3s) → `adopt_duplicate_mux_as_writer`. **Do not** use outbound-stuck/zombie alone at stream-open — churns symmetric-connect duplicates (Symptom C). Conservative by design: in healthy parallel LAN+WAN the peer rarely writes on our duplicate and outbound is not stuck, so it does **not** churn a working link.
-7. **Inbound-preferring stream open on LAN during asymmetric relay** (`dm_stream.rs`) — when **this device** is on LAN (`has_active_lan`), relay is up, and `peer_has_stale_direct_lan_conn`: **defer outbound `open_stream`** and wait for the mobile peer's inbound stream (then step 6 adopt). **Do not defer** when `relay_inbound_handover_active` (peer inbound circuit already arrived). Mobile-data re-dialer never defers. Avoids symmetric `open_stream` timeout deadlock on relay; does **not** shorten reconcile throttle or broaden adopt predicates.
-
-**Writer generation (race guard — required, do not remove):** multiple `handle_inbound_stream` tasks can exist per contact (symmetric connect, parallel LAN+WAN, adopt). Each writer install **claims a monotonic generation** (`claim_dm_writer_generation`); a handler clears the writer slot on exit **only** via `finalize_dm_writer_if_current` (`release_dm_writer_generation_if_current`). Without this, the evicted/stale handler's later close (e.g. LAN idle timeout up to 120s after adopt moved the writer to relay) would `remove(&peer)` the **live** writer and silently kill return acks again. Adopt evicts the old writer with `invalidate_dm_chat_stream` (drops its mpsc tx → its write task ends) then installs a fresh generation — the old task's `finalize` is then a no-op.
-
-**Healthy logs after phone leaves Wi‑Fi:**
-
-```text
-reopen … peer off LAN; recover WAN mux for acks/outbox   ← at most ~once per 5s per peer
-close stale direct … — chat stream up, relay kept
-coord: lookup pass … urgent=1 …   ← foreground/outbox peer looked up during handover
-relay-client: inbound circuit from <peer>   ← may trigger stream reopen on Wi‑Fi side
-inbound on duplicate mux from <peer> — adopt live writer (stale mux replaced)   ← writer moved to the live relay stream
-chat_ready … — can send now
-burst resync N pending row(s) to <peer>   ← backlog drains after mux moves to relay
-stream: ack_received from <peer> … — our outbound delivered by peer
-```
-
-**Broken loop (do not ship):**
-
-```text
-reopen … peer off LAN   ← every 1s
-reset DM link … chat stream open timed out
-dm peer disconnected
-(relay server: circuit ACCEPTED → closed cleanly every ~3s)
-lookup pass: urgent=0 priority=3 …   ← foreground peer with stuck outbox never looked up
-conn=true,stream=true,outbox_pending=N   ← repeating with zero ack_received (one-way WAN)
-```
-
-### Known symptom — bursty delivery during WAN recovery (2026-06-25, not a Flutter bug)
-
-**Observed after the 2026-06-25 asymmetric fix:** both LAN and WAN **work**, but messages and acks may **stall for a few seconds**, then **all pending rows arrive at once**, then stall again — repeating during active LAN↔WAN handover or while `lan_listen_rediscovery_requested` is set.
-
-**Why (transport-level, intentional trade-off — do not “fix” by reverting asymmetric recovery or moving policy to Flutter `NetworkHelper`):**
-
-| Mechanism | Effect |
-|-----------|--------|
-| **Zombie mux window** | While `stream=true` on a dead direct path, new sends may log `frame on wire` but peer never acks until mux reopen completes |
-| **`WAN_MUX_RECONCILE_THROTTLE_MS` (5s)** | Mux teardown/reopen is capped per peer — avoids 2026-06-19 `reopen … peer off LAN` every 1s storms |
-| **Recovery pipeline is multi-step** | Detect stuck outbound → reconcile (≤5s) → coord HTTP (`DM_COORD_LOOKUP_MIN_INTERVAL_MS` 2s) → relay dial → stream open → **`resync_outbox_burst_for_peer`** / **`run_ack_upkeep_burst`** — each step waits on the previous |
-| **Burst drain on stream open** | When the live mux finally attaches on relay, **all** pending outbox rows and ack backlog flush in one burst (`burst resync N pending row(s)`) — correct per DESIGN.md (outbox must not wait on timers once mux is live), but **feels** like batch delivery |
-| **`OUTBOX_RESEND_INTERVAL_MS` (1s)** between upkeep resyncs | While mux is down, only one resync attempt per message per second; failures accumulate until burst |
-| **`READ_ACK_UPKEEP_MAX_OPS_PER_TICK` (64)** | Large ack backlogs drip during upkeep; burst on stream reopen |
-| **Parallel LAN+WAN on Wi‑Fi** | Wi‑Fi side may oscillate between LAN rediscovery and WAN reconcile while peer is on cell — periodic reconcile windows |
-
-**Distinguish from broken chat:**
-
-|----------------------------------|---------------------|
-| Eventually **all** pending messages deliver; ticks catch up after burst | **Never** `ack_received` for new outbound; `outbox_pending` climbs unbounded |
-| `burst resync` / `chat_ready` / `ack_received from` appear after stall | `conn=true,stream=true` with repeating `resync N pending` **forever** |
-| Coord lookup runs for foreground peer during handover | `lookup pass: urgent=0` while foreground peer has stuck outbox |
-| Both directions work after burst | One-way only indefinitely |
-
-**Agents:** improving smoothness means **shortening the recovery pipeline** (event-driven, fewer guardrails) — **not** skipping reconcile, declaring mux stable during `peer_wan_asymmetric_mux_likely`, or reintroducing `coord_lookup_upkeep_satisfied` skip for connected peers with pending outbox. Do **not** route this through Flutter `NetworkHelper` — Rust owns connect policy.
-
-### native connect conflicts that drive this
-
-| native connect behaviour | Ghal Bol impact | Mitigation |
-|------------------|-----------------|------------|
-| Inbound/outbound relay reports as `/p2p/<peer>` (not `/p2p-circuit`) — [#5741](https://github.com/native connect/rust-stack/discussions/5741) | Misclassified “direct” → false `dm_direct_conn_ids`, mux reconcile loop | `dm_relay_circuit_pending` on circuit events; bare `/p2p/<peer>` with coord → **relay** (LAN direct always has `/ip4/…/tcp/…`) |
-| Multiple connections per `PeerId` | Stream may attach to wrong mux | Prefer direct for **new** stream when both exist; **close direct only** on asymmetric recovery |
-| `open_stream` timeout on relay | Must not nuke relay TCP | `note_stream_open_failure`: reopen on relay if `peer_has_relay_connection` |
-| `PeerCondition::NotDialing` | Parallel dial storms | Separate LAN vs circuit app throttles; parallel **links** after connect |
-
-### native connect community lessons (relay v2 — applies directly)
-
-Upstream issues that match Ghal Bol behaviour. When logs disagree with an issue below, fix **code + this doc** — not ad-hoc one-off patches.
-
-| Issue | Symptom in Ghal Bol | Community fix | Our implementation |
-|-------|---------------------|---------------|-------------------|
-| [rust-stack #2513](https://github.com/native connect/rust-stack/discussions/2513) `NoReservation` / circuit DENIED | coord 404; outbound circuit fails; server `circuit DENIED` | **Callee** must `listen_on(/p2p-circuit)` before caller dials | `ensure_wan_relay_circuit` phases B–D; coord presence on `reservation ACCEPTED` |
-| [rust-stack #2944](https://github.com/native connect/rust-stack/discussions/2944) | Dial fails after reserve | Dial addr must be `…/p2p/<relay>/p2p-circuit/p2p/<dest>` | `coord_lookup` → `dial_dm_peer_addr` with full circuit multiaddr |
-| [rust-stack #6141](https://github.com/native connect/rust-stack/issues/6141) | `awaiting_relay_circuit` 10–30s while reservation works | `ReservationReqAccepted` may be late/missing — also check `swarm.listeners()` / coord self-lookup | `relay_circuit_listening(swarm)` + coord presence poll |
-| [rust-stack #5741](https://github.com/native connect/rust-stack/discussions/5741) | `dm connection established … (direct)` on inbound relay | Inbound `ConnectionEstablished` `send_back_addr` is `/p2p/<peer>` only — not full circuit path | `InboundCircuitEstablished` → `dm_relay_circuit_pending` before classifying path |
-| [PR #4225](https://github.com/native connect/rust-stack/pull/4225) / [#5996](https://github.com/native connect/rust-stack/issues/5996) | `DialPeerConditionFalse`; parallel dials cancel | Default `NotDialing` — one outbound dial slot per `PeerId` | `PeerCondition::NotDialing` + separate LAN/circuit app tracking; parallel **links** after connect, not parallel unconditional dials |
-| [#4717](https://github.com/native connect/rust-stack/issues/4717) / [PR #4745](https://github.com/native connect/rust-stack/pull/4745) | Misleading transport errors on circuit fail | Real reason on `OutboundCircuitReqFailed` / `ListenerClosed` | Handle relay listener close + circuit dial errors in swarm handler |
-| [#4651](https://github.com/native connect/rust-stack/issues/4651) AutoRelay | Manual reserve after bootstrap HOP + identify | `listen_on` after identify on connected relay | `try_relay_reservation_after_identify`; coord `GET /v1/relay` = static relay list |
-| [circuit-v2 spec](https://github.com/native connect/specs/blob/master/relay/circuit-v2.md) | Presence lost after relay TCP drop | Reservation invalid when bootstrap TCP to relay drops | Re-reserve + re-register; server logs `reservation closed` |
-| [PR #5926](https://github.com/native connect/rust-stack/pull/5926) peer-store | Stale identify addrs cause blind wrong dials | Remove addrs on dial failure; don't route from identify alone | Stream-first explicit coord/mDNS addrs; block identify ingest when stream up |
-| [#2216](https://github.com/native connect/rust-stack/issues/2216) / [#1135](https://github.com/native connect/rust-stack/issues/1135) | Old LAN ports dialed forever | Identify/external addrs don't expire by default | No peerstore WAN routing; mDNS event-driven LAN only |
-| Relay default rate limits [PR #3742](https://github.com/native connect/rust-stack/pull/3742) | `ResourceLimitExceeded`; endless reserve, no chat | Raise `reservation_rate_per_peer` on server | `ghal_bol_coord/src/relay.rs` |
-
-**Do not fight upstream:**
-
-- Two concurrent `swarm.dial(same_peer)` without `NotDialing` discipline → use throttled explicit addrs.
-- `listen_on` storm while in-flight → cancels reservation (worse than waiting for timeout).
-- Inbound relay classified by endpoint path alone → use `InboundCircuitEstablished`.
-- DCUtR + identify addrs as primary WAN when coord is configured → disabled; coord bridge only.
-
-Diagnostic log format (grep `category=` / `reason=` / `next=`): implemented in `ghal_bol_core/src/p2p/connectivity_diag.rs`.
+1. **`os default = cellular`** → treat as mobile-data path even if RFC1918/cellular addrs still appear in `if_addrs`.
+2. **`os default = wifi/ethernet` + wifi link up** → eligible for LAN mDNS stack.
+3. **Do not** probe the network from Makepad or gate ack/coord policy in the UI.
+4. **Do not** infer “peer is on LAN” from local `profile=lan` alone — use mDNS for that peer.
 
 ---
 
-## Discovery (Tier 1)
+## Asymmetric LAN ↔ WAN (one native session, parallel services)
 
-Typical WAN flow ([GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md), [COORDINATION_SERVER.md](COORDINATION_SERVER.md)):
+**Scenario:** Desktop on Wi‑Fi; phone on mobile-data. **Text** on WAN still flows via **delivery**. **Calls** need **bridge** when there is no LAN mux writer. **LAN text mirror** needs a live LAN TCP session.
+
+When the phone leaves Wi‑Fi, the desktop may still show an old LAN session until mDNS `Expired` — outbound LAN mirror or call signaling on that session can stall while delivery text still works.
+
+**Policy:**
+
+- Treat mDNS **`Expired`** as authoritative for “peer off LAN” — drop LAN session; do not wait on long TTL caches.
+- **Calls:** if `!writer_open_for_peer` and coord configured → bridge path (`outbound.rs`).
+- **Do not** block delivery or bridge pending poll because LAN upkeep is rediscovering.
+- Prefer **event-driven** session reopen (disconnect, expired, bridge connected) over fixed “wait N seconds” retries.
+- The connect worker holds **one writer per peer**. If dual TCP links appear (LAN + public TCP), keep one mux, close the stale direct only, and keep the WAN path.
+
+---
+
+## Discovery
+
+Typical flow ([GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md)):
 
 1. Guest scans host QR → stores `public_key_hex`.
-2. Both peers register endpoints with `ghal_bol_coord`.
-3. Lookup `GET /v1/peers/{public_key_hex}` → dial returned endpoints via native connect.
-4. Open `/ghal-bol/msg/1.0.0` stream; speak `ghal_bol_msg_v1`.
+2. Both peers register on coord when they have publishable **public TCP** (optional for CGNAT-only).
+3. LAN: mDNS discovers configured contacts → direct TCP.
+4. WAN calls: bridge when no LAN writer.
+5. WAN text: delivery when configured.
 
-**Parallel LAN + WAN on Wi‑Fi:** coord register/lookup on **every configured coord server** + coord bridge (and public TCP when registered) **runs alongside** mDNS/direct TCP when mDNS shows the configured peer on the same network — **both stay active** when connected (§ “Both links active”). On mobile-data/CGNAT without active LAN, WAN only. No Kademlia or public-bootstrap peer discovery when coord paths fail — keep retrying coord.
+**Coord lookup** (`GET /v1/peers/{public_key_hex}`) returns online peers with routable TCP endpoints — used when dialing a peer’s **public** address (and for diagnostics). It does **not** replace mDNS on LAN.
 
-Coord publishes `tcp`, `quic`, and `native connect` multiaddrs; `coord_runtime.rs` and `dm_transport/addr.rs` help filter and rank dial targets before native connect dials.
+---
 
-### Naming — “bootstrap” in logs vs product policy
+## LAN dial policy and ephemeral ports
 
-**Removed:** public IPFS / native connect bootstrap multiaddrs in `p2p_start` (`bootstrap_peers: []`, `invite_bootstrap=0` in logs).
-
-**Still used internally:** the **coord co-located relay** from `GET /v1/relay` is registered in `bootstrap_peer_ids` and dialed for circuit reservation. Log lines like `bootstrap_dial_error`, `bootstrap_ok`, and `bootstrap redial` refer to **that relay only**, not a bootstrap peer list.
-
-**Do not reintroduce:** Kademlia DHT, IPFS bootnodes, or a static bootstrap peer array for WAN peer discovery. WAN directory = coord HTTP + relay TCP.
-
-### WAN prerequisites (dev and prod — do not regress)
-
-WAN chat between two internet-connected peers requires **both** channels below. Coord HTTP alone is **not** enough.
-
-| Channel | Home (`coord1.ghalbol.com`) | GCP (`coord.ghalbol.com`) |
-|---------|----------------------------|----------------------------|
-| **Coord HTTP** | nginx `:8443` → `:8765` | nginx `:443` → `:8765` |
-| **Relay TCP** | fixed **`:55002`** — router forward WAN → host (see `install_coord1_home.sh`) | fixed public `:4002` on VM |
-
-Checklist before blaming the client:
-
-1. `curl …/health` → 200  
-2. `curl …/v1/relay | jq` → `"enabled": true`, non-empty `"addrs"`, stable `"peer_id"`  
-3. **Relay TCP reachable** — `nc -zv <relay-ip> <port>` from a WAN-like network (must not be `Connection refused`)  
-4. Server log: `relay v2 node started` with `advertised=[…]` (not `advertised=[]`)  
-5. Server log: `peer registered` after apps unlock (proves `POST /v1/register` succeeded)  
-6. Client log: `reservation accepted`, then `coord_registered=true` — not endless `waiting for relay/public listen endpoint before coord register`
-
-**Symptom → cause (coord HTTP logs):**
-
-| What you see | Meaning | Fix |
-|--------------|---------|-----|
-| `GET /v1/relay` 200, `GET /v1/peers/…` **404 only**, no `peer registered` | Peers never registered — coord bridge or register path failed | Fix relay TCP (firewall/port forward); see deploy README |
-| `GET /v1/peers/…` 404 after server restart | Stale presence TTL expired; peer not re-registered yet | Restart apps so they re-reserve and register |
-| `GET /v1/relay` 200 but client `Connection refused` / timeout on relay addr | HTTP advertises relay but TCP unreachable (home: router forward missing/wrong; GCP: firewall) | Home: forward **TCP 55002** on router, run `verify_coord1.sh`. GCP: open `:4002`. Clients refetch live `GET /v1/relay` (no disk cache) |
-| One side `reservation accepted`, other side 404 on coord lookup | **Asymmetric CGNAT bug** — phone never registered; Wi‑Fi side looks healthy | Check **phone** log for dial storm + missing `reservation accepted`; see § “CGNAT / mobile-data relay reservation” |
-| Phone log: many `coord relay dial` per second, no `bootstrap connection` | Bootstrap **dial storm** — do not add more dials; restore throttle + CGNAT probe path | `issue_bootstrap_dials`, `try_ghal_bol_probe_style_circuit_listen` in `retry_stalled_relay_reservations` |
-| `relay has no public address advertised` at server start | `GHAL_BOL_RELAY_PUBLIC_HOST` unset or relay disabled | Set public host; restart coord server |
-
-See [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md).
-
-**Home coord1 fixed relay (shipping):** `install_coord1_home.sh` binds **`0.0.0.0:55002`** and advertises `/dns4/coord1.ghalbol.com/tcp/55002` (4002 is often blocked on home routers). Forward **8443 + 55002** on the router; verify with `./ghal_bol_coord/deploy/verify_coord1.sh`. Stable port avoids the UPnP port-churn that caused stale coord presence and circuit dial timeouts (see changelog 2026-07-01). DDNS runs in-process inside `ghal_bol_coord` (no separate timer). Server still supports UPnP-dynamic relay (`GHAL_BOL_RELAY_DYNAMIC=1`) for experiments — not used on shipping coord1.
-
-### LAN vs WAN dial policy
-
-**Route priority when LAN is unknown:** coord lookup + coord bridge (WAN) for every configured contact. **LAN** (mDNS → direct TCP) **adds** when that peer is discovered on the local LAN — not from coord RFC1918 addrs alone. When **both** are available, **both stay active** (§ “Both links active” above) — this section is **not** “use only WAN when coord works.”
-
-- **WAN:** coord lookup + coord bridge (on CGNAT/mobile-data) + public TCP when registered. Lookup tries configured coord servers in order; **stop on first success** for that dial attempt; on reconnect after a drop, repeat the full list. Continues on Wi‑Fi even when mDNS shows the peer on LAN.
-- **LAN:** mDNS `Discovered` for the contact → dial direct TCP **in parallel** with WAN — additive, not a replacement for the relay link.
-- **Mobile-data:** no blind peer-id dials when coord is configured — explicit relay multiaddrs only.
-
-#### Immediate LAN shift + fast WAN fallback (mDNS-driven)
-
-LAN is faster and stronger, so a contact discovered on the LAN must shift onto it **immediately**, and a contact that **leaves** the LAN must fall back to WAN **without** a long stall — both are explicit connectivity requirements. `dial_mdns_peer` / the mDNS `Expired` handler in `chat_server.rs` enforce this:
-
-- **`Mdns::Discovered`** → `note_peer_on_local_lan` + merge LAN TCP candidates. First connect: one `dial_mdns_lan_addr` per peer when a **new** TCP candidate arrives (event-gated via `try_claim_lan_dial_slot`, not timers). If already connected over relay only, `dial_lan_upgrade` runs on **new** TCP candidate or mux recovery — additive, throttled only by native connect dial state.
-- **`Mdns::Expired`** → `note_peer_mdns_lan_addr_expired` removes **that** multiaddr from `peer_mdns_lan_candidate_addrs` (native connect often emits `Expired(old_port)` after `Discovered(new_port)` — do not wipe the whole peer on every expire). Only when **no** LAN candidates remain does `forget_peer_on_local_lan` drop the per-peer LAN preference (instead of waiting out `PEER_LAN_SEEN_TTL_MS` = 180s), so dial ranking returns to **WAN-first** at once, and coord/relay lookup re-runs so the peer stays reachable over the internet without delay. If the (now LAN-less) connection later drops, urgent reconnect (§ "Steady connection") takes over.
-
-Do **not** tear down the relay link on LAN discovery (that would drop in-flight messages and deactivate WAN). The upgrade is **additive** — both links active; stream reopen may attach on direct when both links exist.
-
-#### LAN + WAN parallel dial (supersedes “LAN relay vs mDNS race” defer policy — 2026-06-17)
-
-**Current policy:** LAN mDNS TCP and coord coord bridge dials **may run in parallel** for the same peer. Both links may remain connected. Throttles (`should_routed_dial`, `should_circuit_coord_dial`, per-peer intervals) prevent dial storms — **not** mutual deferral.
-
-| Mechanism | Rule |
-|-----------|------|
-| `dial_mdns_lan_addr` / `dial_dm_peer_addr` | Use `PeerCondition::NotDialing` for additive DM dials — LAN and WAN do not block each other |
-| `should_defer_coord_relay_for_lan` | **Removed / always false** — parallel transport supersedes defer-on-LAN |
-| `close_dm_relay_connections_for_peer` | **Do not call** on direct connect — keep WAN link active |
-| `ConnectionEstablished` relay + direct LAN | **Keep both** — do not `close_connection` on relay because direct is up; log `dm connection established … (relay)` and `(direct)` |
-| `coord_dial_from_lookup_addrs` on LAN | May **additive**-dial relay while direct connected — `wan_additive` when already connected; relay-only when direct is up |
-| `coord_lookup_dm_peer` | **Do not skip** coord lookup when `peer_on_local_lan` and native connect-connected — still additive relay dial; skip only when stable mux **and** relay link exists |
-| `connect_dm_peer_now` | From `dm_upkeep` when stream is down: **always** `notify_coord_lookup()` when coord configured (even during `circuit_dial_in_flight` — in-flight blocks replacement **dial**, not lookup wake); LAN from mDNS events only |
-| `dm_upkeep` coord loop | **Do not skip** lookup merely because `swarm.is_connected` — skip only when stable mux **and** relay link exist (`coord_lookup_upkeep_satisfied`); matches `coord_lookup_dm_peer` |
-| `peer_mdns_lan_candidate_addrs` | Live mDNS set only — **not** a dial cache; upkeep does **not** re-dial stale ports |
-
-
-**Healthy logs:** `mdns dialing` and `coord_lookup_peer ok — dialing` for the same peer on Wi‑Fi is **OK** when throttled; `dm connection established … (direct)` and/or `(relay)`; both `conn=true` briefly during LAN upgrade is OK.
-
-**Application layer (unchanged by parallel transport):** LAN and WAN links are independent; **message and ack state are not**. Every DM frame — text, `ack_received`, `ack_read` — is merged in **`dm_transcript_store` (E)** with monotonic delivery ranks (`read` > `delivered` > `sent`). See [DESIGN.md](DESIGN.md) § “Unified message state (E)”. Do **not** clear WAN links to “simplify” state; do **not** split stores per path.
-
-| Mechanism | Rule |
-|-----------|------|
-| `dial_mdns_lan_addr` (first connect) | `PeerCondition::NotDialing` — do **not** clear `circuit_dial_in_flight` to “make room” for LAN |
-| `dial_dm_peer_addr` (coord / identify) | `PeerCondition::NotDialing` — parallel with in-flight LAN or existing direct link |
-| `dial_additive_dm_addr` / `dial_lan_upgrade` | `NotDialing` while relay link exists — additive LAN |
-| Duplicate ack on both links | **E** applies higher rank only; `read` wins over `delivered` |
-
-#### LAN relay vs mDNS race (historical — defer policy superseded 2026-06-17)
-
-Older builds **deferred** coord relay while LAN dial was in flight to avoid native connect oneshot cancel. That caused WAN/LAN split-brain during handover (relay torn down, coord still listing circuit). **Current:** parallel dials + dual active links + unified store — see § “Parallel LAN + WAN transport”.
-
-**Historical broken behaviour:** `should_defer_coord_relay_for_lan` with `connected == true` gate — relay and LAN cancelled each other on first connect.
-
-**Historical log signature (fixed by parallel + NotDialing):** endless `mdns dialing` ~15s apart with competing defer blocking WAN fallback when LAN was dead (stale candidate set) — see § “Ephemeral LAN TCP ports”.
-
-#### Ephemeral LAN TCP ports and stale mDNS candidates (2026-06-15 — read before “fixing” ports)
-
-**There is no stable LAN TCP port to hardcode or guess.** Each `:p2p` / daemon start binds an **ephemeral** TCP port (e.g. Linux `tcp/45787` at 03:01, `tcp/39493` after rebuild at 03:19). That is normal native connect behaviour. LAN reachability comes from **live mDNS** (`Discovered` / `Expired`), not from remembering a number.
-
-**What actually broke (not “wrong port in config”):** we treated the in-memory mDNS candidate list like a **dial cache** and re-used dead ports after the peer moved.
+**There is no stable LAN TCP port.** Each process start binds **`0.0.0.0:0`** (ephemeral port). LAN reachability comes from **live mDNS**, not remembered ports.
 
 | Mistake | Effect |
 |---------|--------|
-| `peer_mdns_lan_candidate_addrs` kept every `Discovered` addr until manually cleared | Old and new ports coexisted (native connect advertises both briefly before `Expired`) |
-| `dm_upkeep` / `connect_dm_peer_now` **re-dialed LAN from that set** every ~16–20s | After native rebuild or listen rebinding, upkeep kept dialing `tcp/45787` while peer listened on `tcp/39493` |
-| `should_defer_coord_relay_for_lan` deferred WAN while **any** candidate remained | Stale LAN addrs blocked coord/relay fallback even when LAN was dead |
-| “Fixes” that **ranked** ports (highest port, newest timestamp, “preferred” addr, last-in-batch) | Masked the cache bug; agents kept adding heuristics instead of fixing ownership |
+| Re-dialing LAN from a cached candidate set on a timer | Stale port storms after peer restart |
+| Deferring coord/WAN because stale LAN candidate exists | Blocked bridge/delivery unnecessarily |
+| Port-ranking heuristics | Masks cache bugs |
 
-**Real log pattern (broken — same Wi‑Fi LAN, two devices):**
+**Correct model:**
 
-```text
-# Phone flow snapshot — Linux listen already moved
-listen_addrs=…/tcp/38437   dm=[peer:conn=false,stream=false]
+| Path | Rule |
+|------|------|
+| **LAN connect** | `Discovered` → dial **that** host:port once (dial inflight guard) |
+| **LAN expire** | `Expired` → remove session; clear LAN flag |
+| **Candidate memory** | Event-driven add/remove only — **not** upkeep re-dial source |
 
-# Phone upkeep — stale port from old discovery
-03:05:32  mdns dialing …/tcp/45787
-03:05:53  mdns dialing …/tcp/45787   ← same dead port, ~20s apart, for minutes
-```
+**LAN re-discovery:** mDNS query interval must stay **short** (seconds) via project mDNS config. Fast LAN recovery must work when coord/delivery WAN paths are down.
 
-Coord and relay were often fine (`coord_registered=true`, `reservation accepted`); chat still stuck at `outbound waiting: not connected` because LAN dials targeted a **stale** RFC1918 port. Probing with `nc` against the old port is misleading — TCP may accept while native connect/Noise handshake fails, or the port is simply wrong.
+**Wi‑Fi toggle recovery (summary):** connectivity notify → fresh ephemeral listen + mDNS republish + purge stale candidates; coord `schedule_register_presence_force` when listen/public IP changes. Do not destructive-restart mDNS every tick (port churn storm).
 
-**Correct model (current `chat_server.rs`):**
-
-| Path | Owner | Rule |
-|------|--------|------|
-| **LAN connect** | mDNS events | `Discovered` → dial **that event’s** new LAN TCP (`handle_mdns_discovered_list` + `try_claim_lan_dial_slot`). Dial fail or `Expired` → remove addr; try next set member once (`try_mdns_lan_failover_dial`); then coord. |
-| **WAN reconnect** | `dm_upkeep` | `connect_dm_peer_now` → coord lookup + relay dial when stream is down — **may run in parallel** with any in-flight LAN dial from mDNS; **never** re-dial LAN TCP from `peer_mdns_lan_candidate_addrs` on a timer. |
-| **Defer relay / defer coord** | — | **`should_defer_coord_relay_for_lan` always false** — superseded 2026-06-17; parallel LAN+WAN. |
-| **Candidate set** | `peer_mdns_lan_candidate_addrs` | Live set: add on `Discovered`, remove on `Expired` / dial fail — **not** a ranked dial cache. Order is not meaningful (`peer_mdns_lan_addr` returns any remaining member for failover only). |
-
-**Removed — do not reintroduce:** `rank_mdns_lan_tcp_candidates`, `pick_mdns_lan_tcp_addr`, `peer_mdns_lan_preferred`, highest-port trim, `MDNS_LAN_CANDIDATE_TTL_MS` / port-age ranking, upkeep LAN re-dials, “guess live port” docs or agent workflows.
-
-**Log signatures (fixed — after full app restart with current native):**
-
-```text
-03:19:42  mdns discovered …/tcp/39493
-03:19:42  mdns discovered …/tcp/44397      ← multiple addrs in one burst is normal
-03:19:42  mdns dialing …/tcp/39493         ← once, from discovery (first new LAN TCP)
-03:19:44  chat_ready
-(silence — no repeated mdns dialing to the same port while conn=true, stream=true)
-03:20:13  flow … dm=[peer:conn=true,stream=true] listen_addrs=…/tcp/35407
-```
-
-Compare `mdns discovered` / `listen_addrs` in the ~30s `Native/flow` snapshot: the dialed LAN port must match a **current** discovery line, not an addr from minutes ago.
-
-See [DESIGN.md](DESIGN.md) § “Dial strategy — parallel LAN + WAN”. Do not add Dart dial policy, RFC1918 /24 guessing from coord, or port-ranking heuristics .
-
-### LAN stability — cold start and Wi‑Fi toggle (verified 2026-06-16)
-
-**Status:** Short-duration manual testing on Linux desktop + Android shows **cold-start LAN chat** and **Wi‑Fi off/on on the same subnet** both recover without breaking the link. Long soak / LAN↔WAN↔LAN cycles depend on § **Network truth** and § **Asymmetric LAN↔WAN mux recovery** (2026-06-19).
-
-#### LAN re-discovery cadence — mDNS query interval (canonical, 2026-06-25)
-
-**Symptom (flutter_linux.log + flutter_android.log, WAN/relay down so LAN-only):** two devices on the **same Wi‑Fi** discovered each other once (`mdns discovered … connected`), the direct link later dropped, and then **neither re-discovered the other for 3–5 minutes** — both logged `LAN soft rediscovery — link down, no mDNS candidate yet` every ~8s with `active_links=0`. Because WAN/relay was also down (local server bore unreachable), the app looked completely broken even though both peers were on the LAN. This is the case the prime directive forbids: **WAN/coord/relay being down must not stop LAN.**
-
-**Root cause:** `native connect::mdns::Config::default()` polls the network only every **`query_interval` = 5 minutes** (and TTLs records for 6 minutes). The "Receiving an mdns packet resets the timer" note means steady traffic keeps it quiet, but **once a peer's record expires after a link drop, the next active query can be up to 5 minutes away.** Our event-driven LAN dial (`handle_mdns_discovered_list`) is correct, but it only fires on a `Discovered` event — and with a 5-minute query interval those events simply stop coming after a drop. The throttled soft-nudge (`restart_mdns_behaviour(force=false)`) mostly no-ops (correctly — destructively restarting mDNS every tick caused the older `mdns restarted … no mdns discovered` port-churn storm), so nothing forced a fresh query.
-
-**Fix (`behaviour.rs` `ghal_bol_mdns_config()`, used at initial creation and in `restart_mdns_behaviour`):** set `query_interval = LAN_MDNS_QUERY_INTERVAL_SECS` (5s). A dropped LAN link is now re-discovered within seconds via the normal mDNS query loop, with **no port rebind and no destructive restart** — the ephemeral TCP listen port stays stable (§ "Ephemeral LAN TCP ports") and discovery remains event-driven. mDNS multicast queries are tiny and the library resets the timer on any received packet, so steady-state traffic stays low. This makes LAN recovery fast and **fully independent of WAN/coord/relay state.**
-
-**FORBIDDEN — agents must not reintroduce:**
-
-1. `native connect::mdns::Config::default()` (5-minute query interval) for the chat node — always build via `ghal_bol_mdns_config()` so LAN re-discovery stays in the seconds range. A 5-minute interval reads as "LAN broken when WAN is down".
-2. "Fixing" slow LAN re-discovery by rebinding the ephemeral TCP port or destructively restarting mDNS on a tick — that is the older churn storm (§ "Ephemeral LAN TCP ports", 2026-06-23 changelog). Fast re-discovery comes from the **query interval**, not from restarts.
-
-**Network mode:** See § **Network truth — OS default route** (canonical). Summary: OS default transport + validated flag drive `profile=`; `if_addrs` is secondary; `Native/flow` logs `os=wifi|cell/validated/…`.
-
-**What broke Wi‑Fi switch (not “wrong port in config”):**
-
-| Bug | Symptom | Fix |
-|-----|---------|-----|
-| **Full kick same tick as circuit dial** (2026-06-19) | Stream drop → full LAN handover + WAN circuit dial same upkeep tick → `NoReservation` / relay churn | **Defer** close/rebind ephemeral TCP while `circuit_dial_in_flight`; soft nudge + `pending_full_lan_kick_reason`; flush full kick when dial completes — § “Deferred full LAN kick”. **Not** soft-only forever. |
-| **Soft mDNS-only upkeep** (no pending full kick) | Repeating `LAN soft rediscovery`, never `fresh ephemeral TCP listen` | Upkeep must call full `kick_lan_dm_rediscovery_after_handover` when no circuit dial in flight, or flush pending queue. **Exception:** `handle_lan_interface_drift` defers full kick (soft + `pending_full_lan_kick`) while coord relay bootstrap/circuit is live; CGNAT/VPN-only listen when bootstrap down — soft nudge only |
-| **Recovery throttle double-consume** | Upkeep called `should_run_lan_recovery` then only soft-restarted mDNS; full kick was throttled out | Let `kick_lan` own the throttle; do not pre-consume it before a soft restart |
-| **Daemon restart / empty `peers_on_local_lan`** | Link down, no `mdns discovered` after sync | `peer_eligible_for_lan_handover`: prior mDNS/LAN sighting or Wi‑Fi pending outbox with LAN history — not bare foreground room for WAN-only peers; not every roster peer |
-| **Linux missing link-up event** | Same-subnet toggle: profile stayed `lan`, no handover key change, no kick | `linux_network::poll_wifi_link_up_transition` → `notify_network_change` → forced kick |
-| **Poll path skipped DM-down-on-LAN** | Streams down on LAN but 1s poll never kicked | `dm_down_on_lan = on_lan && needs_lan` (not only on connectivity notify) |
-| **Profile lag after mobile↔Wi‑Fi toggle** | `profile=` wrong for minutes; ticks/outbox stuck | § **Network truth** — `os=` must flip in ~1s; rebuild native if missing |
-| **Asymmetric mux loop** | `reopen peer off LAN` every 1s; relay churn; one side `(direct)` other `(relay)` | § **Asymmetric LAN↔WAN mux recovery**; `close direct … relay kept` |
-| **Relay-missing = unstable mux** (2026-06-24) | Healthy LAN chat then dead after backlog; endless coord HTTP/dials | Use `needs_additive_relay_dial` — do **not** set `dm_peer_chat_link_stable=false` for missing relay hop alone |
-| **Full kick on every dial fail** (earlier) | `closed stale LAN ephemeral TCP listener` every ~200ms | Failover removes addr + `notify_dm_presence_wake`; full kick only on handover / upkeep / connectivity |
-
-**Required recovery sequence after Wi‑Fi toggle** (`kick_lan_dm_rediscovery_after_handover`):
-
-1. Purge `peer_mdns_lan_candidate_addrs` for DM peers; clear `lan_dial_in_flight` / `lan_candidates_exhausted`
-2. `ensure_lan_tcp_listen(handover=true)` — close stale ephemeral listeners, bind fresh `/ip4/0.0.0.0/tcp/0`
-3. `restart_mdns_behaviour(force=true)`
-4. `notify_stream_reopen`, `clear_coord_lookup_backoff_all`, `schedule_register_presence_force`
-
-**Triggers:** Android/Linux connectivity notify; `lan_handover_upkeep` when link down + no candidate (5s throttle); `handle_lan_interface_drift` (`lan`→`lan` key change — **defer** full kick while relay bootstrap/circuit is live, else full kick; CGNAT/VPN-only + bootstrap down → soft only); mobile-data→LAN `handle_lan_path_restored`.
-
-#### Deferred full LAN kick (2026-06-19 — parallel LAN + WAN)
-
-**Problem observed:** A transient LAN/stream drop in the same `dm_upkeep` tick as an outbound **coord bridge dial** could run full `kick_lan_dm_rediscovery_after_handover` (close ephemeral TCP listeners, rebind `/tcp/0`, purge mDNS candidates) while native connect was still handshaking on the WAN path. Symptom: relay `NoReservation`, coord 404 flap, minutes to recover — even when coord HTTP was healthy.
-
-**Why full kick matters (unchanged):** Wi‑Fi toggle / cold start LAN recovery **requires** fresh ephemeral TCP + force mDNS. Soft mDNS **alone** without a follow-up full kick leaves stale ports .
-
-**Policy — two phases, not either/or:**
-
-| Phase | When | What runs |
-|-------|------|-----------|
-| **Interim (soft)** | LAN upkeep needs recovery **and** `any_dm_circuit_dial_in_flight` | `soft_lan_rediscovery_nudge` — mDNS restart (no force), stream reopen, presence wake. **Queue** `pending_full_lan_kick_reason`. WAN circuit dial continues undisturbed. |
-| **Full kick** | No circuit dial in flight **or** pending queue flush after dial ends | `kick_lan_dm_rediscovery_after_handover` — purge candidates, `ensure_lan_tcp_listen(handover=true)`, force mDNS, coord backoff clear. |
-
-**Implementation (`chat_server.rs`):**
-
-- `lan_handover_upkeep_if_needed`: circuit in flight → `note_pending_full_lan_kick` + soft; else → full kick immediately.
-- `try_flush_pending_full_lan_kick`: called at start of LAN upkeep (after `expire_stale_circuit_dials` in `dm_upkeep`) when in-flight window clears.
-- Connectivity notify / forced `kick_lan(..., force=true)` still run full kick and clear pending.
-
-**Healthy logs (deferred path):**
-
-```text
-LAN soft rediscovery — circuit dial in flight — defer fresh TCP listen
-… circuit dial completes or times out …
-LAN DM rediscovery — deferred full kick (link down, no mDNS candidate yet)
-LAN handover — fresh ephemeral TCP listen for mDNS
-mdns discovered …/tcp/XXXXX
-```
-
-**Interface drift defer (2026-07-02 — phone Wi‑Fi→cell):** same `pending_full_lan_kick` queue when `handle_lan_interface_drift` sees `lan→lan` while coord relay bootstrap/circuit is live — bootstrap TCP must not be torn before `left LAN`:
-
-```text
-LAN interface drift — defer full kick (relay bootstrap/circuit up); soft nudge
-LAN soft rediscovery — interface drift — defer full TCP rebind
-… left LAN …
-relay-client: inbound circuit from <peer>
-inbound on duplicate mux from <peer> — adopt live writer (stale mux replaced)
-ack_received from <peer> ref=<id> — our outbound delivered
-```
-
-**Do not regress:**
-
-- Using soft path when **no** circuit dial is in flight (Wi‑Fi toggle must get full kick immediately).
-- Never flushing pending (soft forever — same as old soft-only bug).
-- Full kick on every LAN dial `OutgoingConnectionError` (failover + presence wake only; full kick on handover/upkeep).
-
-**Success logs (within ~5–15s after Wi‑Fi back):**
-
-```text
-LAN DM rediscovery — Wi‑Fi back (connectivity notify)
-  or LAN DM rediscovery — link down, no mDNS candidate yet
-LAN handover — fresh ephemeral TCP listen for mDNS
-mdns restarted after LAN handover
-mdns discovered …/tcp/XXXXX
-mdns dialing …/tcp/XXXXX          ← same port as discovered
-dm connection established … (direct)
-chat_ready
-```
-
-### Event-driven async — avoid assumed timers (canonical)
-
-**Product rule (general — not limited to dial or handover):**
-
-Whenever **policy** needs an outcome whose **duration is unknown** (connect, listen, reserve, lookup, stream open, register, path shift, …), **do not** drive that policy on guessed intervals (`sleep(N)`, grace windows, “retry every tick until maybe ready”). Instead:
-
-1. **Worker (B)** — owns the long-running or async operation until the stack reports a **fact** (success, failure, disconnect, new addr, HTTP response, …).
-2. **Policy (A)** — **subscribes** to those facts and reacts **immediately** (open stream, drain outbox, failover, invalidate state, shift LAN↔WAN).
-3. **Timers** — only where the **stack or flood prevention** requires them (TCP/circuit in-flight observation, storm throttles, keepalive below idle timeout, register dedupe when endpoints unchanged). Never as a substitute for “we don't know when B will finish.”
-
-The **A / B subscriber model** is an **analogy** for this split — one example is “A needs a peer connected; B keeps dialing until native connect notifies.” The **same pattern** applies anywhere Rust/product waits on work it cannot time-bound.
-
-**Where this applies in Ghal Bol (non-exhaustive):**
-
-| Area | A (policy — react on signal) | B (worker — unknown duration) | B → A signals (examples) |
-|------|------------------------------|-------------------------------|---------------------------|
-| **LAN / WAN connect** | Stream-first connect, parallel route pick (LAN + WAN throttled) | `swarm.dial`, mDNS browse, relay reserve | `ConnectionEstablished`, `OutgoingConnectionError`, mDNS `Discovered`/`Expired` |
-| **Network handover** | `kick_lan` once, purge stale addrs, reopen streams — **parallel** with WAN recovery | mDNS restart, ephemeral listen, relay reserve | Connectivity notify, profile change, relay `ListenerClosed` |
-| **Coord / WAN backup** | Lookup when stream down, outbox waiting, or LAN path exhausted | HTTP lookup, coord bridge dial | Lookup ok/404/error, bootstrap connected, reservation accepted |
-| **DM stream** | Open mux, drain outbox, read-ack gate | `open_stream`, mux read/write | Stream ready, `receiver is gone`, connection closed |
-| **Presence / register** | Publish when endpoints **change** | `POST /v1/register`, relay listen set | Endpoint diff, reservation accepted, handover kick |
-| **Flutter UI** | Render transcript/ticks from native stores | — | Poll is **display only** — never connect/ack policy |
-
-**Anti-pattern (any area):** A polls or sleeps because B might be done “by now”; tick loops that re-kick the same recovery (mDNS, stream reopen, coord) without a new event; tuning `N` seconds instead of wiring the subscriber.
-
-**Allowed timers (guardrails only — all areas):**
-
-- In-flight observation while B runs (`LAN_DIAL_IN_FLIGHT_MS`, `CIRCUIT_DIAL_IN_FLIGHT_MS`) — track B, do not replace its events
-- Storm throttles (`should_issue_bootstrap_dial`, `should_routed_dial`, `should_throttle_register`)
-- Keepalive ping < idle connection timeout
-- Backoff after **confirmed** failure (404, refused) — not preemptive “wait before trying”
-
-
-#### Connectivity — one application of the rule (`chat_server.rs`)
-
-| Event (B finished or failed) | A reacts immediately |
-|------------------------------|-------------------|
-| Android `ConnectivityManager` / Linux `wl*` operstate up / profile change | `kick_lan_dm_rediscovery_after_handover` **once** (fresh listen + force mDNS + purge stale addrs) |
-| mDNS `Discovered` (direct LAN TCP) | `dial_mdns_lan_addr` / `dial_lan_upgrade` on **that** addr |
-| mDNS `Expired` / LAN dial `OutgoingConnectionError` | Drop addr, failover candidate or `notify_coord_lookup` |
-| `ConnectionEstablished` (DM) | `note_connection_path`, clear in-flight dials, open chat stream |
-| `ConnectionClosed` / full DM disconnect | `recover_dm_peer_after_disconnect` (stream reopen + mDNS or coord) — **not** full `kick_lan` (avoids killing a link that just connected) |
-| LAN dial no longer in flight + candidates exhausted | `notify_coord_lookup` (WAN backup) |
-
-**`dm_upkeep` (~1s)** drains outbox, read-ack retries, and work **already queued by events** — it is **not** the connect owner and must **not** poll “is handover still active?” to re-kick mDNS, reopen streams, or pause all coord on a clock.
-
-### Roaming
-
-- **This device** — Android `ConnectivityManager` callbacks in `:p2p` (thin hook → Rust `android_network.rs`), Linux `wl*` operstate poll (`linux_network.rs` on `network_tick`), 1s interface profile poll, WAN relay recovery when coord URL is set. **Flutter must not** call network-change RPCs; UI only polls for display.
-- **Wi‑Fi return (soft handover)** — when `has_active_lan` flips false→true (e.g. mobile-data → Wi‑Fi while rmnet/CGNAT iface still visible), `handle_lan_path_restored` runs: ephemeral LAN TCP listen, mDNS behaviour restart (throttled), clear `lan_candidates_exhausted`, `mark_dm_reconnect_urgent_unless_live_direct_stream`, coord register refresh — **no** `coord_invalidate` / forced WAN recovery. On-LAN DHCP drift (`lan`→`lan` handover key change) uses `handle_lan_interface_drift` → **defer** full kick (soft nudge + `pending_full_lan_kick`) while coord relay bootstrap/circuit is live; **full** kick when bootstrap is not tracked; CGNAT/VPN-only listen with bootstrap down → soft only. `apply_left_lan_handover` clears pending kick. Leaving LAN **immediately** purges mDNS state then full WAN handover.
-- **Wi‑Fi toggle (same subnet, both still on LAN)** — see § **“LAN stability — cold start and Wi‑Fi toggle”** (canonical). Summary: OS link-up hint → `notify_network_change` → **`kick_lan_dm_rediscovery_after_handover` once**; upkeep repeats full kick (throttled) when link down + no mDNS candidate — **not** soft mDNS-only restart. mDNS **`handle_mdns_discovered_list`** dials LAN TCP on every `Discovered` event when disconnected. **LAN connect is mDNS event-driven only** — no upkeep LAN re-dial from cache.
-- **Coord tick** — periodic lookup (~5s) plus immediate lookup when send is queued and peer is not connected.
-
-### Steady connection when both peers are online (do not regress)
-
-The link between two online contacts must stay **steady** — no idle drops, and fast recovery from a transient blip — so messages are not delayed by a full reconnect. Mechanisms in `chat_server.rs` enforce this:
-
-1. **Keepalive ping** — `ChatBehaviour.ping` pings every `PING_INTERVAL_SECS` (8s), comfortably under `SWARM_IDLE_CONNECTION_TIMEOUT_SECS` (45s Android / 300s desktop). A healthy-but-quiet chat connection is therefore never dropped between messages. Do **not** remove ping or raise the interval above the idle timeout. **Idle open DM stream** (hub closed, no inbound frames) is **not** stale — `dm_peer_stream_up` / `dm_link_needs_recovery` must not churn coord/LAN while the mux writer is live.
-2. **Partial connection close** — native connect may hold several parallel TCP paths to the same DM peer (brief mDNS burst before first connect). When one path closes, emit `PeerDisconnected` / clear the stream writer / `note_disconnected` **only if** `!swarm.is_connected(peer)` — otherwise log at debug and keep the live stream. **LAN dials are mDNS event-driven** (`handle_mdns_discovered_list`); **`dm_upkeep` → `connect_dm_peer_now`** may trigger coord/WAN **and** dial a live mDNS addr when present — **in parallel**, throttled — but must **not** re-dial stale LAN TCP from `peer_mdns_lan_candidate_addrs` on a timer (§ “Ephemeral LAN TCP ports”). Do **not** open parallel mDNS dials while a LAN dial is already in flight (`lan_dial_in_flight` → skip). On `OutgoingConnectionError` for a LAN TCP addr, remove that addr and fail over to the next set member once (`try_mdns_lan_failover_dial`), then `notify_coord_lookup` when exhausted. **Linux desktop** idle link timeout is **120s** (not 300s) so quiet LAN links recycle sooner after listen-port changes — still above keepalive ping interval.
-3. **Urgent reconnect** — on full `dm peer disconnected` (no native connect link left), the peer’s key enters a bounded urgent window (`DM_RECONNECT_URGENT_WINDOW_MS`, 30s) via `mark_dm_reconnect_urgent`. While urgent (`is_pk_reconnect_urgent`), coord lookup **skips** the `peer_not_on_server` 404 backoff and the 1s upkeep tick retries reconnect immediately, instead of waiting for the 5s coord tick or the exponential backoff. The window is cleared on successful reconnect. **Relay bootstrap loss** must not mark urgent / coord-lookup peers that already have a **live direct LAN stream** (`mark_dm_reconnect_urgent_unless_live_direct_stream`).
-4. **Reserve on all configured coord relays in parallel, throttled per relay** — `try_relay_reservations` issues `listen_on(/p2p-circuit)` to every connected **Ghal Bol relay** (from `GET /v1/relay` on each configured coord URL) that is not already circuit-listening, and `try_relay_reservation` enforces a per-relay throttle (`RELAY_RESERVE_THROTTLE_MS`). Do **not** use public IPFS bootstrap peers for relay reservation or peer discovery. The client **dials relay base TCP first**, then reserves after identify. The anti-pattern is re-issuing `listen_on` **every tick** (a 1s storm), **not** covering all relays once: serializing onto a single relay let one pending-but-never-accepted reservation block the others, so WAN readiness took minutes or never came up. Per-relay throttling keeps the parallel fan-out storm-free.
-5. **Bootstrap relay dial throttle (CGNAT)** — `issue_bootstrap_dials` / `should_issue_bootstrap_dial` limit redundant `swarm.dial` to the same coord relay (10s normal, 3s minimum during forced WAN recovery). Uncoordinated dials from `maybe_refresh_ghal_bol_relay`, `ensure_coord_relays_connected`, and `redial_tick` **without** this throttle have repeatedly caused a **dial storm** that prevents bootstrap TCP from ever completing on mobile-data/CGNAT.
-6. **Stream mux recovery** — on `open_stream` failure (`receiver is gone`) or send `chat stream closed`, `request_dm_stream_reopen` clears the writer and reopens on the **existing** native connection on the next upkeep tick. Do **not** `disconnect_peer_id` while a direct route may still work. Outbox retries use the same stream — no teardown on `on_wire` timeout alone.
-7. **Presence wake (inactive → active)** — when **this** device re-announces on coord (`try_register_presence` ok, relay `reservation accepted`, app `ui_visible=true`, or network handover), `notify_dm_presence_wake` runs on the next `dm_upkeep` tick (~1s): clears `peer_not_on_coord` backoff for known contacts **without** a live stream and opens a 30s urgent reconnect window. Peers with `dm_peer_stream_up` are skipped. Coord is the WAN phone book; mDNS is the LAN fast path — both are discovery inputs only (stream-first).
-
-
-This bug has come back **multiple times**. It is **not** the same as “relay server down” or “Linux relay OK so WAN is fine”. Symptom pattern is often **asymmetric**:
-
-| Side | Typical profile | What you see |
-|------|-----------------|--------------|
-| Wi‑Fi / LAN desktop | `profile=lan` | `bootstrap connection` → `reservation accepted` → `coord_registered=true` in ~5–10s |
-| Mobile-data / CGNAT phone | `profile=mobile-data`, `cgnat=true` | Endless `CGNAT listen addr only — waiting for coord bridge circuit`; **no** `bootstrap connection`, **no** `reservation accepted` |
-| Wi‑Fi side looking up phone | — | Coord lookup **404 forever** for the phone’s public key (phone never registered) |
-| Phone looking up Wi‑Fi side | — | `coord_lookup_peer ok` + dials peer’s coord bridge — **one-way** visibility, still **no chat** |
-
-### Outbound peer relay dials vs own reservation (do not conflate)
-
-Two different relay-related actions must stay separate in `dial_dm_peer_addr` / coord lookup paths:
-
-| Action | Target | Requires own `relay_circuit_listening`? | Throttle |
-|--------|--------|----------------------------------------|----------|
-| **Bootstrap / coord relay TCP** | `GET /v1/relay` base multiaddr | No (establishes path to infrastructure) | `issue_bootstrap_dials` / `should_issue_bootstrap_dial` |
-| **Own circuit reservation** | `listen_on(…/p2p-circuit)` on coord relay | Yes — result is **your** publishable WAN addr | `try_relay_reservation`, CGNAT probe `listen_on` |
-| **Outbound dial to peer** | Peer’s `/p2p-circuit` addr from coord lookup | **No** — peer already registered; client routes through coord relay bootstrap TCP | `should_routed_dial` in `dial_dm_peer_addr` (2s per peer for coord tag) |
-
-**Why:** A CGNAT phone can reach a Wi‑Fi desktop as soon as coord lookup returns the desktop’s coord bridge. Waiting for the phone’s own `reservation accepted` before dialing the peer adds tens of seconds of dead WAN for no transport reason.
-
-
-**Log signatures (phone / CGNAT side):**
-
-- Many `coord relay dial …` lines **per second** (not once every 10–12s) — **bootstrap dial storm**
-- `node_ready` fires but relay never comes up
-- Never `reserving circuit on …` or `ghalbol circuit listen (probe path) …` after the first seconds
-- Never `WAN not ready at startup — begin recovery pass` on builds **before** the fix (recovery started too late)
-
-**Root causes (both must be guarded in code):**
-
-1. **Dial storm** — `GET /v1/relay` refetch (every ~5s when not registered), WAN recovery, and bootstrap redial all called `swarm.dial` to the same relay with **no per-relay throttle**. Pending dials pile up; bootstrap TCP never completes on cellular/CGNAT even when the relay is reachable from Wi‑Fi.
-2. **Wrong path while bootstrap TCP is pending** — `try_relay_reservations` only runs after `any_bootstrap_connected`. On CGNAT, bootstrap TCP can stay pending for a long time if dials are spammed. The fix is **probe-style** `listen_on(…/p2p-circuit)` via `try_ghal_bol_probe_style_circuit_listen` when `on_mobile_data_path()` and not yet circuit-listening — same idea as `examples/relay_probe.rs`. native connect’s relay client establishes the link through `listen_on`, not only through a completed outbound dial + `ConnectionEstablished`.
-
-**Required behaviour (`chat_server.rs` — do not regress):**
-
-| Mechanism | When |
-|-----------|------|
-| `issue_bootstrap_dials` + `should_issue_bootstrap_dial` | Every coord-relay `swarm.dial`; clears on network handover |
-| Probe-style `listen_on` at **startup** | `coord_only` + `on_mobile_data_path()` + no circuit yet, right after first `dial_coord_relays` |
-| `begin_wan_recovery` at **startup** | Same condition — do not wait for the first `coord_tick` on CGNAT |
-| Probe in `retry_stalled_relay_reservations` | `!any_bootstrap_connected` + `on_mobile_data_path()` + not circuit-listening |
-| `try_relay_reservation` after identify | Normal path once bootstrap TCP **is** connected (Wi‑Fi / fast paths) |
-| `should_routed_dial` in `dial_dm_peer_addr` | Every coord/mDNS peer addr dial — prevents oneshot cancel / relay rate-limit storms **without** blocking first connect |
-| `circuit_dial_in_flight_ms` | Blocks replacement coord relay dials for **45s** after each outbound circuit dial (`circuit_dial_in_flight_blocks`); cleared on `ConnectionEstablished` / `OutgoingConnectionError`; `expire_stale_circuit_dials` on dm upkeep after 45s — **do not** clear early while native connect is still handshaking (oneshot cancel) |
-
-**Do not “fix” this by:**
-
-- Removing probe-style listen from CGNAT paths — Wi‑Fi-only testing will still pass while phones stay broken.
-- Calling probe-style `listen_on` on **every** `coord_tick` / `try_relay_reservations` when bootstrap is still dialing — that poisons `RELAY_RESERVE_THROTTLE_MS` (see anti-pattern § “Steady connection” item 3). Probe belongs at startup and in `retry_stalled` when bootstrap is **not** connected, plus after identify when connected.
-- Assuming one device’s `reservation accepted` means chat works — **both** peers must register on coord.
-- **Blocking outbound peer relay dials until own circuit listens** — confuses “dial peer from coord” with “reserve own circuit”; see § “Outbound peer relay dials vs own reservation” above.
-
-**Verify on two devices:** Android on mobile data + Linux on Wi‑Fi. Within ~15s of `:p2p` start, **phone** log must show `reservation accepted` (or probe path then accepted), then `coord_registered=true`. Until then, the other side’s coord lookup 404 for that peer is **expected**, not a coord-server bug.
+See [DESIGN.md](DESIGN.md) § dial strategy. No UI dial policy or RFC1918 guessing from coord rows.
 
 ---
 
-## Multiple coord / relay servers
+## Event-driven async — avoid assumed timers (canonical)
 
-The app accepts a **list** of coord server base URLs via **`GHAL_BOL_COORD_URLS`** in `ghal_bol_ui/env/.env.development` / `.env.production` (JSON array or comma-separated; no hardcoded URLs in Rust). Today a single entry is typical (`https://coord.ghalbol.com`); the API is an array for future redundancy. Each entry is a full **coord bridge** pair — HTTP presence plus a co-located coord bridge node (`GET /v1/relay` on that host).
+Whenever policy waits on work with **unknown duration** (TCP connect, bridge WSS, HTTP register, mDNS discovery), use **workers + events**, not “sleep N then retry.”
+
+1. **Worker** — owns the operation until success/failure (dial task, bridge accept, delivery poll).
+2. **Policy** — reacts to events (session up → drain outbox; expired → clear LAN; HTTP ok → set registered).
+3. **Timers** — guardrails only: storm throttles, heartbeat/register dedupe, bridge accept backoff, in-flight dial observation.
+
+| Area | Worker | Policy reacts to |
+|------|--------|------------------|
+| LAN connect | `dial_peer_tcp`, mDNS forwarder | `Discovered`, connect result, `Expired` |
+| WAN call | bridge request + WSS | pending poll, WSS open, mux ready |
+| WAN text | delivery_runtime | mailbox events (not connect poll) |
+| Register | `coord_register_tick` | endpoint diff, failure, stale presence |
+| Makepad | — | Poll **display only** |
+
+**Anti-pattern:** upkeep loops that re-kick the same recovery without a new event.
+
+---
+
+## Multiple coord servers
+
+Configure **`GHAL_BOL_COORD_URLS`** in `env/.env.development` / `.env.production` (JSON array or comma-separated).
 
 | Action | Policy |
 |--------|--------|
-| **Register** | Register presence (and coord bridge addr) on **every** reachable coord in the list |
-| **Lookup** | When dialling a peer, try coord servers in order; **stop on first successful lookup + connect** |
-| **Reconnect** | After a connection drop while internet is active, repeat lookup across the full list |
-| **Coord unreachable** | Keep retrying all entries on the regular interval; **LAN (mDNS) unaffected** |
+| **Register / heartbeat** | Every reachable coord URL in the list |
+| **Lookup** | Try URLs **in order**; stop on first success for that attempt |
+| **Reconnect** | After drop, repeat lookup from the first server |
+| **Unreachable** | Keep retrying all entries; LAN mDNS unaffected |
 
-Do not substitute Kademlia DHT or public native connect bootstrap peers when a coord lookup fails — WAN discovery requires coord/relay.
-
----
-
-## coord bridge-client WAN state machine (client)
-
-All WAN circuit reservation must go through **`ensure_wan_relay_circuit`** in `chat_server.rs` — not ad-hoc `listen_on` from scattered ticks. rust-coord bridge-client behaviour that agents must respect:
-
-| Constraint | Why |
-|------------|-----|
-| HOP pins to **one** bootstrap TCP link | Dual-stack happy-eyeballs can open v4+v6; prune to one anchor before `listen_on`. **`listen_on` must use the live HOP TCP multiaddr** from `bootstrap_tcp_conns`, not the dial-cache addr (desktop IPv6-unreachable + IPv4 HOP was a common stall). |
-| New `listen_on(/p2p-circuit)` **cancels** in-flight reservation | Never re-issue while `relay_reserve_in_flight_ms` is set (30s timeout). |
-| **Identify** on bootstrap before reserve | Prefer `bootstrap_identified` after `Identify::Received`; if Identify was drained during `bootstrap_publishable_listen`, allow `listen_on` after `RELAY_TCP_HOP_FALLBACK_MS` (~800ms) on an established bootstrap TCP link. |
-| Startup listen wait | `bootstrap_publishable_listen` forwards **all** swarm events through `handle_swarm_event` — never drop Identify/Relay in a partial match. |
-| Probe `listen_on` **only** when bootstrap TCP is down | CGNAT path; never parallel with active bootstrap dials. |
-| Throttle redundant dials / listens | `issue_bootstrap_dials`, `RELAY_RESERVE_THROTTLE_MS` — storms break mobile CGNAT. |
-
-Phases: dial bootstrap (all families, one throttle window) → Identify → prune HOP → settle 450ms → **one** `listen_on` → `ReservationReqAccepted` → coord register.
+Each URL is **HTTP(S) presence + bridge WSS on the same host**.
 
 ---
 
-When neither peer is directly reachable (home‑NAT desktop ⇄ CGNAT phone), WAN needs a **Ghal Bol relay** that reliably grants coord bridge reservations. `ghal_bol_coord` runs its **own** relay node next to each HTTP coordinator. The HTTP API stays a lightweight presence phone book; peers discover and dial each other via **`/p2p-circuit`** multiaddrs the relay server upserts on coord when a reservation is accepted. Chat and call media ride that circuit (and parallel LAN direct when mDNS finds the peer) — **not** DCUtR hole-punch. **Public IPFS bootstrap peers are not used** for peer discovery or relay reservation.
+## Caching policy (canonical)
 
-**Server (`ghal_bol_coord/src/relay.rs`)**
-- coord bridge + Identify (`/ghal-bol/1.0.0`) + Ping over **TCP + Noise + Yamux** (native connect 0.56, protocol‑identical to the client).
-- Stable ed25519 identity persisted at `<data_dir>/relay_ed25519.key` → constant PeerId across restarts. (The relay's **own** node key is ed25519 — that is fine; it is infrastructure, not a user identity.)
-- **The relay's `native connect` MUST enable the `secp256k1` feature** (`ghal_bol_coord/Cargo.toml`). Ghal Bol **clients authenticate with their secp256k1 device identity** (golden rule 7 / [IDENTITY.md](IDENTITY.md)). The Noise handshake authenticates the remote's identity public key, so a relay built **without** `secp256k1` cannot decode/verify a secp256k1 client and **drops the connection mid‑handshake** — the client sees `Decode(Io(UnexpectedEof))`, the circuit listener closes (`addrs=[]`), `coord_registered=false`, and **no real device can ever reserve a circuit** (every device uses a secp256k1 key). A minimal probe using an ed25519 key will *appear* to work and hide this — always test the relay with a **secp256k1** key (`PROBE_SECP256K1=1` in `examples/relay_probe.rs`).
-- **Dual-stack (IPv4 + IPv6, IPv6 preferred).** The relay listens on the configured address **and** the counterpart-family wildcard on the same port (`GHAL_BOL_RELAY_LISTEN` default `0.0.0.0:4002` ⇒ also `[::]:4002`), so it accepts both IPv4 and IPv6 clients. A counterpart-listen failure (host without that stack) logs a warning and continues single-stack.
-- Env: `GHAL_BOL_RELAY_ENABLE` (default on), `GHAL_BOL_RELAY_LISTEN` (default `0.0.0.0:4002`), `GHAL_BOL_RELAY_PUBLIC_HOST` (→ advertises **both** `/dns6/<host>/tcp/<port>` and `/dns4/<host>/tcp/<port>`, IPv6 first) or `GHAL_BOL_RELAY_PUBLIC_ADDRS` (comma‑separated multiaddrs). **The relay TCP port must be open to the internet**; advertise the public host or clients cannot reserve. For native IPv6 reachability the host needs an `AAAA` record; on IPv4‑only/NAT64 carriers the `/dns*` host is mapped to a routable address client-side regardless.
-- **Relay rate limiters (production).** native connect `relay::Config::default()` installs per-peer/per-IP rate limiters (~**one circuit per 2 minutes** per source peer). Ghal Bol’s `:p2p` node retries DM reconnect every ~2 s when the outbox has pending rows (background — **not** gated on opening a chat room). If the coord relay still uses those default limiters, the server logs `coord bridge DENIED … ResourceLimitExceeded` while clients log endless `coord_lookup_peer ok — dialing …/p2p-circuit` with no `dm peer connected`. `ghal_bol_coord/src/relay.rs` clears `reservation_rate_limiters` and `circuit_src_rate_limiters` and raises pool caps instead. **Redeploy the server binary** after changing relay config; client-only rebuilds cannot fix this.
-- `GET /v1/relay` → `{ enabled, peer_id, addrs }` (addrs are dialable bases without `/p2p/<id>`; both `/dns6` and `/dns4` are returned, IPv6 first).
-- **Registration circuit expansion (`routes.rs`).** On `POST /v1/register`, `/dns*/…/p2p-circuit` endpoints are duplicated with resolved `/ip6/…` **and** `/ip4/…` aliases (IPv6 first) so TCP-only clients (Android has no native connect DNS transport) can dial a peer's coord bridge by concrete IP over whichever family routes.
-
-**Client (`ghal_bol`)**
-- At swarm startup, for **each** configured coord URL, `coord_runtime::fetch_all_ghal_bol_relays` fetches live `GET /v1/relay` (no on-disk cache) and `network_transport::resolve_relay_bootnodes` resolves dialable bases into **both IP families** — `/ip4/<public>/tcp/<port>/p2p/<id>` **and `/ip6/<routable>/tcp/<port>/p2p/<id>`** (IPv6 sorted first; product policy is "IPv6 preferred when it works"). This is required for IPv6‑only / NAT64 mobile carriers: there the OS resolver (DNS64) synthesizes an IPv6 address for the relay's `/dns4` hostname and the literal IPv4 base has no route — keeping only IPv4 (the old behaviour) left such devices unable to reserve a circuit and therefore unreachable. `is_trusted_bootstrap_dial_addr` accepts a public IPv4 **or** a globally routable IPv6 (incl. NAT64 `64:ff9b::/96`). `issue_bootstrap_dials` dials **all** resolved families for a relay within one throttle window (happy‑eyeballs) so a preferred‑but‑unroutable family never starves the other. native connect's relay client pins HOP to **one** bootstrap TCP link per relay, so `prune_duplicate_relay_bootstrap_connections` closes extras and keeps the best family (`relay_bootstrap_family_rank` — IPv6 on global‑v6 LAN, IPv4 on CGNAT/mobile when both connect). **Circuit reservation** is then a single `listen_on(…/p2p-circuit)` on that anchor only (`relay_circuit_listen_addr`). Do **not** issue multi‑family `listen_on` while two bootstrap TCP links are still up — HOP and circuit addr must match. The client **dials base TCP** (throttled), prunes to one link, then after identify requests the circuit. Probe-style `listen_on` runs only from `retry_stalled_relay_reservations` when bootstrap TCP is still **not** connected (not in parallel with active bootstrap dials). The resulting `/p2p-circuit` is registered in coord presence; recovery retries in § "Steady connection". **If the advertised relay TCP port is unreachable** (dev: dead bore tunnel; prod: firewall), clients log `relay TCP unreachable`, clear in-memory relay state, refetch `GET /v1/relay` on the next refresh tick, and never register on coord until the tunnel is fixed.
-
-### Caching policy (canonical)
-
-**Rule:** cache (especially on disk) **only** when the data is **immutable for practical purposes** — user identity, contacts, message history, preferences. If the value **can change** and code that **relies on a cached copy could break the app** (chat, WAN, LAN connect), **do not cache it** — use live sources. Exception only with an explicit product decision recorded in this section.
-
-**Live sources for transport (never disk):**
+**Rule:** disk cache **only immutable user-owned data** (keystore, contacts, transcript, preferences). If staleness could break chat or connectivity, **fetch live**.
 
 | Data | Source |
 |------|--------|
-| Relay bootstrap addr/port | `GET /v1/relay` each start + `maybe_refresh_ghal_bol_relay` |
-| Peer WAN dial addrs | `GET /v1/peers/{public_key}` on upkeep / urgent reconnect |
-| LAN TCP port | mDNS `Discovered` / `Expired` events only |
+| Peer public TCP dial targets | `GET /v1/peers/{public_key}` |
+| LAN TCP port | mDNS events only |
+| Bridge tokens | Short-lived; from bridge API responses only |
 
-**OK on disk (immutable / user-owned):**
+**In-memory OK:** storm throttles, bridge accept backoff, coord lookup backoff, mDNS candidate set for **expire/failover** — not timer re-dial.
 
-| Data | Why |
-|------|-----|
-| Encrypted keystore | User secret until rotation |
-| `contacts_v1.json` | User roster; `public_key_hex` is identity anchor, not a dial addr |
-| `chat_transcript_v1.json` | User message history |
-| Preferences / aliases | UI state |
+**No disk cache** for coord dial addrs or bridge tokens.
 
-**In-memory only (this `:p2p` run):** storm throttles (`should_routed_dial`, `lan_dial_in_flight`, reserve throttle); `ghal_bol_relay_state` from last successful `GET /v1/relay` (**cleared** on relay TCP failure); mDNS candidate set `peer_mdns_lan_candidate_addrs` (add on `Discovered`, remove on `Expired`/dial-fail — **upkeep must not re-dial from it**).
-
-**Historical note:** older docs mentioned relay disk cache for boot. **This section is canonical** — `ghalbol_relay.json` was removed; legacy files are deleted on start.
-
-**Removed / forbidden (relying on these broke P2P):**
-
-| Item | Why |
-|------|-----|
-| `ghalbol_relay.json` | Bore port changes every dev server run |
-| `coord_cached_dial_addrs` | Stale addrs raced live mDNS |
-| Upkeep LAN re-dial from candidate set | Ephemeral ports change every restart |
-| Port-ranking heuristics | Masked stale-cache bugs |
-| Dart-side dial/lookup caches | Routing lives in Rust only |
-
-**Before adding any cache**, answer: (1) Is it immutable user data? (2) If stale for ~30s, does connectivity or chat break? If (2) yes → no cache. (3) If you still need it, document the special reason here.
-- **Network handovers** (wifi ⇄ mobile ⇄ different LAN): relay re-reservation rides `handle_network_path_change` → `retry_stalled_relay_reservations`, so the circuit is re-reserved and re-registered on the new path without a native connect restart.
+**Forbidden:** upkeep LAN re-dial from frozen port lists; UI routing caches.
 
 ---
 
-## Helper modules (not a separate transport)
+## Helper modules
 
 | Path | Role |
 |------|------|
-| `ghal_bol_core/src/p2p/chat_server.rs` | native connect swarm, streams, outbox, ack policy |
-| `ghal_bol_core/src/p2p/network_transport.rs` | `LocalNetworkProfile`, `OsNetworkSnapshot`, OS merge, relay resolution (no Kademlia) |
-| `ghal_bol_core/src/android_network.rs` | Android `ConnectivityManager` JNI probe (`:p2p` only) |
-| `ghal_bol_core/src/linux_network.rs` | Linux default route + Wi‑Fi operstate |
-| `ghal_bol_core/src/p2p_runtime.rs` | Background node thread, poll queue |
-| `ghal_bol_core/src/dm_transport/` | **Dial-address helpers only** — parse coord endpoints; native connect still uses `Multiaddr` on the wire |
-| `ghal_bol_core/src/coord_runtime.rs` | Register/listen snapshot, lookup → dial addrs |
-
-There is **no** standalone native TCP/QUIC listener stack. Do not assume `dm_transport/` replaces native connect.
-
----
-
-## Footprint (approximate, May 2026)
-
-| Metric | Value |
-|--------|-------|
-| Dependency crates (`cargo tree -p ghal_bol_core`) | ~967 |
-| native connect-named crates | ~70 |
-| Release `lib_ghal_bol_core.so` / `ghal_bol_core_daemon` | ~20 MB unstripped, ~15 MB stripped |
-| `chat_server.rs` | ~4k lines — transport + session + ack policy |
-
-Accepting native connect keeps NAT traversal, mDNS, and relay tooling at the cost of binary size and build time. The discarded native-stack plan targeted smaller binaries but was not pursued.
+| `connect/worker.rs` | Main loop: mDNS, TCP listen, bridge pending poll, upkeep |
+| `connect/peer_session.rs`, `session.rs` | Sessions, mux, outbox/acks |
+| `connect/lan_discovery.rs` | mDNS publish/browse |
+| `connect/bridge_*.rs` | WAN call bridge client |
+| `delivery_runtime.rs` | WAN text |
+| `coord_runtime.rs` | Register, heartbeat, lookup JSON |
+| `p2p/network_transport.rs` | OS network truth |
+| `dm_transport/` | Dial-address parsing helpers |
 
 ---
 
-## Stable FFI / daemon surface
+## Stable in-process surface
 
-Do not rename without a version bump:
+The UI calls `ghal_bol_core::host`. Do not rename without a version bump:
 
-- `p2p_start` / `p2p_stop` (avoid stop on contact upsert — [AGENTS.md](../AGENTS.md))
-- `register_dm_peer` / `sync_contacts`
-- `send_text_dm`
-- `p2p_poll` / `apply_p2p_event_json`
-- `p2p_set_foreground_peer` / `p2p_set_app_ack_read_enabled`
+- `host::unlock` / `host::lock` / `host::start_network`
+- `host::set_open_room` / `host::set_app_visible`
+- `host::send_text` (WAN → delivery when configured)
+- `host::poll_event` — UI refresh only
+- Contact APIs → `register_dm_peer` / `sync_contacts`
 - Coord: register, heartbeat, lookup ([COORDINATION_SERVER.md](COORDINATION_SERVER.md))
 
 ---
 
-## Invariants (do not break when touching transport)
+## Invariants (do not break)
 
 | Invariant | Owner |
 |-----------|--------|
-| `ghal_bol_msg_v1` envelope, ack kinds, `ref_id` rules | `msg_v1.rs`, [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) |
-| Recipient sends `ack_received` always; `ack_read` only in-room; leave backlog | `chat_server.rs` — not Dart |
-| Sender outbox until peer acks | Same |
-| Flutter **never** sends acks; poll refreshes UI only | [DESIGN.md](DESIGN.md) |
-| Guest scans host QR; host may have zero contacts | `connect_invite_v1`, `dm_event_handler` |
-| `p2p_poll` → `apply_p2p_event_json` → disk → UI reload | `p2p_runtime.rs`, `dm_event_handler.rs` |
-| No `p2p_stop` on every contact change | `register_dm_peer` / `sync_contacts` |
-| Keepalive **ping** keeps idle DM/relay links up (interval < idle timeout) | `chat_server.rs` `chat_behaviour` |
-| Reconnect is **urgent** after a DM drop (no 404 backoff, 1s retries) | `mark_dm_reconnect_urgent` / `is_pk_reconnect_urgent` |
-| Relay reservations cover **all configured coord relays**, throttled per relay (no 1s storm) | `try_relay_reservations` / `try_relay_reservation` |
-| **One bootstrap TCP per coord relay** on the best IP family — coord bridge HOP uses `directly_connected_peers.first()` only | `prune_duplicate_relay_bootstrap_connections` |
-| Bootstrap dials may race v4+v6; reservation `listen_on` is `…/p2p-circuit` on the **kept** anchor only | `relay_circuit_listen_addr` + `relay_reservation_circuit_addrs` |
-| Bootstrap relay **dials** throttled per relay (no dial storm on CGNAT) | `issue_bootstrap_dials` / `should_issue_bootstrap_dial` |
-| CGNAT/mobile: probe-style relay reservation when bootstrap TCP pending | `try_ghal_bol_probe_style_circuit_listen` at startup + `retry_stalled_relay_reservations` |
-| Outbound peer relay dials after coord lookup are **not** gated on own `relay_circuit_listening` | `dial_dm_peer_addr` + `should_routed_dial` only |
-| LAN discovery upgrades a relay-only link (additive — both links active); LAN loss drops LAN pref + WAN already connected | `dial_lan_upgrade` / `note_peer_mdns_lan_addr_expired` / `forget_peer_on_local_lan` |
-| LAN dials primarily from mDNS events; upkeep may dial live mDNS addr + coord **in parallel** — never re-dial stale cached LAN ports | `handle_mdns_discovered_list`; `connect_dm_peer_now` |
-| **OS default route** drives `profile=lan` vs `mobile-data` (not `if_addrs` alone) | `refresh_os_network_truth`, `merge_os_network_truth`, `android_network.rs`, `linux_network.rs` |
-| Asymmetric handover: close **direct** `ConnectionId`s only when relay exists; one DM mux | `close_direct_dm_connections`, `reconcile_stale_lan_mux_for_wan` |
+| Ack kinds, `ref_id` rules | `msg_v1.rs`, [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) |
+| Recipient sends acks; Makepad never | `connect/outbox_acks.rs`, [DESIGN.md](DESIGN.md) |
+| WAN text via delivery when URL set | `text_transport.rs`, `delivery_runtime.rs` |
+| Guest scans host QR | `connect_invite_v1.rs` |
+| No full connect stop on contact upsert | `register_dm_peer` |
+| OS default route drives `profile=` | `network_transport.rs`, `android_network.rs`, `linux_network.rs` |
+| Register when publishable endpoints **change** | `coord_runtime.rs` |
+| mDNS LAN dials from **events** only | `connect/worker.rs`, `lan_discovery.rs` |
 
 ---
 
 ## AI handoff — common mistakes
 
-1. **Reimplementing ack policy in Dart** — forbidden; see DESIGN.md.
-2. **Assuming native connect was removed** — it was not; read this file.
-3. **Reintroducing gossipsub** for 1:1 DM — wrong model.
-4. **Requiring mutual QR** — guest-only host key from QR is intentional.
-5. **Clearing `pending_read_acks` on leave** — breaks DESIGN leave backlog.
-6. **Restarting native connect on every contact upsert** — use hot `register_dm_peer` instead.
-7. **Kademlia / public-bootstrap WAN discovery when coord is down** — forbidden; WAN requires coord/relay. LAN (mDNS) still works.
-8. **Slow WAN fallback after LAN loss** — mDNS `Expired` must re-kick coord/relay lookup immediately; do not wait on LAN TTL.
-9. **Skipping relay TCP dial for the coord relay** — client must dial `GET /v1/relay` base addr (throttled), then reserve; on CGNAT also use probe-style `listen_on` when bootstrap is not connected yet (§ “CGNAT / mobile-data relay reservation”).
-10. **Treating coord HTTP OK as WAN OK** — `GET /v1/relay` 200 with unreachable relay TCP → endless `GET /v1/peers/…` 404; fix bore/firewall first.
-11. **Reintroducing static `bootstrap_peers` for WAN** — `bootstrap_peers: []` is intentional; only coord relay from `/v1/relay` is the WAN dial target.
-12. **Uncoordinated bootstrap relay dial spam** — refetch + WAN recovery + redial calling `swarm.dial` every 1–2s without `should_issue_bootstrap_dial` prevents bootstrap TCP from completing on mobile-data; log shows many `coord relay dial` lines, never `bootstrap connection`.
-13. **Blind `dial(peer_id)` for DM peers** — used dial-as-probe and started peerstore multi-dials to `::1`, stale LAN, bare `/p2p/` instead of coord bridge; symptom: `Failed to negotiate transport protocol(s)` with many bad addrs, LAN ok, WAN dead. Explicit coord/mDNS endpoints only.
-13. **Removing CGNAT probe reservation** — `try_ghal_bol_probe_style_circuit_listen` at startup / when `!any_bootstrap_connected` is required for phones; Wi‑Fi-only tests hide the issue.
-14. **One-sided relay OK** — Linux `reservation accepted` while Android stuck on `CGNAT listen addr only` means chat will not work; both peers must register on coord.
-15. **Blocking peer relay dials until own circuit listens** — `skip relay dial … self coord bridge not ready yet` after `coord_lookup_peer ok` stalls WAN 30–40s on CGNAT; peer outbound dials only need coord relay bootstrap TCP + peer registered. See § “Outbound peer relay dials vs own reservation”.
-16. **Blocking LAN upkeep during WAN recovery** — `lan_handover_upkeep` returning early when `wan_recovery_active && !relay_circuit_listening`, or `relay_lost_on_lan` re-kicking full handover every 5s while coord is down — LAN never gets stable mDNS. **Fix:** parallel upkeep (WAN reserve + LAN listen/mDNS); `relay_lost_on_lan` false when `wan_recovery_active`. See § “Parallel LAN + WAN transport”.
-17. **Racing coord bridge dials against mDNS LAN on Wi‑Fi** — **superseded 2026-06-17:** parallel `mdns dialing` + `coord dialing` on Wi‑Fi is **OK** when throttled. Issues are **uncoordinated dial spam** and **stale LAN port re-dial from upkeep** — see § “LAN relay vs mDNS race” (historical).
-18. **Caching transport or dial targets** — coord lookup addr cache, frozen mDNS LAN addr, on-disk relay cache, upkeep re-dials from `peer_mdns_lan_candidate_addrs`, Dart routing cache. **Canonical rule:** TRANSPORT.md § “Caching policy” — disk only for immutable user data; if staleness could break connectivity, fetch live.
-19. **Port guessing / ranking heuristics** — highest-port-wins, “preferred” mDNS addr, TTL-based pick, or `nc` probes instead of reading mDNS lifecycle + `Native/flow` listen_addrs. See § “Ephemeral LAN TCP ports”.
-19. **Soft mDNS-only Wi‑Fi switch recovery** — `restart_mdns_behaviour` without `ensure_lan_tcp_listen(handover=true)` and candidate purge; or pre-consuming `should_run_lan_recovery` then skipping full `kick_lan`. Symptom: endless `LAN upkeep — nudge mDNS`, no `mdns discovered`. See § “LAN stability — cold start and Wi‑Fi toggle”.
-20. **`if_addrs`-only network mode** — `profile=lan|mobile-data` from interface scan without `getActiveNetwork` / default route — minutes wrong after toggle. See § **Network truth**.
-21. **Asymmetric mux reset loop** — `reopen peer off LAN` every 1s + `disconnect_peer_id` on relay while `dm_direct_conn_ids` stale — ticks/outbox into void. See § **Asymmetric LAN↔WAN mux recovery**.
-22. **Urgent reconnect clears in-flight relay dial** — `clear_circuit_dial_in_flight` + `disconnect_peer_id` during relay handshake → `Pending connection attempt has been aborted`, relay `ACCEPTED→closed` loops. See .
-23. **`dm_peer_chat_link_stable=false` when relay hop missing** — forces coord lookup/dial every upkeep tick while LAN stream healthy → mux churn, chat dies after backlog drain. Use `needs_additive_relay_dial` instead. See .
-24. **Coord lookup returns after HTTP when additive relay needed** — Wi‑Fi peer stays direct-only; WAN handover dead. Must call `coord_dial_from_lookup_addrs` when `needs_additive_relay_dial`. See .
-25. **Relay `ConnectionClosed` with other path open — no recovery** — zombie `stream=true`, repeating `resync N pending`. Event-driven `request_dm_stream_reopen` + `notify_coord_lookup`. See .
-26. **Blocking coord HTTP on tokio swarm loop** — `try_restore_relay_presence_from_coord` / `reqwest::blocking` in `run_wan_recovery_pass` → `:p2p` panic, node dead. Background std thread only.
-27. **Skipping coord lookup for connected foreground peer during LAN handover** — `lookup pass: urgent=0` while `outbox_pending` high and remote on mobile-data → one-way WAN. `coord_lookup_upkeep_satisfied` must be false when `lan_listen_rediscovery_requested` + intent, or `peer_wan_asymmetric_mux_likely`. See .
-28. **Trusting mDNS/TTL when outbound stuck** — `peer_has_stale_direct_lan_conn` must return true when `peer_lan_handover_outbound_stuck` even if mDNS candidate lingers. See .
-29. **“Bursty delivery = broken chat”** — multi-second stalls then `burst resync` / all pending acks at once during LAN↔WAN handover is the **known trade-off** of throttled mux reconcile + burst drain; do **not** revert asymmetric fix or add Flutter `NetworkHelper` gating. See § **Known symptom — bursty delivery**.
-30. **Defer stream open when relay already up** — `should_defer_stream_open_for_wan_mux` must not block attach on relay while stale direct still connected. See .
-31. **Unconditional writer teardown in a stream handler** — a handler's exit must clear the writer only through `finalize_dm_writer_if_current` (generation guard), or a stale LAN handler closing minutes later deletes the live relay writer (one-way acks return). See .
-32. **Adopting the duplicate mux on every inbound frame** — gate on `duplicate_mux_should_take_over`; unconditional adoption churns healthy parallel LAN+WAN links. See .
-33. **Uncapped priority coord lookups for stale-transcript 404 ghosts** — a `PeerNotOnCoord` contact with only an old pending row (not urgent, not foreground) belongs in the bounded LRU background sweep (`pending_outbox_eligible_for_wire`), not the priority tier; and `resync_pending_outbox` filters by **connectivity**, not coord category. Intent still beats backoff via `mark_dm_reconnect_urgent` on send. See .
-35. **`force=true` on recurring WAN recovery ticks** — `run_wan_recovery_pass` calling `ensure_wan_relay_circuit(…, true)` every `coord_tick` bypasses `RELAY_RESERVE_THROTTLE_MS` and re-issues `listen_on` every ~1s, cancelling in-flight reservations (`Failed to get Reservation` loop after `left LAN`). Recurring recovery must use `force=false`; `force=true` only on one-shot handover entry. See .
-36. **Stream-open adopt on outbound-stuck / zombie without asymmetric evidence** — duplicate stream open must adopt **only** when `asymmetric_relay_recover_on_existing_link`; text-frame path still uses full `duplicate_mux_should_take_over`. Broader adopt at stream-open churns symmetric-connect races and Symptom C parallel LAN. **`asymmetric_relay_recover_urgent`** one-shot throttle bypass only for that same predicate — not zombie/handover alone. See § **Asymmetric mux recovery** steps 1/5/6 (2026-06-30).
-37. **Defer outbound `open_stream` on mobile-data or without stale direct** — `should_defer_outbound_stream_for_asymmetric_relay` applies **only** when `has_active_lan` **and** relay up **and** `peer_has_stale_direct_lan_conn`. Deferring on the cell re-dialer deadlocks WAN; deferring without stale-direct evidence blocks healthy symmetric LAN connect. See § **Asymmetric mux recovery** step 7 (2026-06-30).
-38. **Invented adopt/defer predicates outside `asymmetric_relay_recover_on_existing_link`** — e.g. separate `lan_side_relay_inbound_handover` at stream-open bypasses the Symptom C table. Relay handover during `lan_listen_rediscovery_requested` belongs **inside** `asymmetric_relay_recover_on_existing_link` as `peer_relay_inbound_handover_mux_recovery` + session `relay_inbound_handover_active` set on `InboundCircuitEstablished` (2026-07-02 soaks 05:29:54, 05:41:22).
+1. **Ack policy in the UI** — forbidden.
+2. **Mutual QR requirement** — guest-only host key is intentional.
+3. **Inventing a second WAN discovery path when coord fails** — forbidden; retry coord + use delivery for text.
+4. **Blocking WAN text on native connect `chat_ready`** — WAN text is delivery.
+5. **Skipping coord register on Wi‑Fi because LAN works** — parallel stacks.
+6. **`if_addrs`-only network mode** — use § **Network truth**.
+7. **Caching coord or LAN dial targets on disk** — § **Caching policy**.
+8. **Stable LAN port assumptions** — § **Ephemeral LAN TCP ports**.
+9. **Expecting CGNAT peers to publish a dialable public TCP** — they use bridge (calls) and delivery (text).
 
 ---
 
 ## Logging — see the precise flow
 
-Logs must **fully assist** a two-device debug session and must **never imply a wrong state**. Two
-rules:
+Use App log `Native/flow` (~30s) plus tagged `connect`, `coord`, `bridge`, `delivery` lines. Intent-gated traces avoid roster floods.
 
-1. **Log the precise flow, including early returns.** When a function decides *not* to act
-   (skip / defer / return early) on a path that matters for connecting, that decision is logged —
-   silent early returns hide why a peer “won’t connect.” Examples now emitted:
-   - **`coord` `lookup pass: urgent=… priority=… bg_swept=…/… cap=… force_wake=…`** — one line per
-     coordination pass showing exactly what the scale-safe sweep did, **including how large the idle
-     roster is and that it is being swept, not ignored** (see § “The prime directive”).
-   - **`dial` `connect skip <peer> — idle …`** — peer is not urgent / has no queued mail; LAN waits
-     for mDNS `Discovered`, WAN waits for a coord wake.
-   - **`coord` `lookup skip <peer> — chat link already stable (relay + mux up)`** / **`… coord HTTP
-     throttled (404/unreachable backoff)`** — why a lookup was skipped this pass.
-   - **`stream` `stream open deferred <peer> — … waiting for stable WAN relay mux`**.
+**Journey (info-level milestones):**
 
-2. **No spam, no wrong impression.** Per-peer connect/lookup traces are **gated on active intent**
-   (`peer_connect_trace_enabled` = foreground chat or pending outbox) and throttled (~5 s/peer), so a
-   roster of thousands of idle/stale contacts never floods the log while the peer you actually care
-   about still shows its full flow. “Dialing …” / “ok …” lines are emitted **only when a dial
-   actually happened** (guarded by the dial result), never on a no-op. Verbose Rust `debug` lines
-   reach the in-app App log only with `GHAL_BOL_VERBOSE_LOG=1`; they are always on stderr/logcat.
+| # | Milestone | Typical tag |
+|---|-----------|-------------|
+| 1 | Node up | `connect: TCP listen …` |
+| 2 | Coord registered | `coord: registered …` |
+| 3 | LAN peer found | `connect: mdns discovered …` |
+| 4 | Session up | `chat_ready` / `PeerConnected` |
+| 5 | WAN call bridge | `bridge: bridge request ok` → `wss connecting` |
+| 6 | WAN text | delivery worker send/recv (separate from connect) |
+| 7 | Acks | `ack_received` / `ack_read` on LAN mirror path |
 
-### The full journey at `info` (visible in both logs)
-
-The complete connect → stream → message → ack journey is emitted at **`info`**, so it appears in the
-in-app App log **and** stderr/logcat **without** `GHAL_BOL_VERBOSE_LOG`. Each milestone is low-volume
-(one line per transition / per message id), so the story stays readable. Read top-to-bottom to follow
-one message between two devices:
-
-| # | Milestone | Log line (tag) | Side |
-|---|-----------|----------------|------|
-| 1 | Node up | `p2p: swarm built, opening chat stream accept` | both |
-| 2 | Relay reserved | `relay: reservation accepted on <relay>` / `relay: relay listen addr <addr>` | both |
-| 3 | Peer found on coord | `coord: coord_lookup_peer ok — dialing <peer> via coord bridge` | sender |
-| 4 | LAN peer found | `mdns: discovered <peer> at <addr>` | both |
-| 5 | Dial issued | `lan\|coord\|relay: dialing <peer> via <addr>` | dialer |
-| 6 | Link up | `swarm: dm connection established <peer> via <transport>` | both |
-| 7 | **Chat works** | `stream: chat_ready <peer> — chat stream open, can send now` | both |
-| 7b | Handover mux adopt | `stream: inbound on duplicate mux from <peer> — adopt live writer (stale mux replaced)` | Wi‑Fi side after phone re-dials relay |
-| 8 | Send queued | `outbound: enqueue send_text peer=<peer> msg_id=<id>` | sender |
-| 9 | Send on wire | `outbound: frame on wire peer=<peer> msg_id=<id>` | sender |
-| 10 | Text arrives | `stream: inbound text from <peer> id=<id> len=<n>` | receiver |
-| 11 | Delivery ack sent | `delivery_ack: ack_received sent for inbound <id> to <peer>` | receiver |
-| 12 | Read ack sent (in-room) | `read_ack: ack_read sent for inbound <id> to <peer>` | receiver |
-| 13 | Tick applied | `stream: ack_received\|ack_read from <peer> ref=<id> — our outbound delivered\|read by peer` | sender |
-| — | Link down | `swarm: dm connection closed <peer>` (or `… other path still open` at `debug`) | both |
-| — | State snapshot (~30 s) | `flow: connectivity … dm=[<peer>:conn=…,stream=…] …` | both |
-
-**Diagnosing from the log:** a stuck message shows exactly which milestone is missing — e.g. step 6
-(`connection established`) without step 7 (`chat_ready`) is the classic `conn=true` ≠ "chat works"
-case (stream never opened); step 9 (`frame on wire`) without step 13 means the ack never came back
-(check the receiver’s steps 10–12). **Never infer success from an earlier step than the one that
-proves it** (a link is not a stream; on-wire is not delivered). New milestones must keep this table
-truthful — add the line at `info`, keep it one-per-transition, and do not log a state the code has
-not actually reached.
+Never infer chat delivery from connect alone when delivery mode is on — confirm delivery worker state for WAN text.
 
 ---
 
@@ -1269,15 +446,8 @@ not actually reached.
 |-----|----------------|
 | [DESIGN.md](DESIGN.md) | Canonical product behaviour |
 | [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) | Wire format and ack kinds |
-| [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Invite URLs and QR |
-| [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Run/test coord, local dev stack |
-| [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional Tier 3 paid relay |
-
----
-
-## Changelog
-
-Canonical LAN + Wi‑Fi toggle behaviour: § **“LAN stability — cold start and Wi‑Fi toggle”** and § **Roaming**. Rows below are history; intermediate fixes may be superseded.
-
-| Date | Change |
-|------|--------|
+| [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) | Connect + WAN bridge |
+| [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) | WAN text mailbox |
+| [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Invites / QR |
+| [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Coord API, bridge, deploy |
+| [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional Tier 3 paid relay (not shipping on coord1) |

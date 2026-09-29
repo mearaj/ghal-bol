@@ -1,11 +1,56 @@
 //! Shared on-disk paths for app data under the same namespace root as the keystore.
 //!
 //! Linux: `~/.local/share/com.ghalbol.debug/ghal_bol/` (debug) or `…/com.ghalbol/ghal_bol/`.
-//! Android: `{app_flutter}/{namespace}/ghal_bol/` (debug) or `{app_flutter}/ghal_bol/` (release).
+//! Android: `{app_makepad}/{namespace}/ghal_bol/` (debug) or `{app_makepad}/ghal_bol/` (release).
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use crate::storage::{KeystoreStorageError, StorageConfig, namespace_data_dir};
+
+fn android_data_dir_mx() -> &'static Mutex<Option<PathBuf>> {
+    static D: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    D.get_or_init(|| Mutex::new(None))
+}
+
+/// Point keystore and chat stores at an Android files directory (or a test temp dir).
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn configure_android_data_directory(path: &str) {
+    if let Ok(mut g) = android_data_dir_mx().lock() {
+        *g = Some(PathBuf::from(path));
+    }
+}
+
+/// Drop the test/Android override so later tests use the normal data directory.
+#[cfg(test)]
+pub(crate) fn clear_test_data_directory() {
+    if let Ok(mut g) = android_data_dir_mx().lock() {
+        *g = None;
+    }
+}
+
+/// Serialize tests that mutate the process-global data root.
+#[cfg(test)]
+pub(crate) fn test_storage_isolation_lock() -> &'static Mutex<()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
+/// Android files root when the platform configured one.
+#[cfg(target_os = "android")]
+pub(crate) fn optional_android_data_dir() -> Option<PathBuf> {
+    android_data_dir_mx().lock().ok().and_then(|g| g.clone())
+}
+
+pub(crate) fn resolved_storage_config(ns: &str) -> StorageConfig {
+    let mut cfg = StorageConfig::new(ns.to_owned());
+    if let Ok(g) = android_data_dir_mx().lock() {
+        if let Some(dir) = g.as_ref() {
+            cfg = cfg.with_override_data_dir(dir.clone());
+        }
+    }
+    cfg
+}
 
 /// `{namespace_data_dir}/ghal_bol/` — contacts, transcript (user-owned; no transport cache).
 pub fn ui_data_dir(cfg: &StorageConfig) -> Result<PathBuf, KeystoreStorageError> {
@@ -27,7 +72,7 @@ pub fn chat_transcript_v1_path(cfg: &StorageConfig) -> Result<PathBuf, KeystoreS
 }
 
 pub fn storage_config_for_namespace(app_namespace: &str) -> StorageConfig {
-    crate::c_ffi::resolved_storage_config(app_namespace)
+    resolved_storage_config(app_namespace)
 }
 
 /// Resolve the installed app namespace when the daemon starts without an unlocked session.

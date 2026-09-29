@@ -1,20 +1,17 @@
 # Production — `coord.ghalbol.com`
 
-Edit the config block at the top of `deploy/deploy_server.sh` (GCP target + bandwidth limits), then from repo root:
+Edit the config block at the top of `deploy/deploy_server.sh` (GCP target), then from repo root:
 
 ```bash
 ./ghal_bol_coord/deploy/deploy_server.sh
 ```
 
-`deploy_server.sh` renders systemd units with:
+`deploy_server.sh` renders the systemd unit with:
 
 | Variable | Role |
 |----------|------|
 | `GCP_*` | `gcloud` target |
-| `COORD_URL` / `RELAY_HOST` / `RELAY_PORT` | Post-deploy verify |
-| `GHAL_BOL_RELAY_EGRESS_MBIT` | Linux **tc** egress cap (`relay-egress-cap.service`) |
-| `GHAL_BOL_RELAY_MAX_CIRCUIT_BYTES` | Per-circuit byte cap in the relay binary |
-| `GHAL_BOL_RELAY_MAX_CIRCUITS_PER_PEER` | Concurrent circuits per peer |
-| `GHAL_BOL_RELAY_LISTEN` / `GHAL_BOL_RELAY_PUBLIC_HOST` | Relay listen + advertised DNS |
+| `COORD_URL` | Post-deploy verify |
+| `GHAL_BOL_COORD_LISTEN` | Loopback HTTP listen behind nginx |
 
-See [README.md](README.md) § Production.
+Presence + WAN call bridge WSS share the same HTTPS vhost. See [README.md](README.md).

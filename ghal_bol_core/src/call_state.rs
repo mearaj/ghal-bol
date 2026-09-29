@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::call_sig_v1::CallSigKind;
 
-/// Match Flutter `CallController._maxLiveInviteAgeMs` — invites and ringing UI must not outlive this.
+/// Match Makepad `CallController._maxLiveInviteAgeMs` — invites and ringing UI must not outlive this.
 pub const MAX_LIVE_CALL_INVITE_AGE_MS: i64 = 45_000;
 
 pub fn now_ms() -> i64 {

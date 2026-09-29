@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Coord server data root — separate from the Flutter app (`com.ghalbol`).
+/// Coord server data root — separate from the Makepad app (`com.ghalbol`).
 /// Keep `com.ghalbol.coord` / `ghalbol_server` for coord1 home installs (main branch paths).
 pub const DATA_NAMESPACE: &str = "com.ghalbol.coord";
 

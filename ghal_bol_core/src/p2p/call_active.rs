@@ -1,6 +1,6 @@
 //! In-process snapshot of the active voice/video call for UI re-sync after process restart.
 //!
-//! `:p2p` / the daemon may outlive the Flutter UI on Android; this registry lets the
+//! `:p2p` / the daemon may outlive the Makepad UI on Android; this registry lets the
 //! shell restore the call screen instead of leaving the user unaware of an ongoing call.
 
 use std::sync::{Mutex, OnceLock};

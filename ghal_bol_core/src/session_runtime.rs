@@ -1,11 +1,11 @@
-//! In-process identity session (shared by FFI and the Unix-socket daemon).
+//! In-process identity session for the desktop app.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
-use crate::c_ffi::resolved_storage_config;
+use crate::app_paths::resolved_storage_config;
 use crate::dm_event_handler::set_p2p_handler_context;
 
 fn session_mx() -> &'static Mutex<Option<crate::DecryptedIdentity>> {
@@ -73,7 +73,7 @@ pub fn session_unlocked() -> bool {
         .is_some()
 }
 
-/// Used by [`crate::c_ffi::ghal_bol_core_ffi_create_or_unlock_identity`] after unlock.
+/// Installs the unlocked identity for the in-process session.
 pub(crate) fn install_unlocked_identity(
     ident: crate::DecryptedIdentity,
 ) -> Result<(), &'static str> {

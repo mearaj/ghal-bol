@@ -181,44 +181,6 @@ pub fn voice_preview(duration_ms: u32) -> String {
     )
 }
 
-/// Read little-endian i16 PCM from a mono WAV (48 kHz preferred) or raw PCM file.
-pub fn read_pcm_i16_le_file(path: &std::path::Path) -> Result<Vec<i16>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read pcm: {e}"))?;
-    parse_wav_or_raw_pcm(&bytes)
-}
-
-fn parse_wav_or_raw_pcm(bytes: &[u8]) -> Result<Vec<i16>, String> {
-    if bytes.len() >= 44 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
-        let mut i = 12usize;
-        while i + 8 <= bytes.len() {
-            let id = &bytes[i..i + 4];
-            let sz = u32::from_le_bytes([bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]])
-                as usize;
-            i += 8;
-            if id == b"data" {
-                let end = (i + sz).min(bytes.len());
-                return pcm_bytes_to_i16(&bytes[i..end]);
-            }
-            i = (i + sz).min(bytes.len());
-            if !sz.is_multiple_of(2) {
-                i = (i + 1).min(bytes.len());
-            }
-        }
-        return Err("wav missing data chunk".to_string());
-    }
-    pcm_bytes_to_i16(bytes)
-}
-
-fn pcm_bytes_to_i16(bytes: &[u8]) -> Result<Vec<i16>, String> {
-    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
-        return Err("pcm byte length must be even and non-empty".to_string());
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
-        out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
-    }
-    Ok(out)
-}
 
 /// Persist Opus blob under `{ui_data_dir}/voice/{message_id}.opus`.
 pub fn voice_audio_path(
@@ -244,7 +206,7 @@ pub fn write_voice_audio_file(
 ) -> Result<String, String> {
     let path = voice_audio_path(app_namespace, message_id)?;
     std::fs::write(&path, opus_blob).map_err(|e| format!("write voice: {e}"))?;
-    // Also write a WAV sidecar for Flutter `audioplayers` (raw Opus is not playable there).
+    // Also write a WAV sidecar for Makepad `audioplayers` (raw Opus is not playable there).
     #[cfg(not(target_arch = "wasm32"))]
     {
         if let Ok(pcm) = decode_opus_blob_to_pcm(opus_blob) {

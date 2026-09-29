@@ -1,19 +1,14 @@
 //! Adaptive capture/encode quality for WAN, relay, and cellular paths.
 //!
-//! Display resolution is handled separately in [`super::render`] (GPU texture shm).
-//! This layer scales **encode** resolution and H.264 bitrate from transport pressure.
+//! This layer scales encode resolution and H.264 bitrate from transport pressure.
 
 use super::{RawVideoFrame, i420_downscale_max_edge};
 
 /// Target camera capture (even dimensions). HW/backends may deliver closest size (desktop nokhwa).
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))]
 pub const CAP_WIDTH: u32 = 640;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))]
 pub const CAP_HEIGHT: u32 = 480;
-
-/// Longest edge written into the cross-process display shm (textures).
-/// Match capture resolution — GPU textures scale to full-screen with `BoxFit.contain`.
-pub const DISPLAY_MAX_EDGE: u32 = 640;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tier {

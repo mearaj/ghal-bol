@@ -45,7 +45,7 @@ Messaging should prioritize:
 
 instead of forcing native connect messaging for **WAN text**.
 
-**Why WAN text left native connect:** relay-based DM required both peers online at once; offline or sleeping recipients lost messages; mobile CGNAT + handover made outbox/ack paths unreliable. Chat’s core job is **guaranteed delivery when the recipient returns** — a mailbox model fits; realtime P2P does not. **Privacy unchanged:** payloads are E2E encrypted with the same contact identity keys; the server stores opaque ciphertext and cannot read content.
+**Why WAN text uses delivery:** realtime P2P required both peers online at once; offline or sleeping recipients lost messages; mobile CGNAT + handover made outbox/ack paths unreliable. Chat’s core job is **guaranteed delivery when the recipient returns** — a mailbox model fits; realtime P2P does not. **Privacy unchanged:** payloads are E2E encrypted with the same contact identity keys; the server stores opaque ciphertext and cannot read content.
 
 Voice and video remain P2P-first because they are inherently realtime sessions.
 
@@ -97,7 +97,7 @@ Recipient ─────► Delivery Server ─────► Sender
 
 # Outbound ticks (sender UI)
 
-When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server — not native connect DM acks. The sender sees **four** outbound states. Flutter **displays** native transcript `delivery` only; it does not invent ticks.
+When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server — not native connect DM acks. The sender sees **four** outbound states. Makepad **displays** native transcript `delivery` only; it does not invent ticks.
 
 | UI (sender) | Transcript `delivery` | Meaning | Authority / wire |
 |-------------|----------------------|---------|------------------|
@@ -108,11 +108,11 @@ When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server 
 
 **Monotonic only:** `pending` → `sent` → `delivered` → `read`. Never downgrade.
 
-**Not the same as legacy P2P ticks:** native connect DM used `pending` → single tick at `delivered` (`ack_received`) → blue double at `read` (`ack_read`). Delivery mode adds an explicit **server-received** step (`sent`) and uses **double black** for recipient delivery. See [DESIGN.md](DESIGN.md) § “Delivery mode — outbound ticks”.
+**LAN vs WAN ticks:** LAN native connect uses `pending` → `delivered` (`ack_received`) → `read` (`ack_read`). Delivery mode adds an explicit **server-received** step (`sent`) and uses **double black** for recipient delivery. See [DESIGN.md](DESIGN.md) § Truthful ticks.
 
 **Truthful UI:** never show `sent` until the server returns `message.upload.ok`; never show `delivered` / `read` until the server relays recipient acks. Upload HTTP/WSS failure leaves `pending` (or `failed` on hard send error).
 
-**Read receipts:** blue tick uses `inbox.read` → `message.read_to_sender` on the delivery worker (`delivery_read_acks.rs`), gated by the same hub UI session as P2P (`GhalBolUiSession` / `p2p_sync_ui_session`). Flutter maps transcript `delivery=read` only — no Dart ack logic.
+**Read receipts:** blue tick uses `inbox.read` → `message.read_to_sender` on the delivery worker (`delivery_read_acks.rs`), gated by the same hub UI session as LAN (`host::set_open_room` / `host::set_app_visible`). Makepad maps transcript `delivery=read` only — no UI ack logic.
 
 ---
 
@@ -352,13 +352,12 @@ Server provides:
 
 # Voice / Video Calls
 
-Remain P2P.
+Remain on native connect (direct or coord byte bridge).
 
-Coordination/Relay server continues handling:
+Coordination server continues handling:
 
-- peer discovery
-- NAT traversal
-- relay allocation
+- peer discovery / presence
+- WAN call bridge pairing
 
 Delivery server is not involved.
 
@@ -397,10 +396,10 @@ When the operator moves the backend (home PC → cloud), **repoint the GoDaddy A
 | Concern | Owner |
 |---------|--------|
 | Home install + DDNS + nginx WSS | [`ghal_bol_delivery/deploy/`](../ghal_bol_delivery/deploy/) — see [DELIVERY_HOME.md](../ghal_bol_delivery/deploy/DELIVERY_HOME.md) |
-| Client URL | `ghal_bol_ui/env/.env.production` — canonical `delivery.ghalbol.com` |
-| Calls / relay | Unchanged — [`ghal_bol_coord`](../ghal_bol_coord/) only |
+| Client URL | `ghal_bol_app/env/.env.production` — canonical `delivery.ghalbol.com` |
+| Calls / bridge | Unchanged — [`ghal_bol_coord`](../ghal_bol_coord/) only |
 
-Home stack mirrors coord1: in-process GoDaddy DDNS (`GHAL_BOL_DDNS_CREDENTIALS`), user systemd unit on loopback **8770**, nginx TLS on **55003** (home high port, like coord1 relay **55002**), router forward **55003** only.
+Home stack mirrors coord1: in-process GoDaddy DDNS (`GHAL_BOL_DDNS_CREDENTIALS`), user systemd unit on loopback **8770**, nginx TLS on **55003**, router forward **55003** only.
 
 ---
 

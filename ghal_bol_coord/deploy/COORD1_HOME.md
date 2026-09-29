@@ -5,7 +5,7 @@
 | Coord HTTPS + WAN call bridge WSS | nginx **8443** → loopback **8765** |
 | delivery WSS (same host) | TCP **55003** → nginx → loopback **8770** (see `ghal_bol_delivery/deploy/DELIVERY_HOME.md`) |
 
-**Router:** forward **8443** and **55003** (TCP) to the coord1/delivery host. Port **55002** (legacy libp2p relay) is no longer used.
+**Router:** forward **8443** and **55003** (TCP) to the coord1/delivery host.
 
 ```bash
 ./ghal_bol_coord/deploy/install_coord1_home.sh

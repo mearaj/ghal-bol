@@ -1,6 +1,6 @@
 # Android — opening `https://ghalbol.com/connect/…` in the app
 
-The Flutter app registers invite URLs in `AndroidManifest.xml` and handles them via `app_links` (`invite_deep_link.dart`).
+The Makepad app registers invite URLs in `AndroidManifest.xml` and handles them via `app_links` (`the invite page`).
 
 ## 1. App build (done in repo)
 
@@ -16,7 +16,7 @@ For links tapped in Chrome to **open Ghal Bol directly** (not only “Open with�
 
 **URL:** `https://ghalbol.com/.well-known/assetlinks.json` (and `www.ghalbol.com` — same file via Hosting)
 
-**In repo:** `ghal_bol_ui/web/.well-known/assetlinks.json` — copied into `build/web` on `flutter build web`. Deploy with [WEB_SITE.md](WEB_SITE.md). SHA-256 source: `web/.well-known/README.txt`.
+**In repo:** `web/.well-known/assetlinks.json`. Deploy with [WEB_SITE.md](WEB_SITE.md). SHA-256 source: `web/.well-known/README.txt`.
 
 Example (replace SHA-256 cert fingerprints if template):
 
@@ -55,8 +55,8 @@ If verification fails, Android keeps opening the browser until `assetlinks.json`
 | **Chrome / Samsung Internet** (address bar browser) | `ghalbol://` link works when Play app installed | Copy app link → paste in Ghal Bol |
 | **WhatsApp / Instagram / in-app WebView** | **Does not work** — WebView cannot launch `ghalbol://` or `intent://` (toast: “App not installed…”) | ⋮ → **Open in Chrome**, or copy app link → paste in app |
 
-This is **not** “friend didn’t install Ghal Bol.” Same APK from Play; different **browser shell**. See `web_browser_context_web.dart` and the banner on the invite page when UA is embedded.
+This is **not** “friend didn’t install Ghal Bol.” Same APK from Play; different **browser shell**. See `web/index.html` and the banner on the invite page when UA is embedded.
 
 **Verified HTTPS App Links:** If `pm get-app-links com.ghalbol` shows `ghalbol.com: verified`, tapping `https://ghalbol.com/connect/…` in **Chrome** should open the app directly (no web page). If the web page appears, the link was opened in an in-app browser or App Links are not verified on that device.
 
-**Dev builds:** `flutter run` installs `com.ghalbol.debug`. Play App Links target `com.ghalbol`; use the web button (`ghalbol://`) or a debug `assetlinks` entry for sideload testing.
+**Dev builds:** `makepad run` installs `com.ghalbol.debug`. Play App Links target `com.ghalbol`; use the web button (`ghalbol://`) or a debug `assetlinks` entry for sideload testing.

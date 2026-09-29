@@ -1,4 +1,4 @@
-//! Cross-cutting DM / store diagnostics → Flutter App log (via P2P `native_log` sink when running).
+//! Cross-cutting DM / store diagnostics → Makepad App log (via P2P `native_log` sink when running).
 
 use std::fmt::Display;
 

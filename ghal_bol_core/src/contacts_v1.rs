@@ -1,4 +1,4 @@
-//! Persisted 1:1 contacts (`contacts_v1.json`) — same format as Flutter [ContactStore].
+//! Persisted 1:1 contacts (`contacts_v1.json`) — same format as Makepad [ContactStore].
 
 use std::collections::HashMap;
 use std::fs;
@@ -686,11 +686,37 @@ mod tests {
     /// Guest-scanned host identity wire — never the local identity under test.
     const REMOTE_PK: &str = "02f229f167ac2337144dbeba4392a6300c8fe97fb061efdb4f81ec9f29dec76936";
 
+    struct Isolate {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        dir: TempDir,
+    }
+
+    impl Isolate {
+        fn new() -> Self {
+            let lock = crate::app_paths::test_storage_isolation_lock()
+                .lock()
+                .unwrap();
+            let dir = TempDir::new().unwrap();
+            crate::app_paths::configure_android_data_directory(dir.path().to_str().unwrap());
+            Self { _lock: lock, dir }
+        }
+
+        fn cfg(&self, ns: &str) -> StorageConfig {
+            StorageConfig::new(ns).with_override_data_dir(self.dir.path())
+        }
+    }
+
+    impl Drop for Isolate {
+        fn drop(&mut self) {
+            crate::app_paths::clear_test_data_directory();
+        }
+    }
+
     #[test]
     fn upsert_display_alias_set_and_clear() {
-        let td = TempDir::new().unwrap();
+        let iso = Isolate::new();
         let ns = "dev.contacts.alias";
-        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let cfg = iso.cfg(ns);
         let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
         let pk = "0305b1b0d27745e0a38a7254ea100abc38857b51ded2ac7ea88d3063fb8da21784";
 
@@ -755,9 +781,9 @@ mod tests {
 
     #[test]
     fn set_contact_trust_updates_flags() {
-        let td = TempDir::new().unwrap();
+        let iso = Isolate::new();
         let ns = "dev.contacts.trust";
-        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let cfg = iso.cfg(ns);
         let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
 
         upsert_contact(
@@ -788,9 +814,9 @@ mod tests {
 
     #[test]
     fn upsert_and_find_ed25519_prefixed_identity() {
-        let td = TempDir::new().unwrap();
+        let iso = Isolate::new();
         let ns = "dev.contacts.ed25519";
-        let cfg = StorageConfig::new(ns).with_override_data_dir(td.path());
+        let cfg = iso.cfg(ns);
         let _id = create_or_unlock_identity_v1(&cfg, "pw").unwrap();
         let (_remote_ks, remote) =
             create_keystore_v1_with_algorithm("pw2", IdentityAlgorithm::Ed25519, None).unwrap();

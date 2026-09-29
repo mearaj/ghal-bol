@@ -1,5 +1,5 @@
 //! Unified message state (E) — single on-disk transcript for all LAN/WAN paths.
-//! Full read/write access to `chat_transcript_v1.json` (Flutter [ChatTranscriptStore] is read-only reload).
+//! Full read/write access to `chat_transcript_v1.json` (Makepad [ChatTranscriptStore] is read-only reload).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -580,91 +580,6 @@ pub fn load_merged(
     )
 }
 
-pub fn save_thread(
-    app_namespace: &str,
-    conversation_key: &str,
-    lines: Vec<StoredChatLine>,
-) -> Result<(), TranscriptStoreError> {
-    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
-    let mut all = read_root_unlocked(&path)?;
-    let root = all.as_object_mut().ok_or_else(|| {
-        TranscriptStoreError::Io(std::io::Error::other("transcript root not object"))
-    })?;
-    let deduped = dedupe_lines(lines);
-    // UI full-save must not downgrade delivery/read ticks already written by :p2p on poll.
-    let expanded = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
-    let disk_rows = load_merged_unlocked(app_namespace, &expanded, None, &path).unwrap_or_default();
-    let disk_by_mid: HashMap<String, StoredChatLine> = disk_rows
-        .iter()
-        .filter_map(|r| {
-            let mid = r.message_id.as_deref().unwrap_or("").trim();
-            if mid.is_empty() {
-                None
-            } else {
-                Some((mid.to_string(), r.clone()))
-            }
-        })
-        .collect();
-    let mut merged: Vec<StoredChatLine> = deduped
-        .into_iter()
-        .map(|line| {
-            let mid = line.message_id.as_deref().unwrap_or("").trim();
-            if mid.is_empty() {
-                line
-            } else if let Some(disk) = disk_by_mid.get(mid) {
-                pick_better_duplicate(&line, disk)
-            } else {
-                line
-            }
-        })
-        .collect();
-    let ui_mids: HashSet<String> = merged
-        .iter()
-        .filter_map(|l| {
-            let mid = l.message_id.as_deref().unwrap_or("").trim();
-            if mid.is_empty() {
-                None
-            } else {
-                Some(mid.to_string())
-            }
-        })
-        .collect();
-    // Keep inbound rows :p2p wrote on poll that the UI shell has not merged yet.
-    for disk_line in disk_rows {
-        let mid = disk_line
-            .message_id
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if !mid.is_empty() {
-            if ui_mids.contains(&mid) {
-                continue;
-            }
-            merged.push(disk_line);
-            continue;
-        }
-        let dup = merged.iter().any(|u| {
-            u.message_id.as_deref().unwrap_or("").trim().is_empty()
-                && u.local_id == disk_line.local_id
-        });
-        if !dup {
-            merged.push(disk_line);
-        }
-    }
-    let deduped = dedupe_lines(merged);
-    let arr: Vec<Value> = deduped.iter().map(|l| l.to_json()).collect();
-    let ns_entry = root
-        .entry(app_namespace.to_string())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if let Some(obj) = ns_entry.as_object_mut() {
-        obj.insert(conversation_key.to_string(), Value::Array(arr));
-    }
-    write_root_unlocked(&path, &all)?;
-    bump_transcript_revision(app_namespace, conversation_key);
-    Ok(())
-}
-
 pub fn append_if_new(
     app_namespace: &str,
     conversation_key: &str,
@@ -878,48 +793,6 @@ pub fn patch_attachment_local_path(
     Ok(changed)
 }
 
-pub fn patch_inbound_read_ack_sent_for_thread(
-    app_namespace: &str,
-    conversation_key: &str,
-    message_id: &str,
-) -> Result<bool, TranscriptStoreError> {
-    let mid = message_id.trim();
-    if mid.is_empty() || conversation_key.trim().is_empty() {
-        return Ok(false);
-    }
-    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
-    let mut all = read_root_unlocked(&path)?;
-    let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
-        return Ok(false);
-    };
-    let keys = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
-    let mut changed = false;
-    for ck in keys {
-        let Some(thread) = ns_obj.get_mut(ck.as_str()).and_then(|v| v.as_array_mut()) else {
-            continue;
-        };
-        for item in thread.iter_mut() {
-            let Some(parsed) = StoredChatLine::from_json(item) else {
-                continue;
-            };
-            if !parsed.outgoing
-                && parsed.message_id.as_deref().unwrap_or("").trim() == mid
-                && !parsed.read_ack_sent
-            {
-                let mut next = parsed;
-                next.read_ack_sent = true;
-                *item = next.to_json();
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        write_root_unlocked(&path, &all)?;
-        bump_transcript_revision(app_namespace, conversation_key);
-    }
-    Ok(changed)
-}
-
 fn patch_inbound_read_ack_sent_all_threads(
     all: &mut Value,
     app_namespace: &str,
@@ -962,7 +835,6 @@ fn patch_inbound_read_ack_sent_all_threads(
     (changed, touched)
 }
 
-/// Search every thread under [app_namespace] (read-ack confirm from `chat_server`).
 pub fn patch_inbound_read_ack_sent_at_path(
     path: &Path,
     app_namespace: &str,
@@ -1008,11 +880,11 @@ mod tests {
 
     #[test]
     fn patch_outgoing_delivery_accepts_sent_rank() {
-        use crate::c_ffi::configure_android_data_directory;
+        use crate::app_paths::configure_android_data_directory;
         use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
         use tempfile::TempDir;
 
-        let _guard = crate::c_ffi::test_storage_isolation_lock()
+        let _guard = crate::app_paths::test_storage_isolation_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
@@ -1079,11 +951,11 @@ mod tests {
 
     #[test]
     fn thread_view_limited_returns_newest_window_with_has_more() {
-        use crate::c_ffi::configure_android_data_directory;
+        use crate::app_paths::configure_android_data_directory;
         use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
         use tempfile::TempDir;
 
-        let _guard = crate::c_ffi::test_storage_isolation_lock()
+        let _guard = crate::app_paths::test_storage_isolation_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
@@ -1135,11 +1007,11 @@ mod tests {
 
     #[test]
     fn append_if_new_inserts_by_created_at_ms_not_append_order() {
-        use crate::c_ffi::configure_android_data_directory;
+        use crate::app_paths::configure_android_data_directory;
         use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
         use tempfile::TempDir;
 
-        let _guard = crate::c_ffi::test_storage_isolation_lock()
+        let _guard = crate::app_paths::test_storage_isolation_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();

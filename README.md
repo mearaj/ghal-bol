@@ -1,12 +1,12 @@
 # Ghal Bol
 
 <p align="center">
-  <img src="ghal_bol_ui/assets/for-feature-graphic-1.png" alt="Ghal Bol Icon for playstore's feature graphic" width="1536">
+  <img src="docs/assets/for-feature-graphic-1.png" alt="Ghal Bol" width="1536">
 </p>
 
-Gh`al Bol is an end-to-end encrypted messenger: device-owned identity, local transcripts, and minimal server trust.
+Ghal Bol is an end-to-end encrypted messenger: device-owned identity, local transcripts, and minimal server trust.
 
-**Text chat (WAN)** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **LAN text** and **voice/video calls** use **native connect** (LAN/Voice/Video pure P2P where possible, otherwise P2P with the help of a coord relay server).
+**Text chat (WAN)** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **LAN text** and **voice/video calls** use **native connect** (direct P2P when possible; WAN calls use the coord byte bridge when NAT requires it).
 
 The system is designed around:
 
@@ -14,9 +14,17 @@ The system is designed around:
 
 Unlike traditional messengers, Ghal Bol does **not** store chat history in the cloud. Each device keeps its own transcript. The delivery server holds ciphertext **only until** the recipient acknowledges delivery (then deletes payload, keeps metadata for acks/TTL).
 
-**Why WAN text moved off pure P2P:** relay chat required both peers online at the same time and could not guarantee delivery when one peer was offline, asleep, or on a flaky mobile network — unacceptable for the core job of **text messages**. Voice and video remain P2P-first because they are inherently realtime sessions.
+WAN text uses the delivery mailbox so a message can arrive while the other person is offline. Voice and video stay on native connect because they are live sessions.
 
 **Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md), [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md).
+
+**Desktop UI:** `ghal_bol_app` is the Makepad 2 shell (`script_mod!`). It links `ghal_bol_core` and calls `ghal_bol_core::host` in-process. See [docs/MAKEPAD_UI.md](docs/MAKEPAD_UI.md).
+
+```bash
+cargo run -p ghal_bol_app
+```
+
+Debug builds use `~/.local/share/com.ghalbol.debug/`. Coord and delivery URLs come from the environment, then `env/.env.development` when that variable is unset.
 
 **Invites & coordination:** [docs/GHAL_BOL_URI_SCHEME.md](docs/GHAL_BOL_URI_SCHEME.md), [docs/COORDINATION_SERVER.md](docs/COORDINATION_SERVER.md)
 
@@ -36,7 +44,7 @@ Servers only assist with:
 - peer coordination
 - endpoint discovery
 - presence tracking
-- relay coordination
+- WAN call bridging
 
 The server is not the owner of chats, identities, or messages.
 
@@ -107,7 +115,7 @@ Connection policy for a configured contact ([TRANSPORT.md](docs/TRANSPORT.md) §
 4. **LAN loss:** WAN is already connected — immediate fallback without tearing down coord
 5. **Coord bridge** on the **Ghal Bol coord server** for NAT/CGNAT — WAN calls are bridged over WebSocket.
 
-Peer **discovery over WAN requires coord** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. The app does **not** fall back to Kademlia DHT or public bootstrap peers for WAN discovery. Multiple coord servers are supported as a list (today a single production entry).
+Peer **discovery over WAN requires coord** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. Multiple coord servers are supported as a list (today a single production entry).
 
 The system is designed to be:
 - IPv6-first
@@ -182,7 +190,7 @@ Mobile networking is inherently unstable because of:
 - CGNAT
 - WiFi/mobile switching
 - app suspension
-- battery optimizations and OEM autostart / “pause if unused” policies (Android: hub **`AndroidBackgroundReadiness`** after unlock — see `docs/DESIGN.md` § “Fixed 2026-07-05”)
+- battery optimizations and OEM autostart / “pause if unused” policies (Android — see [DESIGN.md](docs/DESIGN.md) § Process)
 - temporary reachability loss
 
 Ghal Bol assumes:
@@ -233,14 +241,11 @@ over theoretical decentralization purity.
 # Future Possibilities
 
 Potential future extensions include:
-- LAN-first synchronization
-- direct WiFi communication
-- voice/video calls
 - encrypted attachment streaming
 - decentralized relay reputation systems
 - opportunistic peer caching
 - relay incentives
-- local network discovery
+- Tier 2 temporary distributed relay (see [PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md))
 
 ---
 
@@ -284,10 +289,10 @@ Open this directory as the workspace root (the folder that contains this `README
 | `ghal_bol_core/` | Rust core: identity, native connect sync engine, local stores |
 | `ghal_bol_coord/` | Coordination server — see [ghal_bol_coord/README.md](ghal_bol_coord/README.md) |
 | `ghal_bol_delivery/` | Delivery server (WAN text mailbox) — [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md), home deploy [ghal_bol_delivery/deploy/](ghal_bol_delivery/deploy/) |
-| `ghal_bol_ui/` | Flutter UI shell — [ghal_bol_ui/README.md](ghal_bol_ui/README.md) |
+| `ghal_bol_app/` | Makepad 2 UI — [docs/MAKEPAD_UI.md](docs/MAKEPAD_UI.md) |
 | `docs/` | [Design](docs/DESIGN.md), [transport](docs/TRANSPORT.md), [identity](docs/IDENTITY.md), [coord server](docs/COORDINATION_SERVER.md), [web site](docs/WEB_SITE.md), [doc index](docs/README.md) |
 | `firebase.json` | Firebase Hosting for **ghalbol.com** (static web build) |
-| `scripts/deploy_web_firebase.sh` | `flutter build web` + `firebase deploy --only hosting` |
+| `env/` | Coord and delivery URLs for local runs |
 
 ---
 
@@ -299,8 +304,8 @@ Open this directory as the workspace root (the folder that contains this `README
 
 | Phase | Key steps |
 |-------|-----------|
-| **P0** | Release keystore → `flutter build apk/appbundle --release` → two-phone ship test |
+| **P0** | Release build of `ghal_bol_app` → two-phone ship test |
 | **P1** | CI green, VM systemd + reboot, commit & push |
 | **P2** | [Privacy policy](docs/PRIVACY_POLICY.md) online → [Play listing](docs/PLAY_STORE_LISTING.md) → AAB upload |
 
-Build/run details: [ghal_bol_ui/env/README.md](ghal_bol_ui/env/README.md). Server deploy: [ghal_bol_coord/deploy/README.md](ghal_bol_coord/deploy/README.md).
+Build/run details: [env/README.md](env/README.md). Server deploy: [ghal_bol_coord/deploy/README.md](ghal_bol_coord/deploy/README.md).

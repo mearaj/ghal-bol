@@ -1,8 +1,10 @@
-//! Transport KEM lookup for call media FFI (session-scoped peer keys).
+//! Session-scoped transport keys for call media.
 
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use x25519_dalek::{PublicKey, StaticSecret};
 
 static PEER_TRANSPORT_PKS: OnceLock<Mutex<std::collections::HashMap<String, [u8; 32]>>> =
@@ -18,6 +20,7 @@ pub(crate) fn set_peer_transport_pk(peer_wire: &str, pk: [u8; 32]) {
     }
 }
 
+#[cfg(test)]
 fn dm_transport_sk_from_identity(ident: &crate::DecryptedIdentity) -> StaticSecret {
     let mut h = Sha256::new();
     h.update(b"ghal_bol_connect_v1/dm_transport_sk");
@@ -27,6 +30,7 @@ fn dm_transport_sk_from_identity(ident: &crate::DecryptedIdentity) -> StaticSecr
 }
 
 /// Local transport secret + peer x25519 public key when the connect session has completed KEM hello.
+#[cfg(test)]
 pub fn transport_kem_for_peer(peer_wire: &str) -> Option<(StaticSecret, [u8; 32])> {
     let ident = crate::session_runtime::unlocked_identity_clone().ok()?;
     let local_sk = dm_transport_sk_from_identity(&ident);

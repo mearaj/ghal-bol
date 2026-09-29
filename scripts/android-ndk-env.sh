@@ -134,7 +134,7 @@ Try one of these:
                         i686-linux-android x86_64-linux-android
 
   4) Prefer cargo-ndk for APK jniLibs (it discovers the NDK too); see:
-        ghal_bol_ui/README.md   # Flutter shell; optional JNI notes
+        ghal_bol_app/README.md   # Makepad shell; optional JNI notes
 
 One-shot (no sourcing):  scripts/with-android-env.sh cargo check -p ghal_bol_core --target aarch64-linux-android
 EOF

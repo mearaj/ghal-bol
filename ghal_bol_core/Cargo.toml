@@ -5,12 +5,7 @@ edition = "2024"
 
 [lib]
 name = "ghal_bol_core"
-crate-type = ["rlib", "cdylib"]
-
-[[bin]]
-name = "ghal_bol_core_daemon"
-path = "src/bin/ghal_bol_core_daemon.rs"
-required-features = []
+crate-type = ["rlib"]
 
 [dependencies]
 base64 = "0.22"
@@ -57,11 +52,15 @@ if-addrs = "0.14"
 fs4 = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 audiopus = "0.2"
+sonora = "0.1"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 cpal = "0.15"
 openh264 = "0.9"
 nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+png = "0.17"
+rqrr = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [features]
 default = []
@@ -79,6 +78,7 @@ openh264 = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
+qrcode = { version = "0.14", features = ["image"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ghal_bol_coord = { path = "../ghal_bol_coord" }
 axum = "0.8"

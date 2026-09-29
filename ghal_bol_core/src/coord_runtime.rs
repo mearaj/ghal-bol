@@ -80,7 +80,7 @@ fn lookup_backoff_map() -> &'static Mutex<HashMap<String, CoordLookupBackoff>> {
     COORD_LOOKUP_BACKOFF.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Keep FFI/Dart `coord_lookup_peer` backoff aligned with `:p2p` session backoff.
+/// Keep in-process `coord_lookup_peer` backoff aligned with `:p2p` session backoff.
 pub fn clear_coord_lookup_backoff_for_pk(public_key_hex: &str) {
     let pk = public_key_hex.trim();
     if !crate::contacts_v1::is_valid_public_key_hex(pk) {
@@ -91,7 +91,7 @@ pub fn clear_coord_lookup_backoff_for_pk(public_key_hex: &str) {
     }
 }
 
-/// Mirror `:p2p` `note_coord_lookup_not_found` so duplicate Dart lookups do not fight native upkeep.
+/// Mirror `:p2p` `note_coord_lookup_not_found` so duplicate UI lookups do not fight native upkeep.
 pub fn sync_coord_lookup_peer_not_found(public_key_hex: &str, step_ms: u64, now_ms: i64) {
     let pk = public_key_hex.trim();
     if !crate::contacts_v1::is_valid_public_key_hex(pk) {
@@ -208,7 +208,7 @@ pub fn parse_coord_urls(input: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse coord URL(s) from daemon RPC / FFI / `p2p_start` JSON (new + legacy keys).
+/// Parse coord URL(s) from `p2p_start` JSON.
 pub fn coord_urls_from_json_value(v: &serde_json::Value) -> Vec<String> {
     for key in ["base_urls", "coord_base_urls"] {
         if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {

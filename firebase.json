@@ -1,6 +1,6 @@
 {
   "hosting": {
-    "public": "ghal_bol_ui/build/web",
+    "public": "web",
     "ignore": ["firebase.json", "**/node_modules/**"],
     "rewrites": [
       {

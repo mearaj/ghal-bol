@@ -1,14 +1,10 @@
-//! Android `:p2p` process: JNI entry to run the Unix-socket daemon inside `lib_ghal_bol_core.so`.
-
-use std::path::Path;
+//! Android process helpers: rustls, audio context, data directory, connectivity.
 
 use jni::EnvUnowned;
 use jni::errors::LogContextErrorAndDefault;
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean};
 
-use crate::c_ffi::configure_android_data_directory;
-use crate::daemon::run_daemon;
+use crate::app_paths::configure_android_data_directory;
 
 /// Must run once per `:p2p` process before any `reqwest`/coord HTTPS (see rustls-platform-verifier Android docs).
 #[unsafe(no_mangle)]
@@ -90,29 +86,7 @@ pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_configureDataDire
         });
 }
 
-/// Blocks the calling thread running the JSON-RPC listener (call from a background thread).
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_runDaemon<'local>(
-    mut unowned_env: EnvUnowned<'local>,
-    _class: JClass<'local>,
-    socket_path: JString<'local>,
-) -> jboolean {
-    unowned_env
-        .with_env(|env| -> jni::errors::Result<jboolean> {
-            let p: String = socket_path.try_to_string(env)?;
-            let path = Path::new(p.trim());
-            match run_daemon(path) {
-                Ok(()) => Ok(JNI_TRUE),
-                Err(e) => {
-                    eprintln!("ghal_bol run_daemon failed: {e}");
-                    Ok(JNI_FALSE)
-                }
-            }
-        })
-        .resolve_with::<LogContextErrorAndDefault, _>(|| "ghal_bol runDaemon".to_string())
-}
-
-/// Called from `:p2p` when Android reports a connectivity change (thin platform hook only).
+/// Called from Android when the OS reports a connectivity change.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_ghalbol_P2pDaemonNative_notifyNetworkChange<'local>(
     _unowned_env: EnvUnowned<'local>,

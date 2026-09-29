@@ -27,12 +27,12 @@ The system does not require phone numbers, email addresses, or centralized accou
 
 Storage root — one namespace directory per build; keystore, prefs, and `ghal_bol/` (contacts, transcript) all live under it:
 
-| Build | `app_namespace` | Linux | Android (under package `app_flutter`) |
+| Build | `app_namespace` | Linux | Android (under package `app_makepad`) |
 |-------|-----------------|-------|----------------------------------------|
-| `flutter run` (debug) | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` | `com.ghalbol.debug/` |
-| `flutter run --release` / shipped | `com.ghalbol` | `~/.local/share/com.ghalbol/` | `/` (package root) |
+| `makepad run` (debug) | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` | `com.ghalbol.debug/` |
+| `makepad run --release` / shipped | `com.ghalbol` | `~/.local/share/com.ghalbol/` | `/` (package root) |
 
-Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v1.json`, `ghal_bol/chat_transcript_v1.json`. Debug vs release on Android are separate package ids (`com.ghalbol.debug` vs `com.ghalbol`), so separate `app_flutter` trees.
+Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v1.json`, `ghal_bol/chat_transcript_v1.json`. Debug vs release on Android are separate package ids (`com.ghalbol.debug` vs `com.ghalbol`), so separate `app_makepad` trees.
 
 ### Global alias vs local alias
 
@@ -47,16 +47,16 @@ Coord and delivery servers identify peers by **identity wire** (public key), not
 
 | Path | Owner | Contents |
 |------|-------|----------|
-| `~/.local/share/com.ghalbol.debug/` | Debug **app** (`flutter run`) | Keystore, contacts, transcript for debug builds |
-| `~/.local/share/com.ghal_bol.coord/ghal_bol_coord/` | **Coord server** (home or GCP) | `coord.db`, `relay_ed25519.key` |
+| `~/.local/share/com.ghalbol.debug/` | Debug **app** (`makepad run`) | Keystore, contacts, transcript for debug builds |
+| `~/.local/share/com.ghal_bol.coord/ghal_bol_coord/` | **Coord server** (home or GCP) | `coord.db` |
 
 The debug app does **not** write identity or chat stores to `com.ghalbol/` unless you run a release build. There is no automatic migration between debug and release namespaces — re-pair or import identity when switching builds.
 
-**Android path fix (2026-06):** `ui_data_dir()` uses `namespace_data_dir()` so keystore and `ghal_bol/` contacts/transcript share the same namespace root (debug: `app_flutter/com.ghalbol.debug/ghal_bol/`).
+**Android path fix (2026-06):** `ui_data_dir()` uses `namespace_data_dir()` so keystore and `ghal_bol/` contacts/transcript share the same namespace root (debug: `app_makepad/com.ghalbol.debug/ghal_bol/`).
 
 ---
 
-## Identity creation (Flutter)
+## Identity creation (Makepad)
 
 Two modes on first launch when **no keystore** exists on the device.
 
@@ -83,7 +83,7 @@ Use cases: device migration, multi-device setup, recovery from a **Ghal Bol** ba
 
 If a keystore already exists, import fails until the user **deletes identity** on that device.
 
-**Failed first-time setup:** If create or import fails after the user chose an app password, the app removes any partial `keystore_v1.json` (`ghal_bol_core_ffi_reset_first_time_identity`) so they can pick a **new password** and try again. The P2P daemon is not allowed to create a keystore before the UI finishes first-time setup (that would block password retry).
+**Failed first-time setup:** If create or import fails after the user chose an app password, the app removes any partial `keystore_v1.json` so they can pick a **new password** and try again.
 
 ### Cryptocurrency wallet keys (not recommended)
 
@@ -110,20 +110,13 @@ This limits exposure from casual device access or shoulder surfing.
 2. App password prompt
 3. On success: display 64-hex secret + copy (with warning)
 
-**UI contract (do not regress):** The reveal flow stays **dialog-based** (steps above). Do not move the secret inline on the Identity tab.
-
-The Identity tab is kept alive in an **`IndexedStack`**. Two Flutter pitfalls stack with **Show private key** / export / delete dialogs:
-
-1. **`TextEditingController` dispose race** — disposing a controller in the caller immediately after `await showDialog` while the dialog `TextField` is still tearing down (`TextEditingController was used after being disposed` in `flutter_android.log`). Use a **`StatefulWidget` dialog**; dispose only in `State.dispose()` ([`invite_paste_dialog.dart`](../ghal_bol_ui/lib/invite_paste_dialog.dart)).
-2. **`SelectableText` / `SelectionArea`** on the tab body — can cascade into `_dependents.isEmpty` on dialog pop. Use plain **`Text`** + copy buttons.
-
-**Required:** [`identity_key_management.dart`](../ghal_bol_ui/lib/identity_key_management.dart) `_AppPasswordDialog`; plain `Text` on `_identityBody`; `dismissTextSelectionForDialog` before dialog chains. Full spec: [DESIGN.md § Identity tab guard](DESIGN.md#identity-tab--show-private-key-dialog-stack--guard).
+**UI contract:** **Private key** asks for the app password again and shows the secret on that sheet. The password and the revealed secret stay in the Makepad app until the sheet closes. Implementation: `ghal_bol_app` and `host::reveal_secret`.
 
 ---
 
 ## Mandatory backup after Create new (implemented)
 
-When the app **generates** a new identity (first-time **Create new** only), a **blocking backup step** runs after unlock and **before** entering the chat shell ([`showMandatoryKeystoreBackupDialog`](../ghal_bol_ui/lib/identity_key_management.dart), called from [`IdentityScreen._unlock`](../ghal_bol_ui/lib/bootstrap_native.dart)):
+When the app **generates** a new identity (first-time **Create new** only), a **blocking backup step** runs after unlock and **before** entering the chat shell (`ghal_bol_app`, `host::export_keystore`):
 
 1. Explains the identity is device-owned with no cloud copy.
 2. User must **Export encrypted backup** (share + clipboard) at least once.
@@ -171,16 +164,15 @@ Servers assist presence and endpoint discovery; they do not issue or own messagi
 
 ## Implementation reference
 
-| Action | UI | Native FFI |
-|--------|-----|------------|
-| Create / unlock | Unlock screen | `ghal_bol_core_ffi_create_or_unlock_identity` |
-| Import hex secret | Unlock → Import key | `ghal_bol_core_ffi_import_identity_from_secret_hex` |
-| Import keystore file | Unlock → Import backup | `ghal_bol_core_ffi_import_keystore_json` |
-| Reveal private key | Identity → Show private key | `ghal_bol_core_ffi_reveal_secret_key_hex` |
-| Export backup | Identity → Export backup | `ghal_bol_core_ffi_export_keystore_json` |
-| Delete identity | Unlock / More | `ghal_bol_core_ffi_delete_keystore` |
+| Action | UI | `host` |
+|--------|-----|--------|
+| Create / unlock | Unlock screen | `unlock` / `unlock_with_options` |
+| Import keystore file | Unlock → Import backup | `import_keystore` |
+| Reveal private key | Private key sheet | `reveal_secret` |
+| Export backup | Backup sheet | `export_keystore` |
+| Delete identity | Unlock | `delete_identity` |
 
-Rebuild native after API changes: `sync_ghal_bol_native_for_flutter.sh` (desktop) or `pack_android_workspace_jni_libs.sh` (Android). See [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Local dev stack.
+See `ghal_bol_core/src/host.rs` and `ghal_bol_app/src/main.rs`.
 
 ---
 

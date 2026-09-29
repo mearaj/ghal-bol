@@ -989,7 +989,6 @@ pub(crate) async fn start_call_video_for_peer(
         crate::p2p::call_active::on_video_start(&call_id, &pk, camera_enabled);
         return Ok(());
     }
-    crate::call_video::track_call_shm(&call_id);
     let video_key_id = format!("{call_id}:video");
     let keys = derive_call_media_keys(session.as_ref(), &pk, &video_key_id)?;
     let local_is_a = crate::call_media::local_is_a(&session.identity.identity_wire(), &pk);
