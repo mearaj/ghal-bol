@@ -1,24 +1,21 @@
 //! Text chat transport policy.
 //!
-//! **Parallel LAN + WAN invariant:** when `GHAL_BOL_DELIVERY_URL` is set, every outbound text
-//! uploads to the delivery server first (offline guarantee). LAN connect is an **additive fast
-//! mirror** only — it never bypasses the server. See `docs/GHAL_BOL_CONNECT_V1.md`.
-//!
-//! - **WAN text (primary)** — [`ghal_bol_delivery`] E2E mailbox when delivery URL is set.
-//! - **LAN text (fast)** — native connect or libp2p mDNS/direct TCP when both peers are on LAN.
-//! - **Voice/video calls** — native connect (target) / libp2p (legacy) on LAN and WAN.
+//! **Product decision:** when `GHAL_BOL_DELIVERY_URL` is set, **all product text** uses
+//! [`ghal_bol_delivery`] (E2E mailbox). Voice/video calls use native connect (LAN or coord
+//! bridge). Native connect is **not** the product chat path. See `docs/DESIGN.md`.
 
-/// Delivery server handles WAN / offline-capable text (mandatory when URL is set).
+/// Delivery server handles product text (mandatory when URL is set).
 pub fn delivery_primary_text() -> bool {
     crate::delivery_runtime::delivery_mode_enabled()
 }
 
-/// Alias kept for existing call sites during migration.
+/// Alias kept for existing call sites.
 pub fn wan_text_via_delivery_server() -> bool {
     delivery_primary_text()
 }
 
-/// LAN fast-path text mirror is enabled (additive; does not disable delivery worker).
+/// Whether native-connect may still carry non-product mirror frames (implementation detail).
+/// Product chat remains delivery when [`delivery_primary_text`] is true.
 pub fn lan_fast_path_enabled() -> bool {
     true
 }

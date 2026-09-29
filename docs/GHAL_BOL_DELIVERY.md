@@ -43,9 +43,9 @@ Messaging should prioritize:
 - simplicity
 - predictable behaviour
 
-instead of forcing native connect messaging for **WAN text**.
+instead of forcing native-connect messaging for **text**.
 
-**Why WAN text uses delivery:** realtime P2P required both peers online at once; offline or sleeping recipients lost messages; mobile CGNAT + handover made outbox/ack paths unreliable. Chat’s core job is **guaranteed delivery when the recipient returns** — a mailbox model fits; realtime P2P does not. **Privacy unchanged:** payloads are E2E encrypted with the same contact identity keys; the server stores opaque ciphertext and cannot read content.
+**Why text uses delivery:** realtime P2P required both peers online at once; offline or sleeping recipients lost messages; mobile CGNAT + handover made outbox/ack paths unreliable. Chat’s core job is **guaranteed delivery when the recipient returns** — a mailbox model fits; realtime P2P does not. **Privacy unchanged:** payloads are E2E encrypted with the same contact identity keys; the server stores opaque ciphertext and cannot read content.
 
 Voice and video remain P2P-first because they are inherently realtime sessions.
 
@@ -97,7 +97,7 @@ Recipient ─────► Delivery Server ─────► Sender
 
 # Outbound ticks (sender UI)
 
-When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server — not native connect DM acks. The sender sees **four** outbound states. Makepad **displays** native transcript `delivery` only; it does not invent ticks.
+When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server. The sender sees **four** outbound states. Makepad **displays** native transcript `delivery` only; it does not invent ticks.
 
 | UI (sender) | Transcript `delivery` | Meaning | Authority / wire |
 |-------------|----------------------|---------|------------------|
@@ -108,11 +108,11 @@ When **`GHAL_BOL_DELIVERY_URL`** is set, **chat text** uses the delivery server 
 
 **Monotonic only:** `pending` → `sent` → `delivered` → `read`. Never downgrade.
 
-**LAN vs WAN ticks:** LAN native connect uses `pending` → `delivered` (`ack_received`) → `read` (`ack_read`). Delivery mode adds an explicit **server-received** step (`sent`) and uses **double black** for recipient delivery. See [DESIGN.md](DESIGN.md) § Truthful ticks.
+**Product ticks:** delivery mode uses an explicit **server-received** step (`sent`) and **double black** for recipient delivery. See [DESIGN.md](DESIGN.md) § Truthful ticks.
 
 **Truthful UI:** never show `sent` until the server returns `message.upload.ok`; never show `delivered` / `read` until the server relays recipient acks. Upload HTTP/WSS failure leaves `pending` (or `failed` on hard send error).
 
-**Read receipts:** blue tick uses `inbox.read` → `message.read_to_sender` on the delivery worker (`delivery_read_acks.rs`), gated by the same hub UI session as LAN (`host::set_open_room` / `host::set_app_visible`). Makepad maps transcript `delivery=read` only — no UI ack logic.
+**Read receipts:** blue tick uses `inbox.read` → `message.read_to_sender` on the delivery worker (`delivery_read_acks.rs`), gated by hub UI session (`host::set_open_room` / `host::set_app_visible`). Makepad maps transcript `delivery=read` only — no UI ack logic.
 
 ---
 
@@ -326,27 +326,11 @@ Identity remains device-owned.
 
 ---
 
-# LAN Behaviour
+# Text vs calls
 
-LAN messaging remains available.
+**Text messaging** uses this delivery server. Native-connect / LAN P2P is **not** the product chat path.
 
-However:
-
-Messages should still be uploaded to the delivery server.
-
-Reason:
-
-If peer suddenly disconnects from LAN:
-
-delivery is still guaranteed.
-
-LAN provides:
-
-- lower latency
-
-Server provides:
-
-- reliability
+**Voice and video** stay on native connect (LAN direct or coord bridge). Delivery is not involved in call media.
 
 ---
 

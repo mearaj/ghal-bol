@@ -8,11 +8,11 @@ Connectivity: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**, § **N
 |----------|----------|
 | [DESIGN.md](DESIGN.md) | **Canonical** layers, truthful ticks, room open/close, transcripts, trust, process |
 | [MAKEPAD_UI.md](MAKEPAD_UI.md) | Makepad 2 shell (`ghal_bol_app`); Splash, scrolling, language/fonts, `host` |
-| [TRANSPORT.md](TRANSPORT.md) | Native connect: lifecycle, network truth, parallel LAN+WAN, bridge/CGNAT, caching |
-| [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) | Native connect wire (mDNS + Noise + mux + coord bridge) |
-| [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) | DM wire, `ack_received` / `ack_read`, upkeep |
+| [TRANSPORT.md](TRANSPORT.md) | Calls (native connect) + delivery text policy; network truth; bridge/CGNAT |
+| [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) | Call transport wire (mDNS + Noise + mux + coord bridge) |
+| [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) | Call-signaling / native mux wire; text product path is delivery |
 | [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Connect invites: `ghalbol.com`, `ghalbol://` |
-| [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) | WAN text mailbox design (`ghal_bol_delivery`) |
+| [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) | Text mailbox design (`ghal_bol_delivery`) |
 | [GHAL_BOL_DELIVERY_WIRE_V1.md](GHAL_BOL_DELIVERY_WIRE_V1.md) | Delivery HTTP/WebSocket wire |
 | [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Run/test `ghal_bol_coord`, local/prod, troubleshooting |
 | [IDENTITY.md](IDENTITY.md) | Local identity (secp256k1 today) |

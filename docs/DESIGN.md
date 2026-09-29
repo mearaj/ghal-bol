@@ -4,8 +4,8 @@ How the app works today. Wire detail is in [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_M
 
 ## Goals
 
-- End-to-end encrypted text. **WAN** text uses the delivery mailbox ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)). **LAN** text uses native connect.
-- Voice and video calls use native connect: direct when possible, otherwise through the coord bridge.
+- End-to-end encrypted **text messaging** via the delivery mailbox ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)). Text is not a native-connect / LAN P2P product path.
+- **Voice and video calls** use native connect: direct on LAN when possible, otherwise through the coord byte bridge.
 - No server-side chat history. Each device keeps its own transcript. The delivery server stores ciphertext only until the recipient acknowledges it.
 - The recipient decides delivery and read. The sender does not invent ticks.
 - One process. `ghal_bol_app` calls `ghal_bol_core::host`. Debug data is `~/.local/share/com.ghalbol.debug/`. Release data is `~/.local/share/com.ghalbol/`.
@@ -23,9 +23,9 @@ ghal_bol_core
 
 | Concern | Owner |
 |---------|--------|
-| Listen, dial, LAN text, calls, outbox, acks | `ghal_bol_core` |
-| WAN text mailbox | `delivery_runtime.rs` |
-| Apply events to disk | `dm_event_handler.rs` on `p2p_poll` |
+| Listen, dial, calls, call signaling | `ghal_bol_core` (`connect/`) |
+| Text mailbox send/recv and acks | `delivery_runtime.rs` |
+| Apply events to disk | `dm_event_handler.rs` on poll |
 | Contacts, unread, preview, trust | `contacts_v1.rs` |
 | Transcript lines and `delivery` | `dm_transcript_store.rs` |
 | Invites | `connect_invite_v1.rs` |
@@ -39,9 +39,8 @@ Peer traffic uses the device identity and the contact’s identity wire.
 
 | Channel | Mechanism |
 |---------|-----------|
-| WAN text | `ghal_bol_delivery` ciphertext |
-| LAN text | `ghal_bol_msg_v1` with transport KEM v2 |
-| Call signaling | `ghal_bol_call_v1` with transport KEM |
+| Text messaging | `ghal_bol_delivery` ciphertext (`delivery_msg_v1`) |
+| Call signaling | `ghal_bol_call_v1` with transport KEM on native connect |
 | Call audio and video | Keys from the transport secret, AES-GCM per frame |
 
 ## Who scans whom
@@ -52,30 +51,29 @@ The guest scans the host QR and stores the host public key. The host may have ze
 
 The UI shows `delivery` only after the transcript on disk says so.
 
-- The recipient sends `ack_received` and `ack_read`. The sender never sends `ack_request`.
-- Poll applies events. Poll does not send acks.
+- Tick authority is the **delivery** path ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)). The sender never invents ticks.
+- Poll applies events for display. Poll does not send acks.
 - Outbound `pending` while the peer already has the text is normal. Devices do not sync transcripts.
-- State only moves forward: `pending` → `delivered` → `read`. WAN text also has `sent` after the server accepts the upload. `read` never downgrades to `delivered`.
+- State only moves forward: `pending` → `sent` → `delivered` → `read`. `read` never downgrades to `delivered`.
 
-| WAN text (`GHAL_BOL_DELIVERY_URL` set) | Transcript | Meaning |
-|----------------------------------------|------------|---------|
+| Text (`GHAL_BOL_DELIVERY_URL` set) | Transcript | Meaning |
+|-------------------------------------|------------|---------|
 | No tick | `pending` | Not confirmed on the server |
 | ✓ | `sent` | Server accepted the upload |
 | ✓✓ | `delivered` | Recipient got it |
 | ✓✓ in blue | `read` | Recipient had the room open |
 
-LAN text skips `sent`: `pending` → `delivered` (`ack_received`) → `read` (`ack_read`).
+Product chat uses this delivery tick model only.
 
 ## Room open, leave, and read acks
 
 **Open** means the hub has called `host::set_open_room(Some(peer))` and the chat column is showing. A highlighted roster row is not open.
 
-- `ack_received` is always sent for accepted inbound text.
-- `ack_read` is sent for new inbound text only while that room is open and the app is showing it.
-- On leave, `host::set_open_room(None)` freezes `chat_room_exit_at_ms` and drains read acks for messages received while the room was open. New mail after leave gets `ack_received` only.
-- `read_ack_sent` is stored only after our `ack_read` and the sender’s confirming `ack_received`.
-- `received_at_ms` is the local accept time. Do not read-ack a row that has no `received_at_ms`.
-- One `ack_read` per text id, then retries about once a second until the peer confirms. Duplicate floods are bugs.
+Product text acks travel on the **delivery** path ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)):
+
+- Delivery ack is always sent for accepted inbound text.
+- Read ack is sent for new inbound text only while that room is open and the app is showing it.
+- On leave, `host::set_open_room(None)` freezes `chat_room_exit_at_ms` and drains pending read acks for messages received while the room was open. New mail after leave gets delivery ack only.
 - Linux: do not treat a brief focus loss as leaving the room. Android: when the app is not visible, do not send new read acks for the open room.
 
 ## Transcripts

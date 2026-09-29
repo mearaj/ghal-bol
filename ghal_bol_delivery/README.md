@@ -1,6 +1,6 @@
 # ghal_bol_delivery
 
-Temporary encrypted message mailbox for Ghal Bol WAN text delivery.
+Temporary encrypted message mailbox for Ghal Bol text delivery.
 
 Design: [docs/GHAL_BOL_DELIVERY.md](../docs/GHAL_BOL_DELIVERY.md)
 

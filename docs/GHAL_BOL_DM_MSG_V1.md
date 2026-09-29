@@ -4,7 +4,7 @@ Ghal Bol uses **one-to-one framed streams** on native protocol **`/ghal-bol/msg/
 
 **Design overview** (layers, chat-room rules, asymmetric contacts): see **[DESIGN.md](DESIGN.md)** first.
 
-> **Scope:** **`GHAL_BOL_DELIVERY_URL`** handles **WAN text**. This spec covers **LAN text** and **call signaling** on `/ghal-bol/msg/1.0.0`. WAN ticks: [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md). See [DESIGN.md](DESIGN.md) § Goals.
+> **Scope:** Product **text** uses **`GHAL_BOL_DELIVERY_URL`** ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)). This spec covers **call signaling** frames on `/ghal-bol/msg/1.0.0` (and related native mux kinds). Native connect is **not** the product chat messaging path. See [DESIGN.md](DESIGN.md) § Goals.
 
 ## Transport stack
 
@@ -12,7 +12,7 @@ Ghal Bol uses **one-to-one framed streams** on native protocol **`/ghal-bol/msg/
 |-------|--------|
 | App framing | 4-byte little-endian length + UTF-8 JSON envelope |
 | Envelope tag | `ghal_bol_msg_v1` (`format_version`: **`2`**) |
-| **Transport (native connect)** | Stream protocol `/ghal-bol/msg/1.0.0` on TCP + Noise + channel mux; **LAN** mDNS; WAN **calls** use the coord bridge ([TRANSPORT.md](TRANSPORT.md)) |
+| **Transport (native connect)** | Stream protocol `/ghal-bol/msg/1.0.0` on TCP + Noise + channel mux for **call signaling**; **LAN** mDNS; WAN **calls** use the coord bridge ([TRANSPORT.md](TRANSPORT.md)). Product **text** uses delivery, not this path. |
 
 **Long-lived session:** one bidirectional mux session per remote **identity wire** when possible. A dedicated writer task sends frames; inbound read loop on the same session.
 
@@ -64,7 +64,7 @@ Common fields:
 }
 ```
 
-Delivery seal = identity offline seal (`delivery_msg_v1`); LAN DM seal = transport KEM v2 (`msg_v1`). Cap: **3 MB** sealed inner (`ATTACH_MAX_SEALED_INNER_BYTES`). Recipient writes `ghal_bol/attach/downloads/…` and sets transcript `local_path` — no separate download hop. **Coord is not used.**
+Delivery seal = identity offline seal (`delivery_msg_v1`). Cap: **3 MB** sealed inner (`ATTACH_MAX_SEALED_INNER_BYTES`). Recipient writes `ghal_bol/attach/downloads/…` and sets transcript `local_path` — no separate download hop. **Coord is not used.**
 
 **LAN oversized only:** native-connect mux `/ghal-bol/attach/1.0.0` (`CHANNEL_ATTACH`). Offer inner has `blob_id`, `content_key_b64`, hashes, `expires_at_ms` (no `file_b64`). Recipient fetches ciphertext chunks over the **LAN** session, decrypts, then may send `attachment_complete`. See [ATTACHMENTS_PLAN.md](ATTACHMENTS_PLAN.md).
 

@@ -4,7 +4,7 @@
 **App:** Ghal Bol (`com.ghalbol`)  
 **Publisher:** Ghal Bol / [ghalbol.com](https://ghalbol.com)
 
-This Privacy Policy explains how the Ghal Bol mobile and desktop applications (“the app”) and the optional **coordination service** we operate handle information. Ghal Bol is a **peer-to-peer (P2P) messenger**: chat and call content is designed to travel **directly between users’ devices**, not to be stored as message history on our servers.
+This Privacy Policy explains how the Ghal Bol mobile and desktop applications (“the app”) and the optional **coordination** and **delivery** services we operate handle information. Ghal Bol keeps **chat history on devices**; the delivery server holds temporary E2E ciphertext only until delivery is acknowledged. **Calls** are designed to travel peer-to-peer (or through an opaque coord bridge) and are not stored as call content on our servers.
 
 ---
 
@@ -49,19 +49,24 @@ You may **export** an encrypted keystore backup or (after re-entering your passw
 
 ---
 
-## Peer-to-peer communication
+## How chat and calls move
 
-When you send a message or place a call:
+When you send a **chat message**:
 
-1. Content is protected for transport between peers using **cryptographic keys derived from your identities** (message envelopes are signed/sealed in the `ghal_bol` protocol; connections use **native connect** with encrypted transports such as Noise over TCP/QUIC).
-2. Payloads are intended to flow **directly between devices** when the network allows.
-3. **We do not receive message bodies, attachments, or call audio/video** on the coordination server.
+1. Your device encrypts the payload with keys derived from your identity and the recipient’s.
+2. Opaque ciphertext is uploaded to the **Ghal Bol delivery server** (temporary mailbox). The server cannot decrypt it.
+3. The recipient downloads, decrypts locally, and sends delivery/read signals through the same mailbox path.
 
-**Delivery and read receipts** are decided by the **recipient’s device** and exchanged over the same P2P channel; the sender’s app updates status only when those signals are received.
+When you place a **voice or video call**:
 
-**LAN discovery:** On local networks, the app may use **mDNS** to find configured contacts without using the coordination server.
+1. Signaling and media use **native connect** (direct on LAN when possible, otherwise the coord byte bridge).
+2. Media remains end-to-end encrypted on device. Coordination does not decrypt call content.
 
-**NAT traversal:** If a direct connection is not possible for a call, the app may use the **coord byte bridge** on **Ghal Bol coordination servers** (for example `coord.ghalbol.com` or other configured coord hosts). Traffic remains encrypted at the transport/protocol layers. WAN text uses the **delivery mailbox**, not the bridge.
+**Delivery and read receipts** for chat are decided by the **recipient’s device** and returned through the delivery path; the sender’s app updates ticks only when those signals arrive.
+
+**LAN discovery:** On local networks, the app may use **mDNS** so **calls** can find configured contacts without the coordination server.
+
+**NAT traversal (calls):** If a direct connection is not possible, the app may use the **coord byte bridge** on **Ghal Bol coordination servers** (for example `coord.ghalbol.com`). Traffic remains encrypted at the transport/protocol layers. Chat text uses the **delivery mailbox**, not the bridge.
 
 ---
 
@@ -88,7 +93,7 @@ Registration uses a **challenge–response**: you sign a server nonce with your 
 
 ## Voice and video calls
 
-Calls use **native encrypted media** over the **same native connect peer connection** as chat (`/ghal-bol/call/1.0.0` for voice, `/ghal-bol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **same P2P messaging channel**, not through our coordination server.
+Calls use **native encrypted media** over native connect (`/ghal-bol/call/1.0.0` for voice, `/ghal-bol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **native connect** path, not through the delivery mailbox. **Chat text** uses the delivery server.
 
 Media is intended to flow **peer-to-peer** (direct LAN, or through the coord byte bridge when NAT requires it). We do not operate a media server that decrypts call content.
 
@@ -128,7 +133,7 @@ You can deny permissions; related features may not work (e.g. no QR scan without
 | Service | Role | Data involved |
 |---------|------|----------------|
 | **Ghal Bol coordination server** | Presence, endpoint lookup, WAN call byte bridge | Public key, endpoints, heartbeats; opaque bridged call bytes (not decrypted) |
-| **Ghal Bol delivery server** | Temporary WAN text mailbox | Opaque E2E ciphertext until delivery ack; metadata for acks/TTL |
+| **Ghal Bol delivery server** | Temporary text mailbox | Opaque E2E ciphertext until delivery ack; metadata for acks/TTL |
 | **On-device camera / QR decode** | Decode invitation QR | Processing is **on-device** |
 
 We do **not** integrate advertising networks or third-party analytics SDKs in the core application code paths described in our open-source tree.

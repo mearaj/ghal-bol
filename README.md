@@ -6,15 +6,15 @@
 
 Ghal Bol is an end-to-end encrypted messenger: device-owned identity, local transcripts, and minimal server trust.
 
-**Text chat (WAN)** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **LAN text** and **voice/video calls** use **native connect** (direct P2P when possible; WAN calls use the coord byte bridge when NAT requires it).
+**Text messaging** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **Voice and video calls** use **native connect** (direct P2P on LAN when possible; WAN calls use the coord byte bridge when NAT requires it). Chat text is **not** a native-connect / LAN P2P product path.
 
 The system is designed around:
 
-> Reliable encrypted text when peers are apart; realtime P2P when they share a LAN or place a call.
+> Reliable encrypted text via the delivery mailbox; realtime P2P for voice and video calls.
 
 Unlike traditional messengers, Ghal Bol does **not** store chat history in the cloud. Each device keeps its own transcript. The delivery server holds ciphertext **only until** the recipient acknowledges delivery (then deletes payload, keeps metadata for acks/TTL).
 
-WAN text uses the delivery mailbox so a message can arrive while the other person is offline. Voice and video stay on native connect because they are live sessions.
+Text uses the delivery mailbox so a message can arrive while the other person is offline. Voice and video stay on native connect because they are live sessions.
 
 **Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md), [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md).
 
@@ -160,13 +160,11 @@ The protocol assumes reconnects and temporary disconnections are normal.
 
 # Message Delivery
 
-**WAN text** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary E2E encrypted mailbox. The server stores ciphertext only; it cannot decrypt. When the recipient acknowledges delivery, the payload is deleted (metadata retained for acks/TTL). This guarantees offline delivery when the recipient returns — the core requirement native connect WAN chat could not meet.
+**Text messaging** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary E2E encrypted mailbox. The server stores ciphertext only; it cannot decrypt. When the recipient acknowledges delivery, the payload is deleted (metadata retained for acks/TTL). This guarantees offline delivery when the recipient returns.
 
-**LAN text** uses native connect direct streams (`mDNS` / TCP) when both peers share a LAN — same E2E envelope format, no server hop.
+**Voice and video** use native connect on LAN and WAN (coord bridge) — realtime sessions where both peers must be online. Native connect is **not** the product chat path.
 
-**Voice and video** use native connect on LAN and WAN (coord bridge) — realtime sessions where both peers must be online.
-
-Typical WAN text flow:
+Typical text flow:
 
 1. Sender encrypts message locally and uploads ciphertext to delivery server.
 2. Server notifies recipient (WebSocket push when online).
@@ -179,7 +177,7 @@ See [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md) and [docs/DESIGN.md](
 
 # Future: Temporary Distributed Relay (Tier 2)
 
-A decentralized peer-blob relay (Tier 2; Tier 3 paid backup — see [docs/PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md)) remains a **future** option. **WAN text today** uses `ghal_bol_delivery`, not Tier 2.
+A decentralized peer-blob relay (Tier 2; Tier 3 paid backup — see [docs/PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md)) remains a **future** option. **Text today** uses `ghal_bol_delivery`, not Tier 2.
 
 ---
 
@@ -288,7 +286,7 @@ Open this directory as the workspace root (the folder that contains this `README
 |------|------|
 | `ghal_bol_core/` | Rust core: identity, native connect sync engine, local stores |
 | `ghal_bol_coord/` | Coordination server — see [ghal_bol_coord/README.md](ghal_bol_coord/README.md) |
-| `ghal_bol_delivery/` | Delivery server (WAN text mailbox) — [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md), home deploy [ghal_bol_delivery/deploy/](ghal_bol_delivery/deploy/) |
+| `ghal_bol_delivery/` | Delivery server (text mailbox) — [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md), home deploy [ghal_bol_delivery/deploy/](ghal_bol_delivery/deploy/) |
 | `ghal_bol_app/` | Makepad 2 UI — [docs/MAKEPAD_UI.md](docs/MAKEPAD_UI.md) |
 | `docs/` | [Design](docs/DESIGN.md), [transport](docs/TRANSPORT.md), [identity](docs/IDENTITY.md), [coord server](docs/COORDINATION_SERVER.md), [web site](docs/WEB_SITE.md), [doc index](docs/README.md) |
 | `firebase.json` | Firebase Hosting for **ghalbol.com** (static web build) |

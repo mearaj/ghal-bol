@@ -5,10 +5,10 @@
 | Tier | Role | Product path |
 |------|------|----------------|
 | **1 — coord** | Who is online, dialable public TCP (when any), pair outbound WSS for calls | This doc |
-| **2 — delivery** | WAN **text** mailbox (E2E, offline) | [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) |
+| **2 — delivery** | **Text** mailbox (E2E, offline) | [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) |
 | **3 — premium relay** | Optional paid backup (not shipping on coord1) | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) |
 
-The Makepad app (`ghal_bol_app`) calls **`ghal_bol_core::host`** in-process. After unlock, **`host::start_network`** starts native connect; **`coord_runtime`** talks to coord over HTTPS. **WAN text** always uses the delivery server when configured; **WAN voice/video calls** use the coord bridge when LAN/mDNS is not enough. See [DESIGN.md](DESIGN.md), [AGENTS.md](../AGENTS.md), and [TRANSPORT.md](TRANSPORT.md).
+The Makepad app (`ghal_bol_app`) calls **`ghal_bol_core::host`** in-process. After unlock, **`host::start_network`** starts native connect (calls) and delivery (text); **`coord_runtime`** talks to coord over HTTPS. **Text** always uses the delivery server when configured; **voice/video calls** use native connect (LAN or coord bridge). See [DESIGN.md](DESIGN.md), [AGENTS.md](../AGENTS.md), and [TRANSPORT.md](TRANSPORT.md).
 
 ```text
                     ┌─────────────────────────────────────┐
@@ -62,7 +62,7 @@ Broader connectivity rules: [TRANSPORT.md](TRANSPORT.md) § Connectivity lifecyc
 
 Implementation: `should_throttle_register`, `spawn_register_presence_inner`, `coord_register_tick` in `ghal_bol_core/src/coord_runtime.rs`.
 
-**CGNAT / mobile-only peers** often have **no** public routable IPv4 to post. They still place **WAN calls** via `POST /v1/bridge/*` + WSS; **WAN text** uses delivery only. LAN chat uses mDNS/direct TCP.
+**CGNAT / mobile-only peers** often have **no** public routable IPv4 to post. They still place **WAN calls** via `POST /v1/bridge/*` + WSS; **text** uses delivery only.
 
 ---
 

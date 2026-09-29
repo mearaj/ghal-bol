@@ -23,7 +23,7 @@ User A shares a **file** with user B in 1:1 chat:
 | Rule | Choice |
 |------|--------|
 | **E2E for WAN content** | Full file in sealed delivery envelope — same as voice notes. |
-| **P2P only where product allows** | LAN text/attachments + voice/video **calls**. Not WAN DM. |
+| **P2P only where product allows** | Voice/video **calls**. Text and normal attachments use delivery. |
 | **No coord for files** | Coord/bridge is calls (+ optional LAN reachability), never attachment storage or fetch. |
 | **Recipient authority** | Delivery/read ticks from B; optional `attachment_complete` for LAN mux. |
 | **Rust owns policy** | Pack, seal, upload, persist, size caps — Makepad is picker + bubble. |
@@ -55,8 +55,7 @@ LAN (peer on native connect):
 }
 ```
 
-- Sealed to recipient identity for **delivery**; transport KEM for **LAN DM** (same split as text/voice).
-- Cap: `ATTACH_MAX_SEALED_INNER_BYTES` = **3 MB** sealed inner (matches voice). Typical usable plaintext ≈ 2 MB after base64.
+- Sealed to recipient identity for **delivery** (same as text/voice notes). Cap: `ATTACH_MAX_SEALED_INNER_BYTES` = **3 MB** sealed inner.
 - Wire kind remains `attachment_offer` for transcript/`msg_kind` compatibility.
 
 ### LAN mux (oversized only)

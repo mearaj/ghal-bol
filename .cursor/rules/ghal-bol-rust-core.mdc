@@ -5,7 +5,7 @@ alwaysApply: true
 
 # ghal_bol_core owns product logic
 
-**`ghal_bol_core` (Rust)** owns crypto, P2P, outbox, acks, contacts, transcripts, invites, OS network truth, and coord/bridge policy.
+**`ghal_bol_core` (Rust)** owns crypto, text delivery, calls, outbox, acks, contacts, transcripts, invites, OS network truth, and coord/bridge policy.
 
 **`ghal_bol_app` (Makepad 2)** is the only UI. It links `ghal_bol_core` and calls **`ghal_bol_core::host`** in-process. Splash is `script_mod!`. Where Makepad 2 lacks a widget or platform affordance, complete the behaviour in Splash. See `docs/MAKEPAD_UI.md`.
 

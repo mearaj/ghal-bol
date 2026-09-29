@@ -1,16 +1,16 @@
 # Ghal Bol Connect v1 — native transport wire spec
 
 Status: **shipping** — the production native connect stack (mDNS + TCP + Noise + channel mux +
-coord bridge). WAN **text** is out of scope here: it always goes through
-[`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md).
+coord bridge) for **voice/video calls**. **Text messaging** is out of scope here: it always goes
+through [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md).
 
 Scope of the connect layer:
 
-- **LAN text** — additive fast mirror next to the delivery server (never instead of it).
 - **LAN + WAN voice/video calls** — realtime media streams, E2E sealed on device.
+- **Call signaling** — `ghal_bol_call_v1` frames on the native mux (`/ghal-bol/msg/1.0.0`).
 
-WAN **text** always uses the delivery mailbox (E2E encrypted, offline guarantee). See
-"Parallel LAN + WAN invariant" below.
+Product **text** always uses the delivery mailbox (E2E encrypted, offline guarantee). Do not
+treat native connect as a chat messaging path.
 
 ---
 
@@ -215,24 +215,19 @@ prior unpaired pending entries so retries after a failed WSS connect are not blo
 
 ---
 
-## Parallel LAN + WAN invariant (critical)
-
-**LAN never disables WAN.**
+## Calls vs text (critical)
 
 | Path | Role |
 |---|---|
-| Delivery upload (WAN text) | **Primary, mandatory** whenever `GHAL_BOL_DELIVERY_URL` is set. Every outbound text reaches the server so an offline peer still gets it. |
-| LAN connect (text) | Additive fast mirror of the same `message_id` for an instant `delivered` tick. Recipient merge is idempotent by `message_id`. |
-| WAN bridge (calls) | Stays available while a call is active even when a LAN path exists. |
-| LAN connect (calls) | Lower-latency media path when both peers are on the same LAN. |
+| Delivery (text) | **Product chat path** whenever `GHAL_BOL_DELIVERY_URL` is set. Offline-capable mailbox. |
+| Native connect (calls) | Voice/video + call signaling. LAN direct when possible; coord bridge on WAN. |
 
 Concretely:
 
-1. `send_text` **always** uploads to delivery first when the URL is set — LAN presence never
-   routes a text away from the server.
+1. `send_text` uploads to delivery when the URL is set — native connect does not own chat text.
 2. The delivery WebSocket worker keeps running on Wi‑Fi/LAN; mDNS discovery does not stop it.
-3. mDNS `ServiceRemoved` closes only the LAN socket; delivery + bridge are untouched.
-4. A peer going offline mid-chat never strands the last messages on the sender's device.
+3. mDNS `ServiceRemoved` closes only the LAN call socket; delivery + bridge are untouched.
+4. A peer going offline mid-chat never strands the last messages on the sender's device — they sit in the mailbox.
 
 ---
 

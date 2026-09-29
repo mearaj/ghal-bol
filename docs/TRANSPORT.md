@@ -1,8 +1,8 @@
 # Transport — native connect data plane
 
-**Status:** **native connect** (`ghal_bol_core/src/connect/`) is the production transport for **LAN text (fast mirror)**, **LAN voice/video**, and **WAN voice/video** (via the coord byte bridge). **WAN text** uses [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) — not coord HTTP.
+**Status:** **Text messaging** uses [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) (mailbox). **Voice/video calls** use **native connect** (`ghal_bol_core/src/connect/`) — LAN direct when possible, otherwise the coord byte bridge. Native connect is **not** the product path for chat text.
 
-**Scope:** Coord register/heartbeat and mDNS upkeep serve **presence**, **LAN reachability**, and **WAN calls**. When `GHAL_BOL_DELIVERY_URL` is set, WAN text uses the delivery mailbox — see `ghal_bol_core/src/text_transport.rs` and [DESIGN.md](DESIGN.md) § Goals.
+**Scope:** Coord register/heartbeat and mDNS upkeep serve **presence** and **call reachability**. When `GHAL_BOL_DELIVERY_URL` is set, **all** product text uses the delivery mailbox — see `ghal_bol_core/src/text_transport.rs` and [DESIGN.md](DESIGN.md) § Goals.
 
 **For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Makepad. **Start here:** § **Connectivity lifecycle** → § **Network truth** → § **Parallel LAN + WAN** → § **LAN ↔ WAN handover**. Transport reachability is **live-only** — see § **Caching policy**.
 
@@ -16,18 +16,17 @@ Ghal Bol separates **chat protocol** from **transport**:
 
 | Layer | Implementation |
 |-------|----------------|
-| **WAN text** | `ghal_bol_delivery` WebSocket mailbox — E2E `delivery_msg_v1` ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)) |
-| **LAN text (fast mirror)** | `ghal_bol_msg_v1` on native connect when both peers are on LAN ([GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)) |
+| **Text messaging** | `ghal_bol_delivery` WebSocket mailbox — E2E `delivery_msg_v1` ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)) |
 | **Calls (LAN + WAN)** | Noise + channel mux on native connect; **WAN** uses coord **byte bridge** ([GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md)) |
-| **Transport** | **native connect** in `ghal_bol_core/src/connect/` (tokio TCP + Noise + mux; mDNS LAN) |
-| **Discovery / presence** | `ghal_bol_coord` register/lookup + mDNS (`_ghalbol._tcp.local`) |
-| **Policy** | WAN text: `delivery_runtime`; LAN text mirror + calls: `connect/` + `dm_event_handler` |
+| **Call transport** | **native connect** in `ghal_bol_core/src/connect/` (tokio TCP + Noise + mux; mDNS LAN) |
+| **Discovery / presence** | `ghal_bol_coord` register/lookup + mDNS (`_ghalbol._tcp.local`) for call dial |
+| **Policy** | Text: `delivery_runtime`; calls: `connect/` + `dm_event_handler` |
 
 ---
 
 ## The prime directive — instant connect at any roster size (canonical)
 
-> Whenever two peers have *any* technically reachable path — same LAN (mDNS/direct TCP), coord **public TCP** (when registered), coord **bridge** (WAN calls), or delivery (WAN text) — they should **connect within a few seconds** for the relevant channel. Throttles and backoff exist to prevent **storms**, not to delay a peer with **active intent**.
+> Whenever two peers have *any* technically reachable path for a **call** — same LAN (mDNS/direct TCP), coord **public TCP** (when registered), or coord **bridge** — they should **connect within a few seconds**. **Text** uses delivery independently of native connect. Throttles and backoff exist to prevent **storms**, not to delay a peer with **active intent**.
 
 ### Scale invariant (non-negotiable)
 
@@ -35,8 +34,8 @@ A user may have **thousands of contacts**, most **stale** (offline, never regist
 
 ### Instant-connect acceptance criteria (testable)
 
-1. **Reachable ⇒ connected within a few seconds** for the path that matters (LAN session, delivery poll, or call bridge) — independent of roster size.
-2. **Intent beats backoff** — open chat, queued message, or dropped session skips 404 backoff for the urgent window.
+1. **Reachable ⇒ connected within a few seconds** for a **call** (LAN session or call bridge) — independent of roster size. Text delivery polls separately.
+2. **Intent beats backoff** — open chat, queued message, or dropped call session skips 404 backoff for the urgent window.
 3. **No assumed-timer stalls** — see § **Event-driven async**.
 4. **Bounded coord HTTP** — background lookup cap per tick; no full-roster sequential storms.
 
@@ -50,46 +49,46 @@ A user may have **thousands of contacts**, most **stale** (offline, never regist
 
 ## Parallel LAN + WAN transport (canonical)
 
-**Policy:** On Wi‑Fi, **LAN discovery** (mDNS + ephemeral TCP listen) and **coord presence** (register/heartbeat when publishable endpoints exist) **run together**. They are not mutually exclusive. **WAN text** does not use this stack when delivery is configured — it uses `delivery_runtime` in parallel (upload-first policy in `text_transport.rs`).
+**Policy:** On Wi‑Fi, **LAN discovery** (mDNS + ephemeral TCP listen) and **coord presence** (register/heartbeat when publishable endpoints exist) **run together** so **calls** can dial. They are not mutually exclusive. **Text messaging** always uses `delivery_runtime` when the delivery URL is set — never gated on native connect.
 
 ### Both stacks active (product requirement)
 
 | Path | Job while online |
 |------|------------------|
-| **LAN** (mDNS → direct TCP) | Low-latency LAN text mirror, LAN calls, immediate handover when both on Wi‑Fi |
+| **LAN** (mDNS → direct TCP) | Call sessions when both peers share Wi‑Fi |
 | **Coord HTTP** | Presence phone book (public routable TCP when any), heartbeat, bridge signaling for WAN calls |
-| **Delivery** (when configured) | Authoritative WAN text mailbox — always used for outbound WAN text |
+| **Delivery** (when configured) | **Authoritative text mailbox** — product chat path |
 
 **Required behaviour:**
 
 - **Do not stop coord register/heartbeat** because mDNS found a contact on LAN.
 - **Do not stop mDNS browse/listen** because coord registered or a WAN call used the bridge.
 - **LAN connect is mDNS event-driven** — not a timer re-dial from cached ports (§ **Ephemeral LAN TCP ports**).
-- **WAN calls:** prefer live LAN writer; if none, `POST /v1/bridge/request` + outbound WSS (`connect/bridge_ws.rs`, `outbound.rs`).
-- **WAN text:** never gated on native connect `chat_ready`; delivery worker owns WAN send/recv.
+- **Calls:** prefer live LAN writer; if none, `POST /v1/bridge/request` + outbound WSS (`connect/bridge_ws.rs`, `outbound.rs`).
+- **Text:** never gated on native connect `chat_ready`; delivery worker owns send/recv.
 
-**Wrong docs/code:** treating coord as “idle backup” on Wi‑Fi; skipping register while on LAN; inferring peer LAN location from local `profile=lan` without mDNS; UI-owned dial/ack policy.
+**Wrong docs/code:** treating text as a LAN/native-connect product path; treating coord as “idle backup” on Wi‑Fi; skipping register while on LAN; UI-owned dial/ack policy.
 
-| Layer | LAN | WAN (calls) | WAN (text) |
-|-------|-----|-------------|------------|
+| Layer | LAN | WAN (calls) | Text |
+|-------|-----|-------------|------|
 | **Infrastructure** | mDNS browse + ephemeral TCP listen | coord bridge WSS (`/v1/bridge/connect`) | `ghal_bol_delivery` WSS |
 | **Per-peer** | Direct TCP session when discovered | Bridge-paired TCP (Noise+mux inside tunnel) | Mailbox only |
 | **Dial / discovery** | `Discovered` → dial **that** host:port | Bridge request + pending poll | Delivery register/poll |
 
 **Independence rule:** LAN health must **not** suppress coord heartbeat/register (and vice versa). Delivery ticks are independent of mDNS.
 
-**Handover:** Peer leaves LAN → mDNS `Expired` drops LAN session; **calls** fall back to bridge when placing/receiving; **text** continues on delivery.
+**Handover:** Peer leaves LAN → mDNS `Expired` drops LAN call session; **calls** fall back to bridge when placing/receiving; **text** continues on delivery.
 
 ---
 
 ## Stream-first connect (wire layer)
 
-One live **channel mux** per contact for native connect (text mirror, call signaling, media substreams). See [DESIGN.md](DESIGN.md) § stream-first model.
+One live **channel mux** per contact for native connect (**call signaling** and media substreams). See [DESIGN.md](DESIGN.md).
 
 ```text
 Per contact (connect worker ~1s upkeep + events):
   if live mux writer for peer:
-    drain outbox/acks on that session
+    drain call signaling on that session
   else if mDNS Discovered:
     dial_peer_tcp(host, port) from event
   else if WAN call needed and no LAN writer:
@@ -100,7 +99,6 @@ Per contact (connect worker ~1s upkeep + events):
 | Principle | Implementation |
 |-----------|----------------|
 | Symmetric | Inbound accept and outbound dial share the same Noise+mux handler |
-| Send = connect | Outbox/acks retry when session up; hub room open not required for LAN mirror |
 | Parallel inputs | mDNS events + coord endpoints (public TCP dial when used) + bridge pending poll |
 | One session per peer | `PeerSessionRegistry` — new dial skipped when writer open |
 
@@ -112,7 +110,7 @@ Wired in `ghal_bol_core/src/connect/`:
 
 | Piece | Role |
 |-------|------|
-| **Tokio TCP + Noise XX + channel mux** | Encrypted sessions; `/ghal-bol/msg/1.0.0` framed DM |
+| **Tokio TCP + Noise XX + channel mux** | Encrypted call sessions; `/ghal-bol/msg/1.0.0` for call signaling frames |
 | **mDNS-SD** (`lan_discovery.rs`, `_ghalbol._tcp.local`) | LAN peer discovery |
 | **Coord bridge** (`bridge_client.rs`, `bridge_ws.rs`) | WAN call byte pipe via coord WSS |
 | **OS network truth** | `p2p/network_transport.rs`, `android_network.rs`, `linux_network.rs` |
@@ -129,15 +127,15 @@ Identity: **secp256k1** device key ([IDENTITY.md](IDENTITY.md)). Product WAN dis
 └────────────────────────────┬────────────────────────────────────┘
                              │ ghal_bol_core::host
 ┌────────────────────────────▼────────────────────────────────────┐
-│  delivery_runtime — WAN text                                      │
-│  connect/ — LAN + calls + bridge                                  │
+│  delivery_runtime — text messaging                                    │
+│  connect/ — calls + bridge                                            │
 │  coord_runtime — register / heartbeat / lookup                    │
 │  dm_event_handler, transcripts, outbox policy                     │
 └────────────────────────────┬────────────────────────────────────┘
                              │ HTTPS + WSS
 ┌────────────────────────────▼────────────────────────────────────┐
 │  ghal_bol_coord — presence + bridge (no DM bodies)               │
-│  ghal_bol_delivery — WAN text mailbox (Tier 2)                   │
+│  ghal_bol_delivery — text mailbox                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -152,11 +150,11 @@ Binding rules — if another doc disagrees, update it to match this section.
 1. **Start on unlock, run until log out.** `host::start_network` starts connect + delivery workers. **Lock** leaves the node running. **Log out** stops it.
 2. **Watch the network continuously.** `notify_network_change` + `refresh_os_network_truth` on connect upkeep (~1s). See § **Network truth**.
 3. **Publish coord endpoints when they change.** Public routable **TCP** listen (from ephemeral port + public IP when available) → `POST /v1/register`. **Re-register** on endpoint change, failed register, handover, or stale presence — **throttle** when unchanged (`should_throttle_register`, heartbeat every ~25s). Details: [COORDINATION_SERVER.md](COORDINATION_SERVER.md).
-4. **CGNAT / mobile-only peers** often have **no** public TCP to register. They still **heartbeat** when registered empty/minimal; **WAN calls** use `/v1/bridge/*`; **WAN text** uses delivery only.
+4. **CGNAT / mobile-only peers** often have **no** public TCP to register. They still **heartbeat** when registered empty/minimal; **WAN calls** use `/v1/bridge/*`; **text** uses delivery only.
 5. **LAN is per-peer and additive.** mDNS `Discovered` → dial that contact on LAN. mDNS `Expired` → drop LAN session; do not block delivery or bridge.
 6. **Coord unreachable ≠ app offline.** LAN mDNS may still work. Retry **all** `GHAL_BOL_COORD_URLS` on the regular coord tick. Do not invent a second WAN discovery path when coord is down.
 7. **Internet/coord recovery is event-driven** — resume register/lookup/bridge poll when HTTP works again; no full-process restart required.
-8. **Network switch readiness.** Path change → re-register if publishable endpoints changed, clear coord lookup backoff where applicable, reopen native sessions for LAN mirror/calls.
+8. **Network switch readiness.** Path change → re-register if publishable endpoints changed, clear coord lookup backoff where applicable, reopen native sessions for **calls**.
 9. **Process restart.** On `host::start_network`, re-register when listen endpoints are known; do not trust in-memory presence from a prior process.
 
 **UI vs native:** `ghal_bol_core` owns ack policy, outbox, delivery/read ticks, dial, and coord. Makepad uses **`host::set_app_visible`** and **`host::set_open_room`** only. Poll is **display** — never gate sends or acks in the UI.
@@ -174,7 +172,7 @@ Binding rules — if another doc disagrees, update it to match this section.
 | **Public routable TCP** (`tcp://host:port`) | **Client** | `POST /v1/register` when the device has a **globally routable** inbound listen (UPnP / port-forward / public IP). Must be the peer’s own socket — **not** RFC1918/CGNAT LAN. |
 | **LAN TCP** | **Never on coord** | Same-subnet peers use mDNS only. |
 | **WAN call reachability (CGNAT)** | **Bridge** | `POST /v1/bridge/request` + both sides dial `GET /v1/bridge/connect` (WSS). No server-side circuit row. |
-| **WAN text (CGNAT)** | **Delivery** | Tier-2 mailbox — not coord. |
+| **Text (CGNAT / all)** | **Delivery** | Mailbox — not coord. |
 
 Server rejects non-routable “public” endpoints at `POST` ([`ghal_bol_coord` routes/presence](../ghal_bol_coord/src/routes.rs)). Client: `endpoints_for_coord_register`, `on_listen_dm_addr` in `coord_runtime.rs`.
 
@@ -204,23 +202,23 @@ mDNS Discovered → dial_peer_tcp (LAN session)
 
 mDNS Expired → remove_session; set_peer_on_local_lan false
   → new WAN call: bridge_request path
-  → WAN text: unchanged (delivery)
+  → text: unchanged (delivery)
 
 Device left LAN (mobile-data) → refresh_os_network_truth
   → coord register if public endpoint changes
   → mDNS state purged on LAN loss paths in network_transport / connect upkeep
 
 Wi‑Fi return → notify_network_change → fresh ephemeral listen + mDNS publish
-  → Discovered → LAN session again (calls/text mirror)
+  → Discovered → LAN session again (calls)
 ```
 
-**Healthy signs:** `mdns discovered` → `chat_ready` on LAN; `bridge request ok` → `wss connecting` for WAN calls; delivery logs for WAN text independent of connect.
+**Healthy signs:** `mdns discovered` → `chat_ready` on LAN; `bridge request ok` → `wss connecting` for WAN calls; delivery logs for text independent of connect.
 
 ---
 
 ## Network truth — OS default route (authoritative)
 
-**Problem:** After Wi‑Fi ↔ mobile-data toggle, `profile=lan` vs `profile=mobile-data` in `Native/flow` could stay wrong if inferred from `if_addrs` alone. Wrong profile breaks LAN kick timing and logging — not delivery WAN text.
+**Problem:** After Wi‑Fi ↔ mobile-data toggle, `profile=lan` vs `profile=mobile-data` in `Native/flow` could stay wrong if inferred from `if_addrs` alone. Wrong profile breaks LAN kick timing and logging — not delivery text.
 
 **Root cause:** Interface lists **lag** the OS default route. On Android, cellular interfaces often remain visible after Wi‑Fi is default.
 
@@ -232,7 +230,7 @@ Wi‑Fi return → notify_network_change → fresh ephemeral listen + mDNS publi
 | **Wi‑Fi link** | Android TRANSPORT_WIFI; Linux operstate | `platform_wifi_linked`, LAN recovery when Wi‑Fi returns |
 | **Interface hints** | `if_addrs` | Listen bind, logging — **not** primary mode switch |
 | **Remote peer path** | mDNS `Discovered` / `Expired` | Whether **that contact** is on LAN |
-| **Wire health** | connect session writer, outbox drain | Stuck LAN mirror vs live delivery |
+| **Wire health** | connect session writer | Stuck call path vs live delivery text |
 
 `Native/flow` (~30s) should show **`os=wifi|cell/...`** flipping within ~1s of a toggle.
 
@@ -256,9 +254,9 @@ Wi‑Fi return → notify_network_change → fresh ephemeral listen + mDNS publi
 
 ## Asymmetric LAN ↔ WAN (one native session, parallel services)
 
-**Scenario:** Desktop on Wi‑Fi; phone on mobile-data. **Text** on WAN still flows via **delivery**. **Calls** need **bridge** when there is no LAN mux writer. **LAN text mirror** needs a live LAN TCP session.
+**Scenario:** Desktop on Wi‑Fi; phone on mobile-data. **Text** still flows via **delivery**. **Calls** need **bridge** when there is no LAN mux writer.
 
-When the phone leaves Wi‑Fi, the desktop may still show an old LAN session until mDNS `Expired` — outbound LAN mirror or call signaling on that session can stall while delivery text still works.
+When the phone leaves Wi‑Fi, the desktop may still show an old LAN session until mDNS `Expired` — call signaling on that session can stall while delivery text still works.
 
 **Policy:**
 
@@ -278,7 +276,7 @@ Typical flow ([GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md)):
 2. Both peers register on coord when they have publishable **public TCP** (optional for CGNAT-only).
 3. LAN: mDNS discovers configured contacts → direct TCP.
 4. WAN calls: bridge when no LAN writer.
-5. WAN text: delivery when configured.
+5. text: delivery when configured.
 
 **Coord lookup** (`GET /v1/peers/{public_key_hex}`) returns online peers with routable TCP endpoints — used when dialing a peer’s **public** address (and for diagnostics). It does **not** replace mDNS on LAN.
 
@@ -322,7 +320,7 @@ Whenever policy waits on work with **unknown duration** (TCP connect, bridge WSS
 |------|--------|------------------|
 | LAN connect | `dial_peer_tcp`, mDNS forwarder | `Discovered`, connect result, `Expired` |
 | WAN call | bridge request + WSS | pending poll, WSS open, mux ready |
-| WAN text | delivery_runtime | mailbox events (not connect poll) |
+| text | delivery_runtime | mailbox events (not connect poll) |
 | Register | `coord_register_tick` | endpoint diff, failure, stale presence |
 | Makepad | — | Poll **display only** |
 
@@ -371,7 +369,7 @@ Each URL is **HTTP(S) presence + bridge WSS on the same host**.
 | `connect/peer_session.rs`, `session.rs` | Sessions, mux, outbox/acks |
 | `connect/lan_discovery.rs` | mDNS publish/browse |
 | `connect/bridge_*.rs` | WAN call bridge client |
-| `delivery_runtime.rs` | WAN text |
+| `delivery_runtime.rs` | text |
 | `coord_runtime.rs` | Register, heartbeat, lookup JSON |
 | `p2p/network_transport.rs` | OS network truth |
 | `dm_transport/` | Dial-address parsing helpers |
@@ -397,7 +395,7 @@ The UI calls `ghal_bol_core::host`. Do not rename without a version bump:
 |-----------|--------|
 | Ack kinds, `ref_id` rules | `msg_v1.rs`, [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) |
 | Recipient sends acks; Makepad never | `connect/outbox_acks.rs`, [DESIGN.md](DESIGN.md) |
-| WAN text via delivery when URL set | `text_transport.rs`, `delivery_runtime.rs` |
+| text via delivery when URL set | `text_transport.rs`, `delivery_runtime.rs` |
 | Guest scans host QR | `connect_invite_v1.rs` |
 | No full connect stop on contact upsert | `register_dm_peer` |
 | OS default route drives `profile=` | `network_transport.rs`, `android_network.rs`, `linux_network.rs` |
@@ -411,7 +409,7 @@ The UI calls `ghal_bol_core::host`. Do not rename without a version bump:
 1. **Ack policy in the UI** — forbidden.
 2. **Mutual QR requirement** — guest-only host key is intentional.
 3. **Inventing a second WAN discovery path when coord fails** — forbidden; retry coord + use delivery for text.
-4. **Blocking WAN text on native connect `chat_ready`** — WAN text is delivery.
+4. **Blocking text on native connect `chat_ready`** — text is delivery.
 5. **Skipping coord register on Wi‑Fi because LAN works** — parallel stacks.
 6. **`if_addrs`-only network mode** — use § **Network truth**.
 7. **Caching coord or LAN dial targets on disk** — § **Caching policy**.
@@ -433,10 +431,10 @@ Use App log `Native/flow` (~30s) plus tagged `connect`, `coord`, `bridge`, `deli
 | 3 | LAN peer found | `connect: mdns discovered …` |
 | 4 | Session up | `chat_ready` / `PeerConnected` |
 | 5 | WAN call bridge | `bridge: bridge request ok` → `wss connecting` |
-| 6 | WAN text | delivery worker send/recv (separate from connect) |
-| 7 | Acks | `ack_received` / `ack_read` on LAN mirror path |
+| 6 | Text | delivery worker send/recv (separate from connect) |
+| 7 | Call media | `/ghal-bol/call/*` substreams once call is up |
 
-Never infer chat delivery from connect alone when delivery mode is on — confirm delivery worker state for WAN text.
+Never infer chat delivery from connect alone when delivery mode is on — confirm delivery worker state for text.
 
 ---
 
@@ -447,7 +445,7 @@ Never infer chat delivery from connect alone when delivery mode is on — confir
 | [DESIGN.md](DESIGN.md) | Canonical product behaviour |
 | [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) | Wire format and ack kinds |
 | [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) | Connect + WAN bridge |
-| [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) | WAN text mailbox |
+| [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) | text mailbox |
 | [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Invites / QR |
 | [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Coord API, bridge, deploy |
 | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional Tier 3 paid relay (not shipping on coord1) |

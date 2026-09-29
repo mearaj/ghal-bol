@@ -12,16 +12,17 @@
 
 ## Golden rules
 
-0. **Prime directive — instant connect at any roster size (calls + LAN text).** Whenever two peers have *any*
- technically reachable path (LAN, coord bridge for **calls**), they must **connect within a
- few seconds**. **WAN text** uses `ghal_bol_delivery`. Coord upkeep serves **calls** and LAN presence. LAN text, voice, and video use native connect, direct when possible and through the coord bridge otherwise. See `text_transport.rs` and [DESIGN.md](docs/DESIGN.md) § Goals.
-1. **`ghal_bol_core` (Rust) owns all product logic** — crypto, keystore, **WAN text** (`delivery_runtime`), **LAN text + calls** (native connect), contacts, transcripts, invite codec. The app calls **`ghal_bol_core::host`** in-process.
+0. **Prime directive — instant call connect at any roster size.** Whenever two peers have *any*
+ technically reachable path (LAN or coord bridge), a **voice/video call** must connect within a
+ few seconds. **Text messaging** uses `ghal_bol_delivery` (mailbox), not native-connect P2P.
+ Coord upkeep serves **calls** and presence. See `text_transport.rs` and [DESIGN.md](docs/DESIGN.md) § Goals.
+1. **`ghal_bol_core` (Rust) owns all product logic** — crypto, keystore, **text** (`delivery_runtime`), **calls** (native connect), contacts, transcripts, invite codec. The app calls **`ghal_bol_core::host`** in-process.
 2. **`ghal_bol_app` (Makepad 2) is the only UI.** Screens, navigation, hub, composer, and delivery ticks. **Do not re-implement ack policy, outbox, or transcript merge in the UI.** The open room is **`host::set_open_room`**. App visibility (read gate) is **`host::set_app_visible`**. **Do not** HTTP coord lookup or register from the UI. Splash is `script_mod!`. Where Makepad 2 lacks a widget, fill the gap in Splash. See `docs/MAKEPAD_UI.md`.
 3. **`docs/DESIGN.md` is canonical** for architecture; **`docs/TRANSPORT.md`** for transport and connectivity policy. Wire detail: `docs/GHAL_BOL_DM_MSG_V1.md`. Invites: `docs/GHAL_BOL_URI_SCHEME.md`. If code and agent-editable docs disagree, **fix both in the same change**.
 4. **Guest scans host QR** — guest stores host `public_key_hex` and dials. **Host may have zero contacts** until first inbound. **Never** require mutual QR or “both sides need each other’s key from QR”.
 5. **Do not stop / restart native connect on every contact change** — use `register_dm_peer` / `sync_contacts` hot-register only.
 6. **One process.** The Makepad app and native connect share a process. **Lock** hides the hub and leaves the node running. **Log out** stops it. Do not start a second node for the same identity.
-7. **E2E for all peer-key traffic** — Any product communication between two contacts must use **end-to-end** crypto tied to the device identity key and the peer’s contact identity wire (same identity as chat). Includes: DM text (**transport KEM v2** after `TransportKemHello`), call signaling (`ghal_bol_call_v1` + **transport KEM** `CALL_CIPHER_TRANSPORT_V2`), call **audio and video** media (`derive_call_media_keys_from_transport` + per-frame AES-GCM seal on `/ghal-bol/call/*` substreams). Offline auxiliary seal (`offline_seal_v1`, secp256k1 recipient only) is not used by product chat/call paths. Do **not** ship peer-facing plaintext payloads or disable media/signaling E2E for “performance” without an explicit product decision.
+7. **E2E for all peer-key traffic** — Any product communication between two contacts must use **end-to-end** crypto tied to the device identity key and the peer’s contact identity wire. Includes: **text** (`delivery_msg_v1` on the mailbox), call signaling (`ghal_bol_call_v1` + **transport KEM** `CALL_CIPHER_TRANSPORT_V2`), call **audio and video** media (`derive_call_media_keys_from_transport` + per-frame AES-GCM seal on `/ghal-bol/call/*` substreams). Do **not** ship peer-facing plaintext payloads or disable media/signaling E2E for “performance” without an explicit product decision.
 8. **Caching — immutable only on disk** — Persist to disk only data that is **user-owned and does not change meaningfully without user action** (keystore, contacts, transcript, preferences). If a value **can change** (coord presence, mDNS LAN port, bridge endpoints) and relying on a stale copy **could break chat or WAN**, **do not cache it** — refetch live (`GET /v1/peers/…`, mDNS events, bridge pending). In-memory session mirrors and short storm throttles are OK when cleared on failure. New cache only with an explicit documented exception in TRANSPORT.md § “Caching policy”.
 9. **Avoid assumed timers for async P2P work** — When policy (A) depends on work with unknown duration, a worker (B) owns it until the stack reports an outcome; B **notifies subscribers** and A reacts **instantly** — never “wait N seconds then retry.” Timers only for guardrails (in-flight observation, storm throttles, keepalive, register dedupe). See [TRANSPORT.md](docs/TRANSPORT.md) § “Event-driven async — avoid assumed timers”.
 
@@ -32,7 +33,7 @@
 | `ghal_bol_core/` | Rust library (`rlib`). Product logic. UI entry: `host` |
 | `ghal_bol_app/` | Makepad 2 UI. Calls `ghal_bol_core::host` in-process |
 | `ghal_bol_coord/` | Coordination + WAN call bridge |
-| `ghal_bol_delivery/` | Delivery server (WAN text mailbox) |
+| `ghal_bol_delivery/` | Delivery server (text mailbox) |
 | `docs/` | Design + wire specs (source of truth with code) |
 | `scripts/` | Build/pack for Makepad (`build_android_app.sh`, `package_linux_release.sh`) |
 
@@ -49,8 +50,8 @@
                              │ ghal_bol_core::host
 ┌────────────────────────────▼─────────────────────────────────┐
 │  ghal_bol_core                                                │
-│  delivery_runtime — WAN text                                  │
-│  native connect — LAN text + calls                            │
+│  delivery_runtime — text messaging                                │
+│  native connect — voice/video calls (+ call signaling)            │
 │  dm_event_handler, contacts, transcripts, invites             │
 │  p2p_runtime                                                  │
 └──────────────────────────────────────────────────────────────┘
@@ -60,8 +61,8 @@
 
 | Concern | Owner | Primary files |
 |---------|--------|----------------|
-| WAN text send/recv, delivery acks | **Rust** | `ghal_bol_core/src/delivery_runtime.rs`, `delivery_client.rs`, `delivery_read_acks.rs` |
-| LAN text send/recv acks, outbox, stream I/O | **Rust** | `ghal_bol_core/src/connect/` |
+| Text send/recv, delivery acks | **Rust** | `ghal_bol_core/src/delivery_runtime.rs`, `delivery_client.rs`, `delivery_read_acks.rs` |
+| Call connect, signaling, media | **Rust** | `ghal_bol_core/src/connect/` |
 | Apply events → JSON stores | **Rust** | `ghal_bol_core/src/dm_event_handler.rs` |
 | Contacts / unread / preview / **`is_known` / `is_blocked`** | **Rust** (`contacts_v1.rs`); trust UI **Makepad** — `docs/DESIGN.md` § Contact trust |
 | Transcript lines, `delivery` | **Rust** | `ghal_bol_core/src/dm_transcript_v1.rs`, `dm_transcript_store.rs` |
@@ -146,7 +147,7 @@ Linux debug data: `~/.local/share/com.ghalbol.debug/` (release: `~/.local/share/
 | Ticks without peer ack | Fake state — Makepad must not promote |
 | Wire OK, empty roster | unlock then `host::start_network` with `app_namespace` |
 | Host no contact after scan | `peer_identified` / inbound text → roster bump |
-| LAN chat broken on Wi‑Fi | Stale LAN port from upkeep vs live `listen_addrs`? |
+| Call still active after window close | `host::end_call`; node shares the process |
 | Wrong `profile=` / missing `os=` | Rebuild; `os=wifi\|cell/…` must flip ~1s — TRANSPORT.md § Network truth |
 | Coord lookup 404 | Peer not on coord yet |
 | Call still active after window close | `host::end_call`; node shares the process |
