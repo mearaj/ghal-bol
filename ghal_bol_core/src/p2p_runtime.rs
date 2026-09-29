@@ -1,4 +1,4 @@
-//! In-process native DM worker (shared by FFI and the Unix-socket daemon).
+//! In-process native DM worker. The Makepad app calls this through `ghal_bol_core::host`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -16,7 +16,6 @@ use crate::contacts_v1::{clear_unread, is_valid_public_key_hex};
 use crate::dm_event_handler::{
     active_app_namespace, apply_p2p_event_json, clear_p2p_handler_context, set_p2p_handler_context,
 };
-use crate::msg_v1::MsgKind;
 use crate::p2p::{
     DEFAULT_GOSSIP_TOPIC, DmPeer, GossipChatConfig, GossipChatEvent, OutboundCmd,
     live_foreground_peer_for_catchup, native_log, queue_read_ack_catchup,
@@ -111,13 +110,6 @@ pub fn purge_stale_pending_call_invites(now_ms: i64) {
 }
 
 /// Dismiss OS incoming-call alert in `:p2p` / daemon (Linux libnotify, Android full-screen).
-pub fn p2p_dismiss_incoming_call_alert() -> Value {
-    let _ = call_state::expire_stale_ringing(call_state::now_ms());
-    crate::incoming_call_notify::dismiss_incoming_call();
-    json_ok(serde_json::json!({ "ok": true }))
-}
-
-/// Tear down native voice/video and send hangup when the UI session ends (privacy invariant).
 pub fn p2p_force_end_active_call(reason: &str) -> Value {
     native_log::info("call", &format!("force_end_active_call reason={reason}"));
     let had_active = crate::p2p::call_active::snapshot().is_some()
@@ -179,16 +171,6 @@ pub fn p2p_force_end_active_call(reason: &str) -> Value {
 }
 
 /// Consume daemon incoming-call wake marker (Linux notification tap → present UI).
-pub fn p2p_take_incoming_call_wake() -> Value {
-    let wake = crate::daemon::take_incoming_call_wake();
-    json_ok(serde_json::json!({ "ok": true, "wake": wake }))
-}
-
-/// Consume daemon unlock wake marker (login after reboot → present unlock UI).
-pub fn p2p_take_unlock_wake() -> Value {
-    let wake = crate::daemon::take_unlock_wake();
-    json_ok(serde_json::json!({ "ok": true, "wake": wake }))
-}
 
 /// Delivery-server path writes stores directly; enqueue here so `p2p_poll` can emit `stores_updated`.
 pub fn enqueue_delivery_gossip_event(ev: GossipChatEvent) {
@@ -449,17 +431,6 @@ fn apply_coord_from_config(config: &Value) {
     }
 }
 
-pub fn p2p_dial_bootstrap_peers(addrs: &[DmDialAddr]) -> Value {
-    if !p2p_holder_alive() {
-        return json_err("p2p not running");
-    }
-    dial_bootstrap_on_running_node(addrs.to_vec());
-    json_ok(serde_json::json!({ "ok": true, "count": addrs.len() }))
-}
-
-fn dial_bootstrap_on_running_node(_addrs: Vec<DmDialAddr>) {
-    // Native connect uses mDNS + coord bridge — no libp2p bootstrap dials.
-}
 
 fn apply_delivery_from_p2p_config(config: &Value) {
     crate::rustls_init::ensure_rustls_crypto_provider();
@@ -482,23 +453,13 @@ pub fn p2p_start(config: &Value) -> Value {
     crate::rustls_init::ensure_rustls_crypto_provider();
     set_drop_pending_call_invite_hook(drop_pending_call_invite);
     // Stale notification-tap marker must not fire presentWindow on next UI login.
-    crate::daemon::clear_incoming_call_wake();
+    crate::desktop_wake::clear_incoming_call_wake();
     apply_coord_from_config(config);
     let topic = config
         .get("topic")
         .and_then(|t| t.as_str())
         .unwrap_or(DEFAULT_GOSSIP_TOPIC)
         .to_string();
-    let peers: Vec<DmDialAddr> = config
-        .get("bootstrap_peers")
-        .and_then(|p| p.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str())
-                .filter_map(DmDialAddr::parse)
-                .collect()
-        })
-        .unwrap_or_default();
     let dm_peers = parse_dm_peers(config);
 
     let ident = match unlocked_identity_clone() {
@@ -514,7 +475,6 @@ pub fn p2p_start(config: &Value) -> Value {
         Err(e) => return json_err(e),
     };
     gossip_cfg.dm_peers = dm_peers;
-    let bootstrap_for_hot_dial = peers.clone();
     gossip_cfg.app_namespace = config
         .get("app_namespace")
         .and_then(|x| x.as_str())
@@ -541,7 +501,6 @@ pub fn p2p_start(config: &Value) -> Value {
             }
             let _ = p2p_register_dm_peer(pk);
         }
-        dial_bootstrap_on_running_node(bootstrap_for_hot_dial);
         if crate::coord_runtime::coord_is_configured() {
             crate::p2p::notify_relay_refresh();
         }
@@ -675,9 +634,6 @@ pub fn p2p_start(config: &Value) -> Value {
     json_ok(serde_json::json!({ "ok": true }))
 }
 
-pub fn p2p_is_running() -> Value {
-    json_ok(serde_json::json!({ "ok": true, "running": p2p_holder_alive() }))
-}
 
 pub fn p2p_stop() {
     native_log::info("p2p", "p2p_stop requested");
@@ -1007,169 +963,8 @@ pub fn p2p_call_video(config: &Value) -> Value {
     }))
 }
 
-/// Push one I420 camera frame from the Flutter UI into the desktop video engine.
+/// Push one I420 camera frame from the Makepad UI into the desktop video engine.
 /// Used on Linux/macOS/Windows where the daemon cannot open the webcam directly.
-pub fn p2p_call_video_push_camera_frame(config: &Value) -> Value {
-    use base64::Engine as _;
-    let call_id = config
-        .get("call_id")
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let width = config.get("width").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-    let height = config.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-    let b64 = match config.get("data_base64").and_then(|x| x.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return json_err("data_base64 required"),
-    };
-    let data = match base64::engine::general_purpose::STANDARD.decode(b64) {
-        Ok(d) => d,
-        Err(e) => return json_err(format!("data_base64 decode: {e}")),
-    };
-    // `format`: `i420` (default, already planar) or packed `rgba`/`bgra` straight from
-    // the camera — packed is converted to I420 natively (no Dart per-pixel loop).
-    let format = config
-        .get("format")
-        .and_then(|x| x.as_str())
-        .unwrap_or("i420")
-        .to_ascii_lowercase();
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    {
-        let frame = match format.as_str() {
-            "rgba" | "bgra" => {
-                let stride = config
-                    .get("stride")
-                    .and_then(|x| x.as_u64())
-                    .map(|s| s as usize)
-                    .unwrap_or((width as usize) * 4);
-                match crate::call_video::packed_to_i420(
-                    &data,
-                    stride,
-                    width,
-                    height,
-                    format == "rgba",
-                ) {
-                    Some(f) => f,
-                    None => return json_err("packed frame: bad dimensions/stride"),
-                }
-            }
-            _ => crate::call_video::RawVideoFrame {
-                width,
-                height,
-                data,
-            },
-        };
-        crate::call_video::push_camera_frame(frame);
-        return json_ok(serde_json::json!({
-            "ok": true,
-            "call_id": call_id,
-            "accepted": true,
-        }));
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = (call_id, width, height, data, format);
-        json_err("push camera frame only supported on desktop")
-    }
-}
-
-/// Texture registration: shm path + display dimensions for GPU render (no pixels in JSON).
-pub fn p2p_call_video_texture(config: &Value) -> Value {
-    let call_id = match config
-        .get("call_id")
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(s) => s.to_string(),
-        None => return json_err("call_id required"),
-    };
-    let track = config
-        .get("track")
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .unwrap_or("remote");
-    match crate::call_video::texture_shm_info(&call_id, track) {
-        Some(info) => json_ok(serde_json::json!({
-            "ok": true,
-            "ready": true,
-            "shm_path": info.path,
-            "width": info.width,
-            "height": info.height,
-            "generation": info.generation,
-        })),
-        None => json_ok(serde_json::json!({
-            "ok": true,
-            "ready": false,
-        })),
-    }
-}
-
-/// Render pull: latest decoded frame for `call_id` if newer than `since_generation`.
-/// Returns the frame as base64 I420 plus its dimensions and monotonic `generation`
-/// (the UI passes the last `generation` back so duplicates are skipped). I420 keeps
-/// the payload ~⅔ the size of RGB and matches the camera/codec format.
-pub fn p2p_call_video_frame(config: &Value) -> Value {
-    use base64::Engine as _;
-    let call_id = match config
-        .get("call_id")
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(s) => s.to_string(),
-        None => return json_err("call_id required"),
-    };
-    let since = config
-        .get("since_generation")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0);
-    let track = config
-        .get("track")
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .unwrap_or("remote");
-    // `rgba` (default): native I420→RGBA conversion so the Flutter UI isolate does no
-    // per-pixel work — it feeds the bytes straight to `decodeImageFromPixels`. `i420`
-    // keeps the raw planar payload for callers that convert themselves.
-    let want_rgba = config
-        .get("format")
-        .and_then(|x| x.as_str())
-        .map(|f| f.eq_ignore_ascii_case("rgba"))
-        .unwrap_or(true);
-    // Downscale display pulls (default 360 px longest edge) — full-res encode/send
-    // is unchanged; this only shrinks the UI poll payload (~4× less base64/decode).
-    let max_edge = config
-        .get("max_edge")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(360) as u32;
-    let pulled = match track {
-        "local" => crate::call_video::latest_local_preview(&call_id, since),
-        _ => crate::call_video::latest_decoded_frame(&call_id, since),
-    };
-    match pulled {
-        Some((frame, generation)) => {
-            let (format, bytes, out_w, out_h) = if want_rgba {
-                let (rgba, w, h) = crate::call_video::i420_to_rgba_max_edge(&frame, max_edge);
-                ("rgba", rgba, w, h)
-            } else {
-                ("i420", frame.data.clone(), frame.width, frame.height)
-            };
-            json_ok(serde_json::json!({
-                "ok": true,
-                "has_frame": true,
-                "width": out_w,
-                "height": out_h,
-                "generation": generation,
-                "format": format,
-                "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-            }))
-        }
-        None => json_ok(serde_json::json!({ "ok": true, "has_frame": false })),
-    }
-}
-
-/// Look up existing timestamp for outbound message (Flutter saves before calling Rust).
 fn existing_outbound_created_at_ms(recipient: &str, message_id: &str) -> Option<i64> {
     if let Some(ns) = active_app_namespace() {
         if let Ok(rows) =
@@ -1313,7 +1108,7 @@ fn enqueue_send_text_dm(
         };
         h.out_tx.clone()
     };
-    // Preserve existing timestamp if Flutter already saved the message to transcript.
+    // Preserve existing timestamp if Makepad already saved the message to transcript.
     // This ensures timestamps are immutable - once set, never changed.
     let created_at_ms =
         existing_outbound_created_at_ms(&recipient_trim, &message_id).unwrap_or_else(now_ms);
@@ -1648,58 +1443,6 @@ pub fn p2p_send_voice_dm(recipient: &str, duration_ms: u32, opus_blob: Vec<u8>) 
     )
 }
 
-pub fn p2p_send_voice_dm_from_config(recipient: &str, config: &Value) -> Value {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-    let duration_ms = config
-        .get("duration_ms")
-        .and_then(|v| v.as_u64())
-        .filter(|n| *n > 0)
-        .map(|n| n as u32);
-    let mut opus_blob = match config.get("opus_b64").and_then(|v| v.as_str()) {
-        Some(s) if !s.trim().is_empty() => match B64.decode(s.trim()) {
-            Ok(b) => b,
-            Err(e) => return json_err(format!("opus_b64 decode: {e}")),
-        },
-        _ => {
-            let Some(path) = config
-                .get("pcm_path")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            else {
-                return json_err("opus_b64 or pcm_path required");
-            };
-            let pcm = match crate::voice_msg_v1::read_pcm_i16_le_file(std::path::Path::new(path)) {
-                Ok(p) => p,
-                Err(e) => return json_err(e),
-            };
-            match crate::voice_msg_v1::encode_pcm_to_opus_blob(&pcm) {
-                Ok(b) => b,
-                Err(e) => return json_err(e),
-            }
-        }
-    };
-    if opus_blob.is_empty() {
-        return json_err("opus blob empty");
-    }
-    let duration_ms = duration_ms.unwrap_or_else(|| {
-        config
-            .get("pcm_path")
-            .and_then(|v| v.as_str())
-            .and_then(|path| {
-                crate::voice_msg_v1::read_pcm_i16_le_file(std::path::Path::new(path)).ok()
-            })
-            .map(|pcm| crate::voice_msg_v1::duration_ms_from_pcm_len(pcm.len()))
-            .unwrap_or(1)
-    });
-    // Validate before queueing so both LAN and delivery fail fast on oversized clips.
-    if let Err(e) = crate::voice_msg_v1::build_voice_inner(duration_ms, &opus_blob) {
-        opus_blob.clear();
-        return json_err(e);
-    }
-    p2p_send_voice_dm(recipient, duration_ms, opus_blob)
-}
-
 pub fn p2p_send_attachment(recipient: &str, config: &Value) -> Value {
     let Some(ns) = active_app_namespace() else {
         return json_err("app namespace not set");
@@ -1901,10 +1644,6 @@ pub fn p2p_attachment_fetch(config: &Value) -> Value {
     {
         return json_err("p2p fetch failed (node stopped?)");
     }
-    // The daemon serves one RPC at a time per socket, so this must never wait on the
-    // transfer itself. Only fast failures (no session, unknown/expired offer) are worth
-    // holding the caller for; completion lands via `patch_attachment_local_path` plus the
-    // `attachment_complete` poll event owned by the connect layer.
     match done_rx.recv_timeout(ATTACHMENT_FETCH_START_GRACE) {
         Ok(Ok(local_path)) => json_ok(serde_json::json!({
             "ok": true,
@@ -1921,87 +1660,6 @@ pub fn p2p_attachment_fetch(config: &Value) -> Value {
             "downloading": true,
         })),
     }
-}
-
-pub fn p2p_attachment_cancel(config: &Value) -> Value {
-    let blob_id = config
-        .get("blob_id")
-        .or_else(|| config.get("offer_id"))
-        .or_else(|| config.get("message_id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    if blob_id.is_empty() {
-        return json_err("blob_id required");
-    }
-    let out_tx = {
-        let g = match p2p_mx().lock() {
-            Ok(g) => g,
-            Err(_) => return json_err("p2p mutex poisoned"),
-        };
-        let Some(h) = g.as_ref() else {
-            return json_err("p2p not running");
-        };
-        h.out_tx.clone()
-    };
-    let _ = out_tx.send(OutboundCmd::CancelAttachment {
-        blob_id: blob_id.to_string(),
-    });
-    json_ok(serde_json::json!({ "ok": true }))
-}
-
-pub fn p2p_requeue_outbound_dm(message_id: &str, recipient: &str, text: &str) -> Value {
-    if message_id.trim().is_empty() {
-        return json_err("message_id required");
-    }
-    if crate::text_transport::delivery_primary_text() {
-        let mid = message_id.trim();
-        let result = crate::delivery_runtime::delivery_send_text_dm(recipient, text, mid);
-        maybe_mirror_text_on_lan_fast_path(mid, recipient, text);
-        return result;
-    }
-    if !crate::p2p::contact_has_lan_p2p_text_path(recipient) {
-        return json_err(
-            "GHAL_BOL_DELIVERY_URL not set — WAN text requires delivery server; peer not on LAN",
-        );
-    }
-    enqueue_send_text_dm(
-        message_id.trim().to_string(),
-        recipient.to_string(),
-        text.to_string(),
-        false,
-    )
-}
-
-pub fn p2p_send_ack_dm(recipient: &str, ref_id: &str, ack_kind: &str) -> Value {
-    let ack_kind = match ack_kind {
-        "ack_received" => MsgKind::AckReceived,
-        "ack_read" => MsgKind::AckRead,
-        "ack_request" => MsgKind::AckRequest,
-        "attachment_complete" => MsgKind::AttachmentComplete,
-        other => return json_err(format!("unknown ack kind: {other}")),
-    };
-    let out_tx = {
-        let g = match p2p_mx().lock() {
-            Ok(g) => g,
-            Err(_) => return json_err("p2p mutex poisoned"),
-        };
-        let Some(h) = g.as_ref() else {
-            return json_err("p2p not running");
-        };
-        h.out_tx.clone()
-    };
-    if out_tx
-        .send(OutboundCmd::SendAck {
-            recipient_public_key_hex: recipient.to_string(),
-            ref_id: ref_id.to_string(),
-            ack_kind,
-        })
-        .is_err()
-    {
-        return json_err("p2p send failed (node stopped?)");
-    }
-    json_ok(serde_json::json!({ "ok": true }))
 }
 
 pub fn p2p_register_dm_peer(public_key_hex: &str) -> Value {
@@ -2101,40 +1759,6 @@ pub fn p2p_set_availability_status(status_raw: &str) -> Value {
     }))
 }
 
-pub fn p2p_set_app_ack_read_enabled(enabled: bool) -> Value {
-    native_log::info("session", format!("app_ack_read_enabled={enabled}"));
-    crate::p2p::set_app_ack_read_enabled(enabled);
-    if enabled {
-        if let Some(peer) = crate::p2p::live_foreground_peer_for_catchup() {
-            if crate::text_transport::wan_text_via_delivery_server() {
-                crate::delivery_read_acks::queue_delivery_read_catchup(&peer);
-            }
-            if crate::text_transport::lan_p2p_ack_mirror_enabled(&peer) {
-                if let Ok(g) = p2p_mx().lock() {
-                    if let Some(h) = g.as_ref() {
-                        queue_read_ack_catchup(&h.out_tx, peer);
-                    }
-                }
-            }
-        }
-    }
-    json_ok(serde_json::json!({ "ok": true, "enabled": enabled }))
-}
-
-pub fn p2p_set_app_ui_visible(visible: bool) -> Value {
-    native_log::info("session", format!("app_ui_visible={visible}"));
-    crate::p2p::set_app_ui_visible(visible);
-    json_ok(serde_json::json!({ "ok": true, "visible": visible }))
-}
-
-/// Atomically sync integrator UI state → native read-receipt policy.
-///
-/// The coord server and relay never see this; only `ghal_bol` uses it to decide when
-/// `ack_read` is allowed for **new** inbound mail. Leave backlog drain still runs via
-/// `SetForegroundPeer(null)` when [room_public_key_hex] is cleared.
-///
-/// Close order: room `None` → foreground leave drain → read gate off.
-/// Open order: ui visible + room set → read gate on → foreground peer (enter catch-up).
 pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) -> Value {
     let room = room_public_key_hex
         .map(str::trim)
@@ -2197,21 +1821,6 @@ pub fn p2p_sync_ui_session(ui_visible: bool, room_public_key_hex: Option<&str>) 
 }
 
 /// Linux read-gate nudge — re-run in-room `ack_read` catch-up without re-issuing `SetForegroundPeer`.
-pub fn p2p_nudge_read_catchup() -> Value {
-    if let Some(peer) = live_foreground_peer_for_catchup() {
-        if crate::text_transport::wan_text_via_delivery_server() {
-            crate::delivery_read_acks::queue_delivery_read_catchup(&peer);
-        }
-        if crate::text_transport::lan_p2p_ack_mirror_enabled(&peer) {
-            if let Ok(g) = p2p_mx().lock() {
-                if let Some(h) = g.as_ref() {
-                    queue_read_ack_catchup(&h.out_tx, peer);
-                }
-            }
-        }
-    }
-    json_ok(serde_json::json!({ "ok": true }))
-}
 
 fn ui_session_snapshot_mx() -> &'static Mutex<Option<(bool, Option<String>)>> {
     static S: OnceLock<Mutex<Option<(bool, Option<String>)>>> = OnceLock::new();
@@ -2240,7 +1849,7 @@ fn clear_ui_session_snapshot() {
     }
 }
 
-/// DM + libp2p connectivity — forward to Flutter App log (`Native/…` tags in export).
+/// DM + libp2p connectivity — forward to Makepad App log (`Native/…` tags in export).
 fn native_log_should_forward_to_ui(line: &native_log::NativeLogLine) -> bool {
     if line.level == "warn" || line.level == "error" {
         return true;

@@ -14,7 +14,7 @@ use crate::keystore_v1::{
 
 /// Product / packaging id for **`ghal_bol`** (Rust keystore storage root via `directories`).
 ///
-/// Matches the Flutter **`ghal_bol_ui`** Android `applicationId` / iOS bundle id **`com.ghalbol`**.
+/// Matches the Makepad **`ghal_bol_app`** Android `applicationId` / iOS bundle id **`com.ghalbol`**.
 /// Use this symbol from JNI / FFI when aligning native paths.
 pub const ANDROID_LIBRARY_NAMESPACE: &str = "com.ghalbol";
 
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn android_library_namespace_matches_flutter_application_id() {
+    fn android_library_namespace_matches_makepad_application_id() {
         assert_eq!(ANDROID_LIBRARY_NAMESPACE, "com.ghalbol");
         let _dirs = project_dirs_for_library().expect("valid library namespace");
     }

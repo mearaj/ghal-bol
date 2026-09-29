@@ -1,75 +1,163 @@
 # Coordination server (`ghal_bol_coord`)
 
-**Tier 1 only** — presence and endpoint discovery. No message bodies or transcripts.
+**Tier 1** — signed peer **presence**, **endpoint lookup**, and a co-located **WAN call byte bridge**. No message bodies, transcripts, or DM mailboxes.
 
-It also runs a co-located **coord bridge** node for NAT/CGNAT traversal (transport helper; peers dial each other via `/p2p-circuit` multiaddrs registered on coord — not a message store). See [TRANSPORT.md](TRANSPORT.md) § "Ghal Bol relay".
+| Tier | Role | Product path |
+|------|------|----------------|
+| **1 — coord** | Who is online, dialable public TCP (when any), pair outbound WSS for calls | This doc |
+| **2 — delivery** | WAN **text** mailbox (E2E, offline) | [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) |
+| **3 — premium relay** | Optional paid backup (not shipping on coord1) | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) |
+
+The Makepad app (`ghal_bol_app`) calls **`ghal_bol_core::host`** in-process. After unlock, **`host::start_network`** starts native connect; **`coord_runtime`** talks to coord over HTTPS. **WAN text** always uses the delivery server when configured; **WAN voice/video calls** use the coord bridge when LAN/mDNS is not enough. See [DESIGN.md](DESIGN.md), [AGENTS.md](../AGENTS.md), and [TRANSPORT.md](TRANSPORT.md).
 
 ```text
-Peer A / B  →  register / heartbeat  →  ghal_bol_coord (SQLite)  →  GET /v1/peers/{[algo:]hex}  →  dial /p2p-circuit
-                 └─ reserve circuit on relay ─→  GET /v1/relay  →  server upserts /p2p-circuit on coord
+                    ┌─────────────────────────────────────┐
+                    │ ghal_bol_coord (SQLite + in-memory) │
+                    │  POST register / heartbeat          │
+                    │  GET  /v1/peers/{identity}          │
+                    │  WSS  /v1/bridge/connect (calls)    │
+                    └──────────────▲──────────────────────┘
+           register / lookup      │        bridge request + WSS
+                                  │
+              ┌───────────────────┴───────────────────┐
+              │ ghal_bol_core (coord_runtime,       │
+              │ connect bridge_ws, p2p_runtime)     │
+              └───────────────────▲─────────────────┘
+                                  │ host::
+              ┌───────────────────┴───────────────────┐
+              │ ghal_bol_app (Makepad 2)                │
+              └─────────────────────────────────────────┘
 ```
 
-## Client (`ghal_bol`)
+---
 
-After unlock: configure the **coord server list** (today a single URL; the API is an array for future redundancy). On P2P listen: **register + heartbeat on every reachable server** in the list. Before dial: **lookup across the list** — stop on first successful result for that attempt; on reconnect after a drop, repeat the full list.
+## Client configuration
 
-Set URLs in `ghal_bol_ui/env/.env.development` (debug) or `env/.env.production` (release) via `GHAL_BOL_COORD_URLS` (JSON array or comma-separated). No hardcoded coord URLs in the app binary.
-
-**WAN policy:** coord + co-located relay are **required** for internet peer discovery. WAN dials use explicit **`/p2p-circuit`** multiaddrs from `GET /v1/peers/{pk}` — **not** DCUtR hole-punch (DCUtR is disabled when coord is configured; see [TRANSPORT.md](TRANSPORT.md) § Stream-first). When coord is unreachable, LAN (mDNS) still works; the node keeps retrying all configured servers. Do **not** fall back to Kademlia DHT or public native connect bootstrap peers for WAN peer lookup — **native connect remains** for transport (coord bridge, mDNS, streams).
-
-### Client register & heartbeat policy (`coord_runtime.rs`)
-
-**Goal (product):** stay registered with a **correct, dialable** WAN presence — steady and accurate, not spam. The client must **never** believe it is registered when coord does not list a valid endpoint for the peer.
-
-| Trigger | Action |
-|---------|--------|
-| Publishable endpoint set **changed** (public TCP and/or coord bridge) | Full `POST /v1/register` on **all** configured coord URLs (`schedule_register_presence_force`) |
-| Last register **failed** or never succeeded | Retry register (min gap **2s** between attempts) |
-| Relay **reservation accepted** (public TCP path) or **network handover** | Force re-register when endpoints change |
-| **Presence stale** — no successful heartbeat/self-lookup in **~70s** (`PRESENCE_STALE_MS`; server row TTL ~90s) | Force re-register |
-| **`:p2p` / daemon restart** (`p2p_start`) | Re-fetch `GET /v1/relay`, re-reserve if needed, register when endpoints known — do not trust prior process state |
-| Endpoints **unchanged** and recently registered | **Throttle** full register (min gap **10s** when `coord_registered`); use **`POST /v1/heartbeat` every 25s** instead |
-
-**Truthfulness:** `coord_registered` in logs is set only after HTTP success or relay-presence self-lookup (`GET /v1/peers/{self}` / relay presence poll). CGNAT-only peers may show circuit via **relay server upsert** before client `POST` succeeds — see § Hybrid presence below.
-
-**Lookup (peers):** try configured coord servers **in order**; **stop on first successful** lookup for that dial attempt. After a peer disconnect with internet still up, **repeat lookup from the first server**.
-
-Implementation: `should_throttle_register`, `spawn_register_presence_inner`, `coord_register_tick` in `ghal_bol_core/src/coord_runtime.rs`. Broader connectivity rules: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**.
-
-## Run server
-
-**Home** — `./ghal_bol_coord/deploy/install_coord1_home.sh` + `./ghal_bol_coord/deploy/verify_coord1.sh`. See [COORD1_HOME.md](../ghal_bol_coord/deploy/COORD1_HOME.md).
-
-**GCP** — `./ghal_bol_coord/deploy/deploy_server.sh`.
-
-**Loopback smoke:**
-
-```bash
-cargo run -p ghal_bol_coord
-curl -s http://127.0.0.1:8765/v1/relay | jq
-```
-
-## Production (`coord.ghalbol.com`)
-
-Public HTTPS coordination is served by **nginx + TLS** in front of `ghal_bol_coord` on `127.0.0.1:8765`. Relay is **not** behind nginx — clients dial `coord.ghalbol.com:4002` directly. Example config: [ghal_bol_coord/deploy/nginx-coord.conf](../ghal_bol_coord/deploy/nginx-coord.conf).
-
-App builds bundle the URL via `ghal_bol_ui/env/.env.production`:
+Set coord base URLs in `env/.env.development` (debug) or `env/.env.production` (release):
 
 ```bash
 GHAL_BOL_COORD_URLS=["https://coord.ghalbol.com"]
+# home example:
+GHAL_BOL_COORD_URLS=["https://coord1.ghalbol.com:8443"]
 ```
 
-Smoke against production:
+JSON array or comma-separated list; no hardcoded URLs in the app binary. Optional: `GHAL_BOL_COORD_INSECURE_TLS=1` for local HTTPS with a self-signed cert.
+
+**Multi-server policy:** register and heartbeat on **every** URL in the list. **Lookup** (`GET /v1/peers/…`) tries servers **in order** and stops on the first success for that dial attempt; after a disconnect, repeat from the first server.
+
+Broader connectivity rules: [TRANSPORT.md](TRANSPORT.md) § Connectivity lifecycle.
+
+### Register and heartbeat (`coord_runtime.rs`)
+
+**Goal:** stay present on coord with a **correct** row when the device has publishable endpoints — steady, not spam. **`coord_registered`** in logs means a recent successful register or heartbeat on at least one configured server.
+
+| Trigger | Action |
+|---------|--------|
+| Publishable **public TCP** endpoint set **changed** | Full `POST /v1/register` on **all** coord URLs (`schedule_register_presence_force`) |
+| Last register **failed** or never succeeded | Retry register (min gap **2 s**) |
+| **Network handover** (endpoints invalidated) | Re-register when a new publishable set is known |
+| **Presence stale** — no successful heartbeat in **~70 s** (`PRESENCE_STALE_MS`; server TTL **90 s**) | Force re-register |
+| **`host::start_network`** | Register when listen endpoints are known; do not trust a prior process |
+| Endpoints **unchanged** and recently registered | **Throttle** full register (min gap **10 s** when registered); **`POST /v1/heartbeat` every 25 s** |
+
+Implementation: `should_throttle_register`, `spawn_register_presence_inner`, `coord_register_tick` in `ghal_bol_core/src/coord_runtime.rs`.
+
+**CGNAT / mobile-only peers** often have **no** public routable IPv4 to post. They still place **WAN calls** via `POST /v1/bridge/*` + WSS; **WAN text** uses delivery only. LAN chat uses mDNS/direct TCP.
+
+---
+
+## Presence model
+
+| Source | Stored in SQLite | Removed |
+|--------|------------------|---------|
+| Client `POST /v1/register` | **Public routable IPv4** `tcp`/`quic` endpoints (peer inbound DM listen), capabilities, optional `ipv4`/`ipv6` hints | Heartbeat TTL expiry (~90 s without heartbeat) |
+| **Rejected at POST** | RFC1918 LAN, loopback, CGNAT-only hosts posted as “public”, empty endpoint list | — |
+
+Server validation mirrors the client: `tcp` requires a globally routable IPv4 host ([`routes.rs`](../ghal_bol_coord/src/routes.rs) `validate_endpoints`). Stored rows are filtered again in [`presence.rs`](../ghal_bol_coord/src/presence.rs).
+
+---
+
+## WAN call bridge
+
+Opaque byte pipe: coord pairs two **outbound** WebSocket connections; peers run the same Noise XX + mux as LAN inside the tunnel. Full pairing flow, Noise roles, and limits: [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) § WAN call bridge.
+
+Summary:
+
+1. Caller: `POST /v1/bridge/challenge` → `POST /v1/bridge/request` (signed).
+2. Callee learns the offer via delivery push and/or `GET /v1/bridge/pending?identity_wire=…`.
+3. Both dial `GET /v1/bridge/connect?bridge_id=…&token=…` (WebSocket upgrade).
+4. Coord forwards binary frames until hangup, idle timeout, session max, or byte cap.
+
+Bridge **`connect_url`** in JSON responses uses `GHAL_BOL_COORD_PUBLIC_URL` / `GHAL_BOL_COORD_BASE_URL` on the server (must match what clients use for HTTPS/WSS).
+
+### Bridge limits (server env)
+
+| Parameter | Default | Env |
+|-----------|---------|-----|
+| Session max duration | 4 h | `GHAL_BOL_BRIDGE_MAX_SECS` |
+| Unpaired pending TTL | 90 s | `GHAL_BOL_BRIDGE_PENDING_SECS` |
+| Max relayed bytes | unlimited (`0`) | `GHAL_BOL_BRIDGE_MAX_BYTES` |
+| Max concurrent bridges per identity | 4 | `GHAL_BOL_BRIDGE_MAX_PER_PEER` |
+| Idle timeout | 120 s | `GHAL_BOL_BRIDGE_IDLE_SECS` |
+
+A new `POST /v1/bridge/request` for the same caller→callee (or same `call_id`) **replaces** stale unpaired entries so WSS retries are not blocked.
+
+---
+
+## Run and smoke
+
+### Loopback (dev)
 
 ```bash
+cargo run -p ghal_bol_coord
+curl -s http://127.0.0.1:8765/health | jq
+```
+
+Defaults: listen **`0.0.0.0:8765`** (`GHAL_BOL_COORD_LISTEN`; prod/home units use **`127.0.0.1:8765`** behind nginx); SQLite under `~/.local/share/com.ghalbol.coord/ghalbol_server/coord.db` (namespace **`com.ghalbol.coord`**, not the app `com.ghalbol`).
+
+### Automated smoke
+
+```bash
+./ghal_bol_coord/deploy/smoke_coord.sh
+COORD_URL=http://127.0.0.1:8765 ./ghal_bol_coord/deploy/smoke_coord.sh
+COORD_URL=https://coord1.ghalbol.com:8443 ./ghal_bol_coord/deploy/smoke_coord.sh
+```
+
+Runs crate tests, builds `coord_client`, then `health` + `demo-two-peers` against `COORD_URL` when set.
+
+Manual CLI:
+
+```bash
+cargo build -p ghal_bol_coord --release
+./target/release/coord_client http://127.0.0.1:8765 demo-two-peers
+```
+
+Point the app at your server: set `GHAL_BOL_COORD_URLS` to a reachable `http://…:8765` (or HTTPS) and restart after unlock/`start_network`.
+
+---
+
+## Production (`coord.ghalbol.com`)
+
+- **HTTPS:** nginx `:443` → `127.0.0.1:8765` ([`deploy/nginx-coord.conf`](../ghal_bol_coord/deploy/nginx-coord.conf)).
+- **Install:** `./ghal_bol_coord/deploy/deploy_server.sh` — see [deploy/GCP.md](../ghal_bol_coord/deploy/GCP.md).
+
+```bash
+GHAL_BOL_COORD_URLS=["https://coord.ghalbol.com"]
 COORD_URL=https://coord.ghalbol.com ./ghal_bol_coord/deploy/smoke_coord.sh
 ```
 
+**nginx:** must proxy **`/v1/bridge/connect`** with WebSocket upgrade headers (`Upgrade`, `Connection`) on the same vhost as coord HTTP, or WSS dials fail with HTTP 400.
+
+---
+
 ## Home (`coord1.ghalbol.com`)
 
-Same nginx pattern as GCP for **coord HTTP**. **GoDaddy DDNS** runs **in-process** inside `ghal_bol_coord` (`GHAL_BOL_DDNS_CREDENTIALS`, poll on start + every 5 min). One-shot manual update: `godaddy-ddns.sh`.
+| Path | Port |
+|------|------|
+| Coord HTTPS + bridge WSS | nginx **8443** → loopback **8765** |
+| Delivery WSS (same host, separate binary) | **55003** → nginx → delivery **8770** |
 
-**Relay:** fixed TCP **55002** (same model as GCP `:4002`, but home routers often block 4002). `install_coord1_home.sh` sets `GHAL_BOL_RELAY_LISTEN=0.0.0.0:55002`, `GHAL_BOL_RELAY_PUBLIC_HOST=coord1.ghalbol.com`. **Router:** forward **8443** (HTTPS) and **55002** (relay) to the coord1 host.
+**Router:** forward **8443** and **55003** (TCP) to the home host — not a separate “relay” port on coord.
 
 ```bash
 ./ghal_bol_coord/deploy/install_coord1_home.sh
@@ -80,64 +168,81 @@ Same nginx pattern as GCP for **coord HTTP**. **GoDaddy DDNS** runs **in-process
 GHAL_BOL_COORD_URLS=["https://coord1.ghalbol.com:8443"]
 ```
 
-See [COORD1_HOME.md](../ghal_bol_coord/deploy/COORD1_HOME.md).
+Bridge WSS: `wss://coord1.ghalbol.com:8443/v1/bridge/connect`. DDNS + HTTPS once: [deploy/COORD1_HOME.md](../ghal_bol_coord/deploy/COORD1_HOME.md).
+
+---
+
 ## HTTP API (v1)
 
-### Identity wire (path + JSON `public_key_hex`)
+Routes: [`ghal_bol_coord/src/routes.rs`](../ghal_bol_coord/src/routes.rs).
 
-The **same identity wire** appears in JSON bodies (`public_key_hex`) and as the **lookup path segment**. **Algorithm prefix is optional only for `secp256k1`** (bare hex); `ed25519`, `ecdsa-p256`, etc. **must** include `algorithm:`.
+| Method | Path | Body / query | Purpose |
+|--------|------|--------------|---------|
+| GET | `/health` | — | `ok`, `service`, `database`, `bridge` |
+| POST | `/v1/register/challenge` | `{ "public_key_hex" }` | Nonce for register signature |
+| POST | `/v1/register` | `public_key_hex`, `nonce_hex`, `signature_hex`, `endpoints[]`, optional `ipv4` / `ipv6` / `transport_capabilities` | Upsert presence |
+| POST | `/v1/heartbeat` | `{ "public_key_hex" }` | Refresh `last_heartbeat` |
+| GET | `/v1/peers/{identity_wire}` | Path = identity wire (URL-encode `:` as `%3A`) | One online peer or **404** |
+| GET | `/v1/peers` | — | All peers within TTL |
+| POST | `/v1/bridge/challenge` | `{ "caller_identity_wire" }` | Nonce for bridge request |
+| POST | `/v1/bridge/request` | `caller_identity_wire`, `peer_identity_wire`, `call_id`, `nonce_hex`, `signature_hex` | Create bridge; returns `bridge_id`, `token`, `connect_url` |
+| GET | `/v1/bridge/pending` | `?identity_wire=` (callee) | Incoming bridge offers |
+| GET | `/v1/bridge/connect` | `?bridge_id=&token=` | **WebSocket upgrade** — opaque byte pipe |
 
-```text
-GET /v1/peers/{[algo:]public_key_hex}
-```
+### Identity wire
 
-| Form | Meaning | Example lookup path |
-|------|---------|---------------------|
-| Bare hex (no `:`) | **Implicit `secp256k1`** | `/v1/peers/02a1b2…` |
-| `algorithm:hex` | Explicit algorithm | `/v1/peers/ed25519%3A9f86…` (`:` → `%3A`) |
+Same string in JSON (`public_key_hex`) and in `/v1/peers/{…}` paths. **Bare hex** (no `:`) means implicit **`secp256k1`**; other algorithms use `algorithm:hex` (e.g. `ed25519:…` → path `ed25519%3A…`). Server: `normalize_identity_wire()` in [`identity.rs`](../ghal_bol_coord/src/identity.rs).
 
-Server-side: `ghal_bol_coord/src/identity.rs` → `normalize_identity_wire()` on **register**, **heartbeat**, **lookup**, relay `pk=` binding, and SQLite primary key. Explicit `secp256k1:…` normalizes to bare hex on store.
+**Register signature:** canonical message `ghal_bol:register:v1\n<nonce_hex>\n<identity_wire>` (wire lowercased), signed with the device identity key — secp256k1 ECDSA DER, ed25519, or ecdsa-p256 DER per algorithm ([`auth.rs`](../ghal_bol_coord/src/auth.rs)).
 
-Client-side: `ghal_bol_core/src/coord.rs` uses `normalize_contact_identity_wire()` (same parse rules). Lookup URL-encodes the wire (`ed25519:…` → `ed25519%3A…`).
+**Bridge request signature:** domain `ghal_bol:bridge:request:v1` (see challenge response `message_domain`).
 
-**Transport `endpoints[]`** (scheme/host/port or native endpoint) are dial addresses — **not** identity strings. They do not carry an algorithm prefix.
+**`endpoints[]`:** dial addresses `{ scheme, host, port }` — not identity strings. Default capabilities if omitted: `tcp`, `sync-v1`.
 
-| Method | Path |
-|--------|------|
-| GET | `/health` |
-| POST | `/v1/register/challenge` |
-| POST | `/v1/register` |
-| POST | `/v1/heartbeat` |
-| GET | `/v1/peers/{[algo:]public_key_hex}` | Path segment = identity wire (bare hex = implicit `secp256k1`; prefix `:` as `%3A`) |
-| GET | `/v1/peers` |
-| GET | `/v1/relay` |
-| GET | `/v1/relay?remap=true` | UPnP-dynamic relay only (not shipping on coord1): after client bootstrap TCP failure — remove stale WAN port, map fresh (bool query — **`true`/`false`**, not `1`/`0`; storm-throttled) |
+---
 
-Register signature: canonical bytes `ghal_bol:register:v1\n<nonce_hex>\n<identity_wire>` (identity wire lowercased), signed with the identity key — **secp256k1** ECDSA DER, **ed25519**, or **ecdsa-p256** DER per algorithm (`ghal_bol_coord/src/auth.rs`).
+## Server environment
 
-**Hybrid presence (shipping):** `POST /v1/register` accepts **client** endpoints only: **`tcp` / `quic` with globally routable IPv4** (the peer’s own inbound DM listen). **Rejected (400):** `/p2p-circuit`, RFC1918 LAN, CGNAT-only, relay bootstrap host:port from `GET /v1/relay`. The co-located relay **upserts** `/p2p-circuit` when the client’s reservation is accepted (identify `agent_version` `ghal_bol/<ver>;pk=<identity_wire>` — bare secp256k1 hex or `algorithm:hex`). When the reservation ends, the server removes **only** the circuit row — public-TCP rows from `POST` stay. See [TRANSPORT.md](TRANSPORT.md) § “Hybrid coord presence”.
+| Variable | Purpose |
+|----------|---------|
+| `GHAL_BOL_COORD_LISTEN` / `GHAL_BOL_SERVER_LISTEN` | Bind address (default `0.0.0.0:8765`) |
+| `GHAL_BOL_COORD_DB` / `GHAL_BOL_SERVER_DB` | SQLite path or directory |
+| `GHAL_BOL_COORD_CHALLENGE_TTL_SECS` | Register/bridge challenge TTL (default 120 s) |
+| `GHAL_BOL_COORD_PRESENCE_TTL_SECS` | Offline threshold (default 90 s) |
+| `GHAL_BOL_COORD_PURGE_INTERVAL_SECS` | Background purge (default 30 s) |
+| `GHAL_BOL_COORD_PUBLIC_URL` / `GHAL_BOL_COORD_BASE_URL` | Public HTTPS base for `connect_url` in bridge JSON |
+| `GHAL_BOL_DDNS_CREDENTIALS` | Home coord1: in-process GoDaddy DDNS |
+| `GHAL_BOL_BRIDGE_*` | Bridge limits (table above) |
 
-`GET /v1/relay` → `{ enabled, peer_id, addrs }` — the co-located relay's stable PeerId and dialable base multiaddrs (clients append `/p2p/<peer_id>/p2p-circuit`). `enabled:false` or empty `addrs` when `GHAL_BOL_RELAY_PUBLIC_HOST` / `GHAL_BOL_RELAY_PUBLIC_ADDRS` are unset or relay is disabled.
+Deploy walkthrough: [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md), [ghal_bol_coord/README.md](../ghal_bol_coord/README.md).
 
-**Server log (healthy WAN):** `relay reservation ACCEPTED` → `coord presence registered from relay reservation` → optional `peer registered` when client POSTs LAN/public tcp.
+---
 
 ## Troubleshooting
 
-### Interpreting coord HTTP access logs
+### HTTP access patterns
 
 | Pattern | Likely cause | Action |
 |---------|--------------|--------|
-| `GET /v1/relay` 200, many `GET /v1/peers/…` 404, **no** register | Relay TCP unreachable or clients stuck waiting for circuit | Home: `./ghal_bol_coord/deploy/verify_coord1.sh` (relay `:55002` must pass). GCP: `nc -zv coord.ghalbol.com 4002` |
-| `GET /v1/health` 200, `/v1/relay` empty addrs | Server up but relay disabled or failed to bind | Home: `journalctl --user -u ghal-bol-coord1`; GCP: set `GHAL_BOL_RELAY_PUBLIC_HOST` |
-| `peer registered` in **server** logs but lookup 404 | TTL expired (~90s) or wrong coord URL in app | Heartbeat/register failing; check app `coord_registered` |
-| `peer registered` but client `peer_on_coord_no_dial_addrs` | Row has relay bootstrap `tcp` or LAN-only — no `/p2p-circuit` | Phone lost reservation; client must not POST relay IP:port; wait for `reservation ACCEPTED` + server circuit upsert |
-| `coord bridge DENIED` … `NoReservation` | Destination peer has no active relay reservation | Remote `:p2p` dropped reservation (background/LAN handover); remote must re-reserve |
+| `GET /v1/bridge/connect` **400**, client logs missing `upgrade` | nginx not forwarding WebSocket | Home: `./ghal_bol_coord/deploy/enable_coord1_https.sh`; GCP: add `Upgrade` / `Connection` on `/v1/bridge/connect` |
+| `GET /v1/peers/…` **404** | Never registered, TTL expired, or wrong coord URL in app | Check register/heartbeat logs; verify `GHAL_BOL_COORD_URLS`; `curl /health` |
+| Register **400** on `endpoints` | LAN/CGNAT host posted as public TCP | Expected on mobile-only; use bridge for calls, delivery for text |
+| Heartbeat **404** / “peer not on coord” | Row expired or DB wiped | Client forces re-register; check server uptime and TTL |
+| Bridge **400** “bad token” / “unknown bridge” | Expired pending, wrong token side, or second leg too slow | Retry `bridge/request`; check `GHAL_BOL_BRIDGE_PENDING_SECS` |
+| Bridge **400** “bridge limit per identity” | Too many concurrent/pending bridges | Wait for idle close or hang up other calls |
 
 ### Session checklist
 
-1. Coord server running (`ghal-bol-coord1` or GCP systemd)  
-2. `curl -s http://127.0.0.1:8765/v1/relay | jq` — enabled + addrs  
-3. **Relay TCP reachable** — GCP: `nc -zv coord.ghalbol.com 4002`. Home coord1: `./ghal_bol_coord/deploy/verify_coord1.sh` (relay **55002**)
-4. Rebuild native + restart apps after server identity or relay config change
+1. Coord process running (`ghal-bol-coord1` user service or GCP systemd).
+2. `curl -s https://…/health | jq` — `database: true`, `bridge: true`.
+3. Smoke: `COORD_URL=… ./ghal_bol_coord/deploy/smoke_coord.sh`.
+4. App rebuilt with correct `GHAL_BOL_COORD_URLS`; unlock → `start_network`.
+5. For home calls across the internet: router **8443** open; WSS reaches `/v1/bridge/connect`.
 
-When testing app traffic against your local server (not production), set `GHAL_BOL_COORD_URLS` to a reachable `http://…:8765` URL and restart the app.
+### Tests
+
+```bash
+cargo test -p ghal_bol_coord --test http_api
+cargo test -p ghal_bol_coord --test e2e_production
+cargo test -p ghal_bol_coord
+```

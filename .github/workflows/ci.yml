@@ -45,34 +45,11 @@ jobs:
       - name: Unit tests (ghal_bol_delivery)
         run: cargo test -p ghal_bol_delivery
 
-  flutter:
-    name: Flutter analyze & test
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ghal_bol_ui
-    steps:
-      - uses: actions/checkout@v6
+      - name: Install desktop UI libraries
+        run: sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev clang
 
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
+      - name: Check desktop app
+        run: cargo check -p ghal_bol_app
 
-      - name: flutter pub get
-        run: flutter pub get
-
-      - name: Ephemeral env files for asset check
-        run: |
-          cp env/.env.development.example env/.env.development
-          cp env/.env.production.example env/.env.production
-
-      - name: Daemon SDK parity (Rust + Dart)
-        working-directory: .
-        run: ./scripts/check_daemon_sdk_parity.sh
-
-      - name: dart analyze
-        run: dart analyze --fatal-warnings
-
-      - name: flutter test
-        run: flutter test
+      - name: App language tests
+        run: cargo test -p ghal_bol_app --bin ghal_bol_app -- i18n::

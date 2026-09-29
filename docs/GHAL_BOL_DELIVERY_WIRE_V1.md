@@ -353,7 +353,7 @@ Proactive notice when `used_bytes / allocated_bytes >= 0.9`.
 }
 ```
 
-`instance_id` and `schema_version` are for **operator migration verification** — not shown in the Flutter UI.
+`instance_id` and `schema_version` are for **operator migration verification** — not shown in the Makepad UI.
 
 ## Logging (server)
 

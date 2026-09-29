@@ -548,7 +548,7 @@ fn append_outbound_transcript(ns: &str, recipient_wire: &str, message_id: &str, 
         return;
     }
     let now = now_ms();
-    // Preserve existing timestamp if message already persisted (Flutter saves before calling Rust)
+    // Preserve existing timestamp if message already persisted (Makepad saves before calling Rust)
     // This ensures timestamps are immutable - once set, never changed
     let created_at_ms = existing_outbound_created_at_ms(ns, &conv_key, message_id).unwrap_or(now);
     let line = StoredChatLine {
@@ -933,14 +933,6 @@ pub fn delivery_connection_status() -> Value {
     json!({ "ok": true, "connected": false, "delivery_url": delivery_url() })
 }
 
-pub fn delivery_quota_status() -> Value {
-    let status = delivery_connection_status();
-    json!({
-        "ok": true,
-        "quota": status.get("quota").cloned().unwrap_or(Value::Null),
-        "connected": status.get("connected"),
-    })
-}
 
 pub fn delivery_mailbox_list(include_expired: bool) -> Value {
     let Some(url) = delivery_url() else {
@@ -976,72 +968,4 @@ pub fn delivery_mailbox_list(include_expired: bool) -> Value {
     }
 }
 
-pub fn delivery_extend_ttl(message_id: &str, extend_secs: u64) -> Value {
-    let Some(url) = delivery_url() else {
-        return json!({ "ok": false, "error": "GHAL_BOL_DELIVERY_URL not set" });
-    };
-    let ident = match unlocked_identity_clone() {
-        Ok(i) => i,
-        Err(e) => return json!({ "ok": false, "error": e }),
-    };
-    let ws_url = ws_url_from_base(&url);
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(r) => r,
-        Err(e) => return json!({ "ok": false, "error": e.to_string() }),
-    };
-    match rt.block_on(async {
-        let mut session = connect_and_auth(&ws_url, &ident).await?;
-        session.extend_ttl(&ident, message_id, extend_secs).await
-    }) {
-        Ok(resp) => json!({ "ok": true, "result": resp }),
-        Err(e) => json!({ "ok": false, "error": e }),
-    }
-}
 
-pub fn delivery_resend_message(message_id: &str) -> Value {
-    let Some(ns) = active_app_namespace() else {
-        return json!({ "ok": false, "error": "app namespace not set" });
-    };
-    let mid = message_id.trim();
-    if mid.is_empty() {
-        return json!({ "ok": false, "error": "message_id required" });
-    }
-    // Scan merged transcripts for outbound row with this id.
-    let contacts = match crate::contacts_v1::list_contacts(&ns) {
-        Ok(c) => c,
-        Err(e) => return json!({ "ok": false, "error": e.to_string() }),
-    };
-    for contact in contacts {
-        let pk = contact.public_key_hex.trim();
-        if !is_valid_public_key_hex(pk) {
-            continue;
-        }
-        let rows = match load_merged(&ns, &[pk.to_string()], None) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        for row in rows {
-            if !row.outgoing {
-                continue;
-            }
-            if row.message_id.as_deref() != Some(mid) {
-                continue;
-            }
-            if row.msg_kind.trim() == "voice" {
-                let Some(path) = row.audio_path.as_deref().or(row.local_path.as_deref()) else {
-                    return json!({ "ok": false, "error": "voice audio path missing" });
-                };
-                let opus = match std::fs::read(path) {
-                    Ok(b) => b,
-                    Err(e) => return json!({ "ok": false, "error": format!("read voice: {e}") }),
-                };
-                return delivery_send_voice_dm(pk, row.duration_ms.unwrap_or(1), opus, mid);
-            }
-            return delivery_send_text_dm(pk, &row.text, mid);
-        }
-    }
-    json!({ "ok": false, "error": "outbound message not found locally" })
-}

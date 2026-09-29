@@ -165,7 +165,7 @@ pub async fn run_video_session(
     #[cfg(target_os = "android")]
     crate::call_video::android_video::stop_capture();
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    crate::call_video::desktop_video::stop_capture();
+    crate::call_video::capture::reset_desktop_capture_backend();
 }
 
 /// Platform video capture + render surface. Headless/tests use [`MockVideoBackend`].

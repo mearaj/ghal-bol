@@ -12,7 +12,7 @@ transport online/offline and **not** Stories — coord presence stays dial-only.
 | Local status string | Rust prefs | `preferences_v1.json` → `availability_status` |
 | Peer status (received) | Rust contacts | `contacts_v1.json` → `availability_status` |
 | Sync | Rust | Sealed DM `MsgKind::AvailabilityStatus` on set + on connect |
-| UI | Flutter | Set status (Identity / More); roster subtitle chip |
+| UI | Makepad | Set status (Identity / More); roster subtitle chip |
 
 ## Presets (v1)
 
@@ -47,4 +47,4 @@ Inner JSON:
 
 - Do not treat status as online/offline presence for dial policy.
 - Do not put status in coord register payloads.
-- Do not invent status in Flutter without native store.
+- Do not invent status in Makepad without native store.

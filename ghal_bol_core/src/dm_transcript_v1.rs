@@ -1,4 +1,4 @@
-//! Reads the Flutter `chat_transcript_v1.json` format so native P2P can restore outbound work
+//! Reads the Makepad `chat_transcript_v1.json` format so native P2P can restore outbound work
 //! without the UI walking history on the main isolate.
 //!
 //! All file access goes through [`crate::dm_transcript_store`] locking — do not read/write this

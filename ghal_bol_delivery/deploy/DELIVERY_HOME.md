@@ -4,11 +4,8 @@
 
 | Service | WAN port | Loopback |
 |---------|----------|----------|
-| coord1 HTTPS | **8443** | 8765 |
-| coord1 libp2p relay | **55002** | (in-process) |
+| coord1 HTTPS + bridge WSS | **8443** | 8765 |
 | **delivery WSS** | **55003** | **8770** |
-
-Delivery uses a **high WAN port** like coord1 relay (**55002**). Many home routers forward **8443** and **55002** but not adjacent ports such as **8444** — same class of issue as GCP relay **4002** vs home **55002**.
 
 | Path | Port |
 |------|------|

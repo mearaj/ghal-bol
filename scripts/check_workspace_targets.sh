@@ -6,7 +6,7 @@
 # Android ABI checks need the Android NDK on PATH via cargo-ndk:
 #   cargo install cargo-ndk
 #   export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/<version>"   # or NDK_HOME
-# Optional Gradle **jniLibs**: **./scripts/pack_android_workspace_jni_libs.sh** (all workspace **`cdylib`** **`.so`** files) — **PORTABILITY.md**.
+# Optional Gradle **jniLibs**: use **./scripts/build_android_app.sh** (Makepad Android package).
 #
 # Darwin / MSVC targets typically require their host SDKs even for `cargo check`.
 #

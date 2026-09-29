@@ -1,11 +1,11 @@
-//! Apply P2P DM events to contacts + transcript (moved from Flutter [P2pEventBridge]).
+//! Apply P2P DM events to contacts and the transcript. The app only displays the result.
 
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
 use crate::app_paths::{chat_transcript_v1_path, contacts_v1_path, storage_config_for_namespace};
-use crate::c_ffi::ffi_unlocked_identity_clone;
+use crate::session_runtime::unlocked_identity_clone;
 use crate::contacts_v1::{
     SavedContact, find_by_peer_id, find_by_public_key, is_valid_public_key_hex,
     merge_discovered_peer_id, record_inbound_preview, set_contact_availability_status,
@@ -347,7 +347,7 @@ fn contact_is_blocked(ns: &str, sender_pk: &str, from_key: &str) -> bool {
 }
 
 fn apply_inbound_availability_status(ns: &str, ev: &Value) -> bool {
-    let my_pk = ffi_unlocked_identity_clone()
+    let my_pk = unlocked_identity_clone()
         .ok()
         .map(|id| id.public_key_hex())
         .unwrap_or_default();
@@ -397,7 +397,7 @@ fn apply_inbound_availability_status(ns: &str, ev: &Value) -> bool {
 }
 
 fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
-    let my_pk = ffi_unlocked_identity_clone()
+    let my_pk = unlocked_identity_clone()
         .ok()
         .map(|id| id.public_key_hex())
         .unwrap_or_default();
@@ -563,7 +563,7 @@ fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
 }
 
 fn apply_inbound_voice(ns: &str, ev: &Value) -> bool {
-    let my_pk = ffi_unlocked_identity_clone()
+    let my_pk = unlocked_identity_clone()
         .ok()
         .map(|id| id.public_key_hex())
         .unwrap_or_default();
@@ -744,7 +744,7 @@ fn apply_inbound_voice(ns: &str, ev: &Value) -> bool {
 }
 
 fn apply_inbound_attachment_offer(ns: &str, ev: &Value) -> bool {
-    let my_pk = ffi_unlocked_identity_clone()
+    let my_pk = unlocked_identity_clone()
         .ok()
         .map(|id| id.public_key_hex())
         .unwrap_or_default();
@@ -1043,7 +1043,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::c_ffi::configure_android_data_directory;
+    use crate::app_paths::configure_android_data_directory;
     use crate::contacts_v1::find_by_public_key;
     use crate::storage::{StorageConfig, create_or_unlock_identity_v1};
     use serde_json::json;
@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     fn isolated_store(ns: &str) -> IsolatedStore {
-        let guard = crate::c_ffi::test_storage_isolation_lock()
+        let guard = crate::app_paths::test_storage_isolation_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
@@ -1218,6 +1218,7 @@ mod tests {
         assert!(apply_p2p_event_json(&ev));
         let c = find_by_public_key(NS, PK_A).unwrap().unwrap();
         assert_eq!(c.unread_count, 0);
+        assert!(!c.is_known, "first inbound must stay unknown until Add or an outbound send");
         clear_p2p_handler_context();
         crate::p2p::sync_foreground_peer_now(None);
         crate::p2p::set_app_ack_read_enabled(false);

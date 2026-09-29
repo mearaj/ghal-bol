@@ -6,9 +6,10 @@
 //! [transport] ─▶ wire bytes ─▶ open ─▶ jitter buffer ─▶ decode(PLC) ─▶ playout PCM
 //! ```
 //! This module owns encode/decode, per-frame crypto, and the jitter buffer.
-//! Audio device I/O (capture/playback, AEC) and the transport (libp2p substream
-//! or QUIC datagrams) live in separate layers and drive this engine.
+//! Audio device I/O and echo cancellation live beside this engine. The session
+//! feeds speaker audio into the canceller before it encodes the microphone.
 
+mod aec;
 mod android_audio;
 mod audio_device;
 mod codec;
@@ -36,6 +37,19 @@ pub use codec::{
 };
 pub use jitter::Playout;
 pub use session::{MediaControls, run_media_session};
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SPEAKER_ON: AtomicBool = AtomicBool::new(true);
+
+/// Desktop playout follows this. Android uses the earpiece/speaker route as well.
+pub fn set_desktop_speaker_on(on: bool) {
+    SPEAKER_ON.store(on, Ordering::Relaxed);
+}
+
+pub fn desktop_speaker_on() -> bool {
+    SPEAKER_ON.load(Ordering::Relaxed)
+}
 
 pub(crate) use crypto::MediaCrypto;
 use jitter::JitterBuffer;

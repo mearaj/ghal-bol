@@ -17,18 +17,14 @@
 //! keyed by a **distinct** video media key (different HKDF `info`), so audio and
 //! video never share a `(key, nonce)` space.
 
-#[cfg(target_os = "android")]
 mod android_video;
 mod capture;
 mod codec;
 #[cfg(not(target_arch = "wasm32"))]
 mod codec_h264;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-mod desktop_video;
 mod jitter;
 mod packet;
 mod quality;
-mod render;
 mod session;
 
 pub use capture::{desktop_capture_backend, spawn_camera_capture};
@@ -37,8 +33,6 @@ pub use codec::NullVideoCodec;
 pub use codec::{RawVideoFrame, VideoDecoder, VideoEncoder};
 #[cfg(not(target_arch = "wasm32"))]
 pub use codec_h264::{H264Decoder, H264Encoder};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub use desktop_video::push_camera_frame;
 pub use session::{VideoControls, VideoStreams, run_video_session};
 
 use crate::call_media::{MediaCrypto, MediaFrame};
@@ -71,7 +65,7 @@ pub fn publish_decoded_frame(call_id: &str, frame: RawVideoFrame) {
         .ok()
         .map(|m| !m.contains_key(call_id))
         .unwrap_or(false);
-    let next_gen = if let Ok(mut m) = remote_registry().lock() {
+    if let Ok(mut m) = remote_registry().lock() {
         let next_gen = m.get(call_id).map(|s| s.generation).unwrap_or(0) + 1;
         m.insert(
             call_id.to_string(),
@@ -80,11 +74,9 @@ pub fn publish_decoded_frame(call_id: &str, frame: RawVideoFrame) {
                 generation: next_gen,
             },
         );
-        next_gen
     } else {
         return;
     };
-    render::publish_display_frame(call_id, "remote", &frame, next_gen);
     if first {
         crate::p2p::native_log::info(
             "call_video",
@@ -103,7 +95,7 @@ pub fn publish_local_preview(call_id: &str, frame: RawVideoFrame) {
         .ok()
         .map(|m| !m.contains_key(call_id))
         .unwrap_or(false);
-    let next_gen = if let Ok(mut m) = local_registry().lock() {
+    if let Ok(mut m) = local_registry().lock() {
         let frame_gen = m.get(call_id).map(|s| s.generation).unwrap_or(0) + 1;
         m.insert(
             call_id.to_string(),
@@ -112,11 +104,9 @@ pub fn publish_local_preview(call_id: &str, frame: RawVideoFrame) {
                 generation: frame_gen,
             },
         );
-        frame_gen
     } else {
         return;
     };
-    render::publish_display_frame(call_id, "local", &frame, next_gen);
     if first {
         crate::p2p::native_log::info(
             "call_video",
@@ -152,8 +142,8 @@ fn pull_frame(
 }
 
 /// Convert a planar I420 frame to packed RGBA8888 natively (BT.601 full-range,
-/// fixed-point). Moving this off the Flutter UI isolate is the main per-frame
-/// latency win — Dart only feeds the result to `decodeImageFromPixels`.
+/// fixed-point). Moving this off the Makepad UI isolate is the main per-frame
+/// latency win — The UI only feeds the result to `decodeImageFromPixels`.
 pub fn i420_to_rgba(frame: &RawVideoFrame) -> Vec<u8> {
     let w = frame.width as usize;
     let h = frame.height as usize;
@@ -177,7 +167,7 @@ pub fn i420_to_rgba(frame: &RawVideoFrame) -> Vec<u8> {
             let y = d[row * w + col] as i32;
             let u = d[u_off + uv_row * uv_w + uv_col] as i32 - 128;
             let v = d[v_off + uv_row * uv_w + uv_col] as i32 - 128;
-            // Fixed-point (<<16) BT.601 full-range — matches the old Dart float math.
+            // Fixed-point (<<16) BT.601 full-range — matches the the previous float math.
             let r = y + ((91881 * v) >> 16);
             let g = y - ((22554 * u + 46802 * v) >> 16);
             let b = y + ((116130 * u) >> 16);
@@ -244,8 +234,8 @@ pub fn i420_downscale_max_edge(frame: &RawVideoFrame, max_edge: u32) -> RawVideo
     }
 }
 
-/// Like [`i420_to_rgba`] but downscales so the longest edge is at most `max_edge`
-/// pixels (nearest-neighbour). Cuts socket/base64/decode cost ~4× at 360 vs 640.
+/// Like [`i420_to_rgba`] but downscales so the longest edge is at most `max_edge`.
+#[cfg(test)]
 pub fn i420_to_rgba_max_edge(frame: &RawVideoFrame, max_edge: u32) -> (Vec<u8>, u32, u32) {
     let w = frame.width as usize;
     let h = frame.height as usize;
@@ -288,67 +278,6 @@ pub fn i420_to_rgba_max_edge(frame: &RawVideoFrame, max_edge: u32) -> (Vec<u8>, 
         }
     }
     (out, dw as u32, dh as u32)
-}
-
-/// Convert packed 8-bit RGBA/BGRA camera pixels (row stride `stride` bytes) to
-/// planar I420 for the encoder. Done natively so the desktop capture path does no
-/// per-pixel work on the Flutter UI isolate. `is_rgba` false means BGRA byte order.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub fn packed_to_i420(
-    src: &[u8],
-    stride: usize,
-    width: u32,
-    height: u32,
-    is_rgba: bool,
-) -> Option<RawVideoFrame> {
-    let w = (width as usize) & !1;
-    let h = (height as usize) & !1;
-    if w == 0 || h == 0 || stride < w * 4 {
-        return None;
-    }
-    if src.len() < stride * h {
-        return None;
-    }
-    let y_size = w * h;
-    let uv_w = w / 2;
-    let uv_h = h / 2;
-    let mut out = vec![0u8; y_size + 2 * uv_w * uv_h];
-    let u_off = y_size;
-    let v_off = y_size + uv_w * uv_h;
-    for y in 0..h {
-        let row = y * stride;
-        for x in 0..w {
-            let p = row + x * 4;
-            let (r, g, b) = if is_rgba {
-                (src[p] as i32, src[p + 1] as i32, src[p + 2] as i32)
-            } else {
-                (src[p + 2] as i32, src[p + 1] as i32, src[p] as i32)
-            };
-            // Fixed-point (<<8) BT.601 full-range — matches the old Dart float math.
-            out[y * w + x] = (((77 * r + 150 * g + 29 * b) >> 8).clamp(0, 255)) as u8;
-            if y % 2 == 0 && x % 2 == 0 {
-                let uv_idx = (y / 2) * uv_w + (x / 2);
-                out[u_off + uv_idx] =
-                    ((((-43 * r - 84 * g + 127 * b) >> 8) + 128).clamp(0, 255)) as u8;
-                out[v_off + uv_idx] =
-                    ((((127 * r - 106 * g - 21 * b) >> 8) + 128).clamp(0, 255)) as u8;
-            }
-        }
-    }
-    Some(RawVideoFrame {
-        width: w as u32,
-        height: h as u32,
-        data: out,
-    })
-}
-
-/// Shm path + dimensions for GPU texture registration (Flutter embedder).
-pub fn texture_shm_info(call_id: &str, track: &str) -> Option<render::TextureShmInfo> {
-    render::texture_shm_info(call_id, track)
-}
-
-pub(crate) fn track_call_shm(call_id: &str) {
-    render::track_call(call_id);
 }
 
 /// Max in-flight partial frames during reassembly, and max buffered complete frames

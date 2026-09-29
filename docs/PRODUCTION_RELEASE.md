@@ -1,192 +1,112 @@
-# Production release — P0 / P1 / P2
+# Production release
 
-Step-by-step checklist to ship Ghal Bol. Complete in order.
+Checklist for shipping Ghal Bol. The UI is `ghal_bol_app` (Makepad 2). It links `ghal_bol_core` in-process.
 
 **Live coord:** `https://coord.ghalbol.com`
 
 ---
 
-## P0 — Ship a release build
+## P0 — Desktop release
 
-### P0.1 Release keystore (one-time)
+### P0.1 Build and pack
 
-On your dev machine:
-
-```bash
-keytool -genkey -v \
-  -keystore ~/ghalbol-release.jks \
-  -keyalg RSA -keysize 2048 -validity 10000 \
-  -alias ghalbol
-```
-
-Copy the template and fill in absolute paths and passwords:
+On x86_64 Linux, with the Makepad system libraries installed (X11, Wayland, EGL/GL, ALSA):
 
 ```bash
-cp ghal_bol_ui/android/key.properties.example ghal_bol_ui/android/key.properties
-# edit storeFile, storePassword, keyPassword
+./scripts/package_linux_release.sh
 ```
 
-`key.properties`, `*.jks`, and `*.keystore` are gitignored.
+That writes `web/downloads/ghal-bol-linux-x64.tar.gz`. Extract it and run `./run.sh`.
 
-### P0.2 Build release APK (or AAB for Play Store)
+Debug data directory: `~/.local/share/com.ghalbol.debug/`. Release: `~/.local/share/com.ghalbol/`.
 
-```bash
-./scripts/pack_android_workspace_jni_libs.sh
-cd ghal_bol_ui
-flutter build apk --release
-# Play Store upload:
-# flutter build appbundle --release
-```
+On first launch the app writes a login autostart entry and a desktop menu file for the binary you started. If a keystore already exists and the session is locked, it posts an unlock notification.
 
-Outputs:
+### P0.2 Two-device test
 
-| Artifact | Path |
-|----------|------|
-| APK | `ghal_bol_ui/build/app/outputs/flutter-apk/app-release.apk` |
-| AAB | `ghal_bol_ui/build/app/outputs/bundle/release/app-release.aab` |
+Use two machines that are not on the same LAN (or one on mobile data via the Android build below).
 
-Release builds bundle `env/.env.production` → `GHAL_BOL_COORD_URLS=["https://coord.ghalbol.com"]`.
+| # | Step |
+|---|------|
+| 1 | A: create identity and save the encrypted backup |
+| 2 | A: My invitation, share the link or QR |
+| 3 | B: Scan QR, QR picture, or Join → paste |
+| 4 | A sees B after connect |
+| 5 | A sends text → B receives |
+| 6 | B: single tick on A (`ack_received`) |
+| 7 | B opens the room → A gets the read tick (`ack_read`) |
+| 8 | Voice call connects; video call shows local and remote pictures |
+| 9 | Quit and reopen — transcript is still there |
 
-Without `key.properties`, Gradle signs with the debug key (fine for local install only).
-
-### P0.3 Install on test phones
-
-```bash
-adb install -r ghal_bol_ui/build/app/outputs/flutter-apk/app-release.apk
-```
-
-Or sideload the APK file directly.
-
-### P0.4 Two-device ship test (required)
-
-Use **two physical phones on mobile data** (Wi‑Fi off or different carriers — not the same LAN).
-
-| # | Step | Pass? |
-|---|------|-------|
-| 1 | Phone A: unlock / create identity | |
-| 2 | Phone A: Hub → share invite QR | |
-| 3 | Phone B: scan QR (mobile data) | |
-| 4 | Phone B: contact appears on A after connect | |
-| 5 | A sends text → B receives | |
-| 6 | B: single grey tick on A (delivered / `ack_received`) | |
-| 7 | B opens room → A gets blue tick (`ack_read`) | |
-| 8 | B sends reply → A receives + ticks | |
-| 9 | Optional: voice call connects both ways | |
-| 10 | Kill app on B, reopen — transcript persists | |
-
-If lookup fails: confirm coord smoke passes from laptop:
+Coord smoke from a laptop:
 
 ```bash
 COORD_URL=https://coord.ghalbol.com ./ghal_bol_coord/deploy/smoke_coord.sh
 ```
 
-Debug on device: `:p2p` process logs via `adb logcat | rg ghal_bol`.
-
-**P0 is done when:** signed release APK/AAB builds and the ship test table passes.
-
 ---
 
-## P1 — Infra and repo
+## P0 — Android package
 
-### P1.1 CI on GitHub
-
-Push `main` with [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Confirm Actions green:
-
-- Rust unit + P2P integration tests
-- `dart analyze --fatal-warnings` + `flutter test`
-
-### P1.2 Coord server survives reboot (GCP VM)
-
-On the VM (`coord.ghalbol.com`):
+The phone UI is the same `ghal_bol_app` binary, built by cargo-makepad. Package id `com.ghalbol`. The manifest template is `ghal_bol_app/resources/android/AndroidManifest.xml.template` (camera, microphone, network, notifications, `ghalbol://` and `https://ghalbol.com/connect/`).
 
 ```bash
-# 1. Stop foreground server (Ctrl+C) if running
-
-# 2. Install system unit (edit User + paths if needed)
-sudo cp ghal_bol_coord/deploy/ghal-bol-coord.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable ghal-bol-coord
-sudo systemctl start ghal-bol-coord
-
-# 3. Verify
-sudo systemctl status ghal-bol-coord
-curl -s https://coord.ghalbol.com/health
-
-# 4. Reboot test
-sudo reboot
-# after reconnect:
-curl -s https://coord.ghalbol.com/health
+./scripts/build_android_app.sh          # APK
+./scripts/build_android_app.sh --aab    # Play App Bundle
 ```
 
-See [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md).
+Signing for Play uses cargo-makepad’s `--keystore` on `build-aab` (see `cargo makepad android --help`). A debug signature is only for a local install.
 
-### P1.3 Commit production changes
-
-From repo root — exclude built binaries (`linux/native/libexec/ghal_bol_core_daemon` is gitignored).
-
-**P1 is done when:** CI green, coord survives reboot, production branch committed and pushed.
-
----
-
-## P2 — Play Store
-
-### P2.1 Privacy policy
-
-Publish [PRIVACY_POLICY.md](PRIVACY_POLICY.md) at a public URL (e.g. `https://ghalbol.com/privacy`). Play Console requires this link.
-
-### P2.2 Store listing
-
-Use the draft in [PLAY_STORE_LISTING.md](PLAY_STORE_LISTING.md): short description, full description, category, content rating questionnaire.
-
-### P2.3 Store assets
-
-| Asset | Spec |
-|-------|------|
-| App icon | 512×512 PNG — `ghal_bol_ui/assets/app_icon.png` as source |
-| Feature graphic | 1024×500 PNG |
-| Phone screenshots | ≥2, 16:9 or 9:16 |
-
-### P2.4 Play Console upload
-
-1. Create app → `com.ghalbol`
-2. Upload `app-release.aab` from P0.2
-3. Set privacy policy URL
-4. Complete Data safety form (no account; local identity; coord sees presence/endpoints only — see privacy policy)
-5. Internal testing track → add testers → roll out
-
-**P2 is done when:** internal testing build is installable from Play Store.
-
-### P2.5 Public website (ghalbol.com)
-
-Hosting is Firebase (`firebase.json`, `scripts/deploy_web_firebase.sh`). Not a substitute for P0 ship test on phones.
-
-| Step | Action |
-|------|--------|
-| Web build | `cd ghal_bol_ui && flutter build web --release` |
-| Linux tarball | `web/downloads/ghal-bol-linux-x64.tar.gz` before web build — see [WEB_SITE.md](WEB_SITE.md) |
-| App Links | `web/.well-known/assetlinks.json` with Play app-signing SHA-256 |
-| Deploy | `./scripts/deploy_web_firebase.sh` from repo root |
-| Verify | `/`, `/download/linux`, `/downloads/ghal-bol-linux-x64.tar.gz` (file, not HTML), `/.well-known/assetlinks.json` |
-
-Privacy policy URL for Play: `https://ghalbol.com/privacy` when that page is published ([PRIVACY_POLICY.md](PRIVACY_POLICY.md)).
-
----
-
-## Quick reference
+Install:
 
 ```bash
-# Prod coord smoke
-COORD_URL=https://coord.ghalbol.com ./ghal_bol_coord/deploy/smoke_coord.sh
+adb install -r target/makepad-android-apk/ghal_bol_app/apk/app-release.apk
+```
 
-# Android release
-./scripts/pack_android_workspace_jni_libs.sh
-cd ghal_bol_ui && flutter build appbundle --release
+The exact APK path is printed by the build. Repeat the two-device table with one phone on mobile data.
 
-# Linux release (desktop app)
-./scripts/sync_ghal_bol_native_for_flutter.sh
-cd ghal_bol_ui && flutter build linux --release
+The Makepad Android activity is the process. Messages while the screen is off depend on the OS keeping that process alive. A separate boot receiver is not compiled into cargo-makepad’s Java list, so a reboot still needs the user to open Ghal Bol once.
 
-# Linux bundle for ghalbol.com (then web build + deploy)
-# See WEB_SITE.md — tar bundle/ into web/downloads/ghal-bol-linux-x64.tar.gz
+---
+
+## P1 — Repo and servers
+
+### P1.1 CI
+
+`.github/workflows/ci.yml` runs `cargo test` for core, coord, and delivery, then `cargo check -p ghal_bol_app` and the app language tests.
+
+Local checks for the UI contract:
+
+```bash
+cargo test -p ghal_bol_core --lib -- --test-threads=1 identity_invite_password_and_locale outbound_send_marks_an_unknown_contact_known availability_presets_persist_and_cap_at_64 transcript_page_keeps_delivery_and_has_more hidden_room_does_not_send_a_new_read_ack qr_png_roundtrip set_contact_trust_updates_flags
+cargo test -p ghal_bol_app --bin ghal_bol_app -- i18n:: bubble_tests
+```
+
+Those cover create/unlock, backup reveal, invite join, block, password change, locale, QR decode, contact trust, availability, transcript pages, the hidden-room read gate, delivery ticks, and every language catalog.
+
+### P1.2 Coord survives reboot
+
+See [ghal_bol_coord/deploy/README.md](../ghal_bol_coord/deploy/README.md). After reboot, `curl -s https://coord.ghalbol.com/health` must succeed.
+
+---
+
+## P2 — Site and store
+
+### P2.1 Privacy
+
+`https://ghalbol.com/privacy` is served from `web/index.html`. The long form is [PRIVACY_POLICY.md](PRIVACY_POLICY.md).
+
+### P2.2 Linux download and deploy
+
+```bash
+./scripts/package_linux_release.sh
 ./scripts/deploy_web_firebase.sh
 ```
+
+Confirm `/`, `/download/linux`, `/privacy`, `/downloads/ghal-bol-linux-x64.tar.gz`, and `/.well-known/assetlinks.json`.
+
+### P2.3 Play listing
+
+Use [PLAY_STORE_LISTING.md](PLAY_STORE_LISTING.md). Icon source: `docs/assets/app_icon.png`. Upload the AAB from P0 Android, set the privacy URL, and roll out internal testing.
+
+Store screenshots are taken from the running app (phone or desktop) and uploaded in Play Console. They are not generated in this repo.

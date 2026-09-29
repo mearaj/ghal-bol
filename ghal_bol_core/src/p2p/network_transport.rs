@@ -4,8 +4,6 @@ use std::collections::HashSet;
 
 use crate::multiaddr_local::Multiaddr;
 
-use super::native_log;
-
 /// Session peer id — normalized identity wire (legacy name in dial helpers).
 pub type PeerId = String;
 
@@ -71,13 +69,8 @@ fn probe_os_network_truth_platform() -> OsNetworkSnapshot {
     }
 }
 
-/// Fresh OS probe for the **Flutter UI process** (not the `:p2p` / daemon cached snapshot).
-/// Linux-only in-process FFI fallback; other platforms use the daemon `network_snapshot` RPC.
-#[cfg(target_os = "linux")]
-pub(crate) fn probe_os_network_truth_ui() -> Option<OsNetworkSnapshot> {
-    Some(crate::linux_network::probe_connectivity_truth())
-}
 
+#[cfg(test)]
 pub(crate) fn os_default_transport_label(t: OsDefaultTransport) -> &'static str {
     match t {
         OsDefaultTransport::Wifi => "wifi",
@@ -87,7 +80,8 @@ pub(crate) fn os_default_transport_label(t: OsDefaultTransport) -> &'static str 
     }
 }
 
-/// JSON for Flutter `NetworkHelper` — mirrors `Native/flow` `os=` fields (display only).
+/// JSON snapshot of the OS default route. Display only.
+#[cfg(test)]
 pub(crate) fn os_network_snapshot_to_json(
     snap: &OsNetworkSnapshot,
     source: &str,
@@ -103,48 +97,6 @@ pub(crate) fn os_network_snapshot_to_json(
     })
 }
 
-/// Authoritative OS snapshot for UI (daemon RPC / in-process FFI).
-/// `:p2p` `network_tick` owns probes — UI RPC reads the cached snapshot only.
-pub(crate) fn network_snapshot_for_ui(source: &str) -> serde_json::Value {
-    if source == "ffi" {
-        refresh_os_network_truth();
-    }
-    let snap = os_network_snapshot();
-    log_ui_network_if_changed(&snap, source);
-    os_network_snapshot_to_json(&snap, source)
-}
-
-fn log_ui_network_if_changed(snap: &OsNetworkSnapshot, source: &str) {
-    use std::sync::Mutex;
-    static LAST: std::sync::OnceLock<Mutex<Option<(OsDefaultTransport, bool, bool, bool)>>> =
-        std::sync::OnceLock::new();
-    let key = (
-        snap.default_transport,
-        snap.internet_validated,
-        snap.has_internet,
-        snap.wifi_link_up,
-    );
-    let mx = LAST.get_or_init(|| Mutex::new(None));
-    let Ok(mut g) = mx.lock() else {
-        return;
-    };
-    let changed = g.map(|prev| prev != key).unwrap_or(true);
-    if !changed {
-        return;
-    }
-    *g = Some(key);
-    let route = snap.default_route_iface.as_deref().unwrap_or("-");
-    native_log::info(
-        "network",
-        format!(
-            "ui snapshot source={source} os={}/validated={}/wifi={} route={route} internet={}",
-            os_default_transport_label(snap.default_transport),
-            snap.internet_validated,
-            if snap.wifi_link_up { "up" } else { "down" },
-            snap.has_internet,
-        ),
-    );
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LocalNetworkProfile {

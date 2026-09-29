@@ -1,0 +1,25 @@
+[package]
+name = "ghal_bol_app"
+version = "0.1.0"
+edition = "2024"
+description = "Ghal Bol desktop UI (Makepad 2). Links ghal_bol_core in-process."
+publish = false
+
+[package.metadata.packager]
+identifier = "com.ghalbol"
+product_name = "Ghal Bol"
+
+[package.metadata.makepad.android]
+version_code = 1
+version_name = "0.1.0"
+min_sdk_version = 26
+
+[dependencies]
+ghal_bol_core = { path = "../ghal_bol_core" }
+makepad-widgets = { git = "https://github.com/makepad/makepad", rev = "1f60033ed3b1158cb7bf93accf1c91e0166c9373" }
+qrcode = { version = "0.14", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.15"
+
+[target.'cfg(target_os = "android")'.dependencies]
+makepad-android-state = { git = "https://github.com/makepad/makepad", rev = "1f60033ed3b1158cb7bf93accf1c91e0166c9373" }

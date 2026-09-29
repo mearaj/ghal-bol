@@ -75,6 +75,7 @@ pub async fn run_media_session(
     let mut stop_poll = tokio::time::interval(Duration::from_millis(100));
     let mut out = Vec::with_capacity(FRAME_SAMPLES);
     let silence = vec![0i16; FRAME_SAMPLES];
+    let mut aec = super::aec::CallAec::new();
 
     loop {
         if controls.stop.load(Ordering::Relaxed) {
@@ -91,7 +92,8 @@ pub async fn run_media_session(
                             &frame
                         };
                         if src.len() == FRAME_SAMPLES {
-                            if let Ok(wire) = engine.on_capture(src) {
+                            let cleaned = aec.clean_capture(src);
+                            if let Ok(wire) = engine.on_capture(&cleaned) {
                                 // Drop-oldest: if the transport is backed up, skip
                                 // rather than block the audio path (latency control).
                                 if wire_out.try_send(wire).is_ok() {
@@ -117,6 +119,11 @@ pub async fn run_media_session(
             // 20 ms playout clock: jitter → decode/PLC → speaker.
             _ = playout.tick() => {
                 if engine.on_playout(&mut out).is_ok() {
+                    #[cfg(not(target_os = "android"))]
+                    if !crate::call_media::desktop_speaker_on() {
+                        out.fill(0);
+                    }
+                    aec.observe_playout(&out);
                     let _ = audio.playout_tx.try_send(out.clone());
                 }
             }

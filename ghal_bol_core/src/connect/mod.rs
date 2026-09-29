@@ -42,8 +42,6 @@ pub use ui_session::{
 };
 pub use worker::run_connect_node_with_std_io;
 
-pub use transport_kem::transport_kem_for_peer;
-
 /// Alias for legacy callers — async entrypoint.
 pub async fn run_gossip_chat_node_with_std_io(
     config: GossipChatConfig,

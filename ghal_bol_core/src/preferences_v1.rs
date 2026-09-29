@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use crate::DecryptedIdentity;
 use crate::storage::{KeystoreStorageError, StorageConfig};
 
@@ -25,6 +26,8 @@ pub struct PreferencesV1 {
     pub coord_base_url: Option<String>,
     #[serde(default)]
     pub coord_insecure_tls: bool,
+    #[serde(default)]
+    pub ui_locale: Option<String>,
 }
 
 impl Default for PreferencesV1 {
@@ -35,6 +38,7 @@ impl Default for PreferencesV1 {
             availability_status: None,
             coord_base_url: None,
             coord_insecure_tls: false,
+            ui_locale: None,
         }
     }
 }
@@ -88,10 +92,12 @@ fn save_preferences_v1(
     Ok(())
 }
 
+#[cfg(test)]
 fn session_public_key_hex_lower(ident: &DecryptedIdentity) -> String {
     ident.public_key_hex().to_lowercase()
 }
 
+#[cfg(test)]
 fn verify_public_key_matches_session(
     ident: &DecryptedIdentity,
     public_key_hex: &str,
@@ -143,6 +149,7 @@ pub fn availability_status_set(
 }
 
 /// Read stored display alias for the **current unlocked** identity (must match [public_key_hex]).
+#[cfg(test)]
 pub fn peer_display_alias_get(
     cfg: &StorageConfig,
     session: &DecryptedIdentity,
@@ -157,6 +164,7 @@ pub fn peer_display_alias_get(
 }
 
 /// Set or clear display alias for the **current unlocked** identity.
+#[cfg(test)]
 pub fn peer_display_alias_set(
     cfg: &StorageConfig,
     session: &DecryptedIdentity,
@@ -201,6 +209,23 @@ pub fn coord_settings_set(
     let mut prefs = load_preferences_v1(cfg)?;
     prefs.coord_base_url = Some(t);
     prefs.coord_insecure_tls = insecure_tls;
+    save_preferences_v1(cfg, &prefs)
+}
+
+pub fn ui_locale_get(cfg: &StorageConfig) -> Result<Option<String>, KeystoreStorageError> {
+    Ok(load_preferences_v1(cfg)?.ui_locale)
+}
+
+pub fn ui_locale_set(cfg: &StorageConfig, locale: &str) -> Result<(), KeystoreStorageError> {
+    let locale = locale.trim().to_string();
+    if locale.is_empty() {
+        return Err(KeystoreStorageError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "locale empty",
+        )));
+    }
+    let mut prefs = load_preferences_v1(cfg)?;
+    prefs.ui_locale = Some(locale);
     save_preferences_v1(cfg, &prefs)
 }
 

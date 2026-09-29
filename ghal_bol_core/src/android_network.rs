@@ -1,4 +1,4 @@
-//! Android `:p2p` connectivity — probe [`ConnectivityManager`] from Rust (not Flutter/Kotlin policy).
+//! Android `:p2p` connectivity — probe [`ConnectivityManager`] from Rust (not Makepad/Kotlin policy).
 
 #[cfg(target_os = "android")]
 mod imp {

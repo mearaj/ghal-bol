@@ -1,16 +1,16 @@
 //! `ghal_bol` is the **core** of Ghal Bol: keystore, P2P, messaging, contacts, transcripts, invites.
 //!
-//! **Flutter (`ghal_bol_ui`) is a thin UI** — see workspace `AGENTS.md` and `docs/ARCHITECTURE.md`.
+//! **Makepad (`ghal_bol_app`) is the UI** — see workspace `AGENTS.md` and `docs/DESIGN.md`.
 //!
 //! v1 design goal: one secp256k1 keypair (libp2p PeerId, sign, encrypt),
 //! encrypted-at-rest with a key derived from an app-level password. The password is used
 //! only to unlock local storage; it is never shared.
 //!
-//! On **native** targets (non-Wasm), [`p2p`] runs a **libp2p node** for **LAN text**, **voice/video calls**
+//! On **native** targets (non-Wasm), [`p2p`] runs native connect for **LAN text** and **voice/video calls**
 //! (WAN + LAN), with **coord + relay** for WAN call reachability and **mDNS** for LAN.
 //! **WAN text** uses [`delivery_runtime`] + [`text_transport`] (E2E encrypted delivery server).
 //!
-//! **Android:** the Flutter app and [`ANDROID_LIBRARY_NAMESPACE`] both use **`com.ghalbol`**
+//! **Android:** the Makepad app and [`ANDROID_LIBRARY_NAMESPACE`] both use **`com.ghalbol`**
 //! for packaging and the keystore data-directory root.
 
 #[cfg(target_os = "android")]
@@ -24,9 +24,6 @@ mod app_paths;
 mod attach_v1;
 #[cfg(not(target_arch = "wasm32"))]
 pub use app_paths::detect_keystore_app_namespace;
-mod c_ffi;
-#[cfg(not(target_arch = "wasm32"))]
-mod call_ffi;
 #[cfg(not(target_arch = "wasm32"))]
 mod call_media;
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,18 +37,15 @@ mod call_video;
 #[cfg(not(target_arch = "wasm32"))]
 mod connect;
 mod connect_invite_v1;
-mod contacts_ffi;
 mod contacts_v1;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coord;
 #[cfg(not(target_arch = "wasm32"))]
-mod coord_ffi;
-#[cfg(not(target_arch = "wasm32"))]
 mod coord_register_auth;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coord_runtime;
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-pub mod daemon;
+#[cfg(not(target_arch = "wasm32"))]
+mod desktop_wake;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod delivery_auth;
 #[cfg(not(target_arch = "wasm32"))]
@@ -69,13 +63,11 @@ mod dm_transcript_v1;
 mod dm_transport;
 mod flow_log;
 mod identity;
-mod identity_ffi;
 mod identity_sign;
 #[cfg(target_os = "android")]
 mod incoming_call_android;
 #[cfg(not(target_arch = "wasm32"))]
 mod incoming_call_notify;
-mod invite_ffi;
 mod keystore_v1;
 #[cfg(target_os = "linux")]
 mod linux_desktop_launch;
@@ -85,8 +77,6 @@ mod session_key_common;
 #[cfg(not(target_arch = "wasm32"))]
 mod text_transport;
 #[cfg(not(target_arch = "wasm32"))]
-mod transcript_ffi;
-#[cfg(not(target_arch = "wasm32"))]
 mod wan_coord;
 #[cfg(target_os = "linux")]
 pub use linux_desktop_launch::{wake_for_incoming_call, wake_for_unlock};
@@ -95,14 +85,8 @@ mod linux_network;
 mod msg_v1;
 mod multiaddr_local;
 #[cfg(not(target_arch = "wasm32"))]
-mod network_ffi;
-#[cfg(not(target_arch = "wasm32"))]
-mod p2p_ffi;
-#[cfg(not(target_arch = "wasm32"))]
 mod p2p_runtime;
 mod peer_id_util;
-#[cfg(not(target_arch = "wasm32"))]
-mod preferences_ffi;
 mod preferences_v1;
 mod public_key_util;
 #[cfg(not(target_arch = "wasm32"))]
@@ -114,6 +98,10 @@ mod symmetric_seal;
 #[cfg(not(target_arch = "wasm32"))]
 mod transport_kem_v1;
 mod voice_msg_v1;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod desktop_media;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))]
+mod voice_note;
 
 pub use identity::{Identity, IdentityAlgorithm, normalize_identity_wire, same_contact_identity};
 pub use keystore_v1::{
@@ -140,3 +128,5 @@ pub use dm_event_handler::set_p2p_handler_context;
 pub use dm_transport::DmDialAddr;
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_runtime::session_unlocked;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod host;

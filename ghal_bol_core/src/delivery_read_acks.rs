@@ -1,7 +1,7 @@
 //! Delivery-server read receipts (`inbox.read` / `message.read_to_sender`).
 //!
 //! Mirrors P2P read-ack policy (DESIGN.md): in-room only for **new** mail; leave backlog
-//! for inbound accepted while the room was open. All wire I/O here — Flutter displays transcript only.
+//! for inbound accepted while the room was open. All wire I/O here — Makepad displays transcript only.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};

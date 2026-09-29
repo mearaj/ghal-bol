@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ghal Bol</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #f7f7f7;
+      color: #111b21;
+    }
+    main {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 48px 20px 64px;
+    }
+    h1 { text-align: center; font-size: 2rem; margin: 0 0 12px; }
+    p { line-height: 1.45; color: #3b4a54; }
+    .center { text-align: center; }
+    a.btn, button.btn {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      margin: 12px 0;
+      padding: 14px 16px;
+      border-radius: 8px;
+      font-size: 1rem;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    a.primary, button.primary {
+      background: #008069;
+      color: white;
+      border: 0;
+    }
+    a.secondary {
+      background: white;
+      color: #111b21;
+      border: 1px solid #d1d7db;
+    }
+    .warn {
+      background: #fde8e6;
+      border-radius: 12px;
+      padding: 14px;
+      color: #5c1a16;
+    }
+    code { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <main id="app"></main>
+  <script>
+    const PLAY = "https://play.google.com/store/apps/details?id=com.ghalbol";
+    const LINUX_FILE = "/downloads/ghal-bol-linux-x64.tar.gz";
+
+    function pathParts() {
+      const parts = location.pathname.split("/").filter(Boolean);
+      return parts;
+    }
+
+    function aliasFromQuery() {
+      const alias = new URLSearchParams(location.search).get("alias");
+      return alias && alias.trim() ? alias.trim() : "";
+    }
+
+    function isHexKey(value) {
+      return /^[0-9a-fA-F]{64,66}$/.test(value);
+    }
+
+    function embeddedBrowser() {
+      const ua = navigator.userAgent || "";
+      return /WhatsApp|Instagram|FBAN|FBAV|Line\/|Telegram/i.test(ua);
+    }
+
+    async function copyText(text, label) {
+      try {
+        await navigator.clipboard.writeText(text);
+        alert(label + " copied");
+      } catch (e) {
+        prompt("Copy this " + label, text);
+      }
+    }
+
+    function home() {
+      return `
+        <h1>Ghal Bol</h1>
+        <p class="center">Peer-to-peer encrypted chat. No phone number. Direct connection when peers are online.</p>
+        <a class="btn primary" href="${PLAY}">Get it on Google Play</a>
+        <a class="btn secondary" href="/download/linux">Download for Linux</a>
+        <a class="btn secondary" href="/privacy">Privacy policy</a>
+        <p class="center">Invitation links open in the app when it is installed.</p>
+      `;
+    }
+
+    function linux() {
+      return `
+        <h1>Ghal Bol for Linux</h1>
+        <p class="center">Extract the archive and run the app from the folder inside.</p>
+        <a class="btn primary" id="linux-dl" href="${LINUX_FILE}">Download Linux bundle</a>
+        <a class="btn secondary" href="/">Back to home</a>
+      `;
+    }
+
+    function invite(key) {
+      const alias = aliasFromQuery();
+      const https = location.origin + "/connect/" + key + (alias ? "?alias=" + encodeURIComponent(alias) : "");
+      const app = "ghalbol://connect/" + key;
+      const display = alias ? alias : key.slice(0, 8) + "…" + key.slice(-4);
+      const embedded = embeddedBrowser();
+      const warn = embedded
+        ? `<div class="warn"><strong>Opened inside another app (e.g. WhatsApp)</strong><p>This built-in browser cannot open Ghal Bol. Tap the menu and open this page in Chrome, or copy the app link and paste it in Ghal Bol → Join.</p></div>`
+        : `<p>Tap Open in Ghal Bol below. If nothing happens, copy the app link and paste it inside Ghal Bol (Join).</p>`;
+      const open = embedded ? "" : `<a class="btn primary" href="${app}">Open in Ghal Bol</a>`;
+      return `
+        <h1>Join on Ghal Bol</h1>
+        <p class="center"><strong>${display}</strong></p>
+        ${warn}
+        ${open}
+        <button class="btn primary" id="copy-web" type="button">Copy web link</button>
+        <button class="btn primary" id="copy-app" type="button">Copy app link</button>
+        <h2>Install the app</h2>
+        <a class="btn primary" href="${PLAY}">Google Play</a>
+        <a class="btn secondary" href="/download/linux">Linux download</a>
+        <a class="btn secondary" href="/">Home</a>
+      `;
+    }
+
+    function privacy() {
+      return `
+        <h1>Privacy policy</h1>
+        <p>Ghal Bol does not ask for a phone number or email. Chat and call content is end-to-end encrypted between the two devices. The coordination server stores a public key and reachable endpoints so peers can connect. It does not store transcripts. The delivery mailbox stores ciphertext until the recipient acknowledges it, then deletes the payload.</p>
+        <p>The app password and private key stay on the device. You can export an encrypted backup or delete the identity. There are no advertising or analytics SDKs in the app.</p>
+        <p>Full text: the repository file <code>docs/PRIVACY_POLICY.md</code>. This page is the public URL for that policy.</p>
+        <a class="btn secondary" href="/">Back to home</a>
+      `;
+    }
+
+    function badInvite() {
+      return `
+        <h1>Join on Ghal Bol</h1>
+        <p>Use a link like <code>https://ghalbol.com/connect/&lt;public_key_hex&gt;</code></p>
+        <a class="btn secondary" href="/">Back to home</a>
+      `;
+    }
+
+    function render() {
+      const parts = pathParts();
+      const root = document.getElementById("app");
+      if (parts.length === 0) {
+        document.title = "Ghal Bol";
+        root.innerHTML = home();
+        return;
+      }
+      if (parts[0] === "privacy") {
+        document.title = "Ghal Bol privacy";
+        root.innerHTML = privacy();
+        return;
+      }
+      if (parts[0] === "download" && parts[1] === "linux") {
+        document.title = "Ghal Bol for Linux";
+        root.innerHTML = linux();
+        const link = document.getElementById("linux-dl");
+        link.addEventListener("click", () => {
+          setTimeout(() => alert("Download started — check your browser downloads."), 0);
+        });
+        return;
+      }
+      if (parts[0] === "connect") {
+        document.title = "Join on Ghal Bol";
+        const key = parts[1] || "";
+        if (!isHexKey(key)) {
+          root.innerHTML = badInvite();
+          return;
+        }
+        const alias = aliasFromQuery();
+        const https = location.origin + "/connect/" + key + (alias ? "?alias=" + encodeURIComponent(alias) : "");
+        const app = "ghalbol://connect/" + key;
+        root.innerHTML = invite(key);
+        document.getElementById("copy-web").onclick = () => copyText(https, "Web link");
+        document.getElementById("copy-app").onclick = () => copyText(app, "App link");
+        return;
+      }
+      document.title = "Ghal Bol";
+      root.innerHTML = home();
+    }
+
+    render();
+  </script>
+</body>
+</html>

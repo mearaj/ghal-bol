@@ -1,6 +1,6 @@
 # Voice messages — implementation plan
 
-**Status:** Implemented in Rust and Flutter; continue using this doc for limits and follow-up testing.
+**Status:** Implemented in Rust and Makepad; continue using this doc for limits and follow-up testing.
 
 **Depends on:** [DESIGN.md](DESIGN.md), [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md), [AGENTS.md](../AGENTS.md) (golden rules 1, 7).
 
@@ -28,8 +28,8 @@ WhatsApp-style **voice notes** in 1:1 chat:
 | **Same rail as text** | One frame on `/ghal-bol/msg/1.0.0`; outbox; `ack_received` / `ack_read`; transcript patch on poll. |
 | **Full payload in one send** | Entire encoded audio inside the sealed inner JSON — no chunking, no sender-served download link (v1). |
 | **Same E2E as text** | Inner JSON → `seal_to_secp256k1_public` → `ciphertext_hex` → signed envelope. **Not** call media keys. |
-| **Rust owns behaviour** | Record policy, Opus encode/decode, send/retry, decrypt, transcript — expose FFI/RPC to Flutter for UI only. |
-| **Truthful ticks** | Flutter never promotes delivery/read; native transcript + poll only ([DESIGN.md](DESIGN.md)). |
+| **Rust owns behaviour** | Record policy, Opus encode/decode, send/retry, decrypt, transcript. Makepad calls `ghal_bol_core::host`. |
+| **Truthful ticks** | Makepad never promotes delivery/read; native transcript + poll only ([DESIGN.md](DESIGN.md)). |
 
 ---
 
@@ -122,14 +122,14 @@ Hub preview: e.g. `"Voice message"` or `"🎤 0:45"` via `contacts_v1` preview h
 | Build/seal/send envelope | **Rust** `msg_v1.rs`, `outbound.rs`, outbox | Parallel to `build_text_envelope` |
 | Inbound verify/open/decode | **Rust** `frames.rs`, `dm_event_handler.rs` | Treat `voice` like `text` for ack gating |
 | Transcript append/patch | **Rust** `dm_transcript_store.rs` | Chronological insert (existing) |
-| Record UI, waveform, play | **Flutter** | Hold-to-record, timer, cancel; call FFI to start/stop/send |
-| Ticks display | **Flutter** | Read `delivery` from native transcript only |
+| Record UI and play | **Makepad** | Composer control calls `host::voice_note_toggle`, `host::send_voice_note`, and `host::play_voice_file` |
+| Ticks display | **Makepad** | Read `delivery` from native transcript only |
 
-**Flutter must not:** send acks, own outbox, invent ticks, or re-implement seal/open.
+**Makepad must not:** send acks, own outbox, invent ticks, or re-implement seal/open.
 
 ---
 
-## Flutter UX (v1)
+## Makepad UX (v1)
 
 - **Hold** mic in composer → record; release to send (or slide to cancel — product choice).
 - **Timer** visible; hard stop at **2:00**.
@@ -154,34 +154,13 @@ Extend `dm_message` poll events:
 }
 ```
 
-Do **not** put raw `audio_b64` in poll events — UI loads from transcript store / local audio file after native persists.
-
-Hub `ingestP2pEvent`: treat `voice` like `text` for `syncTranscriptView(force: true)`.
+Do **not** put raw `audio_b64` in poll events — UI loads from transcript store / local audio file after native persists. On `voice` events, Makepad reloads the open transcript the same way as for text.
 
 ---
 
-## Implementation phases
+## Shipping
 
-### Phase 1 — Protocol + Rust send/receive
-
-- [ ] `MsgKind::Voice` + `build_voice_envelope` / open path in `msg_v1.rs`
-- [ ] `voice_msg_v1.rs` (inner schema, limits, Opus wrap)
-- [ ] Outbound: FFI/RPC `send_voice_dm` → transcript + outbox (mirror `send_text_dm`)
-- [ ] Inbound: `frames.rs` — ack path for `voice` same as `text`
-- [ ] `apply_inbound_*` in `dm_event_handler.rs` — append transcript, preview bump
-- [ ] Unit tests: round-trip seal/open, max size reject, duration cap
-
-### Phase 2 — Flutter UI
-
-- [ ] Composer record control + permission (mic)
-- [ ] Voice bubble widget + audio playback from local path
-- [ ] Hub preview string for voice
-
-### Phase 3 — Soak + docs
-
-- [ ] Android ↔ Linux LAN/WAN: send 2 min clip, ticks, reconnect resend
-- [ ] Update [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) with `voice` kind (when shipping)
-- [ ] Entry in [DESIGN.md](DESIGN.md) message kinds table (when shipping)
+Voice notes are Opus, mono, 48 kHz, at most 120 seconds. The sealed inner stays within 3 MB. Audio files live under the app data `voice/` directory, keyed by message id. The composer calls `host::voice_note_toggle` and `host::send_voice_note`. Playback calls `host::play_voice_file`. Acks match text. A two-device soak (Android and Linux, LAN and WAN) still belongs on real hardware.
 
 ---
 
@@ -203,17 +182,17 @@ Hub `ingestP2pEvent`: treat `voice` like `text` for `syncTranscriptView(force: t
 - Sending voice on `/ghal-bol/call/1.0.0` or call media keys.
 - Chunked multi-frame voice in v1 (adds complexity; use attachments plan for large files).
 - Plaintext audio in envelope or poll JSON.
-- Flutter-side ack or tick promotion.
+- Makepad-side ack or tick promotion.
 - gzip on inner JSON for v1 (Opus already compresses audio; text-style seal is enough).
 - Separate transcript store or LAN/WAN message stores for voice.
 
 ---
 
-## Open decisions (resolve before Phase 1 coding)
+## Settled
 
-1. **Sample rate:** 48 kHz (match calls) vs 16 kHz (smaller) for voice notes.
-2. **Waveform:** generate in Flutter from local file vs Rust preview peaks in transcript.
-3. **Storage:** always write decrypted Opus to app data dir keyed by `message_id` vs inline in transcript JSON (prefer **file on disk**, metadata in transcript).
+1. **Sample rate:** 48 kHz, same as calls.
+2. **Bubble:** duration and play. No waveform strip.
+3. **Storage:** decrypted Opus on disk, metadata in the transcript.
 
 ---
 
@@ -221,5 +200,5 @@ Hub `ingestP2pEvent`: treat `voice` like `text` for `syncTranscriptView(force: t
 
 - Text wire: [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)
 - Calls (out of scope): [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md)
-- Frame limit: `ghal_bol_core/src/p2p/chat_server/frames.rs` (`4 * 1024 * 1024`)
+- Frame path: `ghal_bol_core/src/connect/frames.rs`
 - Seal: `ghal_bol_core/src/transport_kem_v1.rs`, `ghal_bol_core/src/msg_v1.rs`

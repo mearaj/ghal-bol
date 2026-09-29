@@ -14,10 +14,10 @@ Coordination server URL is configured per device (env / native preferences), not
 
 **Wire map (v3):** `ghalbol.share: "ghal_bol_connect_v1"`, `format_version: 3`, `identity_wire` (full wire), optional `global_alias` (peer-chosen display name on the wire; not unique).
 
-**Wire map (v2, legacy parse):** `format_version: 2`, `public_key_hex` holds the identity wire; optional `peer_alias`.
+**Wire map (v2):** `format_version: 2`, `public_key_hex` holds the identity wire; optional `peer_alias`.
 
 **Local alias:** device-specific `display_alias` in `contacts_v1.json` only — never authoritative on coord or delivery server. See [IDENTITY.md](IDENTITY.md).
 
-**Implementation:** `ghal_bol_core/src/connect_invite_v1.rs` (canonical encode/decode/verify); Flutter uses native `ghal_bol_core_ffi_build_connect_invite_uri` first, with `invite_uri_codec.dart` as fallback when FFI is unavailable.
+**Implementation:** `ghal_bol_core/src/connect_invite_v1.rs` encodes, decodes, and verifies. The app calls `host`.
 
 **Web handoff (no app):** static pages at `https://ghalbol.com/connect/…` — [WEB_SITE.md](WEB_SITE.md).

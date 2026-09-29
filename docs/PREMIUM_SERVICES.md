@@ -151,7 +151,7 @@ They must not become owners of identities or long-term chat history.
 | Tier 1 `ghal_bol_coord` | Shipped |
 | Tier 3 backup relay service | Not started |
 | Invoice / payment detection API | Not started |
-| Flutter premium UI / paywall | Not started |
+| Makepad premium UI / paywall | Not started |
 | Entitlement store (decoupled from pubkey) | Not started |
 
 When Tier 3 is built, document APIs here and link from [ghal_bol_coord/README.md](../ghal_bol_coord/README.md) only if the same binary gains premium features — otherwise a separate service crate is likely.

@@ -1,9 +1,10 @@
-//! In-process diagnostic log for the DM node (forwarded to Flutter via `GossipChatEvent::NativeLog`).
+//! In-process diagnostic log for the DM node (forwarded to Makepad via `GossipChatEvent::NativeLog`).
 //!
 //! - **stderr / adb logcat:** all levels (grep `ghal_bol_core/`).
-//! - **Flutter App log:** `info`/`warn`/`error` for connectivity tags; `debug` only when
+//! - **Makepad App log:** `info`/`warn`/`error` for connectivity tags; `debug` only when
 //!   `GHAL_BOL_VERBOSE_LOG=1` (avoids UI stalls from kad/mDNS tick noise).
 
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -36,7 +37,7 @@ fn verbose_mx() -> &'static AtomicBool {
     })
 }
 
-/// High-volume libp2p detail (`debug` native lines forwarded to Flutter when true).
+/// High-volume libp2p detail (`debug` native lines forwarded to Makepad when true).
 pub fn verbose_enabled() -> bool {
     verbose_mx().load(Ordering::Relaxed)
 }
@@ -54,8 +55,8 @@ fn stderr_line(level: &str, tag: &str, message: &str) {
 
 fn emit(level: &'static str, tag: &str, message: impl Display) {
     let msg = message.to_string();
-    // Always mirror to stderr/logcat/journald so `adb logcat | grep ghal_bol` shows full libp2p flow.
     stderr_line(level, tag, &msg);
+    remember_line(level, tag, &msg);
 
     if level == "debug" && !verbose_enabled() {
         return;
@@ -87,4 +88,31 @@ pub fn warn(tag: &str, message: impl Display) {
 
 pub fn error(tag: &str, message: impl Display) {
     emit("error", tag, message);
+}
+
+const LOG_CAP: usize = 400;
+
+fn log_ring() -> &'static Mutex<VecDeque<String>> {
+    static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+    RING.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn remember_line(level: &str, tag: &str, message: &str) {
+    if level == "debug" && !verbose_enabled() {
+        return;
+    }
+    if let Ok(mut ring) = log_ring().lock() {
+        ring.push_back(format!("[{level}] {tag}: {message}"));
+        while ring.len() > LOG_CAP {
+            ring.pop_front();
+        }
+    }
+}
+
+/// Newest diagnostic lines for the in-app log screen.
+pub fn recent_lines() -> Vec<String> {
+    log_ring()
+        .lock()
+        .map(|ring| ring.iter().rev().cloned().collect())
+        .unwrap_or_default()
 }

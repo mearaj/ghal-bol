@@ -238,11 +238,6 @@ pub fn connect_invite_app_uri_from_wire_map(v: &Value) -> Result<String, String>
     Ok(url)
 }
 
-/// Primary invite URI for QR / share (HTTPS).
-pub fn connect_invite_uri_from_wire_map(v: &Value) -> Result<String, String> {
-    connect_invite_https_uri_from_wire_map(v)
-}
-
 fn parse_alias_query(query: Option<&str>) -> Option<String> {
     let q = query?;
     for part in q.split('&') {

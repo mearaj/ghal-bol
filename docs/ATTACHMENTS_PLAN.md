@@ -14,7 +14,7 @@ User A shares a **file** with user B in 1:1 chat:
 3. B decrypts offline, writes a local copy, and acks like any other DM.
 4. Oversized files between **LAN** peers only may use the native-connect attach mux.
 
-**Not in scope:** Ghal Bol-operated blob CDN ([PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) Tier 2/3), group shares, coord/relay file transfer.
+**Not in scope:** Ghal Bol-operated blob CDN ([PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) Tier 2/3), group shares, coord/bridge file transfer.
 
 ---
 
@@ -26,7 +26,7 @@ User A shares a **file** with user B in 1:1 chat:
 | **P2P only where product allows** | LAN text/attachments + voice/video **calls**. Not WAN DM. |
 | **No coord for files** | Coord/bridge is calls (+ optional LAN reachability), never attachment storage or fetch. |
 | **Recipient authority** | Delivery/read ticks from B; optional `attachment_complete` for LAN mux. |
-| **Rust owns policy** | Pack, seal, upload, persist, size caps — Flutter is picker + bubble. |
+| **Rust owns policy** | Pack, seal, upload, persist, size caps — Makepad is picker + bubble. |
 
 ```text
 WAN (delivery URL set):
@@ -64,13 +64,13 @@ LAN (peer on native connect):
 Protocol `/ghal-bol/attach/1.0.0` on native connect `CHANNEL_ATTACH`:
 
 - Offer JSON carries `blob_id`, `content_key_b64`, hashes, TTL — **no** `file_b64`.
-- Recipient taps Download → `p2p_attachment_fetch` → chunks over LAN session.
+- Recipient taps Download → `host::fetch_attachment` → chunks over LAN session.
 - Max plaintext **100 MB** (`MAX_FILE_SIZE_BYTES`).
-- Requires a live **LAN** connect session — never coord relay for bytes.
+- Requires a live **LAN** connect session — never coord bridge for bytes.
 
-### `p2p_attachment_fetch`
+### `host::fetch_attachment`
 
-Start command only (does not block the daemon socket for the whole transfer). Returns:
+Starts the fetch and returns immediately. The transfer continues in the node. Returns:
 
 | Result | Meaning |
 |--------|---------|
@@ -80,11 +80,11 @@ Start command only (does not block the daemon socket for the whole transfer). Re
 
 ---
 
-## Flutter
+## Makepad
 
 - Inbound mailbox attachments arrive with `local_path` already set → show **Downloaded**.
-- Download button only when `local_path` empty (LAN mux / legacy).
-- File picker + send → `p2p_send_attachment` (Rust chooses mailbox vs LAN mux).
+- Download button only when `local_path` empty (transfer still in progress).
+- File picker + send → `host::send_attachment` (Rust chooses mailbox vs LAN stream).
 
 ---
 
@@ -95,21 +95,21 @@ Start command only (does not block the daemon socket for the whole transfer). Re
 | Pack / size reject / seal / upload | **Rust** `attach_v1`, `delivery_*`, `msg_v1`, `p2p_runtime` |
 | Transcript + `local_path` | **Rust** `dm_event_handler` / `dm_transcript_store` |
 | LAN mux serve/fetch | **Rust** `attach_v1` + `connect/frames` |
-| Picker / bubble / download UI | **Flutter** |
+| Picker / bubble / download UI | **Makepad** |
 
 ---
 
 ## Explicit non-goals
 
 - Uploading attachment bytes to **coord**.
-- Sender-served WAN fetch over connect/relay (removed — that was the old plan).
+- Do not invent a second attachment transfer path over coord for bytes.
 - Putting multi‑hundred‑MB files in one delivery WS frame without a future blob tier.
 
 ---
 
 ## References
 
-- Product split: [DESIGN.md](DESIGN.md) § Why pure P2P WAN text was dropped
+- Product split: [DESIGN.md](DESIGN.md) § Goals
 - Wire: [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) § Attachments
 - Delivery: [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)
 - Voice (same mailbox pattern): [VOICE_MESSAGES_PLAN.md](VOICE_MESSAGES_PLAN.md)

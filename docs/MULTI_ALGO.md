@@ -17,7 +17,7 @@ Ghal Bol identities are **cryptographic public keys**. The **`algorithm:` prefix
 - **Separate identity from transport/E2E:** the identity key is for discovery and connectivity lookup; message and media confidentiality use **session transport keys** (same general approach as call media today — HKDF + symmetric AES-GCM).
 - Stay **transport-agnostic** at the identity layer: validation and storage live in `ghal_bol` with per-algorithm crypto crates. The current P2P stack may use native connect internally; that is **not** an identity dependency and is not guaranteed long-term.
 
-**Public key is the only wire identity.** Do not use identity (or any other transport handle) as a roster key, invite payload, coord lookup key, or transcript key. Shipping code may still map secp256k1 public key → identity inside the transport layer; that is **legacy transport glue** to isolate, not the multi-algo identity contract.
+**Public key is the only wire identity.** Do not use a transport handle as a roster key, invite payload, coord lookup key, or transcript key. Internal dial helpers may still carry session ids derived from the identity wire — that is transport-internal, not the multi-algo identity contract.
 
 **Algorithm registry rationale:** The enum lists commonly used public-key algorithms. That set overlaps what many P2P stacks happen to support; it is a **convenience reference only** — Ghal Bol does **not** depend on native connect for identity parsing, validation, or storage.
 
@@ -57,7 +57,7 @@ ed25519:02a1b2…              # invalid — if hex fails ed25519 codec
 
 ### What is out of scope for the identity layer
 
-- native connect `PublicKey`, `PeerId`, protobuf key encoding, or “enable native connect features per algo.”
+- transport-specific encodings or “enable transport features per algo.”
 - Public key **size** tables in this document — length is defined by each algorithm’s codec at implementation time, not by a global wire table.
 
 ### Keystore on disk (`keystore_v1.json`)
@@ -121,7 +121,7 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Call signaling | [`call_sig_v1.rs`](../ghal_bol_core/src/call_sig_v1.rs) + transport KEM → `CALL_CIPHER_TRANSPORT_V2` (`0x04`) |
 | Call audio/video | [`call_media_key.rs`](../ghal_bol_core/src/call_media_key.rs) — `derive_call_media_keys_from_transport` + HKDF(`call_id`) |
 | Envelope signatures | Per-algorithm sign with identity key (auth only) |
-| Offline FFI seal | [`offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — encrypt-to-secp256k1 pubkey (`0x10`); auxiliary only |
+| Offline seal | [`offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — encrypt-to-secp256k1 pubkey (`0x10`); auxiliary only |
 
 ---
 
@@ -138,17 +138,16 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Coord agent string | `pk=…` | Full identity wire in identify `agent_version` | — |
 | Call signaling | payload ciphertext | Transport KEM (`CALL_CIPHER_TRANSPORT_V2`) | — |
 | Call media | peer key input | Transport KEM + HKDF(`call_id`) | — |
-| Flutter [`public_key_hex.dart`](../ghal_bol_ui/lib/public_key_hex.dart) | validators | FFI `identityParse` / `identityNormalize` | — |
+| Makepad | `identity.rs` via `host` | — |
 
 **Primary code references (today):**
 
-- [`ghal_bol_core/src/identity.rs`](../ghal_bol_core/src/identity.rs) — multi-algo wire parse/validate
-- [`ghal_bol_core/src/public_key_util.rs`](../ghal_bol_core/src/public_key_util.rs) — secp256k1 contact compare (legacy helpers)
-- [`ghal_bol_core/src/identity_ffi.rs`](../ghal_bol_core/src/identity_ffi.rs) — FFI parse/normalize/same
+- [`ghal_bol_core/src/identity.rs`](../ghal_bol_core/src/identity.rs) — multi-algo wire parse/validate; the app calls `host`
+- [`ghal_bol_core/src/public_key_util.rs`](../ghal_bol_core/src/public_key_util.rs) — secp256k1 contact compare helpers
 - [`ghal_bol_core/src/transport_kem_v1.rs`](../ghal_bol_core/src/transport_kem_v1.rs) — transport KEM v2 (DM, call sig, call media HKDF)
 - [`ghal_bol_core/src/call_sig_v1.rs`](../ghal_bol_core/src/call_sig_v1.rs) — call signaling transport seal/open
 - [`ghal_bol_core/src/call_media_key.rs`](../ghal_bol_core/src/call_media_key.rs) — call media keys from transport KEM
-- [`ghal_bol_core/src/offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — offline encrypt-to-secp256k1 (auxiliary FFI)
+- [`ghal_bol_core/src/offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — offline encrypt-to-secp256k1 (auxiliary)
 - [`ghal_bol_core/src/symmetric_seal.rs`](../ghal_bol_core/src/symmetric_seal.rs) — AES-GCM session seal
 - [`ghal_bol_core/src/connect_invite_v1.rs`](../ghal_bol_core/src/connect_invite_v1.rs) — multi-algo invite validation + URI
 - [`ghal_bol_core/src/identity_sign.rs`](../ghal_bol_core/src/identity_sign.rs) — per-algorithm envelope signatures
@@ -168,20 +167,20 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Keystore create/unlock ed25519 / ecdsa-p256 | **Implemented** |
 | Per-algorithm public key validate/encode (standalone crypto crates) | **Implemented** (`secp256k1` via `secp256k1` crate; `ed25519`/`ecdsa-p256` via Dalek/P-256) |
 | Invites / contacts / coord keyed by full `Identity` string (incl. algo prefix) | **Implemented** (`connect_invite_v1`, `contacts_v1`, `coord.rs` URL-encode) |
-| FFI `ghal_bol_core_ffi_identity_*` + Dart `GhalBolFfi.identityParse` | **Implemented** |
+| Identity parse through `host` | **Implemented** |
 | Transport KEM v2 (DM text) | **Implemented** — `DM_CIPHER_TRANSPORT_V2` (`0x03`) after `TransportKemHello` (`transport_kem_v1.rs`, `dm_transport_kem.rs`) |
 | DM outbound / inbound text | **Transport v2 only** — requires exchanged hello before send; decrypt `0x03` only |
 | Call signaling transport keys | **Implemented** — `CALL_CIPHER_TRANSPORT_V2` (`0x04`) after `TransportKemHello` (`call_sig_v1.rs`, `transport_kem_v1.rs`) |
 | Call media transport binding | **Implemented** — `derive_call_media_keys_from_transport` (`call_media_key.rs`) |
 | Envelope signatures per identity algorithm | **Implemented** (`identity_sign.rs` — all three algorithms) |
-| UI: identity algorithm picker at create | **Implemented** (metadata + validation via `ghal_bol_core_ffi_identity_*`) |
-| UI: QR with prefixed identity | **Implemented** — Rust + FFI; hub/share/chat/bootstrap use `identityWire` |
+| UI: identity algorithm picker at create | **Implemented** (`ghal_bol_app`, `host`) |
+| UI: QR with prefixed identity | **Implemented** — Rust invite codec; the hub shares it |
 | Reveal private key shows algorithm | **Implemented** (`reveal_secret_key_hex` + UI) |
 | Migration tooling for existing stores | **Implemented** — `list_contacts` normalizes identity wires on read/write |
 | Coord register challenge + signature verify | **Implemented** — all three algorithms (`ghal_bol_coord/auth.rs`, client `coord_register_auth.rs`) |
 | Coord agent `pk=` binding | **Implemented** — identify `agent_version` parses full identity wire (all three algorithms) via `agent_pk.rs` |
 
-**Explicitly not required for the identity layer:** native connect multi-key identity, PeerId derivation per algorithm, native connect feature flags for identity.
+**Explicitly not required for the identity layer:** multi-key transport identity or transport feature flags for identity algorithms.
 
 **P2P chat/calls** run for **all three** identity algorithms (`p2p_ready` for each).
 
@@ -195,7 +194,7 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 
 ### Phase 1 — Identity parse/validate
 
-- `Identity` parse/format/validate in `ghal_bol` (`identity.rs`); Dart uses **FFI only** (`ghal_bol_core_ffi_identity_*`).
+- `Identity` parse/format/validate in `ghal_bol_core` (`identity.rs`). The app calls `host`.
 - Bare hex (no prefix) = implicit **`secp256k1`** by definition; prefixed forms for other algorithms.
 - Keystore: optional `identity_algorithm` on disk (absent → implicit secp256k1).
 
@@ -221,7 +220,7 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 - **Golden rule 7 (E2E):** Payloads remain end-to-end encrypted; target path uses **transport session keys**, not sealing to identity pubkey.
 - **Signatures:** Identity key authenticates sender on envelopes; transport keys protect confidentiality.
 - **Unknown algorithm prefix** when `:` is present → hard reject. Only **missing** prefix implies `secp256k1`. Includes removed ids such as `ml-dsa-65`.
-- **Do not conflate** today’s native transport internals (PeerId, Noise) with this identity spec.
+- Do not conflate transport session keys with this identity wire.
 
 ---
 
