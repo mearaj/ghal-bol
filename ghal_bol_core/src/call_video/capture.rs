@@ -172,11 +172,12 @@ mod nokhwa_capture {
         let mut indices: Vec<CameraIndex> = Vec::new();
         if let Ok(devices) = nokhwa::query(ApiBackend::Auto) {
             for (i, dev) in devices.iter().enumerate() {
+                let index = dev.index().clone();
                 crate::p2p::native_log::info(
                     "call_video",
-                    format!("camera device[{i}]: {}", dev.human_name()),
+                    format!("camera device[{i}] index={index}: {}", dev.human_name()),
                 );
-                indices.push(CameraIndex::Index(i as u32));
+                indices.push(index);
             }
         }
         if indices.is_empty() {

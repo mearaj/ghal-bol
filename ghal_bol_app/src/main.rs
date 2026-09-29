@@ -835,6 +835,19 @@ script_mod! {
                                     height: 280
                                 }
                             }
+                            scan_frame := SolidView{
+                                visible: false
+                                show_bg: true
+                                draw_bg.color: #111B21
+                                width: Fill
+                                height: Fit
+                                padding: 12
+                                align: Center
+                                scan_preview := Image{
+                                    width: 320
+                                    height: 240
+                                }
+                            }
                             paste_row := View{
                                 width: Fill
                                 height: Fit
@@ -1210,6 +1223,9 @@ impl App {
 
     /// Close sheet UI without the forced-backup re-prompt (history restore path).
     fn force_close_sheet(&mut self, cx: &mut Cx) {
+        if self.page == "scan" {
+            self.end_qr_scan_ui();
+        }
         self.page.clear();
         script_eval!(cx, {
             ui.sheet_view.set_visible(false)
@@ -1662,10 +1678,17 @@ impl App {
             // Pin hub/room under this sheet before page changes.
             self.hub_history.replace_top(self.hub_snapshot());
         }
+        if self.page == "scan" && page != "scan" {
+            self.end_qr_scan_ui();
+        }
         self.page = page.to_string();
+        if page == "scan" {
+            host::set_qr_scan_ui_active(true);
+        }
         let title = title.to_string();
         let action = action.to_string();
         let show_invite = page == "invite";
+        let show_scan = page == "scan";
         let show_paste = matches!(page, "join" | "key" | "password" | "invite");
         let show_pk = matches!(page, "add" | "blocked" | "password");
         let show_alias = matches!(page, "add" | "about" | "password");
@@ -1679,6 +1702,7 @@ impl App {
             ui.sheet_action.set_text(#(action))
             ui.status_row.set_visible(false)
             ui.invite_frame.set_visible(#(show_invite))
+            ui.scan_frame.set_visible(#(show_scan))
             ui.paste_row.set_visible(#(show_paste))
             ui.pk_row.set_visible(#(show_pk))
             ui.alias_row.set_visible(#(show_alias))
@@ -1688,6 +1712,7 @@ impl App {
         });
         self.ui.widget(cx, ids!(status_row)).set_visible(cx, false);
         self.ui.widget(cx, ids!(invite_frame)).set_visible(cx, show_invite);
+        self.ui.widget(cx, ids!(scan_frame)).set_visible(cx, show_scan);
         self.ui.widget(cx, ids!(paste_row)).set_visible(cx, show_paste);
         self.ui.widget(cx, ids!(pk_row)).set_visible(cx, show_pk);
         self.ui.widget(cx, ids!(alias_row)).set_visible(cx, show_alias);
@@ -1786,6 +1811,21 @@ impl App {
                 i18n::phrase(&lang, "paste_body"),
                 &i18n::phrase(&lang, "join_go"),
             ),
+            "scan" => {
+                self.show_sheet(
+                    cx,
+                    page,
+                    &i18n::phrase(&lang, "scan_qr"),
+                    "Point the camera at a Ghal Bol invitation QR (https://ghalbol.com/connect/… or ghalbol://). Live preview below; scanning continues until an invite is read or you go Back.".into(),
+                    "Scan again",
+                );
+                if let Some(png) = scan_placeholder_png() {
+                    let _ = self
+                        .ui
+                        .image(cx, ids!(scan_preview))
+                        .load_png_from_data(cx, &png);
+                }
+            }
             "add" => self.show_sheet(
                 cx,
                 page,
@@ -1941,6 +1981,9 @@ impl App {
             );
             return;
         }
+        if self.page == "scan" {
+            self.end_qr_scan_ui();
+        }
         self.page.clear();
         script_eval!(cx, {
             ui.sheet_view.set_visible(false)
@@ -2025,6 +2068,12 @@ impl App {
                     copy_to_clipboard(link).map(|()| "Invitation copied".into())
                 }
             }
+            "scan" => {
+                match host::start_qr_scan() {
+                    Ok(()) => Ok("Point the camera at an invitation QR…".into()),
+                    Err(e) => Err(e),
+                }
+            }
             "key" => host::reveal_secret(&ns, &self.paste),
             "backup" => self.save_backup(),
             "password" => {
@@ -2051,7 +2100,7 @@ impl App {
             Ok(msg) => {
                 if page == "delivery" || page == "log" {
                     self.open_page(cx, &page);
-                } else if page == "key" || page == "password" || page == "invite" {
+                } else if page == "key" || page == "password" || page == "invite" || page == "scan" {
                     script_eval!(cx, {
                         mod.state.sheet_body = #(msg)
                         ui.sheet_copy.render()
@@ -2138,6 +2187,7 @@ impl App {
         }
         script_eval!(cx, { ui.sheet_copy.render() });
         self.ui.widget(cx, ids!(invite_frame)).set_visible(cx, false);
+        self.ui.widget(cx, ids!(scan_frame)).set_visible(cx, false);
         self.ui.widget(cx, ids!(paste_row)).set_visible(cx, false);
         self.ui.widget(cx, ids!(pk_row)).set_visible(cx, false);
         self.ui.widget(cx, ids!(alias_row)).set_visible(cx, false);
@@ -2507,6 +2557,7 @@ impl App {
             }
         }
         self.refresh_video(cx);
+        self.refresh_qr_preview(cx);
         self.take_qr(cx);
     }
 
@@ -2526,6 +2577,46 @@ impl App {
         }
     }
 
+    fn end_qr_scan_ui(&mut self) {
+        host::set_qr_scan_ui_active(false);
+        host::stop_qr_scan();
+    }
+
+    fn refresh_qr_preview(&mut self, cx: &mut Cx) {
+        if self.page != "scan" {
+            return;
+        }
+        let Some((w, h, rgba)) = host::take_qr_preview_rgba() else {
+            return;
+        };
+        // Live path: raw BGRA texture, no PNG, no mipmaps. `load_png_from_data` on
+        // Linux builds a mip chain per frame and skips redraw outside draw events —
+        // that is why the camera log showed ~30fps while the UI looked frozen.
+        let pixels = (w as usize).saturating_mul(h as usize);
+        let mut data = Vec::with_capacity(pixels);
+        for px in rgba.chunks_exact(4).take(pixels) {
+            data.push(
+                ((px[3] as u32) << 24)
+                    | ((px[0] as u32) << 16)
+                    | ((px[1] as u32) << 8)
+                    | (px[2] as u32),
+            );
+        }
+        let texture = Texture::new_with_format(
+            cx,
+            TextureFormat::VecBGRAu8_32 {
+                width: w as usize,
+                height: h as usize,
+                data: Some(data),
+                updated: TextureUpdated::Full,
+            },
+        );
+        let image = self.ui.image(cx, ids!(scan_preview));
+        image.set_texture(cx, Some(texture));
+        // set_texture only auto-redraws inside a draw event; Signal polls need this.
+        self.ui.widget(cx, ids!(scan_preview)).redraw(cx);
+    }
+
     fn take_qr(&mut self, cx: &mut Cx) {
         let Some(result) = host::take_qr_scan() else {
             return;
@@ -2533,18 +2624,49 @@ impl App {
         let ns = self.namespace.clone();
         match result.and_then(|text| host::accept_invite(&ns, &text)) {
             Ok(pk) => {
-                let line = format!("Joined {pk}");
+                host::set_qr_scan_ui_active(false);
+                let line = format!("Joined {}", short_key(&pk));
                 script_eval!(cx, {
-                    mod.state.call_line = #(line)
+                    mod.state.sheet_body = #(line)
+                    ui.sheet_copy.render()
+                });
+                self.open_peer = pk.clone();
+                self.refresh_roster(cx);
+                let title = self
+                    .session
+                    .as_ref()
+                    .and_then(|_| host::list_roster(&ns).ok())
+                    .and_then(|rows| {
+                        rows.into_iter()
+                            .find(|r| r.public_key_hex.eq_ignore_ascii_case(&pk))
+                            .map(|r| r.title)
+                    })
+                    .unwrap_or_else(|| short_key(&pk));
+                // Leave the scan sheet and open the new chat.
+                self.close_sheet(cx);
+                script_eval!(cx, {
+                    mod.state.selected_pk = #(pk)
+                    mod.state.selected_title = #(title)
+                    mod.state.open_gen = mod.state.open_gen + 1
                     ui.chat_log.render()
                 });
-                self.refresh_roster(cx);
+            }
+            Err(e) if e == "Scan stopped" => {
+                // Back / leaving the sheet — not an error for the user.
             }
             Err(e) => {
-                script_eval!(cx, {
-                    mod.state.call_line = #(e)
-                    ui.chat_log.render()
-                });
+                // Camera already stopped on Ready; offer Scan again on the sheet.
+                if self.page == "scan" {
+                    script_eval!(cx, {
+                        mod.state.sheet_body = #(e)
+                        ui.sheet_copy.render()
+                    });
+                } else {
+                    script_eval!(cx, {
+                        mod.state.call_line = #(e)
+                        ui.chat_log.render()
+                    });
+                }
             }
         }
     }
@@ -2775,13 +2897,14 @@ impl MatchEvent for App {
             self.open_page(cx, "join");
         }
         if self.ui.button(cx, ids!(scan_button)).clicked(actions) {
+            self.open_page(cx, "scan");
             let msg = match host::start_qr_scan() {
-                Ok(()) => "Point the camera at an invitation QR".to_string(),
+                Ok(()) => "Point the camera at an invitation QR…".to_string(),
                 Err(e) => e,
             };
             script_eval!(cx, {
-                mod.state.call_line = #(msg)
-                ui.chat_log.render()
+                mod.state.sheet_body = #(msg)
+                ui.sheet_copy.render()
             });
         }
         if self.ui.button(cx, ids!(scan_file_button)).clicked(actions) {
@@ -3279,6 +3402,19 @@ fn qr_png(text: &str) -> Option<Vec<u8>> {
     Some(png)
 }
 
+/// Dark placeholder so Scan never reuses leftover Invite QR pixels.
+fn scan_placeholder_png() -> Option<Vec<u8>> {
+    use ::image::ImageEncoder;
+    let (w, h) = (320u32, 240u32);
+    let pixels = vec![0x1Bu8; (w * h) as usize];
+    let mut png = Vec::new();
+    let encoder = ::image::codecs::png::PngEncoder::new(&mut png);
+    encoder
+        .write_image(&pixels, w, h, ::image::ExtendedColorType::L8)
+        .ok()?;
+    Some(png)
+}
+
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -3312,6 +3448,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 }
 
 fn style_nav_tab(cx: &mut Cx, button: &mut WidgetRef, active: bool) {
+    // Colors only — Walk/Align/Inset are not in script_apply scope; RailTab sets layout at define time.
     if active {
         script_apply_eval!(cx, button, {
             draw_bg.color: #008069
@@ -3328,12 +3465,6 @@ fn style_nav_tab(cx: &mut Cx, button: &mut WidgetRef, active: bool) {
             draw_text.color_hover: #FFFFFF
             draw_text.color_down: #FFFFFF
             draw_text.color_focus: #FFFFFF
-            draw_text.max_lines: 2
-            draw_text.text_overflow: Ellipsis
-            padding: Inset{left: 12. right: 12. top: 12. bottom: 12.}
-            align: Center
-            label_walk: Walk{width: Fill, height: Fit}
-            label_align: Center
         });
     } else {
         script_apply_eval!(cx, button, {
@@ -3351,12 +3482,6 @@ fn style_nav_tab(cx: &mut Cx, button: &mut WidgetRef, active: bool) {
             draw_text.color_hover: #111B21
             draw_text.color_down: #111B21
             draw_text.color_focus: #111B21
-            draw_text.max_lines: 2
-            draw_text.text_overflow: Ellipsis
-            padding: Inset{left: 12. right: 12. top: 12. bottom: 12.}
-            align: Center
-            label_walk: Walk{width: Fill, height: Fit}
-            label_align: Center
         });
     }
 }
@@ -3456,7 +3581,8 @@ fn start_ui_poll() {
     START.call_once(|| {
         std::thread::spawn(|| {
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                let ms = if host::qr_scan_ui_active() { 50 } else { 400 };
+                std::thread::sleep(std::time::Duration::from_millis(ms));
                 makepad_widgets::makepad_platform::SignalToUI::set_ui_signal();
             }
         });

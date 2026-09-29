@@ -512,6 +512,35 @@ pub fn take_qr_scan() -> Option<Result<String, String>> {
     None
 }
 
+/// Latest QR-scan camera preview as raw RGBA, if a new frame is ready.
+pub fn take_qr_preview_rgba() -> Option<(u32, u32, Vec<u8>)> {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        return crate::desktop_media::take_qr_preview_rgba();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    None
+}
+
+/// Stop an in-flight desktop QR camera scan.
+pub fn stop_qr_scan() {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        crate::desktop_media::stop_qr_scan();
+    }
+}
+
+/// Faster UI poll while the Scan sheet needs live camera frames.
+pub fn set_qr_scan_ui_active(active: bool) {
+    QR_SCAN_UI_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn qr_scan_ui_active() -> bool {
+    QR_SCAN_UI_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static QR_SCAN_UI_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn decode_qr_file(path: &str) -> Result<String, String> {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {

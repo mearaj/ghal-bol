@@ -57,7 +57,7 @@ sonora = "0.1"
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 cpal = "0.15"
 openh264 = "0.9"
-nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+nokhwa = { version = "0.10", default-features = false, features = ["input-native", "decoding"] }
 png = "0.17"
 rqrr = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
