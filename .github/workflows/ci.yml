@@ -52,4 +52,4 @@ jobs:
         run: cargo check -p ghal_bol_app
 
       - name: App language tests
-        run: cargo test -p ghal_bol_app --bin ghal_bol_app -- i18n::
+        run: "cargo test -p ghal_bol_app --bin ghal_bol_app -- i18n::"
