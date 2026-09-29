@@ -46,7 +46,7 @@ jobs:
         run: cargo test -p ghal_bol_delivery
 
       - name: Install desktop UI libraries
-        run: sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev clang
+        run: sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libpulse-dev clang
 
       - name: Check desktop app
         run: cargo check -p ghal_bol_app
