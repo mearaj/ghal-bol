@@ -1751,19 +1751,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghal_bol_app"
+name = "ghalbol-android-dev"
+version = "0.1.0"
+
+[[package]]
+name = "ghalbol-dev"
+version = "0.1.0"
+
+[[package]]
+name = "ghalbol-windows-dev"
+version = "0.1.0"
+
+[[package]]
+name = "ghalbol_app"
 version = "0.1.0"
 dependencies = [
- "ghal_bol_core",
+ "ghalbol_core",
  "image",
- "makepad-android-state 0.1.0 (git+https://github.com/makepad/makepad?rev=1f60033ed3b1158cb7bf93accf1c91e0166c9373)",
+ "makepad-android-state",
  "makepad-widgets",
  "qrcode",
  "rfd",
 ]
 
 [[package]]
-name = "ghal_bol_coord"
+name = "ghalbol_coord"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -1771,7 +1783,7 @@ dependencies = [
  "directories",
  "ed25519-dalek",
  "futures",
- "ghal_bol_ddns",
+ "ghalbol_ddns",
  "hex",
  "p256",
  "rand 0.10.2",
@@ -1792,7 +1804,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghal_bol_core"
+name = "ghalbol_core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
@@ -1810,7 +1822,7 @@ dependencies = [
  "fs4",
  "futures",
  "futures-util",
- "ghal_bol_coord",
+ "ghalbol_coord",
  "hex",
  "hkdf",
  "if-addrs 0.14.0",
@@ -1828,7 +1840,6 @@ dependencies = [
  "reqwest",
  "rqrr",
  "rustls",
- "rustls-platform-verifier",
  "secp256k1",
  "serde",
  "serde_bytes",
@@ -1849,7 +1860,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghal_bol_ddns"
+name = "ghalbol_ddns"
 version = "0.1.0"
 dependencies = [
  "reqwest",
@@ -1861,7 +1872,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghal_bol_delivery"
+name = "ghalbol_delivery"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -1870,8 +1881,8 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "futures-util",
- "ghal_bol_core",
- "ghal_bol_ddns",
+ "ghalbol_core",
+ "ghalbol_ddns",
  "hex",
  "p256",
  "rand 0.10.2",
@@ -2591,14 +2602,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "makepad-android-state"
-version = "0.1.0"
-source = "git+https://github.com/makepad/makepad?rev=1f60033ed3b1158cb7bf93accf1c91e0166c9373#1f60033ed3b1158cb7bf93accf1c91e0166c9373"
-dependencies = [
- "makepad-jni-sys",
-]
-
-[[package]]
 name = "makepad-apple-sys"
 version = "1.0.0"
 source = "git+https://github.com/makepad/makepad?rev=1f60033ed3b1158cb7bf93accf1c91e0166c9373#1f60033ed3b1158cb7bf93accf1c91e0166c9373"
@@ -2814,7 +2817,7 @@ dependencies = [
  "ash",
  "bitflags 2.10.0",
  "hilog-sys",
- "makepad-android-state 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "makepad-android-state",
  "makepad-apple-sys",
  "makepad-futures",
  "makepad-futures-legacy",

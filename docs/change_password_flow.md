@@ -9,7 +9,7 @@ encryption key differs.
 ## Entry point
 
 Identity → **Password**
-(`ghal_bol_app`, `host::change_password`).
+(`ghalbol_app`, `host::change_password`).
 
 ## Steps
 
@@ -17,7 +17,7 @@ Identity → **Password**
 2. The password sheet (`host::change_password`)
    prompts for **current password**, **new password**, and **confirm new password**.
 3. Client-side checks: current + new non-empty, new == confirm, new != current.
-4. Native [`change_password_v1`](../ghal_bol_core/src/storage.rs) verifies the current
+4. Native [`change_password_v1`](../ghalbol_core/src/storage.rs) verifies the current
    password unlocks the keystore, rewraps the same secret under the new password
    (`create_keystore_v1_from_secret_with_algorithm`), and atomically saves it.
 5. The in-process session is reinstalled with the new password so the node keeps running.

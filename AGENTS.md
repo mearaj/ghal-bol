@@ -14,15 +14,15 @@
 
 0. **Prime directive — instant call connect at any roster size.** Whenever two peers have *any*
  technically reachable path (LAN or coord bridge), a **voice/video call** must connect within a
- few seconds. **Text messaging** uses `ghal_bol_delivery` (mailbox), not native-connect P2P.
+ few seconds. **Text messaging** uses `ghalbol_delivery` (mailbox), not native-connect P2P.
  Coord upkeep serves **calls** and presence. See `text_transport.rs` and [DESIGN.md](docs/DESIGN.md) § Goals.
-1. **`ghal_bol_core` (Rust) owns all product logic** — crypto, keystore, **text** (`delivery_runtime`), **calls** (native connect), contacts, transcripts, invite codec. The app calls **`ghal_bol_core::host`** in-process.
-2. **`ghal_bol_app` (Makepad 2) is the only UI.** Screens, navigation, hub, composer, and delivery ticks. **Do not re-implement ack policy, outbox, or transcript merge in the UI.** The open room is **`host::set_open_room`**. App visibility (read gate) is **`host::set_app_visible`**. **Do not** HTTP coord lookup or register from the UI. Splash is `script_mod!`. Where Makepad 2 lacks a widget, fill the gap in Splash. See `docs/MAKEPAD_UI.md`.
-3. **`docs/DESIGN.md` is canonical** for architecture; **`docs/TRANSPORT.md`** for transport and connectivity policy. Wire detail: `docs/GHAL_BOL_DM_MSG_V1.md`. Invites: `docs/GHAL_BOL_URI_SCHEME.md`. If code and agent-editable docs disagree, **fix both in the same change**.
+1. **`ghalbol_core` (Rust) owns all product logic** — crypto, keystore, **text** (`delivery_runtime`), **calls** (native connect), contacts, transcripts, invite codec. The app calls **`ghalbol_core::host`** in-process.
+2. **`ghalbol_app` (Makepad 2) is the only UI.** Screens, navigation, hub, composer, and delivery ticks. **Do not re-implement ack policy, outbox, or transcript merge in the UI.** The open room is **`host::set_open_room`**. App visibility (read gate) is **`host::set_app_visible`**. **Do not** HTTP coord lookup or register from the UI. Splash is `script_mod!`. Where Makepad 2 lacks a widget, fill the gap in Splash. See `docs/MAKEPAD_UI.md`.
+3. **`docs/DESIGN.md` is canonical** for architecture; **`docs/TRANSPORT.md`** for transport and connectivity policy. Wire detail: `docs/GHALBOL_DM_MSG_V1.md`. Invites: `docs/GHALBOL_URI_SCHEME.md`. If code and agent-editable docs disagree, **fix both in the same change**.
 4. **Guest scans host QR** — guest stores host `public_key_hex` and dials. **Host may have zero contacts** until first inbound. **Never** require mutual QR or “both sides need each other’s key from QR”.
 5. **Do not stop / restart native connect on every contact change** — use `register_dm_peer` / `sync_contacts` hot-register only.
 6. **One process.** The Makepad app and native connect share a process. **Lock** hides the hub and leaves the node running. **Log out** stops it. Do not start a second node for the same identity.
-7. **E2E for all peer-key traffic** — Any product communication between two contacts must use **end-to-end** crypto tied to the device identity key and the peer’s contact identity wire. Includes: **text** (`delivery_msg_v1` on the mailbox), call signaling (`ghal_bol_call_v1` + **transport KEM** `CALL_CIPHER_TRANSPORT_V2`), call **audio and video** media (`derive_call_media_keys_from_transport` + per-frame AES-GCM seal on `/ghal-bol/call/*` substreams). Do **not** ship peer-facing plaintext payloads or disable media/signaling E2E for “performance” without an explicit product decision.
+7. **E2E for all peer-key traffic** — Any product communication between two contacts must use **end-to-end** crypto tied to the device identity key and the peer’s contact identity wire. Includes: **text** (`delivery_msg_v1` on the mailbox), call signaling (`ghalbol_call_v1` + **transport KEM** `CALL_CIPHER_TRANSPORT_V2`), call **audio and video** media (`derive_call_media_keys_from_transport` + per-frame AES-GCM seal on `/ghalbol/call/*` substreams). Do **not** ship peer-facing plaintext payloads or disable media/signaling E2E for “performance” without an explicit product decision.
 8. **Caching — immutable only on disk** — Persist to disk only data that is **user-owned and does not change meaningfully without user action** (keystore, contacts, transcript, preferences). If a value **can change** (coord presence, mDNS LAN port, bridge endpoints) and relying on a stale copy **could break chat or WAN**, **do not cache it** — refetch live (`GET /v1/peers/…`, mDNS events, bridge pending). In-memory session mirrors and short storm throttles are OK when cleared on failure. New cache only with an explicit documented exception in TRANSPORT.md § “Caching policy”.
 9. **Avoid assumed timers for async P2P work** — When policy (A) depends on work with unknown duration, a worker (B) owns it until the stack reports an outcome; B **notifies subscribers** and A reacts **instantly** — never “wait N seconds then retry.” Timers only for guardrails (in-flight observation, storm throttles, keepalive, register dedupe). See [TRANSPORT.md](docs/TRANSPORT.md) § “Event-driven async — avoid assumed timers”.
 
@@ -30,12 +30,14 @@
 
 | Path | Role |
 |------|------|
-| `ghal_bol_core/` | Rust library (`rlib`). Product logic. UI entry: `host` |
-| `ghal_bol_app/` | Makepad 2 UI. Calls `ghal_bol_core::host` in-process |
-| `ghal_bol_coord/` | Coordination + WAN call bridge |
-| `ghal_bol_delivery/` | Delivery server (text mailbox) |
+| `ghalbol_core/` | Rust library (`rlib`). Product logic. UI entry: `host` |
+| `apps/ghalbol/` | Makepad 2 UI (Ghal Bol chat). Calls `ghalbol_core::host` in-process |
+| `ghalbol_coord/` | Coordination + WAN call bridge |
+| `ghalbol_delivery/` | Delivery server (text mailbox) |
+| `tools/` | Per-product cargo entrypoints (`ghalbol-dev`, `ghalbol-windows-dev`, `ghalbol-android-dev`) |
+| `dist/` | Packaged builds (windows, windows-dev, linux) — gitignored |
 | `docs/` | Design + wire specs (source of truth with code) |
-| `scripts/` | Build/pack for Makepad (`build_android_app.sh`, `package_linux_release.sh`) |
+| `scripts/` | Shared build/pack tooling (`load-ghalbol-env.sh`, `desktop-ids.sh`, `windows-env.sh`, `package-windows.sh`, `build_android_app.sh`) |
 
 **Workspace root** = directory containing root `README.md` and `Cargo.toml`.
 
@@ -43,13 +45,13 @@
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│  ghal_bol_app — Makepad 2                                     │
+│  ghalbol_app — Makepad 2                                     │
 │  Identity, hub, chat, invites, calls. Poll refreshes UI only │
 │  MUST NOT: send acks, own outbox, merge transcripts          │
 └────────────────────────────┬─────────────────────────────────┘
-                             │ ghal_bol_core::host
+                             │ ghalbol_core::host
 ┌────────────────────────────▼─────────────────────────────────┐
-│  ghal_bol_core                                                │
+│  ghalbol_core                                                │
 │  delivery_runtime — text messaging                                │
 │  native connect — voice/video calls (+ call signaling)            │
 │  dm_event_handler, contacts, transcripts, invites             │
@@ -61,13 +63,13 @@
 
 | Concern | Owner | Primary files |
 |---------|--------|----------------|
-| Text send/recv, delivery acks | **Rust** | `ghal_bol_core/src/delivery_runtime.rs`, `delivery_client.rs`, `delivery_read_acks.rs` |
-| Call connect, signaling, media | **Rust** | `ghal_bol_core/src/connect/` |
-| Apply events → JSON stores | **Rust** | `ghal_bol_core/src/dm_event_handler.rs` |
+| Text send/recv, delivery acks | **Rust** | `ghalbol_core/src/delivery_runtime.rs`, `delivery_client.rs`, `delivery_read_acks.rs` |
+| Call connect, signaling, media | **Rust** | `ghalbol_core/src/connect/` |
+| Apply events → JSON stores | **Rust** | `ghalbol_core/src/dm_event_handler.rs` |
 | Contacts / unread / preview / **`is_known` / `is_blocked`** | **Rust** (`contacts_v1.rs`); trust UI **Makepad** — `docs/DESIGN.md` § Contact trust |
-| Transcript lines, `delivery` | **Rust** | `ghal_bol_core/src/dm_transcript_v1.rs`, `dm_transcript_store.rs` |
+| Transcript lines, `delivery` | **Rust** | `ghalbol_core/src/dm_transcript_v1.rs`, `dm_transcript_store.rs` |
 | Invites format 2 | **Rust** | `connect_invite_v1.rs` |
-| Hub, roster, which room is open | **Makepad** | `ghal_bol_app/src/main.rs` via `host::set_open_room` |
+| Hub, roster, which room is open | **Makepad** | `apps/ghalbol/src/main.rs` via `host::set_open_room` |
 | Display ticks (no policy) | **Makepad** | transcript `delivery` rendered in the chat column |
 | Start network / dm peers | **Rust** | `host::start_network` |
 | Poll loop (UI refresh only) | **Makepad** | `App::drain_events` |
@@ -92,17 +94,29 @@ Read **`docs/DESIGN.md`** before touching acks, ticks, the open room, or transcr
 
 ## Process
 
-Native connect runs **in the same process** as `ghal_bol_app`. `host::unlock` installs the identity. `host::start_network` starts the node. `host::poll_event` lets the UI refresh.
+Native connect runs **in the same process** as `ghalbol_app`. `host::unlock` installs the identity. `host::start_network` starts the node. `host::poll_event` lets the UI refresh.
 
 **Lock** keeps the node running. **Log out** calls `host::lock`, which stops the node.
 
 ## Build & run
 
 ```bash
-cargo run -p ghal_bol_app
-cargo test -p ghal_bol_core
-./scripts/build_android_app.sh
+# App aliases (from any directory in the workspace)
+cargo ghalbol-dev              # desktop live-dev (hot reload + F12 Tweaker)
+cargo ghalbol-windows-dev      # Windows dev .exe → dist/windows-dev/
+cargo ghalbol-android-dev      # Android debug APK
+
+# Direct cargo
+cargo run -p ghalbol_app
+cargo test -p ghalbol_core
+
+# Packaging
+./scripts/package-windows.sh          # production Windows → dist/windows/
+./scripts/package_linux_release.sh    # Linux tarball
+./scripts/build_android_app.sh        # Android (cargo-ndk flow)
 ```
+
+Per-app env: `apps/ghalbol/env/{development,production}.env` (baked by `apps/ghalbol/build.rs`; loaded by `scripts/load-ghalbol-env.sh`).
 
 Linux debug data: `~/.local/share/com.ghalbol.debug/` (release: `~/.local/share/com.ghalbol/`).
 
@@ -124,7 +138,7 @@ Linux debug data: `~/.local/share/com.ghalbol.debug/` (release: `~/.local/share/
 
 ## Debugging checklist (one message, two devices)
 
-**Logs:** In-app App log shows `Native/flow` connectivity snapshots every ~30s and numbered `P2P` `step=` journey lines. Full native detail on stderr/logcat: `grep ghal_bol`. Optional: `GHAL_BOL_VERBOSE_LOG=1` before start.
+**Logs:** In-app App log shows `Native/flow` connectivity snapshots every ~30s and numbered `P2P` `step=` journey lines. Full native detail on stderr/logcat: `grep ghalbol`. Optional: `GHALBOL_VERBOSE_LOG=1` before start.
 
 **Dial — parallel LAN + WAN:** On Wi‑Fi, coord/bridge and mDNS/direct TCP **both run** for configured contacts (TRANSPORT.md § “Both links active”). **`profile=lan` vs `mobile-data` follows OS default route** (`os=` in `Native/flow`).
 
@@ -154,7 +168,7 @@ Linux debug data: `~/.local/share/com.ghalbol.debug/` (release: `~/.local/share/
 | Android: read on screen, sender single tick | `set_app_visible(false)` while backgrounded; resume must reopen the read gate |
 | Android: no messages after reboot until app opened | Activity is the process; open Ghal Bol once |
 | Android: no messages with screen off | Battery optimization / OEM autostart — not the read gate alone |
-| Linux: quiet after login | Autostart `~/.config/autostart/com.ghalbol.desktop` starts `ghal_bol_app` |
+| Linux: quiet after login | Autostart `~/.config/autostart/com.ghalbol.desktop` starts `ghalbol_app` |
 | Incoming-call tap does not show UI | Poll + D-Bus activate in `incoming_call_notify.rs` |
 
 ## Doc index
@@ -162,14 +176,14 @@ Linux debug data: `~/.local/share/com.ghalbol.debug/` (release: `~/.local/share/
 | File | Use |
 |------|-----|
 | `docs/DESIGN.md` | Layers, ticks, room open/close, transcripts, trust |
-| `docs/MAKEPAD_UI.md` | Makepad 2 shell (`ghal_bol_app`) |
+| `docs/MAKEPAD_UI.md` | Makepad 2 shell (`ghalbol_app`) |
 | `docs/IDENTITY.md` | Local identity model |
 | `docs/MULTI_ALGO.md` | Multi-algorithm identity wire |
-| `docs/GHAL_BOL_DM_MSG_V1.md` | Wire + ack kinds + upkeep |
-| `docs/GHAL_BOL_URI_SCHEME.md` | QR / `ghalbol://` invites |
-| `docs/GHAL_BOL_VOICE_V1.md` | Call signaling |
-| `docs/GHAL_BOL_CALL_NATIVE_V2.md` | Native voice engine |
-| `docs/GHAL_BOL_VIDEO_NATIVE_V1.md` | Native video engine |
+| `docs/GHALBOL_DM_MSG_V1.md` | Wire + ack kinds + upkeep |
+| `docs/GHALBOL_URI_SCHEME.md` | QR / `ghalbol://` invites |
+| `docs/GHALBOL_VOICE_V1.md` | Call signaling |
+| `docs/GHALBOL_CALL_NATIVE_V2.md` | Native voice engine |
+| `docs/GHALBOL_VIDEO_NATIVE_V1.md` | Native video engine |
 | `docs/COORDINATION_SERVER.md` | Coord server |
 | `docs/TRANSPORT.md` | Native transport policy |
 | `docs/README.md` | Full doc index |

@@ -2,33 +2,23 @@
 /target/
 **/target/
 
-# Prebuilt Android native libs from **scripts/pack_android_workspace_jni_libs.sh**
 /build/
 /dist/
 
-# Local secrets at repo root or in members
+# Local secrets
 .env
 .env.local
 .env.*.local
-# Flutter release coord config — local only; never commit
-ghal_bol_ui/env/.env.production
-# Dev coord config — frequently toggled between local/cloud coord URLs; do not commit churn
-ghal_bol_ui/env/.env.development
-ghal_bol_coord/deploy/*.service.rendered
-ghal_bol_coord/deploy/godaddy-ddns-coord1.credentials
-ghal_bol_coord/deploy/.godaddy-ddns-coord1.last_ip
-ghal_bol_delivery/deploy/*.service.rendered
-ghal_bol_delivery/deploy/godaddy-ddns-delivery.credentials
-ghal_bol_delivery/deploy/.godaddy-ddns-delivery.last_ip
-
-# Optional local keystores
-ghal_bol_ui/keystore/
-
-# Prebuilt native binaries from sync scripts (rebuild locally)
-ghal_bol_ui/linux/native/lib/
-ghal_bol_ui/linux/native/libexec/
-ghal_bol_ui/windows/native/
-ghal_bol_ui/macos/native/
+env/.env.production
+env/.env.development
+ghalbol_coord/.env.development
+ghalbol_coord/.env.production
+ghalbol_coord/deploy/*.service.rendered
+ghalbol_coord/deploy/godaddy-ddns-coord1.credentials
+ghalbol_coord/deploy/.godaddy-ddns-coord1.last_ip
+ghalbol_delivery/deploy/*.service.rendered
+ghalbol_delivery/deploy/godaddy-ddns-delivery.credentials
+ghalbol_delivery/deploy/.godaddy-ddns-delivery.last_ip
 
 # Backup / editor swap files
 *.rs.bk
@@ -40,7 +30,7 @@ ghal_bol_ui/macos/native/
 .DS_Store
 Thumbs.db
 
-# IDE (local-only; commit shared editor config only if you rename/adjust this section)
+# IDE
 .idea/
 
 # Firebase CLI
@@ -50,14 +40,6 @@ firestore-debug.log
 ui-debug.log
 .firebaserc
 
-# Linux desktop bundle for Firebase Hosting (build locally; see ghal_bol_ui/web/downloads/README.txt)
-ghal_bol_ui/web/downloads/*.tar.gz
-
 # Logs and profiling dumps
 *.log
 *.profraw
-
-# Dart / Flutter (all packages in workspace)
-.dart_tool/
-.pub/
-.pub-cache/

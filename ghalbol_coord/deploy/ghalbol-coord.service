@@ -1,0 +1,29 @@
+# Systemd unit for production VM (coord.ghalbol.com).
+#
+# Install on the server:
+#   sudo cp ghalbol_coord/deploy/ghalbol-coord.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ghalbol-coord
+#
+# Edit User, ExecStart, GHALBOL_COORD_DB (replace REPLACE_VM_USER) before enabling.
+# HTTP/WSS (presence + call bridge) stay on loopback behind nginx.
+
+[Unit]
+Description=Ghal Bol coordination server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_VM_USER
+Group=REPLACE_VM_USER
+WorkingDirectory=/home/REPLACE_VM_USER
+ExecStart=/home/REPLACE_VM_USER/ghalbol_coord
+Environment=GHALBOL_COORD_LISTEN=REPLACE_GHALBOL_COORD_LISTEN
+Environment=GHALBOL_COORD_DB=/home/REPLACE_VM_USER/.local/share/com.ghalbol.coord/ghalbol_coord
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

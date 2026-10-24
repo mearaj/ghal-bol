@@ -1,0 +1,19 @@
+---
+description: Product logic lives in ghalbol_core (Rust); ghalbol_app is the Makepad 2 shell
+alwaysApply: true
+---
+
+# ghalbol_core owns product logic
+
+**`ghalbol_core` (Rust)** owns crypto, text delivery, calls, outbox, acks, contacts, transcripts, invites, OS network truth, and coord/bridge policy.
+
+**`ghalbol_app` (Makepad 2)** is the only UI. It links `ghalbol_core` and calls **`ghalbol_core::host`** in-process. Splash is `script_mod!`. Where Makepad 2 lacks a widget or platform affordance, complete the behaviour in Splash. See `docs/MAKEPAD_UI.md`.
+
+When adding features (including connectivity, acks, storage):
+
+- Implement behaviour in **`ghalbol_core`** and call it from **`ghalbol_core::host`**.
+- Keep the UI in-process via `host` — do not add a second language binding or out-of-process RPC for the Makepad app.
+- The Makepad app polls and displays native state. Do not duplicate OS probes in the UI.
+- Do not move ack policy, outbox, transcript merge, or WAN/LAN dial policy into Splash.
+
+See `AGENTS.md` and `docs/DESIGN.md` for the full split.

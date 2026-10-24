@@ -1,12 +1,12 @@
 # Transport — native connect data plane
 
-**Status:** **Text messaging** uses [`ghal_bol_delivery`](GHAL_BOL_DELIVERY.md) (mailbox). **Voice/video calls** use **native connect** (`ghal_bol_core/src/connect/`) — LAN direct when possible, otherwise the coord byte bridge. Native connect is **not** the product path for chat text.
+**Status:** **Text messaging** uses [`ghalbol_delivery`](GHALBOL_DELIVERY.md) (mailbox). **Voice/video calls** use **native connect** (`ghalbol_core/src/connect/`) — LAN direct when possible, otherwise the coord byte bridge. Native connect is **not** the product path for chat text.
 
-**Scope:** Coord register/heartbeat and mDNS upkeep serve **presence** and **call reachability**. When `GHAL_BOL_DELIVERY_URL` is set, **all** product text uses the delivery mailbox — see `ghal_bol_core/src/text_transport.rs` and [DESIGN.md](DESIGN.md) § Goals.
+**Scope:** Coord register/heartbeat and mDNS upkeep serve **presence** and **call reachability**. When `GHALBOL_DELIVERY_URL` is set, **all** product text uses the delivery mailbox — see `ghalbol_core/src/text_transport.rs` and [DESIGN.md](DESIGN.md) § Goals.
 
 **For AI / new sessions:** Read [AGENTS.md](../AGENTS.md) and [DESIGN.md](DESIGN.md) first. Transport changes must **not** move ack policy, outbox, or transcript merge into Makepad. **Start here:** § **Connectivity lifecycle** → § **Network truth** → § **Parallel LAN + WAN** → § **LAN ↔ WAN handover**. Transport reachability is **live-only** — see § **Caching policy**.
 
-**Shipping coord (`ghal_bol_coord`):** signed presence (`POST /v1/register`, heartbeat), `GET /v1/peers/{identity}`, and **WAN call bridge** (`/v1/bridge/*` + WSS). See [COORDINATION_SERVER.md](COORDINATION_SERVER.md) and [ghal_bol_coord/README.md](../ghal_bol_coord/README.md).
+**Shipping coord (`ghalbol_coord`):** signed presence (`POST /v1/register`, heartbeat), `GET /v1/peers/{identity}`, and **WAN call bridge** (`/v1/bridge/*` + WSS). See [COORDINATION_SERVER.md](COORDINATION_SERVER.md) and [ghalbol_coord/README.md](../ghalbol_coord/README.md).
 
 ---
 
@@ -16,10 +16,10 @@ Ghal Bol separates **chat protocol** from **transport**:
 
 | Layer | Implementation |
 |-------|----------------|
-| **Text messaging** | `ghal_bol_delivery` WebSocket mailbox — E2E `delivery_msg_v1` ([GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)) |
-| **Calls (LAN + WAN)** | Noise + channel mux on native connect; **WAN** uses coord **byte bridge** ([GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md)) |
-| **Call transport** | **native connect** in `ghal_bol_core/src/connect/` (tokio TCP + Noise + mux; mDNS LAN) |
-| **Discovery / presence** | `ghal_bol_coord` register/lookup + mDNS (`_ghalbol._tcp.local`) for call dial |
+| **Text messaging** | `ghalbol_delivery` WebSocket mailbox — E2E `delivery_msg_v1` ([GHALBOL_DELIVERY.md](GHALBOL_DELIVERY.md)) |
+| **Calls (LAN + WAN)** | Noise + channel mux on native connect; **WAN** uses coord **byte bridge** ([GHALBOL_CONNECT_V1.md](GHALBOL_CONNECT_V1.md)) |
+| **Call transport** | **native connect** in `ghalbol_core/src/connect/` (tokio TCP + Noise + mux; mDNS LAN) |
+| **Discovery / presence** | `ghalbol_coord` register/lookup + mDNS (`_ghalbol._tcp.local`) for call dial |
 | **Policy** | Text: `delivery_runtime`; calls: `connect/` + `dm_event_handler` |
 
 ---
@@ -71,7 +71,7 @@ A user may have **thousands of contacts**, most **stale** (offline, never regist
 
 | Layer | LAN | WAN (calls) | Text |
 |-------|-----|-------------|------|
-| **Infrastructure** | mDNS browse + ephemeral TCP listen | coord bridge WSS (`/v1/bridge/connect`) | `ghal_bol_delivery` WSS |
+| **Infrastructure** | mDNS browse + ephemeral TCP listen | coord bridge WSS (`/v1/bridge/connect`) | `ghalbol_delivery` WSS |
 | **Per-peer** | Direct TCP session when discovered | Bridge-paired TCP (Noise+mux inside tunnel) | Mailbox only |
 | **Dial / discovery** | `Discovered` → dial **that** host:port | Bridge request + pending poll | Delivery register/poll |
 
@@ -106,11 +106,11 @@ Per contact (connect worker ~1s upkeep + events):
 
 ## native connect stack (current)
 
-Wired in `ghal_bol_core/src/connect/`:
+Wired in `ghalbol_core/src/connect/`:
 
 | Piece | Role |
 |-------|------|
-| **Tokio TCP + Noise XX + channel mux** | Encrypted call sessions; `/ghal-bol/msg/1.0.0` for call signaling frames |
+| **Tokio TCP + Noise XX + channel mux** | Encrypted call sessions; `/ghalbol/msg/1.0.0` for call signaling frames |
 | **mDNS-SD** (`lan_discovery.rs`, `_ghalbol._tcp.local`) | LAN peer discovery |
 | **Coord bridge** (`bridge_client.rs`, `bridge_ws.rs`) | WAN call byte pipe via coord WSS |
 | **OS network truth** | `p2p/network_transport.rs`, `android_network.rs`, `linux_network.rs` |
@@ -123,9 +123,9 @@ Identity: **secp256k1** device key ([IDENTITY.md](IDENTITY.md)). Product WAN dis
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
-│  ghal_bol_app — screens, hub, poll (display only)                │
+│  ghalbol_app — screens, hub, poll (display only)                │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ ghal_bol_core::host
+                             │ ghalbol_core::host
 ┌────────────────────────────▼────────────────────────────────────┐
 │  delivery_runtime — text messaging                                    │
 │  connect/ — calls + bridge                                            │
@@ -134,12 +134,12 @@ Identity: **secp256k1** device key ([IDENTITY.md](IDENTITY.md)). Product WAN dis
 └────────────────────────────┬────────────────────────────────────┘
                              │ HTTPS + WSS
 ┌────────────────────────────▼────────────────────────────────────┐
-│  ghal_bol_coord — presence + bridge (no DM bodies)               │
-│  ghal_bol_delivery — text mailbox                                    │
+│  ghalbol_coord — presence + bridge (no DM bodies)               │
+│  ghalbol_delivery — text mailbox                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Process:** native connect and delivery run **in the same process** as `ghal_bol_app`. The UI calls `ghal_bol_core::host` in-process.
+**Process:** native connect and delivery run **in the same process** as `ghalbol_app`. The UI calls `ghalbol_core::host` in-process.
 
 ---
 
@@ -152,12 +152,12 @@ Binding rules — if another doc disagrees, update it to match this section.
 3. **Publish coord endpoints when they change.** Public routable **TCP** listen (from ephemeral port + public IP when available) → `POST /v1/register`. **Re-register** on endpoint change, failed register, handover, or stale presence — **throttle** when unchanged (`should_throttle_register`, heartbeat every ~25s). Details: [COORDINATION_SERVER.md](COORDINATION_SERVER.md).
 4. **CGNAT / mobile-only peers** often have **no** public TCP to register. They still **heartbeat** when registered empty/minimal; **WAN calls** use `/v1/bridge/*`; **text** uses delivery only.
 5. **LAN is per-peer and additive.** mDNS `Discovered` → dial that contact on LAN. mDNS `Expired` → drop LAN session; do not block delivery or bridge.
-6. **Coord unreachable ≠ app offline.** LAN mDNS may still work. Retry **all** `GHAL_BOL_COORD_URLS` on the regular coord tick. Do not invent a second WAN discovery path when coord is down.
+6. **Coord unreachable ≠ app offline.** LAN mDNS may still work. Retry **all** `GHALBOL_COORD_URLS` on the regular coord tick. Do not invent a second WAN discovery path when coord is down.
 7. **Internet/coord recovery is event-driven** — resume register/lookup/bridge poll when HTTP works again; no full-process restart required.
 8. **Network switch readiness.** Path change → re-register if publishable endpoints changed, clear coord lookup backoff where applicable, reopen native sessions for **calls**.
 9. **Process restart.** On `host::start_network`, re-register when listen endpoints are known; do not trust in-memory presence from a prior process.
 
-**UI vs native:** `ghal_bol_core` owns ack policy, outbox, delivery/read ticks, dial, and coord. Makepad uses **`host::set_app_visible`** and **`host::set_open_room`** only. Poll is **display** — never gate sends or acks in the UI.
+**UI vs native:** `ghalbol_core` owns ack policy, outbox, delivery/read ticks, dial, and coord. Makepad uses **`host::set_app_visible`** and **`host::set_open_room`** only. Poll is **display** — never gate sends or acks in the UI.
 
 ---
 
@@ -174,13 +174,13 @@ Binding rules — if another doc disagrees, update it to match this section.
 | **WAN call reachability (CGNAT)** | **Bridge** | `POST /v1/bridge/request` + both sides dial `GET /v1/bridge/connect` (WSS). No server-side circuit row. |
 | **Text (CGNAT / all)** | **Delivery** | Mailbox — not coord. |
 
-Server rejects non-routable “public” endpoints at `POST` ([`ghal_bol_coord` routes/presence](../ghal_bol_coord/src/routes.rs)). Client: `endpoints_for_coord_register`, `on_listen_dm_addr` in `coord_runtime.rs`.
+Server rejects non-routable “public” endpoints at `POST` ([`ghalbol_coord` routes/presence](../ghalbol_coord/src/routes.rs)). Client: `endpoints_for_coord_register`, `on_listen_dm_addr` in `coord_runtime.rs`.
 
 ---
 
 ## WAN call bridge (coord)
 
-Opaque byte pipe: coord pairs two **outbound** WebSocket connections; peers run the same Noise + mux as LAN inside the tunnel. Full flow: [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) § WAN call bridge; server limits: [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Bridge limits.
+Opaque byte pipe: coord pairs two **outbound** WebSocket connections; peers run the same Noise + mux as LAN inside the tunnel. Full flow: [GHALBOL_CONNECT_V1.md](GHALBOL_CONNECT_V1.md) § WAN call bridge; server limits: [COORDINATION_SERVER.md](COORDINATION_SERVER.md) § Bridge limits.
 
 **Client summary (`connect/bridge_client.rs`, `bridge_ws.rs`, `worker.rs`):**
 
@@ -270,7 +270,7 @@ When the phone leaves Wi‑Fi, the desktop may still show an old LAN session unt
 
 ## Discovery
 
-Typical flow ([GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md)):
+Typical flow ([GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md)):
 
 1. Guest scans host QR → stores `public_key_hex`.
 2. Both peers register on coord when they have publishable **public TCP** (optional for CGNAT-only).
@@ -330,7 +330,7 @@ Whenever policy waits on work with **unknown duration** (TCP connect, bridge WSS
 
 ## Multiple coord servers
 
-Configure **`GHAL_BOL_COORD_URLS`** in `env/.env.development` / `.env.production` (JSON array or comma-separated).
+Configure **`GHALBOL_COORD_URLS`** in `env/.env.development` / `.env.production` (JSON array or comma-separated).
 
 | Action | Policy |
 |--------|--------|
@@ -378,7 +378,7 @@ Each URL is **HTTP(S) presence + bridge WSS on the same host**.
 
 ## Stable in-process surface
 
-The UI calls `ghal_bol_core::host`. Do not rename without a version bump:
+The UI calls `ghalbol_core::host`. Do not rename without a version bump:
 
 - `host::unlock` / `host::lock` / `host::start_network`
 - `host::set_open_room` / `host::set_app_visible`
@@ -393,7 +393,7 @@ The UI calls `ghal_bol_core::host`. Do not rename without a version bump:
 
 | Invariant | Owner |
 |-----------|--------|
-| Ack kinds, `ref_id` rules | `msg_v1.rs`, [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) |
+| Ack kinds, `ref_id` rules | `msg_v1.rs`, [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md) |
 | Recipient sends acks; Makepad never | `connect/outbox_acks.rs`, [DESIGN.md](DESIGN.md) |
 | text via delivery when URL set | `text_transport.rs`, `delivery_runtime.rs` |
 | Guest scans host QR | `connect_invite_v1.rs` |
@@ -432,7 +432,7 @@ Use App log `Native/flow` (~30s) plus tagged `connect`, `coord`, `bridge`, `deli
 | 4 | Session up | `chat_ready` / `PeerConnected` |
 | 5 | WAN call bridge | `bridge: bridge request ok` → `wss connecting` |
 | 6 | Text | delivery worker send/recv (separate from connect) |
-| 7 | Call media | `/ghal-bol/call/*` substreams once call is up |
+| 7 | Call media | `/ghalbol/call/*` substreams once call is up |
 
 Never infer chat delivery from connect alone when delivery mode is on — confirm delivery worker state for text.
 
@@ -443,9 +443,9 @@ Never infer chat delivery from connect alone when delivery mode is on — confir
 | Doc | Relationship |
 |-----|----------------|
 | [DESIGN.md](DESIGN.md) | Canonical product behaviour |
-| [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) | Wire format and ack kinds |
-| [GHAL_BOL_CONNECT_V1.md](GHAL_BOL_CONNECT_V1.md) | Connect + WAN bridge |
-| [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md) | text mailbox |
-| [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) | Invites / QR |
+| [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md) | Wire format and ack kinds |
+| [GHALBOL_CONNECT_V1.md](GHALBOL_CONNECT_V1.md) | Connect + WAN bridge |
+| [GHALBOL_DELIVERY.md](GHALBOL_DELIVERY.md) | text mailbox |
+| [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md) | Invites / QR |
 | [COORDINATION_SERVER.md](COORDINATION_SERVER.md) | Coord API, bridge, deploy |
 | [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) | Optional Tier 3 paid relay (not shipping on coord1) |

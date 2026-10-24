@@ -1,6 +1,6 @@
 # Ghal Bol web (static site)
 
-Public site at **https://ghalbol.com** and **https://www.ghalbol.com** (Firebase Hosting). Marketing home page, **Linux desktop download**, and **invite handoff** for `/connect/…` links. Chat runs in the desktop app (`ghal_bol_app`) or the Android app, not in the browser.
+Public site at **https://ghalbol.com** and **https://www.ghalbol.com** (Firebase Hosting). Marketing home page, **Linux desktop download**, and **invite handoff** for `/connect/…` links. Chat runs in the desktop app (`ghalbol_app`) or the Android app, not in the browser.
 
 ## Architecture
 
@@ -9,7 +9,7 @@ Public site at **https://ghalbol.com** and **https://www.ghalbol.com** (Firebase
 | Pages | `web/index.html` — one document, routes from `location.pathname` |
 | Hosting config | Repo root `firebase.json` → `web/` |
 | Android App Links | `web/.well-known/assetlinks.json` |
-| Linux bundle | `web/downloads/ghal-bol-linux-x64.tar.gz` when you place it there before deploy |
+| Linux bundle | `web/downloads/ghalbol-linux-x64.tar.gz` when you place it there before deploy |
 
 Firebase serves existing files first (the tarball, `assetlinks.json`). The rewrite to `index.html` applies when no static file matches.
 
@@ -19,7 +19,7 @@ Firebase serves existing files first (the tarball, `assetlinks.json`). The rewri
 |-----|------|
 | `/` | Home — Play Store + **Download for Linux** |
 | `/download/linux` | Linux instructions + link to the tarball |
-| `/downloads/ghal-bol-linux-x64.tar.gz` | Static file (when present in `web/downloads/`) |
+| `/downloads/ghalbol-linux-x64.tar.gz` | Static file (when present in `web/downloads/`) |
 | `/connect/<public-key-hex>` | Invite handoff — `ghalbol://connect/…`, copy web link, copy app link |
 | `/.well-known/assetlinks.json` | Digital Asset Links for verified HTTPS → app |
 
@@ -39,7 +39,7 @@ cd web && python -m http.server 8080
 
 ## Linux desktop bundle
 
-Build `ghal_bol_app` in release on **x86_64 Linux**, pack the binary with the libraries it needs, and save the archive as `web/downloads/ghal-bol-linux-x64.tar.gz` before `firebase deploy`.
+Build `ghalbol_app` in release on **x86_64 Linux**, pack the binary with the libraries it needs, and save the archive as `web/downloads/ghalbol-linux-x64.tar.gz` before `firebase deploy`.
 
 ## Firebase Hosting
 
@@ -66,7 +66,7 @@ firebase deploy --only hosting
 | Item | Action |
 |------|--------|
 | `assetlinks.json` | Play app-signing SHA-256 in `web/.well-known/assetlinks.json` |
-| Linux tarball | `web/downloads/ghal-bol-linux-x64.tar.gz` present if the download button should work |
+| Linux tarball | `web/downloads/ghalbol-linux-x64.tar.gz` present if the download button should work |
 | Verify live | `/`, `/download/linux`, the tarball URL, `/.well-known/assetlinks.json` |
 
 ## Invite link behaviour
@@ -80,6 +80,6 @@ firebase deploy --only hosting
 
 **Open in Ghal Bol** is an HTML link. Do not navigate to `ghalbol://` from script alone; Chrome blocks that unless the user taps the link.
 
-Details: [ANDROID_APP_LINKS.md](ANDROID_APP_LINKS.md), [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
+Details: [ANDROID_APP_LINKS.md](ANDROID_APP_LINKS.md), [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md).
 
 Play listing: `https://play.google.com/store/apps/details?id=com.ghalbol`.

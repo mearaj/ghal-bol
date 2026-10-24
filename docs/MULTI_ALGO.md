@@ -15,7 +15,7 @@ Ghal Bol identities are **cryptographic public keys**. The **`algorithm:` prefix
 - Support multiple public-key algorithms (`secp256k1`, `ed25519`, `ecdsa-p256`, …) without free-form algorithm strings.
 - **Implicit `secp256k1`:** identity strings with **no** `algorithm:` prefix are defined to use **`secp256k1`** (bare hex = secp256k1 public key).
 - **Separate identity from transport/E2E:** the identity key is for discovery and connectivity lookup; message and media confidentiality use **session transport keys** (same general approach as call media today — HKDF + symmetric AES-GCM).
-- Stay **transport-agnostic** at the identity layer: validation and storage live in `ghal_bol` with per-algorithm crypto crates. The current P2P stack may use native connect internally; that is **not** an identity dependency and is not guaranteed long-term.
+- Stay **transport-agnostic** at the identity layer: validation and storage live in `ghalbol` with per-algorithm crypto crates. The current P2P stack may use native connect internally; that is **not** an identity dependency and is not guaranteed long-term.
 
 **Public key is the only wire identity.** Do not use a transport handle as a roster key, invite payload, coord lookup key, or transcript key. Internal dial helpers may still carry session ids derived from the identity wire — that is transport-internal, not the multi-algo identity contract.
 
@@ -34,7 +34,7 @@ Identity := [ algorithm ":" ] public_key_hex
 | Component | Rule |
 |-----------|------|
 | `algorithm` | **Optional only for `secp256k1`** (omit → implicit `secp256k1`). **Required** for every other algorithm id in the closed enum below. |
-| `public_key_hex` | Lowercase hex on the wire. Validated by the named algorithm’s codec in `ghal_bol`. |
+| `public_key_hex` | Lowercase hex on the wire. Validated by the named algorithm’s codec in `ghalbol`. |
 | Normalization | Trim whitespace; lowercase hex; single-line. |
 
 ### Parsing rules (three cases)
@@ -79,7 +79,7 @@ Same rule as wire identity: **optional `identity_algorithm` field**; **omitted o
 - New secp256k1 keystores also omit the field (canonical on-disk shape for implicit secp256k1).
 - Non-secp256k1 keystores set `identity_algorithm` to the wire id (`ed25519`, `ecdsa-p256`, …).
 
-Implementation: [`ghal_bol_core/src/keystore_v1.rs`](../ghal_bol_core/src/keystore_v1.rs), [`ghal_bol_core/src/identity.rs`](../ghal_bol_core/src/identity.rs).
+Implementation: [`ghalbol_core/src/keystore_v1.rs`](../ghalbol_core/src/keystore_v1.rs), [`ghalbol_core/src/identity.rs`](../ghalbol_core/src/identity.rs).
 
 ---
 
@@ -93,7 +93,7 @@ Stable wire constants (kebab-case). Unknown ids → reject when a prefix is pres
 | `ed25519` | **Shipping** | Identity, signing, coord, identity derivation, full P2P. |
 | `ecdsa-p256` | **Shipping** | Identity, signing, coord, identity derivation, full P2P. |
 
-Implement validation with **standard crypto libraries per algorithm** in `ghal_bol` — **not** `native-identity`.
+Implement validation with **standard crypto libraries per algorithm** in `ghalbol` — **not** `native-identity`.
 
 ---
 
@@ -117,11 +117,11 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 
 | Surface | Implementation |
 |---------|----------------|
-| DM text | [`transport_kem_v1.rs`](../ghal_bol_core/src/transport_kem_v1.rs) + `TransportKemHello` → `DM_CIPHER_TRANSPORT_V2` (`0x03`) |
-| Call signaling | [`call_sig_v1.rs`](../ghal_bol_core/src/call_sig_v1.rs) + transport KEM → `CALL_CIPHER_TRANSPORT_V2` (`0x04`) |
-| Call audio/video | [`call_media_key.rs`](../ghal_bol_core/src/call_media_key.rs) — `derive_call_media_keys_from_transport` + HKDF(`call_id`) |
+| DM text | [`transport_kem_v1.rs`](../ghalbol_core/src/transport_kem_v1.rs) + `TransportKemHello` → `DM_CIPHER_TRANSPORT_V2` (`0x03`) |
+| Call signaling | [`call_sig_v1.rs`](../ghalbol_core/src/call_sig_v1.rs) + transport KEM → `CALL_CIPHER_TRANSPORT_V2` (`0x04`) |
+| Call audio/video | [`call_media_key.rs`](../ghalbol_core/src/call_media_key.rs) — `derive_call_media_keys_from_transport` + HKDF(`call_id`) |
 | Envelope signatures | Per-algorithm sign with identity key (auth only) |
-| Offline seal | [`offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — encrypt-to-secp256k1 pubkey (`0x10`); auxiliary only |
+| Offline seal | [`offline_seal_v1.rs`](../ghalbol_core/src/offline_seal_v1.rs) — encrypt-to-secp256k1 pubkey (`0x10`); auxiliary only |
 
 ---
 
@@ -130,10 +130,10 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Surface | Field / path | Today | Future |
 |---------|--------------|-------|--------|
 | Connect invite URI | path segment | Full `Identity` wire (bare secp256k1 or `algo:hex`) | format v3 split fields — TBD |
-| `ghal_bol_connect_v1` wire map | `public_key_hex` | Full identity wire | optional split `algorithm` field — TBD |
-| [`contacts_v1.json`](../ghal_bol_core/src/contacts_v1.rs) | contact key | Full identity wire | — |
-| [`keystore_v1.json`](../ghal_bol_core/src/keystore_v1.rs) | `identity_algorithm` + encrypted secret | secp256k1 default; ed25519/ecdsa-p256 optional | — |
-| DM frames ([`ghal_bol_msg_v1`](GHAL_BOL_DM_MSG_V1.md)) | `sender_public_key_hex` | Identity wire + session ciphertext outbound | Transport session keys for all algorithms |
+| `ghalbol_connect_v1` wire map | `public_key_hex` | Full identity wire | optional split `algorithm` field — TBD |
+| [`contacts_v1.json`](../ghalbol_core/src/contacts_v1.rs) | contact key | Full identity wire | — |
+| [`keystore_v1.json`](../ghalbol_core/src/keystore_v1.rs) | `identity_algorithm` + encrypted secret | secp256k1 default; ed25519/ecdsa-p256 optional | — |
+| DM frames ([`ghalbol_msg_v1`](GHALBOL_DM_MSG_V1.md)) | `sender_public_key_hex` | Identity wire + session ciphertext outbound | Transport session keys for all algorithms |
 | Coord `GET /v1/peers/{[algo:]hex}` | path key | Identity wire (URL-encoded) | — |
 | Coord agent string | `pk=…` | Full identity wire in identify `agent_version` | — |
 | Call signaling | payload ciphertext | Transport KEM (`CALL_CIPHER_TRANSPORT_V2`) | — |
@@ -142,17 +142,17 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 
 **Primary code references (today):**
 
-- [`ghal_bol_core/src/identity.rs`](../ghal_bol_core/src/identity.rs) — multi-algo wire parse/validate; the app calls `host`
-- [`ghal_bol_core/src/public_key_util.rs`](../ghal_bol_core/src/public_key_util.rs) — secp256k1 contact compare helpers
-- [`ghal_bol_core/src/transport_kem_v1.rs`](../ghal_bol_core/src/transport_kem_v1.rs) — transport KEM v2 (DM, call sig, call media HKDF)
-- [`ghal_bol_core/src/call_sig_v1.rs`](../ghal_bol_core/src/call_sig_v1.rs) — call signaling transport seal/open
-- [`ghal_bol_core/src/call_media_key.rs`](../ghal_bol_core/src/call_media_key.rs) — call media keys from transport KEM
-- [`ghal_bol_core/src/offline_seal_v1.rs`](../ghal_bol_core/src/offline_seal_v1.rs) — offline encrypt-to-secp256k1 (auxiliary)
-- [`ghal_bol_core/src/symmetric_seal.rs`](../ghal_bol_core/src/symmetric_seal.rs) — AES-GCM session seal
-- [`ghal_bol_core/src/connect_invite_v1.rs`](../ghal_bol_core/src/connect_invite_v1.rs) — multi-algo invite validation + URI
-- [`ghal_bol_core/src/identity_sign.rs`](../ghal_bol_core/src/identity_sign.rs) — per-algorithm envelope signatures
-- [`ghal_bol_core/src/keystore_v1.rs`](../ghal_bol_core/src/keystore_v1.rs) — multi-algo keystore (optional `identity_algorithm`)
-- [`ghal_bol_coord/src/agent_pk.rs`](../ghal_bol_coord/src/agent_pk.rs) — identify `pk=` identity wire parse
+- [`ghalbol_core/src/identity.rs`](../ghalbol_core/src/identity.rs) — multi-algo wire parse/validate; the app calls `host`
+- [`ghalbol_core/src/public_key_util.rs`](../ghalbol_core/src/public_key_util.rs) — secp256k1 contact compare helpers
+- [`ghalbol_core/src/transport_kem_v1.rs`](../ghalbol_core/src/transport_kem_v1.rs) — transport KEM v2 (DM, call sig, call media HKDF)
+- [`ghalbol_core/src/call_sig_v1.rs`](../ghalbol_core/src/call_sig_v1.rs) — call signaling transport seal/open
+- [`ghalbol_core/src/call_media_key.rs`](../ghalbol_core/src/call_media_key.rs) — call media keys from transport KEM
+- [`ghalbol_core/src/offline_seal_v1.rs`](../ghalbol_core/src/offline_seal_v1.rs) — offline encrypt-to-secp256k1 (auxiliary)
+- [`ghalbol_core/src/symmetric_seal.rs`](../ghalbol_core/src/symmetric_seal.rs) — AES-GCM session seal
+- [`ghalbol_core/src/connect_invite_v1.rs`](../ghalbol_core/src/connect_invite_v1.rs) — multi-algo invite validation + URI
+- [`ghalbol_core/src/identity_sign.rs`](../ghalbol_core/src/identity_sign.rs) — per-algorithm envelope signatures
+- [`ghalbol_core/src/keystore_v1.rs`](../ghalbol_core/src/keystore_v1.rs) — multi-algo keystore (optional `identity_algorithm`)
+- [`ghalbol_coord/src/agent_pk.rs`](../ghalbol_coord/src/agent_pk.rs) — identify `pk=` identity wire parse
 
 ---
 
@@ -173,11 +173,11 @@ Identity may still be used for **signatures** on envelopes (algorithm-specific v
 | Call signaling transport keys | **Implemented** — `CALL_CIPHER_TRANSPORT_V2` (`0x04`) after `TransportKemHello` (`call_sig_v1.rs`, `transport_kem_v1.rs`) |
 | Call media transport binding | **Implemented** — `derive_call_media_keys_from_transport` (`call_media_key.rs`) |
 | Envelope signatures per identity algorithm | **Implemented** (`identity_sign.rs` — all three algorithms) |
-| UI: identity algorithm picker at create | **Implemented** (`ghal_bol_app`, `host`) |
+| UI: identity algorithm picker at create | **Implemented** (`ghalbol_app`, `host`) |
 | UI: QR with prefixed identity | **Implemented** — Rust invite codec; the hub shares it |
 | Reveal private key shows algorithm | **Implemented** (`reveal_secret_key_hex` + UI) |
 | Migration tooling for existing stores | **Implemented** — `list_contacts` normalizes identity wires on read/write |
-| Coord register challenge + signature verify | **Implemented** — all three algorithms (`ghal_bol_coord/auth.rs`, client `coord_register_auth.rs`) |
+| Coord register challenge + signature verify | **Implemented** — all three algorithms (`ghalbol_coord/auth.rs`, client `coord_register_auth.rs`) |
 | Coord agent `pk=` binding | **Implemented** — identify `agent_version` parses full identity wire (all three algorithms) via `agent_pk.rs` |
 
 **Explicitly not required for the identity layer:** multi-key transport identity or transport feature flags for identity algorithms.
@@ -194,7 +194,7 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 
 ### Phase 1 — Identity parse/validate
 
-- `Identity` parse/format/validate in `ghal_bol_core` (`identity.rs`). The app calls `host`.
+- `Identity` parse/format/validate in `ghalbol_core` (`identity.rs`). The app calls `host`.
 - Bare hex (no prefix) = implicit **`secp256k1`** by definition; prefixed forms for other algorithms.
 - Keystore: optional `identity_algorithm` on disk (absent → implicit secp256k1).
 
@@ -227,7 +227,7 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 ## Open questions (TBD)
 
 - Coord DB primary key: full identity string vs `(algorithm, public_key_hex)` columns.
-- **Transport KEM algorithm** — **DM (native connect path):** X25519 (`x25519-dalek`). **Delivery mailbox (server path):** identity-sealed ciphertext per [GHAL_BOL_DELIVERY_WIRE_V1.md](GHAL_BOL_DELIVERY_WIRE_V1.md).
+- **Transport KEM algorithm** — **DM (native connect path):** X25519 (`x25519-dalek`). **Delivery mailbox (server path):** identity-sealed ciphertext per [GHALBOL_DELIVERY_WIRE_V1.md](GHALBOL_DELIVERY_WIRE_V1.md).
 - **Call signaling transport KEM** — TBD (session v1 ships today).
 
 ### Connect invite v3 (implemented)
@@ -242,8 +242,8 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 ## Related docs
 
 - [IDENTITY.md](IDENTITY.md) — user-facing identity model (today: secp256k1)
-- [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) — connect invite URIs
-- [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) — DM envelopes (transport KEM v2)
-- [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md) — call media keys (today: identity-derived)
+- [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md) — connect invite URIs
+- [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md) — DM envelopes (transport KEM v2)
+- [GHALBOL_CALL_NATIVE_V2.md](GHALBOL_CALL_NATIVE_V2.md) — call media keys (today: identity-derived)
 - [DESIGN.md](DESIGN.md) — layers and E2E overview
 - [TRANSPORT.md](TRANSPORT.md) — current connectivity stack (transport only; not identity spec)

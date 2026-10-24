@@ -1,11 +1,21 @@
-# Android cross-compilation for raw `cargo --target …-linux-android` (sanity checks, CI).
-#
-# Use **`source scripts/android-ndk-env.sh`** (auto-finds Studio’s `~/Android/Sdk/ndk/*` when
-# `ANDROID_NDK_HOME` is unset) or **`scripts/with-android-env.sh cargo check …`**. Cargo expands
-# `${ANDROID_NDK_TOOLCHAIN_BIN}` for `linker` / `ar` only; C/C++ build scripts still need `CC_*` /
-# `CXX_*`, which those helpers set (see `.cargo/` cannot reliably use `[env]` with `${VAR}` expansion).
-#
-# APK / Gradle flow: **`cargo ndk`** (see **`PORTABILITY.md`**) resolves the NDK itself.
+# GhalBol workspace - cargo config for all apps.
+
+[alias]
+# Desktop live-dev (apps/ghalbol, com.ghalbol.debug).
+# Usage: cargo ghalbol-dev
+ghalbol-dev = ["run", "-p", "ghalbol-dev", "--"]
+
+# Android dev build (com.ghalbol.debug).
+# Usage: cargo ghalbol-android-dev
+ghalbol-android-dev = ["run", "-p", "ghalbol-android-dev", "--"]
+
+# Windows dev package (cross from Linux with mingw; Win10 + 11 x86_64).
+# Makepad layout: exe + ghalbol_app/resources beside it.
+# Usage: cargo ghalbol-windows-dev -> dist/windows-dev/
+ghalbol-windows-dev = ["run", "-p", "ghalbol-windows-dev", "--"]
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
 
 [target.aarch64-linux-android]
 linker = "${ANDROID_NDK_TOOLCHAIN_BIN}/aarch64-linux-android21-clang"
@@ -22,3 +32,12 @@ ar = "${ANDROID_NDK_TOOLCHAIN_BIN}/llvm-ar"
 [target.x86_64-linux-android]
 linker = "${ANDROID_NDK_TOOLCHAIN_BIN}/x86_64-linux-android21-clang"
 ar = "${ANDROID_NDK_TOOLCHAIN_BIN}/llvm-ar"
+
+[env]
+MAKEPAD_APP_ICON_32 = { value = "apps/ghalbol/resources/icon_32.png", relative = true }
+MAKEPAD_APP_ICON_64 = { value = "apps/ghalbol/resources/icon_64.png", relative = true }
+MAKEPAD_APP_ICON_128 = { value = "apps/ghalbol/resources/icon_128.png", relative = true }
+MAKEPAD_APP_ICON_256 = { value = "apps/ghalbol/resources/icon_256.png", relative = true }
+MAKEPAD_APP_ICON_512 = { value = "apps/ghalbol/resources/icon_512.png", relative = true }
+MAKEPAD_APP_ICON_1024 = { value = "apps/ghalbol/resources/icon_1024.png", relative = true }
+MAKEPAD_APP_ICON_ICO = { value = "apps/ghalbol/resources/icon.ico", relative = true }

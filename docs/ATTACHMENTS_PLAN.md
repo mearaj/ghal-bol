@@ -1,7 +1,7 @@
 # Attachments (1:1) — product + implementation plan
 
 **Status:** Mailbox E2E shipped — file bytes ride the same sealed rail as voice/text.
-**WAN:** `ghal_bol_delivery` (identity-sealed ciphertext only). **LAN:** native-connect DM (or mux for oversized). **Coord is never used for attachments.**
+**WAN:** `ghalbol_delivery` (identity-sealed ciphertext only). **LAN:** native-connect DM (or mux for oversized). **Coord is never used for attachments.**
 
 ---
 
@@ -60,7 +60,7 @@ LAN (peer on native connect):
 
 ### LAN mux (oversized only)
 
-Protocol `/ghal-bol/attach/1.0.0` on native connect `CHANNEL_ATTACH`:
+Protocol `/ghalbol/attach/1.0.0` on native connect `CHANNEL_ATTACH`:
 
 - Offer JSON carries `blob_id`, `content_key_b64`, hashes, TTL — **no** `file_b64`.
 - Recipient taps Download → `host::fetch_attachment` → chunks over LAN session.
@@ -109,6 +109,6 @@ Starts the fetch and returns immediately. The transfer continues in the node. Re
 ## References
 
 - Product split: [DESIGN.md](DESIGN.md) § Goals
-- Wire: [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md) § Attachments
-- Delivery: [GHAL_BOL_DELIVERY.md](GHAL_BOL_DELIVERY.md)
+- Wire: [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md) § Attachments
+- Delivery: [GHALBOL_DELIVERY.md](GHALBOL_DELIVERY.md)
 - Voice (same mailbox pattern): [VOICE_MESSAGES_PLAN.md](VOICE_MESSAGES_PLAN.md)

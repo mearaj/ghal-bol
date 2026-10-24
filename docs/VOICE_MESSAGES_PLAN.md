@@ -2,7 +2,7 @@
 
 **Status:** Implemented in Rust and Makepad; continue using this doc for limits and follow-up testing.
 
-**Depends on:** [DESIGN.md](DESIGN.md), [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md), [AGENTS.md](../AGENTS.md) (golden rules 1, 7).
+**Depends on:** [DESIGN.md](DESIGN.md), [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md), [AGENTS.md](../AGENTS.md) (golden rules 1, 7).
 
 **Related:** [ATTACHMENTS_PLAN.md](ATTACHMENTS_PLAN.md) — same E2E mailbox rail for normal-sized files; LAN mux only for oversized local transfers.
 
@@ -17,7 +17,7 @@ WhatsApp-style **voice notes** in 1:1 chat:
 - Recipient sees a **voice bubble** (duration, play/pause).
 - **Delivery and read ticks** use the same recipient-authority ack model as text.
 
-**Not in scope:** live voice calls ([GHAL_BOL_VOICE_V1.md](GHAL_BOL_VOICE_V1.md), [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md)) — those use call signaling + `/ghal-bol/call/1.0.0` streaming media keys, not DM envelopes.
+**Not in scope:** live voice calls ([GHALBOL_VOICE_V1.md](GHALBOL_VOICE_V1.md), [GHALBOL_CALL_NATIVE_V2.md](GHALBOL_CALL_NATIVE_V2.md)) — those use call signaling + `/ghalbol/call/1.0.0` streaming media keys, not DM envelopes.
 
 ---
 
@@ -25,10 +25,10 @@ WhatsApp-style **voice notes** in 1:1 chat:
 
 | Rule | Detail |
 |------|--------|
-| **Same rail as text** | One frame on `/ghal-bol/msg/1.0.0`; outbox; `ack_received` / `ack_read`; transcript patch on poll. |
+| **Same rail as text** | One frame on `/ghalbol/msg/1.0.0`; outbox; `ack_received` / `ack_read`; transcript patch on poll. |
 | **Full payload in one send** | Entire encoded audio inside the sealed inner JSON — no chunking, no sender-served download link (v1). |
 | **Same E2E as text** | Inner JSON → `seal_to_secp256k1_public` → `ciphertext_hex` → signed envelope. **Not** call media keys. |
-| **Rust owns behaviour** | Record policy, Opus encode/decode, send/retry, decrypt, transcript. Makepad calls `ghal_bol_core::host`. |
+| **Rust owns behaviour** | Record policy, Opus encode/decode, send/retry, decrypt, transcript. Makepad calls `ghalbol_core::host`. |
 | **Truthful ticks** | Makepad never promotes delivery/read; native transcript + poll only ([DESIGN.md](DESIGN.md)). |
 
 ---
@@ -50,7 +50,7 @@ Enforce **both** max duration (UI + native) and max encoded bytes (native reject
 
 ### Envelope (unchanged shell)
 
-Same `ghal_bol_msg_v1` envelope as text. Add `MsgKind::Voice` in `msg_v1.rs` (wire: `"voice"`).
+Same `ghalbol_msg_v1` envelope as text. Add `MsgKind::Voice` in `msg_v1.rs` (wire: `"voice"`).
 
 | Field | Voice message |
 |-------|----------------|
@@ -90,7 +90,7 @@ Decrypt: verify signature → open transport seal → parse inner JSON → decod
 
 ## Delivery, read, and transcript
 
-Mirror text ([GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md), [DESIGN.md](DESIGN.md)):
+Mirror text ([GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md), [DESIGN.md](DESIGN.md)):
 
 | Concern | Voice (same as text) |
 |---------|----------------------|
@@ -118,7 +118,7 @@ Hub preview: e.g. `"Voice message"` or `"🎤 0:45"` via `contacts_v1` preview h
 
 | Concern | Owner | Notes |
 |---------|--------|-------|
-| Opus encode/decode | **Rust** (`ghal_bol`) | New small module or reuse `call_media/codec.rs` traits without call session keys |
+| Opus encode/decode | **Rust** (`ghalbol`) | New small module or reuse `call_media/codec.rs` traits without call session keys |
 | Build/seal/send envelope | **Rust** `msg_v1.rs`, `outbound.rs`, outbox | Parallel to `build_text_envelope` |
 | Inbound verify/open/decode | **Rust** `frames.rs`, `dm_event_handler.rs` | Treat `voice` like `text` for ack gating |
 | Transcript append/patch | **Rust** `dm_transcript_store.rs` | Chronological insert (existing) |
@@ -179,7 +179,7 @@ Voice notes are Opus, mono, 48 kHz, at most 120 seconds. The sealed inner stays 
 
 ## Anti-patterns (do not ship)
 
-- Sending voice on `/ghal-bol/call/1.0.0` or call media keys.
+- Sending voice on `/ghalbol/call/1.0.0` or call media keys.
 - Chunked multi-frame voice in v1 (adds complexity; use attachments plan for large files).
 - Plaintext audio in envelope or poll JSON.
 - Makepad-side ack or tick promotion.
@@ -198,7 +198,7 @@ Voice notes are Opus, mono, 48 kHz, at most 120 seconds. The sealed inner stays 
 
 ## References
 
-- Text wire: [GHAL_BOL_DM_MSG_V1.md](GHAL_BOL_DM_MSG_V1.md)
-- Calls (out of scope): [GHAL_BOL_CALL_NATIVE_V2.md](GHAL_BOL_CALL_NATIVE_V2.md)
-- Frame path: `ghal_bol_core/src/connect/frames.rs`
-- Seal: `ghal_bol_core/src/transport_kem_v1.rs`, `ghal_bol_core/src/msg_v1.rs`
+- Text wire: [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md)
+- Calls (out of scope): [GHALBOL_CALL_NATIVE_V2.md](GHALBOL_CALL_NATIVE_V2.md)
+- Frame path: `ghalbol_core/src/connect/frames.rs`
+- Seal: `ghalbol_core/src/transport_kem_v1.rs`, `ghalbol_core/src/msg_v1.rs`

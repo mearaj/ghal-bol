@@ -1,309 +1,123 @@
-# Ghal Bol
+# GhalBol — Brand for Communication Products
 
-<p align="center">
-  <img src="docs/assets/for-feature-graphic-1.png" alt="Ghal Bol" width="1536">
-</p>
+**GhalBol** (ghalbol.com) — brand family for real-time and asynchronous communication products. Currently shipping **Ghal Bol**, an end-to-end encrypted messenger with voice/video calls and text messaging.
 
-Ghal Bol is an end-to-end encrypted messenger: device-owned identity, local transcripts, and minimal server trust.
+## Workspace Structure (Kumkaj Model)
 
-**Text messaging** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary encrypted mailbox. The server never decrypts messages; only sender and recipient keys can. **Voice and video calls** use **native connect** (direct P2P on LAN when possible; WAN calls use the coord byte bridge when NAT requires it). Chat text is **not** a native-connect / LAN P2P product path.
+This workspace follows the Kumkaj pattern: a common workspace shared across multiple apps, with no shared product core. Each app under `apps/` owns all its code independently.
 
-The system is designed around:
-
-> Reliable encrypted text via the delivery mailbox; realtime P2P for voice and video calls.
-
-Unlike traditional messengers, Ghal Bol does **not** store chat history in the cloud. Each device keeps its own transcript. The delivery server holds ciphertext **only until** the recipient acknowledges delivery (then deletes payload, keeps metadata for acks/TTL).
-
-Text uses the delivery mailbox so a message can arrive while the other person is offline. Voice and video stay on native connect because they are live sessions.
-
-**Architecture & transport:** [docs/DESIGN.md](docs/DESIGN.md), [docs/TRANSPORT.md](docs/TRANSPORT.md), [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md).
-
-**Desktop UI:** `ghal_bol_app` is the Makepad 2 shell (`script_mod!`). It links `ghal_bol_core` and calls `ghal_bol_core::host` in-process. See [docs/MAKEPAD_UI.md](docs/MAKEPAD_UI.md).
-
-```bash
-cargo run -p ghal_bol_app
+```
+ghalbol/
+├── Cargo.toml                    # Workspace root — brand-level config
+├── README.md                     # This file — brand overview & structure docs
+├── docs/                         # Global brand docs (shared doctrine)
+│   ├── GHALBOL_BRAND.md          # Brand identity & naming conventions
+│   ├── DESIGN.md                 # Architecture design
+│   ├── TRANSPORT.md              # Transport policy
+│   └── ...                       # Other design docs
+├── ghalbol_core/                # Shared core library (identity, crypto, P2P, delivery)
+├── ghalbol_coord/               # Coordination server (presence, endpoint discovery)
+├── ghalbol_delivery/            # Delivery server (text mailbox)
+├── ghalbol_ddns/                # DDNS helper for home deployment
+├── apps/                         # Product apps — each brand's products live here
+│   └── ghalbol/                  # Ghal Bol Chat (current product)
+│       ├── Cargo.toml            # App crate config
+│       ├── build.rs              # Env baking (development.env → binary)
+│       ├── src/                  # Makepad 2 UI source
+│       ├── resources/            # Fonts, icons, assets
+│       ├── scripts/              # Per-app dev scripts
+│       │   ├── dev.sh            # Development build (hot reload + Tweaker)
+│       │   ├── windows-dev.sh    # Windows x86_64 dev package
+│       │   └── android-dev.sh    # Android debug APK
+│       └── env/                  # Per-app environment files
+│           ├── development.env   # Dev coord/delivery URLs
+│           └── production.env    # Prod coord/delivery URLs
+├── tools/                        # Per-product cargo entrypoints (thin wrappers)
+│   ├── ghalbol-dev/              # `cargo ghalbol-dev` → dev.sh
+│   ├── ghalbol-android-dev/      # `cargo ghalbol-android-dev` → android-dev.sh
+│   └── ghalbol-windows-dev/      # `cargo ghalbol-windows-dev` → windows-dev.sh
+├── dist/                         # Build outputs (gitignored)
+│   ├── windows/                  # Production Windows MSI package
+│   │   ├── package.wxs           # WiX installer manifest
+│   │   ├── install.ps1           # PowerShell installer
+│   │   ├── uninstall.ps1         # PowerShell uninstaller
+│   │   ├── Setup.bat             # Double-click entry point (installer)
+│   │   └── Uninstall.bat         # Double-click entry point (uninstaller)
+│   └── windows-dev/              # Development Windows package
+├── scripts/                      # Shared build/packaging tooling
+│   ├── load-ghalbol-env.sh       # Env loader (source into other scripts)
+│   ├── desktop-ids.sh            # Desktop install paths, manifest helpers
+│   ├── windows-env.sh            # Windows cross-compile setup, resource staging
+│   ├── stage-desktop-package.sh  # Package staging (installers + manifests)
+│   ├── cargo-target-dir.sh       # Resolve cargo target directory
+│   ├── package-windows.sh        # Production Windows build
+│   ├── package_linux_release.sh  # Linux x86_64 release tarball
+│   ├── build_android_app.sh      # Android APK build
+│   └── with-android-env.sh       # Android NDK environment setup
+├── vendor/                       # Vendored dependencies (Makepad 2)
+├── env/                          # Legacy workspace-level env (for coord/delivery servers)
+├── web/                          # ghalbol.com static site + Firebase hosting
+└── .gitignore                    # Ignored files pattern
 ```
 
-Debug builds use `~/.local/share/com.ghalbol.debug/`. Coord and delivery URLs come from the environment, then `env/.env.development` when that variable is unset.
+## Key Design Decisions
 
-**Invites & coordination:** [docs/GHAL_BOL_URI_SCHEME.md](docs/GHAL_BOL_URI_SCHEME.md), [docs/COORDINATION_SERVER.md](docs/COORDINATION_SERVER.md)
+### No Shared Core Library (Like Kumkaj)
+- Each `apps/<product>/` owns all its code independently
+- `ghalbol_core` is a **library** crate (shared because it serves multiple products), not a product core
+- Future GhalBol products under `apps/` will copy from the best-fitting sibling, then diverge
+- Reuse is **copy-then-diverge**, duplication is preferable to coupling
 
----
+### Brand Naming Convention
+| Type | Convention | Example |
+|------|-----------|---------|
+| Brand | CamelCase | GhalBol, ghalbol.com |
+| Product name | Title case + space | Ghal Bol |
+| Package names | kebab-case | `ghalbol-app` (future), `ghalbol_app` (current) |
+| Directory names | snake_case or kebab-case | `ghalbol_core/`, `apps/ghalbol/` |
+| App ID prod | `com.ghalbol` | Production Android app id |
+| App ID dev | `com.ghalbol.debug` | Debug Android app id |
 
-# Core Philosophy
+### Per-App Environment
+Each app under `apps/` has its own `env/` directory:
+- `development.env` — dev coord/delivery URLs, debug app ID
+- `production.env` — prod URLs, production app ID
+- `build.rs` bakes the selected env into the binary at compile time
 
-Ghal Bol separates identity from infrastructure.
+### Development Workflow
+```bash
+# Desktop development (hot reload + Tweaker via F12)
+cargo ghalbol-dev              # → runs apps/ghalbol with --hot --remote
 
-Users own:
-- their cryptographic identity
-- their local transcript
-- their delivery state
-- their communication history
+# Windows dev build (cross-compile from Linux with mingw)
+cargo ghalbol-windows-dev      # → dist/windows-dev/
 
-Servers only assist with:
-- peer coordination
-- endpoint discovery
-- presence tracking
-- WAN call bridging
+# Android dev APK
+cargo ghalbol-android-dev
 
-The server is not the owner of chats, identities, or messages.
+# Production Windows MSI package
+./scripts/package-windows.sh  # → dist/windows/
 
----
+# Production Linux release
+./scripts/package_linux_release.sh
 
-# Identity Model
+# Direct Cargo run (legacy, still works)
+cargo run -p ghalbol_app
+```
 
-Each installation uses a local cryptographic identity (public/private secp256k1 keypair). The app can **create** a new key on first setup or **import** an existing 64-hex private key or encrypted keystore backup. Optional **premium infrastructure** (paid Tier 3 relay) is separate from identity and payments — see [docs/IDENTITY.md](docs/IDENTITY.md) and [docs/PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md).
+## Adding a New Product
 
-Identities are:
-- local-only
-- user-owned
-- self-generated
-- independent from centralized accounts
+When adding a new communication product under the GhalBol brand:
 
-The system does not require:
-- phone numbers
-- email addresses
-- usernames controlled by servers
+1. **Create `apps/<product>/`** with its own `Cargo.toml`, `src/`, `resources/`, `env/`, `scripts/`
+2. **Create `tools/<product>-dev/` and `tools/<product>-windows-dev/`** as thin wrapper binaries
+3. **Add members to workspace Cargo.toml** (`apps/<product>`, `tools/<product>-dev`, `tools/<product>-windows-dev`)
+4. **Follow the per-app env pattern**: `env/development.env` + `env/production.env`
+5. **Per-app scripts**: `dev.sh`, `windows-dev.sh`, `android-dev.sh`
 
-Peer connections can be established through QR codes, invite links, or public key exchange.
-
-**Invite URLs (domain we use today):**
-
-- Web: `https://ghalbol.com/connect/<public_key_hex>`
-- App: `ghalbol://connect/<public_key_hex>`
-
-The link identifies the peer only; the app resolves live endpoints via `ghal_bol_coord`, then connects directly. See [docs/TRANSPORT.md](docs/TRANSPORT.md) § Discovery. **HTTPS invites:** with verified App Links (`/.well-known/assetlinks.json` on the site), Android opens the app directly; otherwise the browser shows the [web invite handoff](docs/WEB_SITE.md). **Linux desktop:** [download page](https://ghalbol.com/download/linux).
-
----
-
-# Presence and Registration
-
-Each peer maintains lightweight presence with the coordination server.
-
-When a peer connects:
-1. The server sends a nonce challenge.
-2. The peer signs the nonce using its private key.
-3. The server verifies the signature.
-4. The peer’s endpoint registration is accepted.
-
-This ensures that a peer can only register endpoints for identities it actually owns.
-
-The server stores:
-- peer public key
-- current reachable endpoints
-- transport capabilities
-- heartbeat timestamp
-- optional IPv6 and IPv4 addresses
-
-Presence is ephemeral and expires automatically if heartbeats stop.
+See [`docs/GHALBOL_BRAND.md`](GHALBOL_BRAND.md) for brand doctrine and naming conventions.
 
 ---
 
-# Networking Model
-
-Every peer in Ghal Bol acts as both:
-- client
-- server
-
-Peers communicate directly whenever possible.
-
-Connection policy for a configured contact ([TRANSPORT.md](docs/TRANSPORT.md) § “Both links active”):
-
-1. Existing active session (resume)
-2. **Parallel on Wi‑Fi:** coord lookup + coord bridge + public TCP (WAN) **and** mDNS → direct TCP (LAN) when the contact is on the local network — **both links stay active** when connected
-3. **Mobile-data / CGNAT:** WAN (coord bridge) only when no active LAN
-4. **LAN loss:** WAN is already connected — immediate fallback without tearing down coord
-5. **Coord bridge** on the **Ghal Bol coord server** for NAT/CGNAT — WAN calls are bridged over WebSocket.
-
-Peer **discovery over WAN requires coord** when both peers have internet. When coord is unreachable, **LAN (mDNS) still works**; the background node keeps retrying all configured coord servers. Multiple coord servers are supported as a list (today a single production entry).
-
-The system is designed to be:
-- IPv6-first
-- direct-communication-first
-- reconnect-friendly
-- mobile-aware
-
-QUIC over UDP is the preferred transport because of:
-- lower latency
-- multiplexed streams
-- better reconnect behavior
-- improved mobile roaming support
-
----
-
-# Synchronization Model
-
-Ghal Bol is synchronization-oriented rather than stream-oriented.
-
-Instead of treating communication as a permanent socket session, peers perform short-lived synchronization sessions where they:
-- exchange pending messages
-- exchange acknowledgements
-- synchronize transcript state
-- resume interrupted transfers
-
-Synchronization sessions are:
-- reconnectable
-- resumable
-- idempotent
-- replay-safe
-
-Every message has:
-- globally unique ID
-- sender identity
-- recipient identity
-- timestamp
-- encrypted payload
-
-The protocol assumes reconnects and temporary disconnections are normal.
-
----
-
-# Message Delivery
-
-**Text messaging** uses the [`ghal_bol_delivery`](ghal_bol_delivery/) server — a temporary E2E encrypted mailbox. The server stores ciphertext only; it cannot decrypt. When the recipient acknowledges delivery, the payload is deleted (metadata retained for acks/TTL). This guarantees offline delivery when the recipient returns.
-
-**Voice and video** use native connect on LAN and WAN (coord bridge) — realtime sessions where both peers must be online. Native connect is **not** the product chat path.
-
-Typical text flow:
-
-1. Sender encrypts message locally and uploads ciphertext to delivery server.
-2. Server notifies recipient (WebSocket push when online).
-3. Recipient decrypts locally, sends delivery/read acks through the server.
-4. Each device keeps its own transcript; ticks are recipient-authority only.
-
-See [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md) and [docs/DESIGN.md](docs/DESIGN.md).
-
----
-
-# Future: Temporary Distributed Relay (Tier 2)
-
-A decentralized peer-blob relay (Tier 2; Tier 3 paid backup — see [docs/PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md)) remains a **future** option. **Text today** uses `ghal_bol_delivery`, not Tier 2.
-
----
-
-# Mobile Networking Philosophy
-
-Mobile networking is inherently unstable because of:
-- NAT
-- CGNAT
-- WiFi/mobile switching
-- app suspension
-- battery optimizations and OEM autostart / “pause if unused” policies (Android — see [DESIGN.md](docs/DESIGN.md) § Process)
-- temporary reachability loss
-
-Ghal Bol assumes:
-- reconnects are normal
-- sessions are temporary
-- synchronization must be resumable
-- presence is ephemeral
-
-The protocol is therefore designed around deterministic synchronization instead of fragile long-lived socket assumptions.
-
----
-
-# Protocol Design Principles
-
-## Local Ownership
-
-Peers own:
-- identity
-- transcript
-- delivery state
-- synchronization state
-
-## Minimal Trust
-
-Servers assist coordination but do not own:
-- message history
-- identities
-- transcript truth
-- communication state
-
-## Idempotency
-
-All synchronization operations must be replay-safe.
-
-Duplicate synchronization attempts must never corrupt state or create inconsistent transcripts.
-
-## Deterministic Behavior
-
-The project prioritizes:
-- predictable synchronization
-- observable behavior
-- practical reliability
-
-over theoretical decentralization purity.
-
----
-
-# Future Possibilities
-
-Potential future extensions include:
-- encrypted attachment streaming
-- decentralized relay reputation systems
-- opportunistic peer caching
-- relay incentives
-- Tier 2 temporary distributed relay (see [PREMIUM_SERVICES.md](docs/PREMIUM_SERVICES.md))
-
----
-
-# Non-Goals
-
-Ghal Bol is intentionally not:
-- a cloud messaging platform
-- a social network
-- a centralized chat service
-- a permanent message archive
-- a phone-number-based identity system
-
----
-
-# Project Direction
-
-Ghal Bol explores a middle ground between fully centralized messengers and fully decentralized swarm-based systems.
-
-By combining:
-- centralized coordination
-with
-- direct peer synchronization
-
-the project aims to provide:
-- fast realtime communication
-- resilient direct messaging
-- low infrastructure dependence
-- strong user ownership
-- modern peer-to-peer networking
-
-without the complexity and unpredictability of large-scale decentralized swarm architectures.
-
----
-
-# Repository
-
-Open this directory as the workspace root (the folder that contains this `README.md`).
-
-| Path | Role |
-|------|------|
-| `ghal_bol_core/` | Rust core: identity, native connect sync engine, local stores |
-| `ghal_bol_coord/` | Coordination server — see [ghal_bol_coord/README.md](ghal_bol_coord/README.md) |
-| `ghal_bol_delivery/` | Delivery server (text mailbox) — [docs/GHAL_BOL_DELIVERY.md](docs/GHAL_BOL_DELIVERY.md), home deploy [ghal_bol_delivery/deploy/](ghal_bol_delivery/deploy/) |
-| `ghal_bol_app/` | Makepad 2 UI — [docs/MAKEPAD_UI.md](docs/MAKEPAD_UI.md) |
-| `docs/` | [Design](docs/DESIGN.md), [transport](docs/TRANSPORT.md), [identity](docs/IDENTITY.md), [coord server](docs/COORDINATION_SERVER.md), [web site](docs/WEB_SITE.md), [doc index](docs/README.md) |
-| `firebase.json` | Firebase Hosting for **ghalbol.com** (static web build) |
-| `env/` | Coord and delivery URLs for local runs |
-
----
-
-# Production release (checklist)
-
-**Full step-by-step guide:** [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md) (P0 ship test → P1 infra → P2 Play Store)
-
-**Coord server (live):** `https://coord.ghalbol.com` — smoke: `COORD_URL=https://coord.ghalbol.com ./ghal_bol_coord/deploy/smoke_coord.sh`
-
-| Phase | Key steps |
-|-------|-----------|
-| **P0** | Release build of `ghal_bol_app` → two-phone ship test |
-| **P1** | CI green, VM systemd + reboot, commit & push |
-| **P2** | [Privacy policy](docs/PRIVACY_POLICY.md) online → [Play listing](docs/PLAY_STORE_LISTING.md) → AAB upload |
-
-Build/run details: [env/README.md](env/README.md). Server deploy: [ghal_bol_coord/deploy/README.md](ghal_bol_coord/deploy/README.md).
+**Current product:** Ghal Bol — E2EE messenger (voice/video calls + text via delivery mailbox)
+**Infrastructure shared across products:** ghalbol_coord, ghalbol_delivery, ghalbol_ddns

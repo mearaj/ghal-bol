@@ -1,0 +1,9 @@
+[package]
+name = "ghalbol-windows-dev"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "ghalbol-windows-dev"
+path = "main.rs"

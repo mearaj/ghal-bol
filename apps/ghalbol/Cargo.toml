@@ -1,0 +1,35 @@
+# GhalBol Chat — the communication app under the GhalBol brand.
+# Links ghalbol_core in-process (Makepad 2 UI + Rust product logic).
+[package]
+name = "ghalbol_app"
+version = "0.1.0"
+edition = "2024"
+description = "Ghal Bol — E2EE messenger (voice/video + text). Part of the GhalBol brand family."
+license = "MIT OR Apache-2.0"
+
+# Packager metadata: production id. Dev installs use development.env (com.ghalbol.debug) via scripts.
+[package.metadata.packager]
+identifier = "com.ghalbol"
+product_name = "Ghal Bol"
+
+[package.metadata.makepad.android]
+version_code = 1
+version_name = "0.1.0"
+min_sdk_version = 26
+
+# build.rs bakes env/development.env or production.env into the binary.
+build = "build.rs"
+
+[dependencies]
+ghalbol_core = { path = "../../ghalbol_core" }
+makepad-widgets = { git = "https://github.com/makepad/makepad", rev = "1f60033ed3b1158cb7bf93accf1c91e0166c9373" }
+qrcode = { version = "0.14", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Desktop file pickers only — rfd has no Android backend.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.15"
+
+# Must match makepad-platform's crates.io pin so JNI_OnLoad is not linked twice.
+[target.'cfg(target_os = "android")'.dependencies]
+makepad-android-state = "0.1.0"

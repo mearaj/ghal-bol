@@ -21,18 +21,18 @@ The system does not require phone numbers, email addresses, or centralized accou
 
 - Public identity: bare secp256k1 hex (66 chars) or prefixed form per [MULTI_ALGO.md](MULTI_ALGO.md)
 - Private export: 64 hex chars for secp256k1 devices (other algorithms: raw secret hex via native reveal)
-- On disk: `keystore_v1.json` — Argon2id + ChaCha20-Poly1305 (`ghal_bol_core/src/keystore_v1.rs`)
+- On disk: `keystore_v1.json` — Argon2id + ChaCha20-Poly1305 (`ghalbol_core/src/keystore_v1.rs`)
   - Optional `identity_algorithm` field (`secp256k1`, `ed25519`, `ecdsa-p256`, …). **Omitted or empty → implicit `secp256k1`** (definition — same rule as wire identity).
   - New non-secp256k1 keystores set `identity_algorithm` explicitly.
 
-Storage root — one namespace directory per build; keystore, prefs, and `ghal_bol/` (contacts, transcript) all live under it:
+Storage root — one namespace directory per build; keystore, prefs, and `ghalbol/` (contacts, transcript) all live under it:
 
 | Build | `app_namespace` | Linux | Android (under package `app_makepad`) |
 |-------|-----------------|-------|----------------------------------------|
 | `makepad run` (debug) | `com.ghalbol.debug` | `~/.local/share/com.ghalbol.debug/` | `com.ghalbol.debug/` |
 | `makepad run --release` / shipped | `com.ghalbol` | `~/.local/share/com.ghalbol/` | `/` (package root) |
 
-Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v1.json`, `ghal_bol/chat_transcript_v1.json`. Debug vs release on Android are separate package ids (`com.ghalbol.debug` vs `com.ghalbol`), so separate `app_makepad` trees.
+Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghalbol/contacts_v1.json`, `ghalbol/chat_transcript_v1.json`. Debug vs release on Android are separate package ids (`com.ghalbol.debug` vs `com.ghalbol`), so separate `app_makepad` trees.
 
 ### Global alias vs local alias
 
@@ -41,18 +41,18 @@ Under that root: `keystore_v1.json`, `preferences_v1.json`, `ghal_bol/contacts_v
 | **`global_alias`** | Connect invite wire v3 (`format_version: 3`) | Peer-chosen name shared on the wire when pairing; not unique; may seed a new contact |
 | **`display_alias`** | `contacts_v1.json` per device | Local roster label only; never sent as authoritative identity |
 
-Coord and delivery servers identify peers by **identity wire** (public key), not alias. See [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md).
+Coord and delivery servers identify peers by **identity wire** (public key), not alias. See [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md).
 
 **Linux — do not confuse app data with the local coord server:**
 
 | Path | Owner | Contents |
 |------|-------|----------|
 | `~/.local/share/com.ghalbol.debug/` | Debug **app** (`makepad run`) | Keystore, contacts, transcript for debug builds |
-| `~/.local/share/com.ghal_bol.coord/ghal_bol_coord/` | **Coord server** (home or GCP) | `coord.db` |
+| `~/.local/share/com.ghalbol.coord/ghalbol_coord/` | **Coord server** (home or GCP) | `coord.db` |
 
 The debug app does **not** write identity or chat stores to `com.ghalbol/` unless you run a release build. There is no automatic migration between debug and release namespaces — re-pair or import identity when switching builds.
 
-**Android path fix (2026-06):** `ui_data_dir()` uses `namespace_data_dir()` so keystore and `ghal_bol/` contacts/transcript share the same namespace root (debug: `app_makepad/com.ghalbol.debug/ghal_bol/`).
+**Android path fix (2026-06):** `ui_data_dir()` uses `namespace_data_dir()` so keystore and `ghalbol/` contacts/transcript share the same namespace root (debug: `app_makepad/com.ghalbol.debug/ghalbol/`).
 
 ---
 
@@ -110,13 +110,13 @@ This limits exposure from casual device access or shoulder surfing.
 2. App password prompt
 3. On success: display 64-hex secret + copy (with warning)
 
-**UI contract:** **Private key** asks for the app password again and shows the secret on that sheet. The password and the revealed secret stay in the Makepad app until the sheet closes. Implementation: `ghal_bol_app` and `host::reveal_secret`.
+**UI contract:** **Private key** asks for the app password again and shows the secret on that sheet. The password and the revealed secret stay in the Makepad app until the sheet closes. Implementation: `ghalbol_app` and `host::reveal_secret`.
 
 ---
 
 ## Mandatory backup after Create new (implemented)
 
-When the app **generates** a new identity (first-time **Create new** only), a **blocking backup step** runs after unlock and **before** entering the chat shell (`ghal_bol_app`, `host::export_keystore`):
+When the app **generates** a new identity (first-time **Create new** only), a **blocking backup step** runs after unlock and **before** entering the chat shell (`ghalbol_app`, `host::export_keystore`):
 
 1. Explains the identity is device-owned with no cloud copy.
 2. User must **Export encrypted backup** (share + clipboard) at least once.
@@ -172,7 +172,7 @@ Servers assist presence and endpoint discovery; they do not issue or own messagi
 | Export backup | Backup sheet | `export_keystore` |
 | Delete identity | Unlock | `delete_identity` |
 
-See `ghal_bol_core/src/host.rs` and `ghal_bol_app/src/main.rs`.
+See `ghalbol_core/src/host.rs` and `ghalbol_app/src/main.rs`.
 
 ---
 
@@ -184,7 +184,7 @@ See `ghal_bol_core/src/host.rs` and `ghal_bol_app/src/main.rs`.
 
 **Secure local storage (today)** — Password-derived key encrypts the identity blob on disk. **Planned:** tighter integration with Android Keystore / iOS Keychain or Secure Enclave for key material wrapping.
 
-**Minimal trust** — `ghal_bol_coord` sees registration metadata (public key, endpoints, heartbeats), not private keys or transcript bodies.
+**Minimal trust** — `ghalbol_coord` sees registration metadata (public key, endpoints, heartbeats), not private keys or transcript bodies.
 
 **Logging** — `AppLog` redacts `private_key_hex` and similar fields in RPC traces.
 
@@ -194,5 +194,5 @@ See `ghal_bol_core/src/host.rs` and `ghal_bol_app/src/main.rs`.
 
 - [MULTI_ALGO.md](MULTI_ALGO.md) — multi-algorithm identity spec, identity vs transport/E2E
 - [PREMIUM_SERVICES.md](PREMIUM_SERVICES.md) — paid Tier 3 relay, payment rails, membership vs identity
-- [GHAL_BOL_URI_SCHEME.md](GHAL_BOL_URI_SCHEME.md) — invites and coordination lookup
+- [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md) — invites and coordination lookup
 - [TRANSPORT.md](TRANSPORT.md) — WAN/LAN dial policy

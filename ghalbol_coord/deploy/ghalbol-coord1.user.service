@@ -1,0 +1,20 @@
+# User systemd unit — no root. Installed by install_coord1_home.sh to ~/.config/systemd/user/
+
+[Unit]
+Description=Ghal Bol coordination server (coord1.ghalbol.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=REPLACE_COORD1_BIN
+Environment=GHALBOL_COORD_LISTEN=REPLACE_GHALBOL_COORD_LISTEN
+Environment=GHALBOL_COORD_PUBLIC_URL=REPLACE_GHALBOL_COORD_PUBLIC_URL
+Environment=GHALBOL_COORD_DB=/home/REPLACE_COORD1_USER/.local/share/com.ghalbol.coord/ghalbol_server
+Environment=RUST_LOG=info
+Environment=GHALBOL_DDNS_CREDENTIALS=REPLACE_GHALBOL_DDNS_CREDENTIALS
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

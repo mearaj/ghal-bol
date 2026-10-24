@@ -5,7 +5,7 @@
 # does NOT pass `--host`, so under cargo-ndk it would compile Opus for the build
 # host (wrong arch → "incompatible with aarch64linux" link error). Instead we
 # build Opus ourselves here and let audiopus_sys link the prebuilt static lib via
-# LIBOPUS_LIB_DIR / LIBOPUS_STATIC / LIBOPUS_NO_PKG (see pack_android_workspace_jni_libs.sh).
+# LIBOPUS_LIB_DIR / LIBOPUS_STATIC / LIBOPUS_NO_PKG for Android Opus static builds.
 #
 # Output: build/android-opus/<abi>/lib/libopus.a
 #

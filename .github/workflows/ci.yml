@@ -18,7 +18,7 @@ jobs:
     name: Rust tests
     runs-on: ubuntu-latest
     env:
-      GHAL_BOL_COORD_URLS: ""
+      GHALBOL_COORD_URLS: ""
     steps:
       - uses: actions/checkout@v6
 
@@ -29,27 +29,27 @@ jobs:
       - name: Reject libp2p in core/coord lockfile
         run: |
           if rg '^name = "libp2p' Cargo.lock; then
-            echo "libp2p must not appear in Cargo.lock for ghal_bol_core / ghal_bol_coord"
+            echo "libp2p must not appear in Cargo.lock for ghalbol_core / ghalbol_coord"
             exit 1
           fi
 
       - name: Install native deps (cpal/ALSA + libopus for voice)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev pkg-config
 
-      - name: Unit tests (ghal_bol_core)
-        run: cargo test -p ghal_bol_core --lib
+      - name: Unit tests (ghalbol_core)
+        run: cargo test -p ghalbol_core --lib
 
-      - name: Unit tests (ghal_bol_coord)
-        run: cargo test -p ghal_bol_coord
+      - name: Unit tests (ghalbol_coord)
+        run: cargo test -p ghalbol_coord
 
-      - name: Unit tests (ghal_bol_delivery)
-        run: cargo test -p ghal_bol_delivery
+      - name: Unit tests (ghalbol_delivery)
+        run: cargo test -p ghalbol_delivery
 
       - name: Install desktop UI libraries
         run: sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libpulse-dev clang
 
       - name: Check desktop app
-        run: cargo check -p ghal_bol_app
+        run: cargo check -p ghalbol_app
 
       - name: App language tests
-        run: "cargo test -p ghal_bol_app --bin ghal_bol_app -- i18n::"
+        run: "cargo test -p ghalbol_app --bin ghalbol_app -- i18n::"

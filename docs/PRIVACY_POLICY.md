@@ -93,7 +93,7 @@ Registration uses a **challenge–response**: you sign a server nonce with your 
 
 ## Voice and video calls
 
-Calls use **native encrypted media** over native connect (`/ghal-bol/call/1.0.0` for voice, `/ghal-bol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **native connect** path, not through the delivery mailbox. **Chat text** uses the delivery server.
+Calls use **native encrypted media** over native connect (`/ghalbol/call/1.0.0` for voice, `/ghalbol/call-video/1.0.0` for video). **Call signaling** (invite, accept, hangup, video on/off) is exchanged over the **native connect** path, not through the delivery mailbox. **Chat text** uses the delivery server.
 
 Media is intended to flow **peer-to-peer** (direct LAN, or through the coord byte bridge when NAT requires it). We do not operate a media server that decrypts call content.
 

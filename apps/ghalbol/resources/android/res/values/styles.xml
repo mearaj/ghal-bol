@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Keep the same light chrome after splash — DeviceDefault alone flashes black
+         while the GL surface boots. -->
+    <style name="MakepadAppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@drawable/makepad_launch_background</item>
+        <item name="android:colorBackground">#FFF7F7F7</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:statusBarColor">#FFF7F7F7</item>
+        <item name="android:navigationBarColor">#FFF7F7F7</item>
+    </style>
+
+    <style name="MakepadLaunchTheme" parent="@style/MakepadAppTheme">
+        <item name="android:windowBackground">@drawable/makepad_launch_background</item>
+        <item name="android:windowIsTranslucent">false</item>
+    </style>
+</resources>

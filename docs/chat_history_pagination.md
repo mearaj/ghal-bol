@@ -9,7 +9,7 @@ older history.
 ## Model
 
 - The native store returns the newest `limit` lines plus a `has_more` flag
-  ([`thread_view_limited`](../ghal_bol_core/src/dm_transcript_store.rs)).
+  ([`thread_view_limited`](../ghalbol_core/src/dm_transcript_store.rs)).
 - `limit` omitted → full thread (`has_more = false`) — used by hub warm/cache.
 - The Makepad chat screen keeps a `window_limit` (default 50 via `transcript_limit()`).
   **Older messages** grows the limit by 50 and reloads via `host::load_transcript`.
@@ -25,7 +25,7 @@ newest-N view, so live tick updates on poll continue to work.
 
 ## Ownership
 
-- Rust owns the slice + `has_more` (`ghal_bol_core`).
+- Rust owns the slice + `has_more` (`ghalbol_core`).
 - The UI calls `host::load_transcript(namespace, peer, limit)`.
 - Makepad is UI only: window size, the older-messages control, and repaint.
 
