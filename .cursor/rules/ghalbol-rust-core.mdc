@@ -17,3 +17,5 @@ When adding features (including connectivity, acks, storage):
 - Do not move ack policy, outbox, transcript merge, or WAN/LAN dial policy into Splash.
 
 See `AGENTS.md` and `docs/DESIGN.md` for the full split.
+
+Never rename protocol or storage strings (Noise prologue, HKDF / AAD info, signing domains, `ghalbol.share` values, mDNS service, on-disk folder names) as a cleanup — it breaks every existing peer, server and keystore. The legacy `ghal_bol` constants in `keystore_v1.rs` and `app_paths.rs` exist on purpose. CI denies warnings on Linux, Windows and Android (`scripts/check_android.sh`).

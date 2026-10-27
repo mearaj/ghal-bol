@@ -46,6 +46,98 @@ mod imp {
         }
     }
 
+    /// Wi-Fi `MulticastLock` held while the node runs (see [`hold_multicast_lock`]).
+    static MULTICAST_LOCK: std::sync::Mutex<Option<jni::objects::Global<JObject<'static>>>> =
+        std::sync::Mutex::new(None);
+
+    /// Android drops inbound multicast unless an app holds a Wi-Fi `MulticastLock`; without it
+    /// mDNS never sees LAN peers and calls fall back to the coord bridge. Needs
+    /// `CHANGE_WIFI_MULTICAST_STATE` in the manifest.
+    pub fn hold_multicast_lock(hold: bool) {
+        if !crate::call_media::android_p2p_context_ready() {
+            return;
+        }
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+        let result = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            let mut slot = MULTICAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let result = if hold {
+                if slot.is_some() {
+                    return Ok(());
+                }
+                let activity =
+                    unsafe { JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
+                let context = env.new_local_ref(&activity)?;
+                // `activity` is Makepad's global ref. Dropping it would delete it.
+                std::mem::forget(activity);
+                acquire_multicast_lock(env, &context).map(|lock| *slot = Some(lock))
+            } else if let Some(lock) = slot.take() {
+                env.call_method(&lock, jni_str!("release"), jni_sig!("()V"), &[])
+                    .map(|_| ())
+            } else {
+                Ok(())
+            };
+            if env.exception_check() {
+                env.exception_clear();
+            }
+            result
+        });
+        if let Err(e) = result {
+            crate::p2p::native_log::warn("connect", format!("wifi multicast lock: {e}"));
+        }
+    }
+
+    fn acquire_multicast_lock<'a>(
+        env: &mut Env<'a>,
+        context: &JObject<'a>,
+    ) -> jni::errors::Result<jni::objects::Global<JObject<'static>>> {
+        // Application context: an Activity-scoped WifiManager leaks on older Android.
+        let app = env
+            .call_method(
+                context,
+                jni_str!("getApplicationContext"),
+                jni_sig!("()Landroid/content/Context;"),
+                &[],
+            )?
+            .l()?;
+        let class_ctx = env.find_class(jni_str!("android/content/Context"))?;
+        let wifi_service = env
+            .get_static_field(
+                &class_ctx,
+                jni_str!("WIFI_SERVICE"),
+                jni_sig!(java.lang.String),
+            )?
+            .l()?;
+        let wifi = env
+            .call_method(
+                &app,
+                jni_str!("getSystemService"),
+                jni_sig!((java.lang.String) -> java.lang.Object),
+                &[JValue::Object(&wifi_service)],
+            )?
+            .l()?;
+        if wifi.is_null() {
+            return Err(jni::errors::Error::NullPtr("no WifiManager"));
+        }
+        let tag = env.new_string("ghalbol-mdns")?;
+        let lock = env
+            .call_method(
+                &wifi,
+                jni_str!("createMulticastLock"),
+                jni_sig!("(Ljava/lang/String;)Landroid/net/wifi/WifiManager$MulticastLock;"),
+                &[JValue::Object(&tag)],
+            )?
+            .l()?;
+        env.call_method(
+            &lock,
+            jni_str!("setReferenceCounted"),
+            jni_sig!("(Z)V"),
+            &[JValue::Bool(false)],
+        )?;
+        env.call_method(&lock, jni_str!("acquire"), jni_sig!("()V"), &[])?;
+        env.new_global_ref(&lock)
+    }
+
     fn with_connectivity_manager<F>(f: F) -> Result<OsNetworkSnapshot, String>
     where
         F: FnOnce(&mut Env, &JObject) -> jni::errors::Result<OsNetworkSnapshot>,
@@ -202,15 +294,9 @@ mod imp {
 }
 
 #[cfg(target_os = "android")]
-pub use imp::probe_connectivity_truth;
+pub use imp::{hold_multicast_lock, probe_connectivity_truth};
 
 #[cfg(not(target_os = "android"))]
 pub fn probe_connectivity_truth() -> crate::p2p::network_transport::OsNetworkSnapshot {
     crate::p2p::network_transport::OsNetworkSnapshot::default()
-}
-
-/// `:p2p` Android connectivity callback — refresh OS truth and wake libp2p handover recovery.
-pub fn on_connectivity_changed() {
-    crate::p2p::network_transport::refresh_os_network_truth();
-    crate::p2p::notify_network_change();
 }

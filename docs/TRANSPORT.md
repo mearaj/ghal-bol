@@ -113,7 +113,7 @@ Wired in `ghalbol_core/src/connect/`:
 | **Tokio TCP + Noise XX + channel mux** | Encrypted call sessions; `/ghalbol/msg/1.0.0` for call signaling frames |
 | **mDNS-SD** (`lan_discovery.rs`, `_ghalbol._tcp.local`) | LAN peer discovery |
 | **Coord bridge** (`bridge_client.rs`, `bridge_ws.rs`) | WAN call byte pipe via coord WSS |
-| **OS network truth** | `p2p/network_transport.rs`, `android_network.rs`, `linux_network.rs` |
+| **OS network truth** | `p2p/network_transport.rs`, `android_network.rs`, `linux_network.rs`, `windows_network.rs` |
 
 Identity: **secp256k1** device key ([IDENTITY.md](IDENTITY.md)). Product WAN discovery is **coord only** (plus delivery for text); no DHT or public bootstrap peers.
 
@@ -226,7 +226,7 @@ Wi‑Fi return → notify_network_change → fresh ephemeral listen + mDNS publi
 
 | Layer | Source | Used for |
 |-------|--------|----------|
-| **OS default transport** | Android `ConnectivityManager` + validated capability; Linux default route iface + `wl*` operstate | `has_active_lan()`, `on_mobile_data_path()`, `profile=` |
+| **OS default transport** | Android `ConnectivityManager` + validated capability; Linux default route iface + `wl*` operstate; Windows adapter carrying the default route (UDP route probe + adapter name) | `has_active_lan()`, `on_mobile_data_path()`, `profile=` |
 | **Wi‑Fi link** | Android TRANSPORT_WIFI; Linux operstate | `platform_wifi_linked`, LAN recovery when Wi‑Fi returns |
 | **Interface hints** | `if_addrs` | Listen bind, logging — **not** primary mode switch |
 | **Remote peer path** | mDNS `Discovered` / `Expired` | Whether **that contact** is on LAN |
@@ -241,6 +241,7 @@ Wi‑Fi return → notify_network_change → fresh ephemeral listen + mDNS publi
 | `p2p/network_transport.rs` | `OsNetworkSnapshot`, `merge_os_network_truth`, `refresh_os_network_truth` |
 | `android_network.rs` | JNI on connectivity notify |
 | `linux_network.rs` | Default route + Wi‑Fi operstate |
+| `windows_network.rs` | Default-route adapter (no packet sent) classified by name: Wi‑Fi / Cellular / Ethernet |
 | `connect/worker.rs` | Upkeep calls `refresh_os_network_truth` |
 
 ### Rules agents must not violate
@@ -330,7 +331,7 @@ Whenever policy waits on work with **unknown duration** (TCP connect, bridge WSS
 
 ## Multiple coord servers
 
-Configure **`GHALBOL_COORD_URLS`** in `env/.env.development` / `.env.production` (JSON array or comma-separated).
+Configure **`GHALBOL_COORD_URLS`** in `apps/ghalbol/env/development.env` / `production.env` (JSON array or comma-separated; a local `env/.env.<profile>` overrides it on desktop — see [env/README.md](../env/README.md)).
 
 | Action | Policy |
 |--------|--------|
@@ -398,7 +399,7 @@ The UI calls `ghalbol_core::host`. Do not rename without a version bump:
 | text via delivery when URL set | `text_transport.rs`, `delivery_runtime.rs` |
 | Guest scans host QR | `connect_invite_v1.rs` |
 | No full connect stop on contact upsert | `register_dm_peer` |
-| OS default route drives `profile=` | `network_transport.rs`, `android_network.rs`, `linux_network.rs` |
+| OS default route drives `profile=` | `network_transport.rs`, `android_network.rs`, `linux_network.rs`, `windows_network.rs` |
 | Register when publishable endpoints **change** | `coord_runtime.rs` |
 | mDNS LAN dials from **events** only | `connect/worker.rs`, `lan_discovery.rs` |
 

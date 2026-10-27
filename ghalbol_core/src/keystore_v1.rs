@@ -11,6 +11,9 @@ use zeroize::Zeroize;
 use crate::identity::{self, Identity, IdentityAlgorithm};
 
 const KEYSTORE_V1_AAD_PREFIX: &[u8] = b"ghalbol.keystore.v1";
+/// AAD prefix written before the `ghal_bol` → `ghalbol` rename. Unlock still accepts it so
+/// existing keystores and exported backups keep working; new writes use the current prefix.
+const LEGACY_KEYSTORE_V1_AAD_PREFIX: &[u8] = b"ghal_bol.keystore.v1";
 
 #[derive(Debug, Error)]
 pub enum KeystoreError {
@@ -159,23 +162,19 @@ fn derive_aead_key(master: &[u8; 32], purpose: &'static [u8]) -> [u8; 32] {
     okm
 }
 
-fn aad_legacy_identity() -> Vec<u8> {
-    aad(b"identity")
-}
-
-fn aad_for_algorithm(algorithm: IdentityAlgorithm) -> Vec<u8> {
+fn aad_for_algorithm(prefix: &[u8], algorithm: IdentityAlgorithm) -> Vec<u8> {
     if algorithm == IdentityAlgorithm::Secp256k1 {
         // Legacy on-disk keystores (no identity_algorithm field) use this AAD.
-        aad_legacy_identity()
+        aad(prefix, b"identity")
     } else {
         let purpose = format!("identity:{}", algorithm.wire_id());
-        aad(purpose.as_bytes())
+        aad(prefix, purpose.as_bytes())
     }
 }
 
-fn aad(purpose: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(KEYSTORE_V1_AAD_PREFIX.len() + 1 + purpose.len());
-    v.extend_from_slice(KEYSTORE_V1_AAD_PREFIX);
+fn aad(prefix: &[u8], purpose: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(prefix.len() + 1 + purpose.len());
+    v.extend_from_slice(prefix);
     v.push(b':');
     v.extend_from_slice(purpose);
     v
@@ -240,6 +239,24 @@ fn encrypt_identity_secret(
     public_key: &[u8],
     kdf_override: Option<KeystoreV1KdfParams>,
 ) -> Result<KeystoreV1, KeystoreError> {
+    encrypt_identity_secret_with_aad_prefix(
+        password,
+        algorithm,
+        secret,
+        public_key,
+        kdf_override,
+        KEYSTORE_V1_AAD_PREFIX,
+    )
+}
+
+fn encrypt_identity_secret_with_aad_prefix(
+    password: &str,
+    algorithm: IdentityAlgorithm,
+    secret: &[u8],
+    public_key: &[u8],
+    kdf_override: Option<KeystoreV1KdfParams>,
+    aad_prefix: &[u8],
+) -> Result<KeystoreV1, KeystoreError> {
     let mut rng = OsRng;
     let kdf = if let Some(k) = kdf_override {
         k
@@ -265,7 +282,7 @@ fn encrypt_identity_secret(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: &sk_plain,
-                aad: &aad_for_algorithm(algorithm),
+                aad: &aad_for_algorithm(aad_prefix, algorithm),
             },
         )
         .map_err(|_| KeystoreError::Invalid("encrypt identity failed"))?;
@@ -398,16 +415,20 @@ pub fn unlock_keystore_v1(
     let master = derive_master_key(password.as_bytes(), &keystore.kdf)?;
     let mut identity_key = derive_aead_key(&master, b"identity");
     let aead = ChaCha20Poly1305::new(Key::from_slice(&identity_key));
-    let sk_plain = aead
-        .decrypt(
-            Nonce::from_slice(&keystore.identity_nonce),
-            Payload {
-                msg: &keystore.identity_ciphertext,
-                aad: &aad_for_algorithm(algorithm),
-            },
-        )
-        .map_err(|_| KeystoreError::Decrypt)?;
     identity_key.zeroize();
+    let sk_plain = [KEYSTORE_V1_AAD_PREFIX, LEGACY_KEYSTORE_V1_AAD_PREFIX]
+        .iter()
+        .find_map(|prefix| {
+            aead.decrypt(
+                Nonce::from_slice(&keystore.identity_nonce),
+                Payload {
+                    msg: &keystore.identity_ciphertext,
+                    aad: &aad_for_algorithm(prefix, algorithm),
+                },
+            )
+            .ok()
+        })
+        .ok_or(KeystoreError::Decrypt)?;
 
     let id = decrypted_from_secret(algorithm, &sk_plain)?;
     if id.public_key.as_slice() != keystore.identity_public_key.as_slice() {
@@ -458,6 +479,29 @@ mod tests {
         let legacy: KeystoreV1 = serde_json::from_value(v).unwrap();
         let id2 = unlock_keystore_v1("pass123", &legacy).unwrap();
         assert_eq!(id.public_key_hex(), id2.public_key_hex());
+    }
+
+    #[test]
+    fn pre_rename_aad_keystores_still_unlock() {
+        for algorithm in [IdentityAlgorithm::Secp256k1, IdentityAlgorithm::Ed25519] {
+            let secret = identity::generate_secret(algorithm).unwrap();
+            let id = decrypted_from_secret(algorithm, &secret).unwrap();
+            let legacy = encrypt_identity_secret_with_aad_prefix(
+                "pw",
+                algorithm,
+                &secret,
+                &id.public_key,
+                None,
+                LEGACY_KEYSTORE_V1_AAD_PREFIX,
+            )
+            .unwrap();
+            let unlocked = unlock_keystore_v1("pw", &legacy).unwrap();
+            assert_eq!(unlocked.public_key_hex(), id.public_key_hex());
+            assert!(matches!(
+                unlock_keystore_v1("wrong", &legacy),
+                Err(KeystoreError::Decrypt)
+            ));
+        }
     }
 
     #[test]

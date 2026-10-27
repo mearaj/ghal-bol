@@ -47,6 +47,7 @@ pub fn set_desktop_speaker_on(on: bool) {
     SPEAKER_ON.store(on, Ordering::Relaxed);
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn desktop_speaker_on() -> bool {
     SPEAKER_ON.load(Ordering::Relaxed)
 }

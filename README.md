@@ -37,36 +37,34 @@ ghalbol/
 │   ├── ghalbol-android-dev/      # `cargo ghalbol-android-dev` → android-dev.sh
 │   └── ghalbol-windows-dev/      # `cargo ghalbol-windows-dev` → windows-dev.sh
 ├── dist/                         # Build outputs (gitignored)
-│   ├── windows/                  # Production Windows MSI package
-│   │   ├── package.wxs           # WiX installer manifest
-│   │   ├── install.ps1           # PowerShell installer
-│   │   ├── uninstall.ps1         # PowerShell uninstaller
-│   │   ├── Setup.bat             # Double-click entry point (installer)
-│   │   └── Uninstall.bat         # Double-click entry point (uninstaller)
+│   ├── windows/                  # Production Windows package (Setup.bat per-user install)
 │   └── windows-dev/              # Development Windows package
 ├── scripts/                      # Shared build/packaging tooling
 │   ├── load-ghalbol-env.sh       # Env loader (source into other scripts)
 │   ├── desktop-ids.sh            # Desktop install paths, manifest helpers
-│   ├── windows-env.sh            # Windows cross-compile setup, resource staging
+│   ├── desktop-resources.sh      # Desktop package layout (app + Makepad resources)
 │   ├── stage-desktop-package.sh  # Package staging (installers + manifests)
+│   ├── linux/                    # install.sh / uninstall.sh shipped in the Linux tarball
+│   ├── windows/                  # Setup.bat, install.ps1, uninstall.ps1 for Windows packages
+│   ├── windows-env.sh            # Windows cross-compile setup
 │   ├── cargo-target-dir.sh       # Resolve cargo target directory
 │   ├── package-windows.sh        # Production Windows build
 │   ├── package_linux_release.sh  # Linux x86_64 release tarball
-│   ├── build_android_app.sh      # Android APK build
+│   ├── build_android_app.sh      # Android APK / AAB build (cargo-makepad)
+│   ├── check_android.sh          # Android type-check without the SDK (CI)
 │   └── with-android-env.sh       # Android NDK environment setup
-├── vendor/                       # Vendored dependencies (Makepad 2)
-├── env/                          # Legacy workspace-level env (for coord/delivery servers)
+├── env/                          # Optional developer overrides (gitignored .env.*) + templates
 ├── web/                          # ghalbol.com static site + Firebase hosting
 └── .gitignore                    # Ignored files pattern
 ```
 
 ## Key Design Decisions
 
-### No Shared Core Library (Like Kumkaj)
-- Each `apps/<product>/` owns all its code independently
-- `ghalbol_core` is a **library** crate (shared because it serves multiple products), not a product core
-- Future GhalBol products under `apps/` will copy from the best-fitting sibling, then diverge
-- Reuse is **copy-then-diverge**, duplication is preferable to coupling
+### Apps own their UI; `ghalbol_core` owns product logic
+- Each `apps/<product>/` owns its UI, resources, env and scripts
+- `ghalbol_core` is the Rust library with product logic (crypto, keystore, delivery, calls, contacts, transcripts) — see `AGENTS.md`
+- Future GhalBol products under `apps/` copy UI code from the best-fitting sibling, then diverge
+- For app code, reuse is **copy-then-diverge**; duplication is preferable to coupling
 
 ### Brand Naming Convention
 | Type | Convention | Example |
@@ -82,7 +80,11 @@ ghalbol/
 Each app under `apps/` has its own `env/` directory:
 - `development.env` — dev coord/delivery URLs, debug app ID
 - `production.env` — prod URLs, production app ID
-- `build.rs` bakes the selected env into the binary at compile time
+- `build.rs` bakes the selected env into the binary at compile time: `GHALBOL_ENV` when set
+  (the scripts set it), else the Cargo profile (`--release` → production)
+- `GHALBOL_APP_ID` from that file picks the data directory and desktop id
+- At startup the process environment wins, then an optional `env/.env.<profile>` in the working
+  directory (developer override, gitignored — see [`env/README.md`](env/README.md)), then the baked values
 
 ### Development Workflow
 ```bash
@@ -95,7 +97,7 @@ cargo ghalbol-windows-dev      # → dist/windows-dev/
 # Android dev APK
 cargo ghalbol-android-dev
 
-# Production Windows MSI package
+# Production Windows package (Setup.bat per-user install)
 ./scripts/package-windows.sh  # → dist/windows/
 
 # Production Linux release
@@ -115,7 +117,7 @@ When adding a new communication product under the GhalBol brand:
 4. **Follow the per-app env pattern**: `env/development.env` + `env/production.env`
 5. **Per-app scripts**: `dev.sh`, `windows-dev.sh`, `android-dev.sh`
 
-See [`docs/GHALBOL_BRAND.md`](GHALBOL_BRAND.md) for brand doctrine and naming conventions.
+See [`docs/GHALBOL_BRAND.md`](docs/GHALBOL_BRAND.md) for brand doctrine and naming conventions.
 
 ---
 

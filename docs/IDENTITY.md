@@ -172,7 +172,7 @@ Servers assist presence and endpoint discovery; they do not issue or own messagi
 | Export backup | Backup sheet | `export_keystore` |
 | Delete identity | Unlock | `delete_identity` |
 
-See `ghalbol_core/src/host.rs` and `ghalbol_app/src/main.rs`.
+See `ghalbol_core/src/host.rs` and `apps/ghalbol/src/main.rs`.
 
 ---
 

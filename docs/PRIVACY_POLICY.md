@@ -1,6 +1,6 @@
 # Ghal Bol — Privacy Policy
 
-**Last updated:** June 2026  
+**Last updated:** October 2026  
 **App:** Ghal Bol (`com.ghalbol`)  
 **Publisher:** Ghal Bol / [ghalbol.com](https://ghalbol.com)
 
@@ -13,7 +13,7 @@ This Privacy Policy explains how the Ghal Bol mobile and desktop applications (�
 | Topic | What we do |
 |--------|------------|
 | Account | **No** phone number, email, or cloud account required |
-| Messages | **Not** collected or stored on Ghal Bol servers; sent **P2P** when peers are online |
+| Messages | End-to-end encrypted on your device; the delivery server holds only **ciphertext it cannot read**, until the recipient acknowledges it |
 | Identity | **Local** cryptographic key on your device; public key used for invites and discovery |
 | Coordination server | Stores **only** presence and connection endpoints (see below) |
 | Ads / analytics | **No** advertising SDKs; **no** third-party analytics in the core app |
@@ -29,7 +29,7 @@ This policy applies to anyone who installs or uses Ghal Bol and, where relevant,
 
 ## What Ghal Bol is (and is not)
 
-Ghal Bol provides **encrypted 1:1 text chat**, **delivery/read receipts**, and **voice/video calls** between people who connect via **QR code or invite link**. It is **not** a traditional cloud messenger: there is **no central chat archive** operated by us, and **offline message delivery to the cloud** is not provided. Messages are synchronized when **both peers are online** and connected over the network.
+Ghal Bol provides **encrypted 1:1 text chat**, **delivery/read receipts**, and **voice/video calls** between people who connect via **QR code or invite link**. It is **not** a traditional cloud messenger: there is **no central chat archive** operated by us. When the recipient is offline, a message waits on the delivery server as end-to-end encrypted ciphertext and is removed once the recipient's device acknowledges it (or when it expires). Each device keeps its own chat history.
 
 ---
 
@@ -107,7 +107,7 @@ Invites (e.g. `https://ghalbol.com/connect/<public_key_hex>` or `ghalbol://conne
 
 ## Android background processing
 
-On Android, networking runs in the app process. An incoming call and a locked keystore each post a notification. After a reboot, open the app once so it can connect again.
+On Android, networking runs in the app process (there is no separate background service). Incoming calls, new messages and a locked keystore post notifications. A new-message notification shows the contact's name and only "New message", "Voice message" or "File" — never the message text. After a reboot, open the app once so it can connect again.
 
 ---
 
@@ -119,12 +119,11 @@ The app requests OS permissions only for features you use:
 |------------|-----|
 | **Internet / network state** | P2P connections and coordination lookups |
 | **Wi‑Fi multicast** (Android) | Local (LAN) peer discovery via mDNS |
-| **Camera** | Scan invitation QR codes |
-| **Microphone** | Voice and video calls |
-| **Notifications** (Android) | Optional alerts when enabled |
-| **Foreground service** (Android) | Background P2P process described above |
+| **Camera** | Scan invitation QR codes; video calls |
+| **Microphone** | Voice and video calls; voice messages |
+| **Notifications** (Android) | Incoming calls, new messages, unlock reminder |
 
-You can deny permissions; related features may not work (e.g. no QR scan without camera).
+You can deny permissions; related features may not work (e.g. no QR scan without camera). Files you send, back up or import are chosen in the system file picker, which needs no storage permission.
 
 ---
 

@@ -12,10 +12,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # AGENTS.md: no warning suppressions — workspace crates must build warning-free.
+  # (Cargo caps lints for registry/git dependencies, so this only affects our crates.)
+  RUSTFLAGS: -D warnings
 
 jobs:
   rust:
-    name: Rust tests
+    name: Rust tests (Linux)
     runs-on: ubuntu-latest
     env:
       GHALBOL_COORD_URLS: ""
@@ -33,8 +36,12 @@ jobs:
             exit 1
           fi
 
-      - name: Install native deps (cpal/ALSA + libopus for voice)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev pkg-config
+      - name: Install native deps (cpal/ALSA + libopus for voice, desktop UI libraries)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libopus-dev pkg-config \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+            libwayland-dev libxkbcommon-dev libpulse-dev clang
 
       - name: Unit tests (ghalbol_core)
         run: cargo test -p ghalbol_core --lib
@@ -45,11 +52,75 @@ jobs:
       - name: Unit tests (ghalbol_delivery)
         run: cargo test -p ghalbol_delivery
 
-      - name: Install desktop UI libraries
-        run: sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libpulse-dev clang
+      - name: Unit tests (ghalbol_ddns)
+        run: cargo test -p ghalbol_ddns
 
-      - name: Check desktop app
-        run: cargo check -p ghalbol_app
+      - name: App tests (languages, bubbles, navigation history)
+        run: cargo test -p ghalbol_app
 
-      - name: App language tests
-        run: "cargo test -p ghalbol_app --bin ghalbol_app -- i18n::"
+      - name: Check whole workspace (all targets)
+        run: cargo check --workspace --all-targets
+
+  windows:
+    name: Windows cross-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 nasm cmake
+
+      - name: Check desktop app for Windows
+        run: cargo check -p ghalbol_app --target x86_64-pc-windows-gnu
+
+  android:
+    name: Android check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install build tools (static Opus for Android)
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: Check app + core the way cargo-makepad builds them
+        # Runner images preinstall the NDK; ANDROID_NDK_LATEST_HOME is set by the image.
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" ./scripts/check_android.sh
+
+  scripts:
+    name: Packaging scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Bash syntax
+        run: |
+          for f in scripts/*.sh scripts/linux/*.sh apps/ghalbol/scripts/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: PowerShell syntax (Windows installer)
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem scripts/windows/*.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors) | Out-Null
+            foreach ($e in $errors) { Write-Error "$($file.Name): $($e.Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }

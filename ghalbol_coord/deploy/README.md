@@ -10,6 +10,8 @@
 
 Full home steps: **[COORD1_HOME.md](COORD1_HOME.md)**.
 
+> **Redeploy with the apps.** Commit `2dd0f51` renamed `ghal_bol` → `ghalbol` in the register / bridge signing domains (`ghalbol:register:v1`, `ghalbol:bridge:request:v1`), env names (`GHALBOL_COORD_*`) and the data dir (`com.ghalbol.coord/ghalbol_server/`). A coord built before it rejects current clients, and current coord rejects older clients. Re-run the install script from the same commit as the apps; the old presence DB is not needed (rows expire anyway).
+
 ```bash
 # credentials once, then:
 ./ghalbol_coord/deploy/install_coord1_home.sh

@@ -33,7 +33,7 @@ The Makepad app (`ghalbol_app`) calls **`ghalbol_core::host`** in-process. After
 
 ## Client configuration
 
-Set coord base URLs in `env/.env.development` (debug) or `env/.env.production` (release):
+Set coord base URLs in `apps/ghalbol/env/development.env` / `production.env` (baked into the app — see [env/README.md](../env/README.md); a local `env/.env.<profile>` overrides them for desktop runs):
 
 ```bash
 GHALBOL_COORD_URLS=["https://coord.ghalbol.com"]

@@ -17,18 +17,18 @@ This directory contains the **Ghal Bol** E2EE messenger app, built on Makepad 2.
 | `src/main.rs` | Makepad 2 UI shell (~5200 lines). Hub, chat, invites, calls |
 | `src/i18n.rs` | Multi-language support (25+ languages) |
 | `src/phrases.rs` | Phrase table for all supported languages |
-| `resources/fonts/` | Noto Sans global scripts + FA icons + LXGW CJK + Noto Emoji |
-| `resources/android/` | Android Manifest template |
+| `resources/fonts/` | Noto Sans scripts + Font Awesome (CJK LXGW and Noto Emoji come from `makepad_widgets`) |
+| `resources/android/` | Android manifest template, launcher icons, launch theme |
 | `env/development.env` | Dev coord/delivery URLs, debug app ID |
 | `env/production.env` | Prod coord/delivery URLs |
-| `build.rs` | Bakes env file into binary at compile time |
+| `build.rs` | Bakes the selected env file into the binary (`GHALBOL_ENV`, else Cargo profile) |
 
 ## Build & Run
 
 ```bash
 # Desktop dev (hot reload + Tweaker F12)
 cargo ghalbol-dev            # via tools/ghalbol-dev wrapper
-makepad run -p ghalbol_app  # direct Makepad command
+cargo run -p ghalbol_app     # plain debug run (development env)
 
 # Windows dev package
 cargo ghalbol-windows-dev    # → dist/windows-dev/
@@ -39,7 +39,7 @@ cargo ghalbol-android-dev
 # Production Linux release
 ./scripts/package_linux_release.sh
 
-# Production Windows MSI
+# Production Windows package (Setup.bat per-user install)
 ./scripts/package-windows.sh
 ```
 
@@ -61,9 +61,14 @@ cargo ghalbol-android-dev
 
 ## Data Paths
 
-| Build | XDG_DATA_HOME path |
-|-------|-------------------|
-| Debug | `~/.local/share/com.ghalbol.debug/` |
-| Release | `~/.local/share/com.ghalbol/` |
+The data directory follows `GHALBOL_APP_ID` (`com.ghalbol` or `com.ghalbol.debug`).
 
-Contains: `keystore_v1.json`, `contacts_v1.json`, `chat_transcript_v1.json`, `preferences_v1.json`
+| Platform | Release (`com.ghalbol`) | Development (`com.ghalbol.debug`) |
+|----------|-------------------------|-----------------------------------|
+| Linux | `~/.local/share/com.ghalbol/` | `~/.local/share/com.ghalbol.debug/` |
+| Windows | `%LOCALAPPDATA%\com.ghalbol\data\` | `%LOCALAPPDATA%\com.ghalbol\data\com.ghalbol.debug\` |
+| Android | app files dir | app files dir `/com.ghalbol.debug/` |
+
+The data directory holds `keystore_v1.json` and `preferences_v1.json`; contacts, the transcript,
+voice notes and attachments live in its `ghalbol/` subfolder. Builds from before the
+`ghal_bol` → `ghalbol` rename used `ghal_bol/`; the app moves it on first start.

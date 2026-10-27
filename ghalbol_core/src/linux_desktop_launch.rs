@@ -48,11 +48,11 @@ pub fn install_user_autostart() {
     let Ok(home) = std::env::var("HOME") else {
         return;
     };
-    let app_id = if cfg!(debug_assertions) {
-        "com.ghalbol.debug"
-    } else {
-        "com.ghalbol"
-    };
+    let app_id = crate::host::default_app_namespace();
+    let label = std::env::var("GHALBOL_APP_LABEL")
+        .ok()
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| "Ghal Bol".to_string());
     // Install a Freedesktop icon so the dock / app menu show Ghal Bol, not a generic glyph.
     let icon_dir = std::path::PathBuf::from(format!(
         "{home}/.local/share/icons/hicolor/128x128/apps"
@@ -62,14 +62,12 @@ pub fn install_user_autostart() {
         let _ = std::fs::write(&icon_path, include_bytes!("../../apps/ghalbol/resources/icon_128.png"));
     }
     let autostart = format!(
-        "[Desktop Entry]\nType=Application\nName=Ghal Bol\nExec={exe}\nIcon={app_id}\nStartupNotify=true\nX-GNOME-Autostart-enabled=true\n",
+        "[Desktop Entry]\nType=Application\nName={label}\nExec={exe}\nIcon={app_id}\nStartupNotify=true\nX-GNOME-Autostart-enabled=true\n",
         exe = exe.display(),
-        app_id = app_id
     );
     let applications = format!(
-        "[Desktop Entry]\nType=Application\nName=Ghal Bol\nExec={exe} %u\nIcon={app_id}\nStartupNotify=true\nMimeType=x-scheme-handler/ghalbol;\n",
+        "[Desktop Entry]\nType=Application\nName={label}\nExec={exe} %u\nIcon={app_id}\nStartupNotify=true\nMimeType=x-scheme-handler/ghalbol;\n",
         exe = exe.display(),
-        app_id = app_id
     );
     let auto_dir = std::path::PathBuf::from(format!("{home}/.config/autostart"));
     let apps_dir = std::path::PathBuf::from(format!("{home}/.local/share/applications"));

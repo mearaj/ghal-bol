@@ -119,6 +119,18 @@ fn attach_root(app_namespace: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
+/// Copy picker bytes to `{attach}/outgoing/{unique}/{name}` so the file keeps its name.
+#[cfg(target_os = "android")]
+pub fn stage_picked_file(app_namespace: &str, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let mut p = attach_root(app_namespace)?;
+    p.push("outgoing");
+    p.push(format!("{}-{:08x}", now_ms(), OsRng.next_u32()));
+    fs::create_dir_all(&p).map_err(|e| format!("attach outgoing dir: {e}"))?;
+    p.push(sanitize_file_name(name));
+    fs::write(&p, bytes).map_err(|e| format!("attach copy: {e}"))?;
+    Ok(p)
+}
+
 fn downloads_root(app_namespace: &str) -> Result<PathBuf, String> {
     let mut p = attach_root(app_namespace)?;
     p.push("downloads");

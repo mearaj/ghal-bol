@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Stage install/uninstall helpers + manifest into a desktop package folder.
-# Usage (after binary + resources are in $OUT):
+# Usage (after the binary + resources are in $OUT — see desktop-resources.sh):
 #   source scripts/desktop-ids.sh
 #   stage_desktop_package "$OUT" linux|windows
+#
+# Linux package:   <bin>, run.sh, install.sh, uninstall.sh, desktop-ids.sh, install-manifest.env
+# Windows package: ghalbol-app.exe, Setup.bat, Uninstall.bat, install.ps1, uninstall.ps1,
+#                  install-manifest.env
 stage_desktop_package() {
   local out="${1:?}"
   local os="${2:?}" # linux | windows
@@ -10,7 +14,6 @@ stage_desktop_package() {
   local scripts="$root/scripts"
 
   mkdir -p "$out"
-  cp -f "$scripts/desktop-ids.sh" "$out/desktop-ids.sh"
 
   # Manifest baked into the package (install copies it into the install dir).
   {
@@ -24,24 +27,20 @@ stage_desktop_package() {
   } >"$out/install-manifest.env"
 
   if [[ "$os" == "linux" ]]; then
-    cp -f "$scripts/install-linux.sh" "$out/install.sh"
-    cp -f "$scripts/uninstall-linux.sh" "$out/uninstall.sh"
-    chmod +x "$out/install.sh" "$out/uninstall.sh" "$out/desktop-ids.sh"
-    # Portable launcher without full install.
-    cat >"$out/run.sh" <<'EOF'
+    cp -f "$scripts/desktop-ids.sh" "$out/desktop-ids.sh"
+    cp -f "$scripts/linux/install.sh" "$out/install.sh"
+    cp -f "$scripts/linux/uninstall.sh" "$out/uninstall.sh"
+    # Portable launcher without a full install. Resources resolve beside the binary.
+    cat >"$out/run.sh" <<EOF
 #!/usr/bin/env bash
-set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MAKEPAD_PACKAGE_DIR=.
-cd "$ROOT"
-exec "$ROOT/bin/ghalbol" "$@"
+exec "\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)/$(desktop_bin_name)" "\$@"
 EOF
-    chmod +x "$out/run.sh"
+    chmod +x "$out/install.sh" "$out/uninstall.sh" "$out/run.sh" "$out/desktop-ids.sh"
   else
-    cp -f "$scripts/install-windows.ps1" "$out/install.ps1"
-    cp -f "$scripts/uninstall-windows.ps1" "$out/uninstall.ps1"
+    cp -f "$scripts/windows/install.ps1" "$out/install.ps1"
+    cp -f "$scripts/windows/uninstall.ps1" "$out/uninstall.ps1"
     # Double-click entry points (opening .ps1 in Explorer often launches Notepad).
-    cp -f "$scripts/Setup.bat" "$out/Setup.bat"
-    cp -f "$scripts/Uninstall.bat" "$out/Uninstall.bat"
+    cp -f "$scripts/windows/Setup.bat" "$out/Setup.bat"
+    cp -f "$scripts/windows/Uninstall.bat" "$out/Uninstall.bat"
   fi
 }

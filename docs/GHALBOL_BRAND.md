@@ -6,12 +6,12 @@
 
 | Product | Type | Status | Description |
 |---------|------|--------|-------------|
-| **Ghal Bol** (chat) | E2EE messenger | Shipping | Voice/video calls + text via delivery mailbox. Local transcripts, device-owned identity. See [`ghalbol_chat/`](../ghalbol_chat/) |
+| **Ghal Bol** (chat) | E2EE messenger | Shipping | Voice/video calls + text via delivery mailbox. Local transcripts, device-owned identity. See [`apps/ghalbol/`](../apps/ghalbol/) |
 
 ## Architecture doctrine
 
-- The only shared thing between GhalBol products is the **common workspace**: vendored dependencies, build tooling, and shared infrastructure crates (e.g., `ghalbol_coord`, `ghalbol_delivery`).
-- Each product under `ghalbol_app/` owns all of its app/UI code independently.
+- GhalBol products share the **common workspace**: build tooling, the `ghalbol_core` library, and infrastructure crates (`ghalbol_coord`, `ghalbol_delivery`, `ghalbol_ddns`).
+- Each product under `apps/<product>/` owns all of its app/UI code independently.
 - Infrastructure crates (`ghalbol_coord`, `ghalbol_delivery`) are shared across products where they serve a common need — but **no shared core product library** between apps.
 
 ## Naming convention
@@ -21,7 +21,7 @@
 | Brand | CamelCase (GhalBol) | ghalbol.com, GhalBol family |
 | Product name | Title case with space | Ghal Bol |
 | Package names | kebab-case | `ghalbol-chat`, `ghalbol-core` |
-| Directory names | snake_case or kebab-case | `ghalbol_app/`, `ghalbol_chat/` |
+| Directory names | snake_case or kebab-case | `apps/ghalbol/`, `ghalbol_core/` |
 | App IDs (production) | `com.ghalbol.<product>` | `com.ghalbol`, `com.ghalbol.debug` |
 | App IDs (development) | `com.ghalbol.<product>.debug` | `com.ghalbol.debug` |
 
@@ -36,25 +36,20 @@ ghalbol-workspace/          # Brand root
 │   ├── DESIGN.md           # Architecture design
 │   ├── TRANSPORT.md        # Transport policy
 │   └── ...                 # Other global docs
-├── ghalbol_chat/           # Current product (replaces apps/<app> for now)
-│   ├── Cargo.toml          # App crate
-│   ├── src/                # App source
-│   ├── resources/          # Fonts, icons
-│   └── env/                # Per-app env
 ├── ghalbol_core/          # Shared core library (product logic)
 ├── ghalbol_coord/         # Coordination server (shared infra)
 ├── ghalbol_delivery/      # Delivery server (shared infra)
 ├── ghalbol_ddns/          # DDNS helper (shared infra)
-├── apps/                   # Future products live here: apps/<product>/
+├── apps/                   # Products: apps/ghalbol/ (Ghal Bol chat) today
+│   └── ghalbol/            # App crate `ghalbol_app`: src/, resources/, env/, scripts/
 ├── tools/                  # Per-product dev tooling: tools/<product>-dev, tools/<product>-windows-dev
-├── dist/                   # Build outputs: dist/windows/, dist/linux/
-├── scripts/                # Shared build/packaging tooling
-└── vendor/                 # Vendored dependencies (Makepad 2)
+├── dist/                   # Build outputs: dist/windows/, dist/windows-dev/ (Linux tarball → web/downloads/)
+└── scripts/                # Shared build/packaging tooling
 ```
 
 ## Future products
 
-Future communication products under the GhalBol brand will live in `apps/<product>/` following the same structure as `ghalbol_chat/` (or `apps/courier/` from the Kumkaj model). Each product gets its own:
+Future communication products under the GhalBol brand will live in `apps/<product>/` following the same structure as `apps/ghalbol/`. Each product gets its own:
 - App crate with Keystore ID
 - Environment files (development.env, production.env)
 - Resource bundles (fonts, icons)

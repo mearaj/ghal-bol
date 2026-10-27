@@ -2,9 +2,9 @@
 
 **Status: product architecture — billing and Tier 3 relay are not implemented in this repo yet.**
 
-Ghal Bol’s **core messaging** (Tier 1 direct sync, optional Tier 2 peer relay) stays independent of payment systems and blockchain infrastructure. Optional **premium infrastructure** (Tier 3 backup relay) is a separate product layer.
+Ghal Bol’s **core messaging** stays independent of payment systems and blockchain infrastructure. Optional **premium infrastructure** (Tier 3 backup relay) is a separate product layer.
 
-**Tiers:** Tier 1 = direct P2P + coord (free, shipping); Tier 2 = peer blob relay (planned); Tier 3 = paid backup relay (this doc). See [TRANSPORT.md](TRANSPORT.md) and [IDENTITY.md](IDENTITY.md).
+**Tiers:** Tier 1 = coord (presence + WAN call bridge) and the `ghalbol_delivery` text mailbox, which holds ciphertext only until the recipient acks it, within a TTL and a per-user quota (free, shipping — [GHALBOL_DELIVERY.md](GHALBOL_DELIVERY.md)); Tier 2 = peer blob relay (planned); Tier 3 = paid backup relay with longer retention (this doc). See [TRANSPORT.md](TRANSPORT.md) and [IDENTITY.md](IDENTITY.md).
 
 ---
 
@@ -18,7 +18,7 @@ Design goals:
 - optional premium reliability when users want it
 - simple payment experience without turning the app into a wallet
 
-Premium does **not** change who owns transcripts or private keys. It only changes whether encrypted blobs may be held temporarily on Ghal Bol-operated infrastructure.
+Premium does **not** change who owns transcripts or private keys. The free mailbox already holds encrypted blobs briefly on Ghal Bol-operated infrastructure; premium only changes how long and how much.
 
 ---
 
@@ -37,7 +37,7 @@ Examples aligned with **Tier 3** (paid backup relay):
 - permanent centralized transcript archives
 - replacing E2E encryption with server-readable mail
 
-`ghalbol_coord` **today** is Tier 1 coordination only (register, heartbeat, peer lookup). It is **not** Tier 3 billing or blob storage.
+`ghalbol_coord` **today** is Tier 1 coordination only (register, heartbeat, peer lookup, call bridge). `ghalbol_delivery` is the Tier 1 mailbox (ciphertext until ack). Neither does Tier 3 billing or long-term blob storage.
 
 ---
 

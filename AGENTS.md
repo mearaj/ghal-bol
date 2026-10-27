@@ -73,7 +73,9 @@
 | Display ticks (no policy) | **Makepad** | transcript `delivery` rendered in the chat column |
 | Start network / dm peers | **Rust** | `host::start_network` |
 | Poll loop (UI refresh only) | **Makepad** | `App::drain_events` |
-| OS network hints (Wi‑Fi link, default route) | **Rust** | `android_network.rs`, `linux_network.rs`, `network_transport.rs` |
+| OS network hints (Wi‑Fi link, default route) | **Rust** | `android_network.rs`, `linux_network.rs`, `windows_network.rs`, `network_transport.rs` |
+| New-message notifications | **Rust** | `message_notify.rs` (fired from `dm_event_handler` when unread bumps; cleared by `set_open_room`) |
+| Android camera (calls + QR scan), document picker reads | **Rust** | `android_camera.rs`, `android_qr.rs`, `incoming_call_android.rs` (`read_content_uri`) |
 
 ## Message state (do not break this)
 
@@ -109,20 +111,26 @@ cargo ghalbol-android-dev      # Android debug APK
 # Direct cargo
 cargo run -p ghalbol_app
 cargo test -p ghalbol_core
+cargo test --workspace                                   # everything CI tests (Linux)
+cargo check -p ghalbol_app --target x86_64-pc-windows-gnu # Windows (CI)
+./scripts/check_android.sh                               # Android, as cargo-makepad compiles it (CI)
 
 # Packaging
 ./scripts/package-windows.sh          # production Windows → dist/windows/
 ./scripts/package_linux_release.sh    # Linux tarball
-./scripts/build_android_app.sh        # Android (cargo-ndk flow)
+./scripts/build_android_app.sh        # Android (cargo-makepad; --release / --aab for Play)
 ```
 
-Per-app env: `apps/ghalbol/env/{development,production}.env` (baked by `apps/ghalbol/build.rs`; loaded by `scripts/load-ghalbol-env.sh`).
+CI (`.github/workflows/ci.yml`) builds with `-D warnings` on Linux, Windows and Android — a warning anywhere fails it. `cargo check` of the app **bin** for Android always fails (`main` not found); use `scripts/check_android.sh`.
+
+Per-app env: `apps/ghalbol/env/{development,production}.env`, baked by `apps/ghalbol/build.rs` into `$OUT_DIR/ghalbol.env` (`GHALBOL_ENV`, else the Cargo profile) and loaded once at startup by `load_env_once` in `main.rs` (process env → optional `env/.env.<profile>` → baked). `GHALBOL_APP_ID` picks the data namespace (`host::default_app_namespace`). Keep `build = "build.rs"` inside `[package]` of `apps/ghalbol/Cargo.toml` — cargo-makepad's Android wrapper needs it. Scripts export the env via `scripts/load-ghalbol-env.sh`.
 
 Linux debug data: `~/.local/share/com.ghalbol.debug/` (release: `~/.local/share/com.ghalbol/`).
 
 ## Anti-patterns (do not reintroduce)
 
 - **Rust warning suppressions** — no `#[allow(dead_code)]` / `RUSTFLAGS=-A warnings` to hide build warnings; delete unused code or wire it up.
+- **Renaming protocol strings as "cleanup"** — Noise prologue, HKDF / AAD info, signing domains, `ghalbol.share` values, mDNS service names and on-disk folder names are protocol and storage formats. Changing them breaks every existing peer, server and keystore. The `ghal_bol` → `ghalbol` rename did exactly that; `LEGACY_KEYSTORE_V1_AAD_PREFIX` (`keystore_v1.rs`) and `LEGACY_UI_DATA_DIR_NAME` (`app_paths.rs`) keep old data working and must **not** be "fixed" to the new spelling.
 - Mutual-QR requirement or “both need each other’s public key from QR”.
 - UI filtering that drops inbound events.
 - Hub `stores_updated` → full roster reload storm (preview debounce on inbound text; **roster** bump on `peer_identified` only — not every text).
@@ -164,7 +172,9 @@ Linux debug data: `~/.local/share/com.ghalbol.debug/` (release: `~/.local/share/
 | Call still active after window close | `host::end_call`; node shares the process |
 | Wrong `profile=` / missing `os=` | Rebuild; `os=wifi\|cell/…` must flip ~1s — TRANSPORT.md § Network truth |
 | Coord lookup 404 | Peer not on coord yet |
-| Call still active after window close | `host::end_call`; node shares the process |
+| "Wrong password" for a keystore that used to unlock | Pre-rename keystore — `keystore_v1.rs` must still try `LEGACY_KEYSTORE_V1_AAD_PREFIX` |
+| Empty roster after an upgrade | Pre-rename `ghal_bol/` store folder — `app_paths::ui_data_dir` adopts it |
+| Coord register / bridge 401 after an upgrade | Server older than the client's signing domains — redeploy coord + delivery from the same commit |
 | Android: read on screen, sender single tick | `set_app_visible(false)` while backgrounded; resume must reopen the read gate |
 | Android: no messages after reboot until app opened | Activity is the process; open Ghal Bol once |
 | Android: no messages with screen off | Battery optimization / OEM autostart — not the read gate alone |

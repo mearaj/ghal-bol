@@ -500,6 +500,12 @@ fn apply_inbound_text(ns: &str, ev: &Value) -> bool {
         if !poll_replay {
             let bump_unread = !skip_unread;
             let _ = record_inbound_preview(ns, &sender_pk, text, bump_unread, Some(at));
+            if bump_unread {
+                crate::message_notify::notify_inbound(
+                    &sender_pk,
+                    crate::message_notify::Arrived::Text,
+                );
+            }
             changed = true;
         }
     }
@@ -682,6 +688,12 @@ fn apply_inbound_voice(ns: &str, ev: &Value) -> bool {
         if !poll_replay {
             let bump_unread = !skip_unread;
             let _ = record_inbound_preview(ns, &sender_pk, &preview, bump_unread, Some(at));
+            if bump_unread {
+                crate::message_notify::notify_inbound(
+                    &sender_pk,
+                    crate::message_notify::Arrived::Voice,
+                );
+            }
             changed = true;
         }
     }
@@ -842,6 +854,12 @@ fn apply_inbound_attachment_offer(ns: &str, ev: &Value) -> bool {
             .unwrap_or_else(now_ms);
         if !poll_replay {
             let _ = record_inbound_preview(ns, &sender_pk, &preview, !skip_unread, Some(at));
+            if !skip_unread {
+                crate::message_notify::notify_inbound(
+                    &sender_pk,
+                    crate::message_notify::Arrived::File,
+                );
+            }
             changed = true;
         }
     }

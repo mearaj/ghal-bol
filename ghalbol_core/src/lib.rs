@@ -2,21 +2,19 @@
 //!
 //! **Makepad (`ghalbol_app`) is the UI** — see workspace `AGENTS.md` and `docs/DESIGN.md`.
 //!
-//! v1 design goal: one secp256k1 keypair (libp2p PeerId, sign, encrypt),
-//! encrypted-at-rest with a key derived from an app-level password. The password is used
+//! One device identity keypair (secp256k1, ed25519 or ecdsa-p256) signs and decrypts; it is
+//! encrypted at rest with a key derived from an app-level password. The password is used
 //! only to unlock local storage; it is never shared.
 //!
-//! On **native** targets (non-Wasm), [`p2p`] runs native connect for **LAN text** and **voice/video calls**
-//! (WAN + LAN), with **coord + relay** for WAN call reachability and **mDNS** for LAN.
-//! **WAN text** uses [`delivery_runtime`] + [`text_transport`] (E2E encrypted delivery server).
+//! **Text** (and voice notes, files) uses [`delivery_runtime`] + [`text_transport`]: the E2E
+//! delivery mailbox. On **native** targets, [`p2p`] runs native connect for **voice/video calls**
+//! (LAN direct via mDNS, WAN through the coord byte bridge). See `docs/DESIGN.md` § Goals.
 //!
 //! **Android:** the Makepad app and [`ANDROID_LIBRARY_NAMESPACE`] both use **`com.ghalbol`**
 //! for packaging and the keystore data-directory root.
 
 #[cfg(target_os = "android")]
-mod android_daemon;
-#[cfg(target_os = "android")]
-mod android_jni_cache;
+mod android_camera;
 #[cfg(target_os = "android")]
 mod android_network;
 mod app_paths;
@@ -28,6 +26,8 @@ pub use app_paths::detect_keystore_app_namespace;
 mod call_media;
 #[cfg(not(target_arch = "wasm32"))]
 mod call_media_key;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))]
+mod call_pictures;
 #[cfg(not(target_arch = "wasm32"))]
 mod call_sig_v1;
 #[cfg(not(target_arch = "wasm32"))]
@@ -71,6 +71,8 @@ mod incoming_call_android;
 #[cfg(not(target_arch = "wasm32"))]
 mod incoming_call_notify;
 mod keystore_v1;
+#[cfg(not(target_arch = "wasm32"))]
+mod message_notify;
 #[cfg(target_os = "linux")]
 mod linux_desktop_launch;
 #[cfg(not(target_arch = "wasm32"))]
@@ -84,6 +86,9 @@ mod wan_coord;
 pub use linux_desktop_launch::{wake_for_incoming_call, wake_for_unlock};
 #[cfg(target_os = "linux")]
 mod linux_network;
+// Built for tests everywhere so its classifier is covered on Linux CI.
+#[cfg(any(target_os = "windows", test))]
+mod windows_network;
 mod msg_v1;
 mod multiaddr_local;
 #[cfg(not(target_arch = "wasm32"))]

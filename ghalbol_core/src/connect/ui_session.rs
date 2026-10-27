@@ -15,13 +15,11 @@ pub(crate) fn platform_incoming_call_show(peer_pk: &str, call_id: &str) {
     if app_ui_visible() {
         return;
     }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     crate::incoming_call_notify::show_incoming_call(peer_pk, call_id);
 }
 
 #[inline]
 pub(crate) fn platform_incoming_call_dismiss() {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     crate::incoming_call_notify::dismiss_incoming_call();
 }
 

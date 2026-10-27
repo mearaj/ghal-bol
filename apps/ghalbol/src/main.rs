@@ -2,6 +2,9 @@
 //!
 //! Splash uses `script_mod!` (Makepad 2).
 
+// Production Windows exe opens without a console window (`build.rs` sets the cfg).
+#![cfg_attr(all(windows, ghalbol_hide_console), windows_subsystem = "windows")]
+
 pub use makepad_widgets;
 
 mod i18n;
@@ -1788,8 +1791,6 @@ pub struct App {
     #[rust]
     seen_open_gen: f64,
     #[rust]
-    env_loaded: bool,
-    #[rust]
     create_new: bool,
     #[rust]
     algorithm: String,
@@ -1815,8 +1816,6 @@ pub struct App {
     shell_split: bool,
     #[rust]
     narrow_show_room: bool,
-    #[rust]
-    file_path: String,
     #[rust]
     mic_muted: bool,
     #[rust]
@@ -1879,14 +1878,6 @@ pub struct App {
 }
 
 impl App {
-    fn ensure_env(&mut self) {
-        if self.env_loaded {
-            return;
-        }
-        self.env_loaded = true;
-        load_dotenv_if_present();
-    }
-
     fn push_identity_copy(&self, cx: &mut Cx) {
         let exists = host::keystore_exists(&self.namespace);
         let primary = if exists {
@@ -2378,7 +2369,7 @@ impl App {
     }
 
     fn submit_unlock(&mut self, cx: &mut Cx) {
-        self.ensure_env();
+        load_env_once();
         self.pull_password(cx);
         let password = self.password.clone();
         if password.is_empty() {
@@ -2882,6 +2873,74 @@ impl App {
         host::import_keystore(&self.namespace, &self.password, json)
     }
 
+    /// Status line above the transcript (attach / QR picture / join results).
+    fn show_call_line(&mut self, cx: &mut Cx, msg: String) {
+        script_eval!(cx, {
+            mod.state.call_line = #(msg)
+            ui.chat_log.render()
+        });
+    }
+
+    fn show_attach_result(&mut self, cx: &mut Cx, sent: Result<(), String>) {
+        let queued = sent.is_ok();
+        self.show_call_line(cx, sent.map(|()| "File queued".to_string()).unwrap_or_else(|e| e));
+        if queued {
+            self.refresh_transcript(cx);
+        }
+    }
+
+    /// Decode an invite QR from a picture (desktop path or Android `content://` URI) and join.
+    fn join_from_qr_picture(&mut self, cx: &mut Cx, picked: &str) {
+        let ns = self.namespace.clone();
+        let joined = host::decode_qr_file(picked).and_then(|text| host::accept_invite(&ns, &text));
+        let msg = match joined {
+            Ok(pk) => format!("Joined {pk}"),
+            Err(e) => e,
+        };
+        self.show_call_line(cx, msg);
+        self.refresh_roster(cx);
+    }
+
+    #[cfg(target_os = "android")]
+    fn on_android_pick(&mut self, cx: &mut Cx, answer: android_pick::Answer) {
+        use android_pick::Answer;
+        match answer {
+            Answer::Picked(id, uri) if id == android_pick::ATTACHMENT => {
+                let peer = android_pick::take_attach_peer();
+                let sent = host::send_picked_attachment(&self.namespace, &peer, &uri);
+                self.show_attach_result(cx, sent);
+            }
+            Answer::Picked(id, uri) if id == android_pick::BACKUP => {
+                let imported = host::read_picked_file(&uri, host::MAX_PICKED_BACKUP_BYTES)
+                    .and_then(|(_, bytes)| {
+                        String::from_utf8(bytes)
+                            .map_err(|_| "That file is not a keystore backup JSON.".to_string())
+                    })
+                    .and_then(|json| {
+                        self.paste = json;
+                        self.import_backup_from_paste()
+                    });
+                match imported {
+                    Ok(session) => self.finish_import_backup(cx, session),
+                    Err(e) => {
+                        script_eval!(cx, {
+                            mod.state.status = #(e)
+                            ui.identity_copy.render()
+                        });
+                    }
+                }
+            }
+            Answer::Picked(id, uri) if id == android_pick::QR_PICTURE => {
+                self.join_from_qr_picture(cx, &uri);
+            }
+            // No file chosen: offer pasting the backup JSON instead.
+            Answer::Cancelled(id) if id == android_pick::BACKUP => {
+                self.open_import_backup_sheet(cx);
+            }
+            _ => {}
+        }
+    }
+
     fn open_import_backup_sheet(&mut self, cx: &mut Cx) {
         self.pull_password(cx);
         let lang = self.lang.clone();
@@ -3013,7 +3072,7 @@ impl App {
                 if link.is_empty() {
                     Err("Invitation link is empty.".into())
                 } else {
-                    copy_to_clipboard(link).map(|()| "Invitation copied".into())
+                    copy_to_clipboard(cx, link).map(|()| "Invitation copied".into())
                 }
             }
             "scan" => {
@@ -3999,6 +4058,12 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        #[cfg(target_os = "android")]
+        for action in actions {
+            if let Some(answer) = android_pick::answer(action) {
+                self.on_android_pick(cx, answer);
+            }
+        }
         self.sync_algorithm(cx);
         if let Some(text) = self.ui.text_input(cx, ids!(password_input)).changed(actions) {
             self.password = text;
@@ -4096,7 +4161,13 @@ impl MatchEvent for App {
             self.pull_password(cx);
             #[cfg(target_os = "android")]
             {
-                self.open_import_backup_sheet(cx);
+                if self.password.is_empty() {
+                    // Shows the "enter your password" hint.
+                    self.open_import_backup_sheet(cx);
+                } else {
+                    let title = "Choose your keystore backup";
+                    android_pick::open(cx, android_pick::BACKUP, title, None);
+                }
             }
             #[cfg(not(target_os = "android"))]
             {
@@ -4143,7 +4214,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(invite_copy_button)).clicked(actions) {
             if let Some(session) = self.session.clone() {
                 let msg = match host::invite_links(&session.public_key_hex, None) {
-                    Ok((https, _)) => match copy_to_clipboard(&https) {
+                    Ok((https, _)) => match copy_to_clipboard(cx, &https) {
                         Ok(()) => {
                             "Invitation copied. Paste it on the other device under Join.".to_string()
                         }
@@ -4156,7 +4227,7 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(key_copy_button)).clicked(actions) {
             if let Some(session) = self.session.clone() {
-                let msg = match copy_to_clipboard(&session.public_key_hex) {
+                let msg = match copy_to_clipboard(cx, &session.public_key_hex) {
                     Ok(()) => "Public key copied".to_string(),
                     Err(e) => e,
                 };
@@ -4180,27 +4251,20 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(scan_file_button)).clicked(actions) {
             #[cfg(target_os = "android")]
-            let msg = "Pick from gallery is desktop-only for now — use Scan QR".to_string();
+            android_pick::open(
+                cx,
+                android_pick::QR_PICTURE,
+                "Choose a QR picture",
+                Some(("Pictures", &["png", "jpg", "jpeg"])),
+            );
             #[cfg(not(target_os = "android"))]
-            let msg = if let Some(path) = rfd::FileDialog::new()
+            match rfd::FileDialog::new()
                 .add_filter("Pictures", &["png", "jpg", "jpeg"])
                 .pick_file()
             {
-                let ns = self.namespace.clone();
-                match host::decode_qr_file(&path.display().to_string())
-                    .and_then(|text| host::accept_invite(&ns, &text))
-                {
-                    Ok(pk) => format!("Joined {pk}"),
-                    Err(e) => e,
-                }
-            } else {
-                "No picture chosen".into()
-            };
-            script_eval!(cx, {
-                mod.state.call_line = #(msg)
-                ui.chat_log.render()
-            });
-            self.refresh_roster(cx);
+                Some(path) => self.join_from_qr_picture(cx, &path.display().to_string()),
+                None => self.show_call_line(cx, "No picture chosen".into()),
+            }
         }
         if self.ui.button(cx, ids!(contacts_button)).clicked(actions) {
             self.open_page(cx, "contacts");
@@ -4422,39 +4486,16 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(choose_file_button)).clicked(actions) {
             let peer = self.open_peer.clone();
-            let msg: String = {
+            if peer.is_empty() {
+                self.show_call_line(cx, "Select a chat first".into());
+            } else {
                 #[cfg(target_os = "android")]
-                {
-                    if peer.is_empty() {
-                        "Select a chat first".into()
-                    } else {
-                        "File attach is desktop-only for now".into()
-                    }
-                }
+                android_pick::pick_attachment(cx, &peer);
                 #[cfg(not(target_os = "android"))]
-                {
-                    if peer.is_empty() {
-                        "Select a chat first".into()
-                    } else if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        self.file_path = path.display().to_string();
-                        match host::send_attachment(&peer, &self.file_path) {
-                            Ok(()) => "File queued".into(),
-                            Err(e) => e,
-                        }
-                    } else {
-                        String::new()
-                    }
+                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                    let sent = host::send_attachment(&peer, &path.display().to_string());
+                    self.show_attach_result(cx, sent);
                 }
-            };
-            let queued = msg == "File queued";
-            if !msg.is_empty() {
-                script_eval!(cx, {
-                    mod.state.call_line = #(msg)
-                    ui.chat_log.render()
-                });
-            }
-            if queued {
-                self.refresh_transcript(cx);
             }
         }
         if self.ui.button(cx, ids!(key_button)).clicked(actions) {
@@ -4509,8 +4550,10 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        // Before the first namespace read: `GHALBOL_APP_ID` picks the data directory.
+        load_env_once();
         if !vm.is_reload() {
-            let ns = host::default_app_namespace().to_string();
+            let ns = host::default_app_namespace();
             let exists = host::keystore_exists(&ns);
             let primary = if exists {
                 "Unlock"
@@ -4557,7 +4600,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if self.namespace.is_empty() {
-            self.namespace = host::default_app_namespace().to_string();
+            self.namespace = host::default_app_namespace();
             self.create_new = true;
             self.algorithm = "secp256k1".into();
             self.lang = host::ui_locale(&self.namespace).unwrap_or_else(i18n::system_code);
@@ -4850,7 +4893,66 @@ fn scan_placeholder_png() -> Option<Vec<u8>> {
     Some(png)
 }
 
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
+/// Android document picker (Storage Access Framework). Answers arrive later as a
+/// `FileDialogAction` carrying a `content://` URI, which `host` reads for us.
+#[cfg(target_os = "android")]
+mod android_pick {
+    use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
+    use makepad_widgets::*;
+    use std::sync::Mutex;
+
+    pub const ATTACHMENT: LiveId = live_id!(pick_attachment);
+    pub const BACKUP: LiveId = live_id!(pick_backup);
+    pub const QR_PICTURE: LiveId = live_id!(pick_qr_picture);
+
+    /// Chat that was open when Attach was tapped; the answer may arrive after a room switch.
+    static ATTACH_PEER: Mutex<String> = Mutex::new(String::new());
+
+    pub enum Answer {
+        Picked(LiveId, String),
+        Cancelled(LiveId),
+    }
+
+    pub fn open(cx: &mut Cx, id: LiveId, title: &str, filter: Option<(&str, &[&str])>) {
+        let mut dialog = FileDialog::new().set_id(id).set_title(title.to_string());
+        if let Some((name, extensions)) = filter {
+            dialog = dialog.add_filter(
+                name.to_string(),
+                extensions.iter().map(|e| e.to_string()).collect(),
+            );
+        }
+        cx.open_select_file_dialog(dialog);
+    }
+
+    pub fn pick_attachment(cx: &mut Cx, peer: &str) {
+        if let Ok(mut g) = ATTACH_PEER.lock() {
+            *g = peer.to_string();
+        }
+        open(cx, ATTACHMENT, "Send a file", None);
+    }
+
+    pub fn take_attach_peer() -> String {
+        ATTACH_PEER
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
+    }
+
+    pub fn answer(action: &Action) -> Option<Answer> {
+        match action.downcast_ref::<FileDialogAction>()? {
+            FileDialogAction::FileSelected { id, paths } => Some(Answer::Picked(
+                *id,
+                paths.first()?.to_string_lossy().into_owned(),
+            )),
+            FileDialogAction::FileCancelled { id } => Some(Answer::Cancelled(*id)),
+            _ => None,
+        }
+    }
+}
+
+/// Linux tries the desktop clipboard tools first (the copy outlives the app), then
+/// Makepad's own clipboard, which every other platform uses directly.
+fn copy_to_clipboard(cx: &mut Cx, text: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         for (bin, args) in [
@@ -4873,13 +4975,9 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
                 return Ok(());
             }
         }
-        return Err("Could not copy. Install wl-copy or xclip.".into());
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = text;
-        Err("Copy is not available on this platform yet.".into())
-    }
+    cx.copy_to_clipboard(text);
+    Ok(())
 }
 
 fn apply_algo_chip_style(cx: &mut Cx, button: &mut WidgetRef, on: bool) {
@@ -5056,32 +5154,34 @@ fn splash_f64(cx: &mut Cx, value: ScriptValue) -> f64 {
     value.as_f64().unwrap_or(0.0)
 }
 
-/// Load `env/.env.development` (debug) or `env/.env.production` (release).
-/// Process environment already set always wins — never overwrite.
-///
-/// Desktop: live file under workspace cwd when present.
-/// Android / packaged: matching committed `.example` via `include_str` (no shared bake file).
-/// Profile is **only** `cfg!(debug_assertions)` — a release APK never loads development.
-fn load_dotenv_if_present() {
-    let debug = cfg!(debug_assertions);
-    let path = if debug {
-        "env/.env.development"
-    } else {
-        "env/.env.production"
-    };
-    let baked = if debug {
-        include_str!("../../../env/.env.development.example")
-    } else {
-        include_str!("../../../env/.env.production.example")
-    };
-    let from_file = std::fs::read_to_string(path).is_ok();
-    let raw = std::fs::read_to_string(path).unwrap_or_else(|_| baked.to_string());
-    apply_dotenv_text(&raw);
-    let coord = std::env::var("GHALBOL_COORD_URLS").unwrap_or_else(|_| "(unset)".into());
-    let profile = if debug { "development" } else { "production" };
-    let src = if from_file { path } else { "baked .example" };
-    // Visible in logcat / stderr so wrong-profile installs are obvious.
-    eprintln!("ghalbol env profile={profile} src={src} GHALBOL_COORD_URLS={coord}");
+/// `apps/ghalbol/env/<profile>.env`, selected and embedded by `build.rs`.
+const BAKED_ENV: &str = include_str!(concat!(env!("OUT_DIR"), "/ghalbol.env"));
+
+/// Load the app environment once per process. Precedence, highest first:
+/// the process environment; a developer override `env/.env.<profile>` in the working
+/// directory (gitignored, desktop only in practice); the per-app values baked at build time.
+/// The profile is `GHALBOL_ENV` at build time, else the Cargo profile — see `build.rs`.
+fn load_env_once() {
+    static LOADED: std::sync::Once = std::sync::Once::new();
+    LOADED.call_once(|| {
+        let profile = env!("GHALBOL_ENV");
+        let path = format!("env/.env.{profile}");
+        let from_file = match std::fs::read_to_string(&path) {
+            Ok(raw) => {
+                apply_dotenv_text(&raw);
+                true
+            }
+            Err(_) => false,
+        };
+        apply_dotenv_text(BAKED_ENV);
+        let coord = std::env::var("GHALBOL_COORD_URLS").unwrap_or_else(|_| "(unset)".into());
+        let app_id = std::env::var("GHALBOL_APP_ID").unwrap_or_default();
+        let src = if from_file { path.as_str() } else { "baked" };
+        // Visible in logcat / stderr so wrong-profile installs are obvious.
+        eprintln!(
+            "ghalbol env profile={profile} src={src} GHALBOL_APP_ID={app_id} GHALBOL_COORD_URLS={coord}"
+        );
+    });
 }
 
 fn apply_dotenv_text(raw: &str) {

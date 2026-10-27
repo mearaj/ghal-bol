@@ -114,7 +114,7 @@ When **`GHALBOL_DELIVERY_URL`** is set, **chat text** uses the delivery server. 
 
 **Mailbox unreachable:** when `GHALBOL_DELIVERY_URL` is set but the WSS worker cannot connect (timeout, DNS, firewall), the UI still queues outbound text locally (`pending` / `○`) and shows a **Delivery offline** banner via `host::delivery_offline_hint`. Outbox uploads retry when the worker reconnects. A dead **public** A record (home ISP, no port forward, no hairpin) looks like “messages never reach” and the host never auto-creates the guest contact (that only happens on **inbound** decrypt).
 
-**Client dial:** TLS/SNI always use the URL host. TCP tries, in order: optional `GHALBOL_DELIVERY_DIAL` (lab LAN IP — desktop `env/.env.development` only, never bake into Android `.example`), then `127.0.0.1:port` on **desktop** only (same-host hairpin), then DNS. Android skips loopback. Each upload opens its own socket; dead dial candidates cost ~3s each and looked like “messages sometimes reach”. Production should put delivery on a cloud host so the public A record answers.
+**Client dial:** TLS/SNI always use the URL host. TCP tries, in order: optional `GHALBOL_DELIVERY_DIAL` (lab LAN IP — desktop `env/.env.development` override only, never bake into `apps/ghalbol/env/*.env`), then `127.0.0.1:port` on **desktop** only (same-host hairpin), then DNS. Android skips loopback. Each upload opens its own socket; dead dial candidates cost ~3s each and looked like “messages sometimes reach”. Production should put delivery on a cloud host so the public A record answers.
 
 **Read receipts:** blue tick uses `inbox.read` → `message.read_to_sender` on the delivery worker (`delivery_read_acks.rs`), gated by hub UI session (`host::set_open_room` / `host::set_app_visible`). Makepad maps transcript `delivery=read` only — no UI ack logic.
 
@@ -384,7 +384,7 @@ When the operator moves the backend (home PC → cloud), **repoint the GoDaddy A
 | Concern | Owner |
 |---------|--------|
 | Home install + DDNS + nginx WSS | [`ghalbol_delivery/deploy/`](../ghalbol_delivery/deploy/) — see [DELIVERY_HOME.md](../ghalbol_delivery/deploy/DELIVERY_HOME.md) |
-| Client URL | `ghalbol_app/env/.env.production` — canonical `delivery.ghalbol.com` |
+| Client URL | `apps/ghalbol/env/production.env` — canonical `delivery.ghalbol.com` |
 | Calls / bridge | Unchanged — [`ghalbol_coord`](../ghalbol_coord/) only |
 
 Home stack mirrors coord1: in-process GoDaddy DDNS (`GHALBOL_DDNS_CREDENTIALS`), user systemd unit on loopback **8770**, nginx TLS on **55003**, router forward **55003** only.

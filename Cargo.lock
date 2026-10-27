@@ -1840,6 +1840,7 @@ dependencies = [
  "reqwest",
  "rqrr",
  "rustls",
+ "rustls-platform-verifier",
  "secp256k1",
  "serde",
  "serde_bytes",

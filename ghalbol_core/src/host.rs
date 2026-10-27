@@ -16,13 +16,21 @@ fn cfg(app_namespace: &str) -> crate::storage::StorageConfig {
     storage_config_for_namespace(app_namespace)
 }
 
-/// Debug installs share the Makepad debug namespace so an existing keystore unlocks.
-pub fn default_app_namespace() -> &'static str {
-    if cfg!(debug_assertions) {
-        "com.ghalbol.debug"
-    } else {
-        crate::storage::ANDROID_LIBRARY_NAMESPACE
-    }
+/// Install namespace (data directory and desktop id): the app's baked `GHALBOL_APP_ID`
+/// (`com.ghalbol` / `com.ghalbol.debug`), else the build profile.
+pub fn default_app_namespace() -> String {
+    std::env::var("GHALBOL_APP_ID")
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| crate::storage::sanitize_namespace(id).is_ok())
+        .unwrap_or_else(|| {
+            if cfg!(debug_assertions) {
+                "com.ghalbol.debug"
+            } else {
+                crate::storage::ANDROID_LIBRARY_NAMESPACE
+            }
+            .to_string()
+        })
 }
 
 /// Hand this process's Java VM and Activity to native audio, camera, and HTTPS.
@@ -96,6 +104,8 @@ pub fn unlock(app_namespace: &str, password: &str) -> Result<UnlockedSession, St
 
 pub fn lock() {
     p2p_stop();
+    #[cfg(target_os = "android")]
+    crate::android_network::hold_multicast_lock(false);
     lock_identity();
 }
 
@@ -481,17 +491,17 @@ pub fn end_call() -> Result<(), String> {
     if let Ok(mut g) = active_call().lock() {
         *g = None;
     }
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    crate::desktop_media::clear_call_pictures();
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))]
+    crate::call_pictures::clear_call_pictures();
     Ok(())
 }
 
 /// Local camera PNG and remote video PNG for the open call.
 pub fn call_picture_pngs() -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))]
     {
         if let Ok((call_id, _)) = current_call() {
-            return crate::desktop_media::call_picture_pngs(&call_id);
+            return crate::call_pictures::call_picture_pngs(&call_id);
         }
     }
     (None, None)
@@ -502,7 +512,11 @@ pub fn start_qr_scan() -> Result<(), String> {
     {
         return crate::desktop_media::start_qr_scan();
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        return crate::android_qr::start_qr_scan();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
     Err("QR camera scan is not available on this device".into())
 }
 
@@ -511,7 +525,11 @@ pub fn take_qr_scan() -> Option<Result<String, String>> {
     {
         return crate::desktop_media::take_qr_scan();
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        return crate::android_qr::take_qr_scan();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
     None
 }
 
@@ -521,16 +539,30 @@ pub fn take_qr_preview_rgba() -> Option<(u32, u32, Vec<u8>)> {
     {
         return crate::desktop_media::take_qr_preview_rgba();
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        return crate::android_qr::take_qr_preview_rgba();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
     None
 }
 
-/// Stop an in-flight desktop QR camera scan.
+/// Stop an in-flight QR camera scan.
 pub fn stop_qr_scan() {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         crate::desktop_media::stop_qr_scan();
     }
+    #[cfg(target_os = "android")]
+    {
+        crate::android_qr::stop_qr_scan();
+    }
+}
+
+/// Android: write the keystore backup to app files and the public Downloads folder.
+#[cfg(target_os = "android")]
+pub fn android_save_backup_json(json: &str) -> Result<String, String> {
+    crate::incoming_call_android::save_keystore_backup(json)
 }
 
 /// Faster UI poll while the Scan sheet needs live camera frames.
@@ -544,16 +576,68 @@ pub fn qr_scan_ui_active() -> bool {
 
 static QR_SCAN_UI_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Decode an invite QR from a picture: a path on desktop, a picker `content://` URI on Android.
 pub fn decode_qr_file(path: &str) -> Result<String, String> {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         return crate::desktop_media::decode_qr_file(path);
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        let (_, bytes) = read_picked_file(path, MAX_PICKED_PICTURE_BYTES)?;
+        return crate::qr_luma::decode_image_bytes(&bytes);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
     {
         let _ = path;
         Err("QR picture decode is not available on this device".into())
     }
+}
+
+/// Largest picture accepted for QR decode from the picker.
+#[cfg(target_os = "android")]
+const MAX_PICKED_PICTURE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Largest keystore backup accepted from the picker (real ones are under 1 KB).
+pub const MAX_PICKED_BACKUP_BYTES: usize = 1024 * 1024;
+
+/// A file chosen in the system picker, as (display name, bytes). Desktop pickers return a
+/// path; Android returns a `content://` document URI, read through the content resolver.
+pub fn read_picked_file(picked: &str, max_bytes: usize) -> Result<(String, Vec<u8>), String> {
+    let picked = picked.trim();
+    #[cfg(target_os = "android")]
+    if picked.starts_with("content://") {
+        return crate::incoming_call_android::read_content_uri(picked, max_bytes);
+    }
+    let path = std::path::Path::new(picked);
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("could not open {picked}: {e}"))?
+        .len();
+    if len > max_bytes as u64 {
+        return Err(format!(
+            "The chosen file is larger than {} MB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("could not read {picked}: {e}"))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok((name, bytes))
+}
+
+/// Android: send a file picked as a `content://` URI. The bytes are copied into app
+/// storage first, because the transcript keeps the sender's local path for **Open**.
+#[cfg(target_os = "android")]
+pub fn send_picked_attachment(
+    app_namespace: &str,
+    peer_public_key_hex: &str,
+    picked: &str,
+) -> Result<(), String> {
+    let (name, bytes) = read_picked_file(picked, crate::attach_v1::MAX_FILE_SIZE_BYTES as usize)?;
+    let path = crate::attach_v1::stage_picked_file(app_namespace, &name, &bytes)?;
+    send_attachment(peer_public_key_hex, &path.display().to_string())
 }
 
 pub fn call_banner() -> String {
@@ -562,7 +646,7 @@ pub fn call_banner() -> String {
         .get("peer_public_key_hex")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let peer_label = call_peer_display_name(peer);
+    let peer_label = peer_display_name(peer);
     // Incoming ring only — never treat the caller's outbound dial as Accept UI.
     if status.get("incoming").and_then(|v| v.as_bool()) == Some(true)
         || (status.get("ringing").and_then(|v| v.as_bool()) == Some(true)
@@ -597,7 +681,7 @@ pub fn call_peer_label() -> String {
     if peer.is_empty() {
         String::new()
     } else {
-        call_peer_display_name(peer)
+        peer_display_name(peer)
     }
 }
 
@@ -613,7 +697,8 @@ fn call_shows_video_from(status: &Value) -> bool {
         || status.get("remote_video_on").and_then(|v| v.as_bool()) == Some(true)
 }
 
-fn call_peer_display_name(peer_pk_hex: &str) -> String {
+/// Contact alias, else a short key — call banner and message notifications.
+pub(crate) fn peer_display_name(peer_pk_hex: &str) -> String {
     let pk = peer_pk_hex.trim();
     if pk.is_empty() {
         return String::new();
@@ -846,6 +931,8 @@ pub fn start_network(app_namespace: &str) -> Result<Value, String> {
     let _ = p2p_sync_ui_session(true, None);
     #[cfg(target_os = "linux")]
     crate::linux_desktop_launch::install_user_autostart();
+    #[cfg(target_os = "android")]
+    crate::android_network::hold_multicast_lock(true);
     Ok(result)
 }
 
@@ -891,6 +978,9 @@ pub fn note_call_banner(line: &str) {
 }
 
 pub fn set_open_room(public_key_hex: Option<&str>) {
+    if let Some(peer) = public_key_hex {
+        crate::message_notify::clear_for_peer(peer);
+    }
     let _ = p2p_sync_ui_session(true, public_key_hex);
 }
 

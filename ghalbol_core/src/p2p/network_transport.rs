@@ -27,7 +27,7 @@ pub(crate) struct OsNetworkSnapshot {
     pub has_internet: bool,
     /// Wi‑Fi link up (Android any-WiFi-network or Linux `wl*` operstate).
     pub wifi_link_up: bool,
-    /// Linux: iface name carrying the default IPv4 route (e.g. `wlan0`, `eth0`).
+    /// Linux / Windows: iface carrying the default IPv4 route (e.g. `wlan0`, `Wi-Fi`).
     pub default_route_iface: Option<String>,
 }
 
@@ -63,7 +63,11 @@ fn probe_os_network_truth_platform() -> OsNetworkSnapshot {
     {
         return crate::linux_network::probe_connectivity_truth();
     }
-    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        return crate::windows_network::probe_connectivity_truth();
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "windows")))]
     {
         OsNetworkSnapshot::default()
     }

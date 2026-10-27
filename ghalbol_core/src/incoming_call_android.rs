@@ -299,6 +299,151 @@ mod imp {
         Ok(path)
     }
 
+    /// Read a Storage Access Framework document (`content://…`) the user picked.
+    /// Returns the provider's display name (empty when it reports none) and the bytes.
+    pub fn read_content_uri(uri: &str, max_bytes: usize) -> Result<(String, Vec<u8>), String> {
+        let mut name = String::new();
+        let mut data = Vec::new();
+        let mut too_big = false;
+        with_context(|env, context| {
+            let result = read_content_uri_jni(
+                env,
+                context,
+                uri,
+                max_bytes,
+                &mut name,
+                &mut data,
+                &mut too_big,
+            );
+            if env.exception_check() {
+                // Leave no pending SecurityException / FileNotFoundException on this thread.
+                env.exception_clear();
+            }
+            result
+        })
+        .map_err(|e| format!("could not read the chosen file: {e}"))?;
+        if too_big {
+            return Err(format!(
+                "The chosen file is larger than {} MB",
+                max_bytes / (1024 * 1024)
+            ));
+        }
+        Ok((name, data))
+    }
+
+    fn read_content_uri_jni<'a>(
+        env: &mut jni::Env<'a>,
+        context: &JObject<'a>,
+        uri: &str,
+        max_bytes: usize,
+        name: &mut String,
+        data: &mut Vec<u8>,
+        too_big: &mut bool,
+    ) -> jni::errors::Result<()> {
+        let resolver = env
+            .call_method(
+                context,
+                jni_str!("getContentResolver"),
+                jni_sig!(() -> android.content.ContentResolver),
+                &[],
+            )?
+            .l()?;
+        let uri_class = env.find_class(jni_str!("android/net/Uri"))?;
+        let uri_text = env.new_string(uri)?;
+        let juri = env
+            .call_static_method(
+                &uri_class,
+                jni_str!("parse"),
+                jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"),
+                &[JValue::Object(&uri_text)],
+            )?
+            .l()?;
+        let null_obj = JObject::null();
+        let cursor = env
+            .call_method(
+                &resolver,
+                jni_str!("query"),
+                jni_sig!("(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;"),
+                &[
+                    JValue::Object(&juri),
+                    JValue::Object(&null_obj),
+                    JValue::Object(&null_obj),
+                    JValue::Object(&null_obj),
+                    JValue::Object(&null_obj),
+                ],
+            )?
+            .l()?;
+        if !cursor.is_null() {
+            let has_row = env
+                .call_method(&cursor, jni_str!("moveToFirst"), jni_sig!("()Z"), &[])?
+                .z()?;
+            if has_row {
+                let column = env.new_string("_display_name")?;
+                let index = env
+                    .call_method(
+                        &cursor,
+                        jni_str!("getColumnIndex"),
+                        jni_sig!("(Ljava/lang/String;)I"),
+                        &[JValue::Object(&column)],
+                    )?
+                    .i()?;
+                if index >= 0 {
+                    let value = env
+                        .call_method(
+                            &cursor,
+                            jni_str!("getString"),
+                            jni_sig!("(I)Ljava/lang/String;"),
+                            &[JValue::Int(index)],
+                        )?
+                        .l()?;
+                    if !value.is_null() {
+                        let text = unsafe { jni::objects::JString::from_raw(env, value.as_raw()) };
+                        *name = text.try_to_string(env)?;
+                        std::mem::forget(value);
+                    }
+                }
+            }
+            env.call_method(&cursor, jni_str!("close"), jni_sig!("()V"), &[])?;
+        }
+        let stream = env
+            .call_method(
+                &resolver,
+                jni_str!("openInputStream"),
+                jni_sig!("(Landroid/net/Uri;)Ljava/io/InputStream;"),
+                &[JValue::Object(&juri)],
+            )?
+            .l()?;
+        if stream.is_null() {
+            return Err(jni::errors::Error::NullPtr("openInputStream returned null"));
+        }
+        const CHUNK: usize = 64 * 1024;
+        let buffer = env.new_byte_array(CHUNK)?;
+        let mut chunk = vec![0i8; CHUNK];
+        let read = loop {
+            let n = match env
+                .call_method(&stream, jni_str!("read"), jni_sig!("([B)I"), &[JValue::Object(buffer.as_ref())])
+                .and_then(|v| v.i())
+            {
+                Ok(n) => n,
+                Err(e) => break Err(e),
+            };
+            if n < 0 {
+                break Ok(());
+            }
+            let n = n as usize;
+            if data.len() + n > max_bytes {
+                *too_big = true;
+                break Ok(());
+            }
+            if let Err(e) = buffer.get_region(env, 0, &mut chunk[..n]) {
+                break Err(e);
+            }
+            data.extend(chunk[..n].iter().map(|b| *b as u8));
+        };
+        env.call_method(&stream, jni_str!("close"), jni_sig!("()V"), &[])?;
+        read
+    }
+
     /// Write keystore JSON to app files + MediaStore Downloads when possible.
     pub fn save_keystore_backup(json: &str) -> Result<String, String> {
         let json = json.to_string();
@@ -565,6 +710,28 @@ pub fn dismiss() {
     let _ = imp::cancel(imp::INCOMING_ID);
 }
 
+/// Notification id for one chat's message banner, clear of the call / unlock ids.
+#[cfg(target_os = "android")]
+fn message_notification_id(pk: &str) -> i32 {
+    // FNV-1a: stable across runs, so a newer message replaces the same banner.
+    let mut h: u32 = 0x811c_9dc5;
+    for b in pk.trim().to_ascii_lowercase().bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    72_000 + (h % 10_000) as i32
+}
+
+#[cfg(target_os = "android")]
+pub fn post_message(peer_public_key_hex: &str, title: &str, body: &str) -> Result<(), String> {
+    imp::post(message_notification_id(peer_public_key_hex), title, body)
+}
+
+#[cfg(target_os = "android")]
+pub fn cancel_message(peer_public_key_hex: &str) {
+    let _ = imp::cancel(message_notification_id(peer_public_key_hex));
+}
+
 #[cfg(target_os = "android")]
 pub fn notify_unlock_needed() {
     let _ = imp::post(
@@ -604,6 +771,12 @@ pub fn android_files_dir() -> Result<String, String> {
 #[cfg(target_os = "android")]
 pub fn save_keystore_backup(json: &str) -> Result<String, String> {
     imp::save_keystore_backup(json)
+}
+
+/// Read a `content://` document from the system picker as (display name, bytes).
+#[cfg(target_os = "android")]
+pub fn read_content_uri(uri: &str, max_bytes: usize) -> Result<(String, Vec<u8>), String> {
+    imp::read_content_uri(uri, max_bytes)
 }
 
 /// Copy a local file into MediaStore Downloads (same path as keystore backup).

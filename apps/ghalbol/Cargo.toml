@@ -6,19 +6,22 @@ version = "0.1.0"
 edition = "2024"
 description = "Ghal Bol — E2EE messenger (voice/video + text). Part of the GhalBol brand family."
 license = "MIT OR Apache-2.0"
+publish = false
+# Bakes env/development.env or production.env into the binary. Must stay in [package]
+# (not after a metadata table): cargo-makepad's Android wrapper relies on this key.
+build = "build.rs"
 
 # Packager metadata: production id. Dev installs use development.env (com.ghalbol.debug) via scripts.
 [package.metadata.packager]
 identifier = "com.ghalbol"
 product_name = "Ghal Bol"
 
+# Play already has the Flutter app up to version code 9 (1.0.1); each upload must be higher.
 [package.metadata.makepad.android]
-version_code = 1
-version_name = "0.1.0"
+version_code = 10
+version_name = "1.1.0"
 min_sdk_version = 26
 
-# build.rs bakes env/development.env or production.env into the binary.
-build = "build.rs"
 
 [dependencies]
 ghalbol_core = { path = "../../ghalbol_core" }

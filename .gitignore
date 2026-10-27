@@ -43,3 +43,6 @@ ui-debug.log
 # Logs and profiling dumps
 *.log
 *.profraw
+
+# Built by scripts/package_linux_release.sh for Firebase deploy; never committed.
+/web/downloads/*.tar.gz

@@ -71,9 +71,12 @@ notify-rust = "4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22", default-features = false }
+# Same version reqwest pulls in, so `host::install_android_context` initializes reqwest's copy.
+rustls-platform-verifier = { version = "0.7", features = ["jni"] }
 cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
 ndk-context = "0.1"
 openh264 = "0.9"
+png = "0.17"
 rqrr = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 

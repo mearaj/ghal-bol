@@ -94,6 +94,10 @@ One store, `chat_transcript_v1.json`, for LAN and WAN. Load a thread by peer id 
 
 `host::start_voice_call`, `host::start_video_call`, `host::accept_incoming_call`, `host::set_mic_muted`, `host::end_call`. While video is connected, `host::call_picture_pngs` is the local and remote picture. Ending a call stops media. Log out stops the node, which ends an active call.
 
+## Notifications
+
+New inbound text, voice notes and files post a notification when they bump unread — that is, the message is new (not a poll replay) and the chat is not open with read receipts on. One notification per chat, replaced by newer mail and removed by `host::set_open_room(Some(peer))`. The body says what arrived ("New message", "Voice message", "File"), never the message text. Blocked contacts never notify. Code: `ghalbol_core/src/message_notify.rs`. Incoming calls keep their own notification (`incoming_call_notify.rs`).
+
 ## Invites
 
 Format 2 carries `public_key_hex` only. Encode and decode live in `connect_invite_v1.rs`. The desktop app registers `ghalbol://`. A link passed on the command line is joined after unlock.
@@ -107,6 +111,8 @@ Format 2 carries `public_key_hex` only. Encode and decode live in `connect_invit
 | `chat_transcript_v1.json` | Lines, `delivery`, `received_at_ms`, `read_ack_sent` |
 | `preferences_v1.json` | Locale, availability, coord URL |
 
+Contacts, the transcript, voice notes and attachments live in the `ghalbol/` subfolder of the data directory. Builds from before the `ghal_bol` → `ghalbol` rename wrote `ghal_bol/` and sealed the keystore with a `ghal_bol.keystore.v1` AAD; `app_paths.rs` moves the old folder on first use (leaving a `ghal_bol` symlink on Unix so stored file paths still open) and `keystore_v1.rs` still unlocks the old AAD. Peers and servers from before the rename do **not** interoperate with new builds (handshake, KDF and signing domains changed) — redeploy coord and delivery from the same commit as the apps.
+
 Do not cache live endpoints (coord presence, mDNS port, bridge tokens) on disk.
 
 ## Process
@@ -119,7 +125,7 @@ On Linux, launch writes `~/.config/autostart/com.ghalbol.desktop` (debug: `com.g
 
 | Area | Path |
 |------|------|
-| UI | `ghalbol_app/src/main.rs` |
+| UI | `apps/ghalbol/src/main.rs` |
 | UI API | `ghalbol_core/src/host.rs` |
 | Connect and acks | `ghalbol_core/src/connect/` |
 | Events to disk | `ghalbol_core/src/dm_event_handler.rs` |

@@ -16,11 +16,20 @@ On x86_64 Linux, with the Makepad system libraries installed (X11, Wayland, EGL/
 ./scripts/package_linux_release.sh
 ```
 
-That writes `web/downloads/ghalbol-linux-x64.tar.gz`. Extract it and run `./run.sh`.
+That builds with the production env and `MAKEPAD_PACKAGE_DIR=.`, and writes `web/downloads/ghalbol-linux-x64.tar.gz` (gitignored): the binary, `ghalbol_app/resources/`, `makepad_widgets/resources/` (icon, CJK and emoji fonts), `install.sh`, `uninstall.sh` and `run.sh`. Extract it, then `./install.sh` (per-user, into `~/.local/lib/ghalbol/` with a menu entry) or `./run.sh` to try it in place.
 
 Debug data directory: `~/.local/share/com.ghalbol.debug/`. Release: `~/.local/share/com.ghalbol/`.
 
 On first launch the app writes a login autostart entry and a desktop menu file for the binary you started. If a keystore already exists and the session is locked, it posts an unlock notification.
+
+### P0.1b Windows package
+
+```bash
+./scripts/package-windows.sh        # production → dist/windows/
+cargo ghalbol-windows-dev           # development (com.ghalbol.debug, coord1) → dist/windows-dev/
+```
+
+Cross-builds `x86_64-pc-windows-gnu` with mingw. Copy the folder to Windows and double-click **Setup.bat**: a per-user install (no admin) into `%LOCALAPPDATA%\Programs\<label>\` with Start Menu shortcuts, an *Apps & features* entry, sign-in autostart and the `ghalbol://` handler. **Uninstall.bat** (or *Apps & features*) removes it and deletes the data only if you type `YES`. The production exe has no console window.
 
 ### P0.2 Two-device test
 
@@ -48,7 +57,7 @@ COORD_URL=https://coord.ghalbol.com ./ghalbol_coord/deploy/smoke_coord.sh
 
 ## P0 — Android package
 
-The phone UI is the same `ghalbol_app` binary, built by cargo-makepad. Package id `com.ghalbol`. The manifest template is `ghalbol_app/resources/android/AndroidManifest.xml.template` (camera, microphone, network, notifications, `ghalbol://` and `https://ghalbol.com/connect/`).
+The phone UI is the same `ghalbol_app` binary, built by cargo-makepad. Package id `com.ghalbol`. The manifest template is `apps/ghalbol/resources/android/AndroidManifest.xml.template` (camera, microphone, network, notifications, `ghalbol://` and `https://ghalbol.com/connect/`).
 
 ```bash
 ./scripts/build_android_app.sh            # debug: install + launch
@@ -57,6 +66,8 @@ The phone UI is the same `ghalbol_app` binary, built by cargo-makepad. Package i
 ```
 
 Signing for Play uses cargo-makepad’s `--keystore` on `build-aab` (see `cargo makepad android --help`).
+
+**Version code:** Play already has the Flutter app up to version code 9 (1.0.1). `[package.metadata.makepad.android]` in `apps/ghalbol/Cargo.toml` is at **10 / 1.1.0**; bump it for every upload. The upload must be signed with the same Play upload key as the Flutter releases.
 
 After `--release`, install with:
 
@@ -76,13 +87,20 @@ The Makepad Android activity is the process. Messages while the screen is off de
 
 ### P1.1 CI
 
-`.github/workflows/ci.yml` runs `cargo test` for core, coord, and delivery, then `cargo check -p ghalbol_app` and the app language tests.
+`.github/workflows/ci.yml` (warnings are errors):
+
+| Job | What |
+|-----|------|
+| Rust tests (Linux) | `cargo test` for core, coord, delivery, ddns and the app; `cargo check --workspace --all-targets` |
+| Windows cross-check | `cargo check -p ghalbol_app --target x86_64-pc-windows-gnu` |
+| Android check | `./scripts/check_android.sh` — app + core the way cargo-makepad compiles them (needs only the NDK) |
+| Packaging scripts | `bash -n` on every script; PowerShell parse of `scripts/windows/*.ps1` |
 
 Local checks for the UI contract:
 
 ```bash
 cargo test -p ghalbol_core --lib -- --test-threads=1 identity_invite_password_and_locale outbound_send_marks_an_unknown_contact_known availability_presets_persist_and_cap_at_64 transcript_page_keeps_delivery_and_has_more hidden_room_does_not_send_a_new_read_ack qr_png_roundtrip set_contact_trust_updates_flags
-cargo test -p ghalbol_app --bin ghalbol_app -- i18n:: bubble_tests
+cargo test -p ghalbol_app
 ```
 
 Those cover create/unlock, backup reveal, invite join, block, password change, locale, QR decode, contact trust, availability, transcript pages, the hidden-room read gate, delivery ticks, and every language catalog.

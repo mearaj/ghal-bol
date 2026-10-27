@@ -25,7 +25,7 @@ WhatsApp-style **voice notes** in 1:1 chat:
 
 | Rule | Detail |
 |------|--------|
-| **Same rail as text** | One frame on `/ghalbol/msg/1.0.0`; outbox; `ack_received` / `ack_read`; transcript patch on poll. |
+| **Same rail as text** | One sealed envelope on the **delivery mailbox** (`delivery_msg_v1`, `delivery_send_voice_dm`); recipient acks drive ticks; transcript patch on poll. The native-connect `/ghalbol/msg/1.0.0` frame below is only the LAN mirror / no-delivery-URL path. |
 | **Full payload in one send** | Entire encoded audio inside the sealed inner JSON — no chunking, no sender-served download link (v1). |
 | **Same E2E as text** | Inner JSON → `seal_to_secp256k1_public` → `ciphertext_hex` → signed envelope. **Not** call media keys. |
 | **Rust owns behaviour** | Record policy, Opus encode/decode, send/retry, decrypt, transcript. Makepad calls `ghalbol_core::host`. |
@@ -50,7 +50,7 @@ Enforce **both** max duration (UI + native) and max encoded bytes (native reject
 
 ### Envelope (unchanged shell)
 
-Same `ghalbol_msg_v1` envelope as text. Add `MsgKind::Voice` in `msg_v1.rs` (wire: `"voice"`).
+Product path: a `delivery_msg_v1` envelope, same shell as text ([GHALBOL_DELIVERY_WIRE_V1.md](GHALBOL_DELIVERY_WIRE_V1.md)). LAN mirror: the `ghalbol_msg_v1` envelope with `MsgKind::Voice` in `msg_v1.rs` (wire: `"voice"`):
 
 | Field | Voice message |
 |-------|----------------|
@@ -75,14 +75,18 @@ Same `ghalbol_msg_v1` envelope as text. Add `MsgKind::Voice` in `msg_v1.rs` (wir
 - **`duration_ms`** — for UI waveform/duration label; also stored on transcript row.
 - Version inner schema with a `"voice_msg_version": 1` field if future codecs are added.
 
-### Encryption (same as DM text — transport KEM)
+### Encryption (same as text)
+
+**Delivery mailbox (product path, `delivery_msg_v1.rs`):**
 
 1. `serde_json` inner bytes  
-2. Seal with **transport KEM v2** (`DM_CIPHER_TRANSPORT_V2`) after `TransportKemHello` — same path as text DM (`transport_kem_v1.rs`, `msg_v1.rs`)  
+2. Seal to the recipient identity with `offline_seal_v1::seal_to_secp256k1_public` (ephemeral ECDH + AES-256-GCM). **v1 supports secp256k1 recipients only** — see [MULTI_ALGO.md](MULTI_ALGO.md) § Implementation status.  
 3. Hex-encode → `ciphertext_hex`  
-4. Sign envelope with sender device key  
+4. Sign the envelope with the sender device key  
 
-Decrypt: verify signature → open transport seal → parse inner JSON → decode Opus → play.
+**Native connect (LAN mirror / no delivery URL):** same inner JSON sealed with transport KEM v2 (`DM_CIPHER_TRANSPORT_V2`) after `TransportKemHello` (`transport_kem_v1.rs`, `msg_v1.rs`).
+
+Decrypt: verify signature → open the seal → parse inner JSON → decode Opus → play.
 
 **Do not** use `derive_call_media_keys_from_transport` for voice notes — that is for live call media substreams only.
 

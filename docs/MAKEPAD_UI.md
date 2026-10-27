@@ -2,7 +2,7 @@
 
 `ghalbol_app` is the only Ghal Bol UI. It is Makepad 2: Splash `script_mod!`, `Script` / `ScriptHook`, and `AppMain::script_mod`.
 
-The dependency is pinned in `ghalbol_app/Cargo.toml` to Makepad `dev` (`makepad-widgets` 2.0.0).
+The dependency is pinned in `apps/ghalbol/Cargo.toml` to a Makepad git revision (`makepad-widgets` 2.0.0; `scripts/build_android_app.sh` installs `cargo-makepad` from the same revision).
 
 Screens call [`ghalbol_core::host`](../ghalbol_core/src/host.rs) in-process. Ack policy, outbox, and transcript merge stay in `ghalbol_core`.
 
@@ -12,10 +12,10 @@ Where Makepad 2 still lacks a widget or platform affordance (for example a nativ
 
 Debug builds use the `com.ghalbol.debug` data directory.
 
-**App icon / launcher:** Brand art is `docs/assets/app_icon.png`. Sized copies live under `ghalbol_app/resources/` (`icon_{32,64,128,256,512,1024}.png`, `icon.ico`) and Android `resources/android/res/mipmap-*/ic_launcher.png` plus splash `drawable/launch_logo.png`. The custom Android manifest sets `android:icon` / `android:roundIcon`; launch theme uses `makepad_launch_background`. Desktop window icons come from `MAKEPAD_APP_ICON_*` in `.cargo/config.toml`. Linux `.desktop` install writes `~/.local/share/icons/hicolor/128x128/apps/com.ghalbol*.png`.
+**App icon / launcher:** Brand art is `docs/assets/app_icon.png`. Sized copies live under `apps/ghalbol/resources/` (`icon_{32,64,128,256,512,1024}.png`, `icon.ico`) and Android `resources/android/res/mipmap-*/ic_launcher.png` plus splash `drawable/launch_logo.png`. The custom Android manifest sets `android:icon` / `android:roundIcon`; launch theme uses `makepad_launch_background`. Desktop window icons come from `MAKEPAD_APP_ICON_*` in `.cargo/config.toml`. Linux `.desktop` install writes `~/.local/share/icons/hicolor/128x128/apps/com.ghalbol*.png`.
 
 - Create, import a private key, import an encrypted keystore backup, unlock, or delete the device identity.
-- After a newly generated identity, export an encrypted backup before chat opens. **Desktop** uses a save/open file picker. **Android** writes the backup to Downloads (plus an app-files copy); import pastes the keystore JSON (no SAF picker yet).
+- After a newly generated identity, export an encrypted backup before chat opens. **Desktop** uses a save/open file picker. **Android** writes the backup to Downloads (plus an app-files copy); import opens the system document picker, and cancelling it offers pasting the keystore JSON instead.
 - Start native connect and register saved contacts.
 - Hub chrome: **≥720px** desktop = side rail + list + room; **&lt;720px** = bottom tabs + stacked list/room. Until the first resize, the shell assumes the design desktop width so the rail is not hidden. Room stays hidden until a contact is opened. Long lists, transcripts, sheets, Identity/More, unlock, and call UI **scroll** (see Scrolling below).
 - **Hub list AppBar**: title **Ghal Bol** on its own row, then a full-width **`ActionBar` / `HScroll`** of labeled actions (New chat, Invite, Join, Scan, Delivery, Lock on narrow). Do **not** put the title beside the scroller in one `flow: Right` row — on Android that leftover-width layout disables horizontal pan. The strip must pan when actions overflow. Wide layout also keeps **Lock** on the side rail.
@@ -23,13 +23,14 @@ Debug builds use the `com.ghalbol.debug` data directory.
 - Chat list with unread counts and availability text. Roster rows are rich `RosterRow` views (avatar initial, title, status, preview, Unknown chip, unread badge); **blue wash** for unread, **green wash** for the open room. Tap opens via `roster_list.on_item_tap` (rows have **no** `cursor`/Button — a drag scrolls, a plain tap opens). Empty search shows “Try a different search.” A highlighted roster row is not an open room (`host::set_open_room`).
 - Chat room AppBar: **back · title** on one row; **call / video / ⋮** in an **`HScroll`** strip under it. The ⋮ menu covers Voice call / Video call / Share invitation / Join someone / Add contact / Block / Lock. Trust banner (Add / Block) while `is_known: false`. Titles are **`Label`** (not `Selectable` — that steals IME focus).
 - Bubbles: Flutter chat chrome — **outgoing** right-aligned (`align.x: 1`) with **left gutter ~48** / right ~8; **inbound** left-aligned with **right gutter ~48** / left ~8. Chip is **`width: Fit{max: ~280}`** (content-sized), never a shared full-width slab. Body + meta row (**You**/peer caption + ticks) inside the chip. Delivery ticks use **FA PUA single glyphs** on WorldFonts (`\uf111` pending, `\uf00c` sent, `\uf560` check-double for delivered/read, `!` failed). Do **not** use Unicode `✓✓` — NotoSans has no ✓ so it falls through to two wide FA checks with a gap. Attachments: Download / Open / Save. Voice bubbles tap to play.
-- Share an invitation (link and QR). **Invite** shows a real QR image and the https link with **Copy link**. **Scan QR** opens a sheet with a continuous live camera preview until a code is read or you go Back. **QR picture** (More) reads a code from a PNG or JPEG. Paste an invitation, or add a contact by public key.
+- Share an invitation (link and QR). **Invite** shows a real QR image and the https link with **Copy link**. **Scan QR** opens a sheet with a continuous live camera preview until a code is read or you go Back. **QR picture** (More) reads a code from a PNG or JPEG (Android: system document picker). Paste an invitation, or add a contact by public key.
 - Password and private-key fields use Makepad `is_password` masking plus a **Show** / **Hide** control (`toggle_is_password`). Makepad does not ship a built-in eye glyph on `TextInput`, so the shell fills that gap beside each secret field.
 - Voice call and video call. Dial / accept / end open the call screen **immediately** (not on a later poll). Voice chrome is peer avatar + name + status + labeled **Accept / Mute / Speaker / End** in an `HScroll` — **no** empty local/remote video panes. Video tiles appear only while `host::call_shows_video` is true. **Accept / Decline** appear only on an **incoming** ring — never on the caller’s dial (`Calling…`). An incoming call plays a tone. An outgoing call plays a short ringback until it connects. **Speaker** routes the Android earpiece or loudspeaker; on the desktop it turns call playback on or off. **Add** marks an unknown contact as known. **Block** blocks the open chat. Sending a message also marks that contact known.
-- Show the private key, export a keystore backup, change the app password.
+- Show the private key, export a keystore backup, change the app password. **Copy** (invite link, public key) uses the desktop clipboard tools on Linux, else Makepad's clipboard.
+- New-message notifications come from `ghalbol_core` (`message_notify.rs`) whenever inbound mail bumps unread: one per chat, body "New message" / "Voice message" / "File" (never the text), replaced by newer mail and removed when that chat opens. Linux uses desktop notifications; Android posts to the app's notification channel.
 - Delivery storage, in-app log, contacts, blocked contacts. About saves availability: Available, Busy, Away, In a call, Clear, or custom text (64 characters).
 - Voice note: mic opens a Flutter-style bar (Discard · red dot · elapsed · Send); Discard cancels; Send / second mic tap uploads (up to 2 minutes; “Recording too short” under ~400 ms). Tap a voice bubble to play it.
-- Choose a file to send (desktop picker; Android attach still pending SAF). Attachment bubbles: Download / Open / Save.
+- Choose a file to send (desktop picker; Android system document picker — `host::send_picked_attachment` copies the `content://` file into app storage first). Attachment bubbles: Download / Open / Save.
 - Older messages: **Older messages** chip, plus auto-load when the transcript is scrolled to the top. Stick-to-bottom follows new lines only when already near the end (or on own send / room open). Poll refreshes the open transcript only when `host::transcript_revision` moves.
 - **Language** — worldwide catalogue (India Eighth Schedule + state languages, South/East/Southeast Asia, Middle East, Europe, Africa, Americas) with native names and English glosses, grouped by region. Bundled Noto script fonts (`resources/fonts`) plus Makepad LXGW WenKai cover Devanagari, Bengali, Tamil, Telugu, Gujarati, Kannada, Malayalam, Gurmukhi, Odia, Arabic, Hebrew, Thai, Sinhala, Myanmar, Khmer, Lao, Tibetan, Ethiopic, Thaana, Georgian, Armenian, Meetei Mayek, Ol Chiki, and CJK. Chrome strings exist for a starter set; other languages select correctly and fall back to English until translated. Preference is saved.
 
@@ -40,7 +41,7 @@ Debug builds use the `com.ghalbol.debug` data directory.
 
 ## Layout tokens
 
-Shared Splash styles in `ghalbol_app/src/main.rs`:
+Shared Splash styles in `apps/ghalbol/src/main.rs`:
 
 - **Quiet / Go / Stop** — rounded buttons with roomy inner padding (`Inset{left/right: 20–22, top/bottom: 14}`) and 10px corner radius. Never put label text flush against the pill edge.
 - **Chip** — compact Quiet for occasional text actions (e.g. Older messages).

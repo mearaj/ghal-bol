@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Android install+run. **Default is DEBUG** (development.example → home coord1 bridge).
+# Android install+run. **Default is DEBUG** (apps/ghalbol/env/development.env → home coord1 bridge).
 # Production GCP is opt-in via --release only — bare runs must not overwrite debug with GCP.
 #
-#   ./scripts/build_android_app.sh           # debug  (debug_assertions on  → development.example)
+#   ./scripts/build_android_app.sh           # debug   → development.env
 #   ./scripts/build_android_app.sh --debug   # same
-#   ./scripts/build_android_app.sh --release # release (debug_assertions off → production.example)
-#   ./scripts/build_android_app.sh --aab     # Play App Bundle (always release)
+#   ./scripts/build_android_app.sh --release # release → production.env
+#   ./scripts/build_android_app.sh --aab     # Play App Bundle (release → production.env)
 #
-# Do not swap the env files. Profile is selected by Rust debug_assertions only.
+# apps/ghalbol/build.rs bakes the env file named by GHALBOL_ENV. This script sets it from the
+# flag unless the caller already exported it (cargo ghalbol-android-dev exports development).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REV="1f60033ed3b1158cb7bf93accf1c91e0166c9373"
@@ -39,6 +40,13 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+if [[ -z "${GHALBOL_ENV:-}" ]]; then
+  if [[ "${#EXTRA[@]}" -eq 0 ]]; then
+    export GHALBOL_ENV=development
+  else
+    export GHALBOL_ENV=production
+  fi
+fi
 
 if ! command -v cargo-makepad >/dev/null 2>&1; then
   cargo install --git https://github.com/makepad/makepad --rev "$REV" cargo-makepad --locked
@@ -82,11 +90,9 @@ cd "$ROOT"
 # Agent shells may set CARGO_TARGET_DIR to a sandbox cache; keep the repo target/.
 unset CARGO_TARGET_DIR || true
 
-if [[ "${#EXTRA[@]}" -eq 0 ]]; then
-  echo "Android profile: DEBUG → env/.env.development.example (home coord1 / bridge)." >&2
-else
-  echo "Android profile: RELEASE → env/.env.production.example (GCP coord.ghalbol.com)." >&2
-  echo "WAN call bridge for home testing needs --debug (coord1), not --release." >&2
+echo "Android build: ${EXTRA[*]:-debug} · env=$GHALBOL_ENV (apps/ghalbol/env/$GHALBOL_ENV.env)." >&2
+if [[ "$GHALBOL_ENV" == "production" ]]; then
+  echo "WAN call bridge for home testing needs the development env (coord1)." >&2
 fi
 
 # Default mode is install+run. If nothing is plugged in, build the APK only —

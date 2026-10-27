@@ -15,6 +15,7 @@ fn marker(name: &str) -> PathBuf {
     runtime_dir().join(name)
 }
 
+#[cfg(target_os = "linux")]
 fn touch(name: &str) {
     let dir = runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -33,6 +34,7 @@ fn take(name: &str) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn touch_incoming_call_wake() {
     touch("incoming_call_wake");
 }
@@ -45,6 +47,7 @@ pub fn clear_incoming_call_wake() {
     let _ = std::fs::remove_file(marker("incoming_call_wake"));
 }
 
+#[cfg(target_os = "linux")]
 pub fn touch_unlock_wake() {
     touch("unlock_wake");
 }

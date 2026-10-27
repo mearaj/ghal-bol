@@ -46,8 +46,14 @@ desktop_data_dir_linux() {
   echo "${XDG_DATA_HOME:-$HOME/.local/share}/${GHALBOL_APP_ID:?}"
 }
 
+# Windows: `directories` ProjectDirs for com.ghalbol → %LOCALAPPDATA%\com.ghalbol\data;
+# the debug namespace is a subfolder of it.
 desktop_data_dir_windows_hint() {
-  echo "%APPDATA%\\\\${GHALBOL_APP_ID:?}"
+  if [[ "${GHALBOL_APP_ID:?}" == "com.ghalbol" ]]; then
+    echo '%LOCALAPPDATA%\com.ghalbol\data'
+  else
+    echo "%LOCALAPPDATA%\\com.ghalbol\\data\\${GHALBOL_APP_ID}"
+  fi
 }
 
 desktop_install_dir_linux() {
@@ -106,7 +112,7 @@ desktop_prompt_remove_data() {
     return 1
   fi
   echo
-  echo "Remove this data? (settings, keystore backups)"
+  echo "Remove this data? (identity, contacts and chats — cannot be undone)"
   echo "  y = delete data forever"
   echo "  N = keep data (run uninstall again later to remove it)"
   local ans=""

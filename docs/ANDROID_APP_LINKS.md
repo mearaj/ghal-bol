@@ -16,7 +16,7 @@ For links tapped in Chrome to **open Ghal Bol directly** (not only “Open with�
 
 **URL:** `https://ghalbol.com/.well-known/assetlinks.json` (and `www.ghalbol.com` — same file via Hosting)
 
-**In repo:** `web/.well-known/assetlinks.json`. Deploy with [WEB_SITE.md](WEB_SITE.md). SHA-256 source: `web/.well-known/README.txt`.
+**In repo:** `web/.well-known/assetlinks.json` (holds the release signing fingerprint). Deploy with [WEB_SITE.md](WEB_SITE.md). Get the SHA-256 from Play Console → App integrity → App signing key certificate.
 
 Example (replace SHA-256 cert fingerprints if template):
 

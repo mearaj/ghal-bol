@@ -23,7 +23,7 @@ Connectivity: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**, § **N
 | [GHALBOL_VIDEO_NATIVE_V1.md](GHALBOL_VIDEO_NATIVE_V1.md) | Native video engine (shipping) |
 | [VOICE_MESSAGES_PLAN.md](VOICE_MESSAGES_PLAN.md) | Async voice notes over DM |
 | [ATTACHMENTS_PLAN.md](ATTACHMENTS_PLAN.md) | File attachments |
-| [status.md](status.md) | Availability status |
+| [AVAILABILITY_STATUS.md](AVAILABILITY_STATUS.md) | Availability status (user-chosen text, not presence) |
 | [chat_history_pagination.md](chat_history_pagination.md) | Transcript windowing |
 | [change_password_flow.md](change_password_flow.md) | Password change |
 | [PRODUCTION_RELEASE.md](PRODUCTION_RELEASE.md) | Release / Play / desktop packaging |

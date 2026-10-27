@@ -9,6 +9,7 @@ export GHALBOL_ENV_DIR="$GHALBOL_APP_DIR/env"
 
 source "$ROOT/scripts/load-ghalbol-env.sh"
 source "$ROOT/scripts/windows-env.sh"
+source "$ROOT/scripts/desktop-resources.sh"
 source "$ROOT/scripts/desktop-ids.sh"
 source "$ROOT/scripts/stage-desktop-package.sh"
 
