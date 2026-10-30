@@ -34,6 +34,8 @@ struct DeliveryMirror {
     quota: Value,
     policy: Value,
     mailbox_rows: Vec<Value>,
+    /// Set when the server pushes `quota.warning`; cleared when the UI reads it.
+    quota_warning: Option<String>,
 }
 
 fn mirror_mx() -> &'static Mutex<DeliveryMirror> {
@@ -390,6 +392,41 @@ async fn handle_push_frame(
                     }
                     try_read_ack_after_inbound_async(session, &message_id, &sender_wire).await;
                 }
+                Ok(DeliveryOpenedMessage::AvailabilityStatus {
+                    message_id,
+                    sender_wire,
+                    status,
+                    updated_at_ms,
+                }) => {
+                    // Control plane — apply to contacts, no transcript bubble / ticks.
+                    let ev = json!({
+                        "kind": "dm_message",
+                        "msg_kind": "availability_status",
+                        "id": message_id,
+                        "text": status,
+                        "status": status,
+                        "sender_public_key_hex": sender_wire,
+                        "public_key_hex": sender_wire,
+                        "created_at_ms": updated_at_ms,
+                    });
+                    let _ = apply_p2p_event_json(&ev);
+                    enqueue_dm_poll(
+                        &sender_wire,
+                        &message_id,
+                        "availability_status",
+                        Some(status.clone()),
+                        None,
+                        updated_at_ms,
+                        None,
+                    );
+                    if let Err(e) = session.inbox_ack(&message_id, &sender_wire).await {
+                        native_log::warn(
+                            "delivery",
+                            format!("inbox.ack failed message_id={message_id}: {e}"),
+                        );
+                    }
+                    // No read ack — availability is not a chat message.
+                }
                 Err(e) => {
                     native_log::warn("delivery", format!("message.inbound decrypt failed: {e}"));
                 }
@@ -436,11 +473,47 @@ async fn handle_push_frame(
             enqueue_delivery_ack_poll(recipient, message_id, "ack_read");
         }
         "message.expired" => {
-            // UI mailbox sync picks up expired rows on next list refresh.
+            let message_id = frame
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let recipient = frame
+                .get("recipient_wire")
+                .and_then(|v| v.as_str())
+                .or_else(|| frame.get("recipient").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if let Some(ns) = active_app_namespace() {
+                if !message_id.is_empty() && !recipient.is_empty() {
+                    let _ = crate::dm_transcript_store::patch_outgoing_failed(
+                        &ns, recipient, message_id,
+                    );
+                    native_log::info(
+                        "delivery",
+                        format!("message.expired → failed mid={message_id}"),
+                    );
+                }
+            }
         }
         "quota.status" | "quota.warning" => {
             if let Ok(mut m) = mirror_mx().lock() {
                 m.quota = frame.clone();
+            }
+            if frame.get("type").and_then(|v| v.as_str()) == Some("quota.warning") {
+                let used = frame
+                    .get("used_bytes")
+                    .or_else(|| frame.get("used"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let alloc = frame
+                    .get("allocated_bytes")
+                    .or_else(|| frame.get("allocated"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let warn = format!("Delivery quota warning — used {used} of {alloc}");
+                native_log::warn("delivery", warn.clone());
+                if let Ok(mut m) = mirror_mx().lock() {
+                    m.quota_warning = Some(warn);
+                }
             }
         }
         _ => {}
@@ -688,6 +761,22 @@ fn spawn_delivery_upload(recipient: String, text: String, message_id: String) {
                         "delivery",
                         format!("upload failed message_id={message_id}: {e}"),
                     );
+                    // Permanent client/auth/size errors — stop retrying as pending.
+                    let hard = e.contains("too large")
+                        || e.contains("oversize")
+                        || e.contains("auth")
+                        || e.contains("401")
+                        || e.contains("403")
+                        || e.contains("unsupported")
+                        || e.contains("secp256k1")
+                        || e.contains("seal");
+                    if hard {
+                        if let Some(ns) = active_app_namespace() {
+                            let _ = crate::dm_transcript_store::patch_outgoing_failed(
+                                &ns, &recipient, &message_id,
+                            );
+                        }
+                    }
                 }
             }
         })
@@ -720,6 +809,21 @@ fn spawn_delivery_voice_upload(
                         "delivery",
                         format!("voice upload failed message_id={message_id}: {e}"),
                     );
+                    let hard = e.contains("too large")
+                        || e.contains("oversize")
+                        || e.contains("auth")
+                        || e.contains("401")
+                        || e.contains("403")
+                        || e.contains("unsupported")
+                        || e.contains("secp256k1")
+                        || e.contains("seal");
+                    if hard {
+                        if let Some(ns) = active_app_namespace() {
+                            let _ = crate::dm_transcript_store::patch_outgoing_failed(
+                                &ns, &recipient, &message_id,
+                            );
+                        }
+                    }
                 }
             }
         })
@@ -751,6 +855,21 @@ fn spawn_delivery_attachment_upload(
                         "delivery",
                         format!("attachment upload failed message_id={message_id}: {e}"),
                     );
+                    let hard = e.contains("too large")
+                        || e.contains("oversize")
+                        || e.contains("auth")
+                        || e.contains("401")
+                        || e.contains("403")
+                        || e.contains("unsupported")
+                        || e.contains("secp256k1")
+                        || e.contains("seal");
+                    if hard {
+                        if let Some(ns) = active_app_namespace() {
+                            let _ = crate::dm_transcript_store::patch_outgoing_failed(
+                                &ns, &recipient, &message_id,
+                            );
+                        }
+                    }
                 }
             }
         })
@@ -919,6 +1038,78 @@ pub fn delivery_send_attachment(
     })
 }
 
+/// Broadcast availability over the mailbox (short TTL). Skips non-secp peers.
+/// Call alongside native-connect status sync so text-only peers still see it.
+pub fn delivery_broadcast_availability(status: &str, updated_at_ms: i64) -> usize {
+    let Some(url) = delivery_url() else {
+        return 0;
+    };
+    let Some(ns) = active_app_namespace() else {
+        return 0;
+    };
+    let Ok(contacts) = crate::contacts_v1::list_contacts(&ns) else {
+        return 0;
+    };
+    let status = status.to_string();
+    let mut sent = 0usize;
+    for c in contacts {
+        if !c.has_public_key() {
+            continue;
+        }
+        let peer = c.public_key_hex.clone();
+        if let Ok(id) = crate::identity::Identity::parse(&peer) {
+            if id.algorithm != crate::identity::IdentityAlgorithm::Secp256k1 {
+                continue;
+            }
+        }
+        let message_id = format!(
+            "avail-{}-{}",
+            updated_at_ms,
+            &peer.chars().take(12).collect::<String>()
+        );
+        let url = url.clone();
+        let status = status.clone();
+        let peer_u = peer.clone();
+        let _ = std::thread::Builder::new()
+            .name("delivery_avail".into())
+            .spawn(move || {
+                match crate::delivery_client::blocking_upload_availability(
+                    &url,
+                    &peer_u,
+                    &status,
+                    updated_at_ms,
+                    &message_id,
+                    Some(24 * 3600),
+                ) {
+                    Ok(_) => native_log::debug(
+                        "delivery",
+                        format!(
+                            "availability uploaded peer={}…",
+                            peer_u.chars().take(8).collect::<String>()
+                        ),
+                    ),
+                    Err(e) => native_log::warn(
+                        "delivery",
+                        format!(
+                            "availability upload failed peer={}…: {e}",
+                            peer_u.chars().take(8).collect::<String>()
+                        ),
+                    ),
+                }
+            });
+        sent += 1;
+    }
+    sent
+}
+
+/// Take and clear a pending quota-warning banner for the UI (one-shot).
+pub fn take_quota_warning() -> Option<String> {
+    mirror_mx()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.quota_warning.take())
+}
+
 pub fn delivery_connection_status() -> Value {
     if let Ok(m) = mirror_mx().lock() {
         return json!({
@@ -928,11 +1119,43 @@ pub fn delivery_connection_status() -> Value {
             "quota": m.quota,
             "policy": m.policy,
             "delivery_url": delivery_url(),
+            "quota_warning": m.quota_warning,
         });
     }
     json!({ "ok": true, "connected": false, "delivery_url": delivery_url() })
 }
 
+
+/// Extend a still-queued mailbox row's TTL (server rejects once expired).
+pub fn delivery_extend_ttl(message_id: &str, extend_secs: u64) -> Value {
+    let mid = message_id.trim();
+    if mid.is_empty() {
+        return json!({ "ok": false, "error": "message_id empty" });
+    }
+    let Some(url) = delivery_url() else {
+        return json!({ "ok": false, "error": "GHALBOL_DELIVERY_URL not set" });
+    };
+    let ident = match unlocked_identity_clone() {
+        Ok(i) => i,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let ws_url = ws_url_from_base(&url);
+    let mid = mid.to_string();
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "ok": false, "error": e.to_string() }),
+    };
+    match rt.block_on(async {
+        let mut session = connect_and_auth(&ws_url, &ident).await?;
+        session.extend_ttl(&ident, &mid, extend_secs).await
+    }) {
+        Ok(resp) => json!({ "ok": true, "extended": resp }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
 
 pub fn delivery_mailbox_list(include_expired: bool) -> Value {
     let Some(url) = delivery_url() else {

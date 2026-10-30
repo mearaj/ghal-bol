@@ -70,7 +70,7 @@ Voice pipeline, transport, `host::` call APIs, and device-test steps: [GHALBOL_C
 
 Video pipeline, textures, and call end: [GHALBOL_VIDEO_NATIVE_V1.md](GHALBOL_VIDEO_NATIVE_V1.md).
 
-**Debug:** More → **App log** → filter **Calls**. Lines use `[Call]`, `[Call/Media]`, `[Call/Video]`. Look for `call_media start`, `sent=N recv=M`, `call_video`, `media_e2ee` / identity key prefix.
+**Debug:** Settings → **App log** → filter **Calls**. Lines use `[Call]`, `[Call/Media]`, `[Call/Video]`. Look for `call_media start`, `sent=N recv=M`, `call_video`, `media_e2ee` / identity key prefix.
 
 **In-call UI:** Green lock chip when identity E2E is active: **End-to-end encrypted · contact key** `03a1f2b3…`. Media must not connect without a derived identity key (golden rule 7).
 

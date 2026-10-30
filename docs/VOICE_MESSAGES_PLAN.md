@@ -135,7 +135,7 @@ Hub preview: e.g. `"Voice message"` or `"🎤 0:45"` via `contacts_v1` preview h
 
 ## Makepad UX (v1)
 
-- **Hold** mic in composer → record; release to send (or slide to cancel — product choice).
+- **Toggle** mic in composer → start/stop record via `host::voice_note_toggle` (shipping v1; hold-to-record remains optional later).
 - **Timer** visible; hard stop at **2:00**.
 - Outbound bubble: duration + sending spinner → ticks when native says so.
 - Inbound bubble: play/pause; optional simple progress bar.

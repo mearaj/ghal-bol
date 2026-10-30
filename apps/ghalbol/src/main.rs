@@ -128,26 +128,33 @@ script_mod! {
 
     let state = mod.state
 
+    // Intent → face (same job → same look). Quiet/Go/Stop keep legacy names as
+    // aliases for secondary / submit-primary / destroy so call sites stay stable.
+    // Never promote a navigate/hub jump to filled primary — use HubDestBtn / MenuRow.
+    // Palette: cool shell + electric blue CTAs + navy chrome (from app_icon.png).
     let Quiet = Button{
         width: Fit
         height: Fit
         padding: Inset{left: 20. right: 20. top: 14. bottom: 14.}
         margin: Inset{left: 0. right: 0. top: 0. bottom: 0.}
         align: Center
+        label_walk: Walk{width: Fit, height: Fit, margin: Inset{left: 2. right: 2. top: 0. bottom: 0.}}
+        grab_key_focus: false
+        reset_hover_on_click: true
         draw_bg.border_size: 1.0
         draw_bg.border_radius: 10.0
         draw_bg.color: #FFFFFF
-        draw_bg.color_hover: #E9EDEF
-        draw_bg.color_down: #D1D7DB
+        draw_bg.color_hover: #DCE4F0
+        draw_bg.color_down: #C5D0DE
         draw_bg.color_focus: #FFFFFF
-        draw_bg.border_color: #D1D7DB
-        draw_bg.border_color_hover: #D1D7DB
-        draw_bg.border_color_down: #D1D7DB
-        draw_bg.border_color_focus: #008069
-        draw_text.color: #111B21
-        draw_text.color_hover: #111B21
-        draw_text.color_down: #111B21
-        draw_text.color_focus: #111B21
+        draw_bg.border_color: #C5D0DE
+        draw_bg.border_color_hover: #C5D0DE
+        draw_bg.border_color_down: #C5D0DE
+        draw_bg.border_color_focus: #0183FB
+        draw_text.color: #0B1220
+        draw_text.color_hover: #0B1220
+        draw_text.color_down: #0B1220
+        draw_text.color_focus: #0B1220
         draw_text.text_style.font_size: 13
     }
     let Go = Button{
@@ -156,16 +163,19 @@ script_mod! {
         padding: Inset{left: 22. right: 22. top: 14. bottom: 14.}
         margin: Inset{left: 0. right: 0. top: 0. bottom: 0.}
         align: Center
+        label_walk: Walk{width: Fit, height: Fit, margin: Inset{left: 2. right: 2. top: 0. bottom: 0.}}
+        grab_key_focus: false
+        reset_hover_on_click: true
         draw_bg.border_size: 1.0
         draw_bg.border_radius: 10.0
-        draw_bg.color: #008069
-        draw_bg.color_hover: #017561
-        draw_bg.color_down: #006655
-        draw_bg.color_focus: #008069
-        draw_bg.border_color: #006655
-        draw_bg.border_color_hover: #006655
-        draw_bg.border_color_down: #006655
-        draw_bg.border_color_focus: #006655
+        draw_bg.color: #0183FB
+        draw_bg.color_hover: #0170D8
+        draw_bg.color_down: #015CB5
+        draw_bg.color_focus: #0183FB
+        draw_bg.border_color: #015CB5
+        draw_bg.border_color_hover: #015CB5
+        draw_bg.border_color_down: #015CB5
+        draw_bg.border_color_focus: #015CB5
         draw_text.color: #FFFFFF
         draw_text.color_hover: #FFFFFF
         draw_text.color_down: #FFFFFF
@@ -178,6 +188,9 @@ script_mod! {
         padding: Inset{left: 20. right: 20. top: 14. bottom: 14.}
         margin: Inset{left: 0. right: 0. top: 0. bottom: 0.}
         align: Center
+        label_walk: Walk{width: Fit, height: Fit, margin: Inset{left: 2. right: 2. top: 0. bottom: 0.}}
+        grab_key_focus: false
+        reset_hover_on_click: true
         draw_bg.border_size: 1.0
         draw_bg.border_radius: 10.0
         draw_bg.color: #FFFFFF
@@ -194,6 +207,43 @@ script_mod! {
         draw_text.color_focus: #C62828
         draw_text.text_style.font_size: 13
     }
+    // Full-width multi-word CTAs — wrap + center; never Chip/ellipsis.
+    let StackPrimaryBtn = Go{
+        width: Fill
+        height: Fit
+        flow: Right{wrap: true}
+        align: Align{x: 0.5 y: 0.5}
+        label_walk: Walk{width: Fit, height: Fit, margin: Inset{left: 4. right: 4. top: 0. bottom: 0.}}
+        draw_text.max_lines: 4
+        draw_text.text_overflow: Clip
+    }
+    let StackSecondaryBtn = Quiet{
+        width: Fill
+        height: Fit
+        flow: Right{wrap: true}
+        align: Align{x: 0.5 y: 0.5}
+        label_walk: Walk{width: Fit, height: Fit, margin: Inset{left: 4. right: 4. top: 0. bottom: 0.}}
+        draw_text.max_lines: 4
+        draw_text.text_overflow: Clip
+    }
+    let ActionStack = View{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: 10
+    }
+    // Navigate elsewhere (hub destination) — never filled primary.
+    let HubDestBtn = Quiet{
+        width: Fill
+        height: Fit
+        padding: Inset{left: 20. right: 20. top: 16. bottom: 16.}
+        margin: Inset{left: 0. right: 0. top: 4. bottom: 4.}
+        align: Align{x: 0 y: 0.5}
+        label_walk: Walk{width: Fill, height: Fit, margin: Inset{left: 2. right: 2. top: 0. bottom: 0.}}
+        draw_text.max_lines: 3
+        draw_text.text_overflow: Ellipsis
+        draw_text.text_style.font_size: 14
+    }
     let Field = TextInput{
         width: Fill
         height: Fit
@@ -206,26 +256,26 @@ script_mod! {
         draw_bg.color_focus: #FFFFFF
         draw_bg.color_down: #FFFFFF
         draw_bg.color_empty: #FFFFFF
-        draw_bg.border_color: #D1D7DB
-        draw_bg.border_color_hover: #8696A0
-        draw_bg.border_color_focus: #008069
-        draw_bg.border_color_down: #008069
-        draw_bg.border_color_empty: #D1D7DB
-        draw_text.color: #111B21
-        draw_text.color_hover: #111B21
-        draw_text.color_focus: #111B21
-        draw_text.color_down: #111B21
-        draw_text.color_empty: #667781
-        draw_text.color_empty_hover: #667781
-        draw_text.color_empty_focus: #667781
+        draw_bg.border_color: #C5D0DE
+        draw_bg.border_color_hover: #8A9BB0
+        draw_bg.border_color_focus: #0183FB
+        draw_bg.border_color_down: #0183FB
+        draw_bg.border_color_empty: #C5D0DE
+        draw_text.color: #0B1220
+        draw_text.color_hover: #0B1220
+        draw_text.color_focus: #0B1220
+        draw_text.color_down: #0B1220
+        draw_text.color_empty: #7A8B9C
+        draw_text.color_empty_hover: #7A8B9C
+        draw_text.color_empty_focus: #7A8B9C
         draw_text.text_style.font_size: 15
         // Theme default caret is white — invisible on our white fields.
-        draw_cursor.color: #111B21
+        draw_cursor.color: #0B1220
         // Selection is drawn *over* glyphs — keep alpha so ink stays readable.
-        draw_selection.color: #00806940
-        draw_selection.color_hover: #00806955
-        draw_selection.color_focus: #00806955
-        draw_selection.color_down: #00806966
+        draw_selection.color: #0183FB40
+        draw_selection.color_hover: #0183FB55
+        draw_selection.color_focus: #0183FB55
+        draw_selection.color_down: #0183FB66
         blink_speed: 0.5
     }
     // Square Font Awesome toolbar control (WorldFonts falls through to FA).
@@ -277,20 +327,20 @@ script_mod! {
         draw_bg.border_color_focus: #00000000
         draw_bg.border_color_down: #00000000
         draw_bg.border_color_empty: #00000000
-        draw_text.color: #111B21
-        draw_text.color_hover: #111B21
-        draw_text.color_focus: #111B21
-        draw_text.color_down: #111B21
-        draw_text.color_empty: #111B21
-        draw_text.color_empty_hover: #111B21
-        draw_text.color_empty_focus: #111B21
+        draw_text.color: #0B1220
+        draw_text.color_hover: #0B1220
+        draw_text.color_focus: #0B1220
+        draw_text.color_down: #0B1220
+        draw_text.color_empty: #0B1220
+        draw_text.color_empty_hover: #0B1220
+        draw_text.color_empty_focus: #0B1220
         draw_text.text_style.font_size: 14
         draw_cursor.color: #00000000
         // Selection is drawn *over* glyphs — keep alpha so ink stays readable.
-        draw_selection.color: #00806940
-        draw_selection.color_hover: #00806955
-        draw_selection.color_focus: #00806955
-        draw_selection.color_down: #00806966
+        draw_selection.color: #0183FB40
+        draw_selection.color_hover: #0183FB55
+        draw_selection.color_focus: #0183FB55
+        draw_selection.color_down: #0183FB66
         blink_speed: 0.0
     }
     // Chat text bubble — Label in a rounded box. Deliberately NOT a TextInput:
@@ -313,7 +363,7 @@ script_mod! {
         body := Label{
             width: Fit{max: FitBound.Abs(256)}
             text: ""
-            draw_text.color: #111B21
+            draw_text.color: #0B1220
             draw_text.text_style.font_size: 15
             draw_text.max_lines: 48
             draw_text.text_overflow: Ellipsis
@@ -327,7 +377,7 @@ script_mod! {
             caption := Label{
                 width: Fit
                 text: ""
-                draw_text.color: #667781
+                draw_text.color: #7A8B9C
                 draw_text.text_style.font_size: 11
                 draw_text.max_lines: 1
                 draw_text.text_overflow: Ellipsis
@@ -337,7 +387,7 @@ script_mod! {
             tick := Label{
                 width: Fit
                 text: ""
-                draw_text.color: #667781
+                draw_text.color: #7A8B9C
                 draw_text.text_style.font_size: 12
                 draw_text.text_style.font_family: WorldFonts
             }
@@ -351,7 +401,7 @@ script_mod! {
     }
     let Bar = SolidView{
         show_bg: true
-        draw_bg.color: #F7F7F7
+        draw_bg.color: #EEF2F8
         width: Fill
         height: Fit
         flow: Right
@@ -359,18 +409,109 @@ script_mod! {
         padding: Inset{left: 14. right: 14. top: 12. bottom: 12.}
         align: Align{y: 0.5}
     }
-    // Constrained-width control: wrap inside the face; ellipsis if still too tall.
-    let RailTab = Quiet{
+    // Side-rail peer — idle face. Selection is Overlay idle+active (Makepad Button
+    // has no selected bit). Idle must NOT reuse active fill on hover/focus.
+    let RailTab = Button{
         width: Fill
         height: Fit
-        padding: Inset{left: 12. right: 12. top: 12. bottom: 12.}
-        align: Center
-        // Fill so long labels wrap; label_align centers the ink in that box
-        // (layout `align` alone does not move glyphs when the walk is Fill).
-        label_walk: Walk{width: Fill, height: Fit}
-        label_align: Center
+        padding: Inset{left: 40. right: 12. top: 12. bottom: 12.}
+        align: Align{x: 0.0 y: 0.5}
+        flow: Right{wrap: true}
+        grab_key_focus: false
+        reset_hover_on_click: true
+        label_walk: Walk{width: Fill, height: Fit, margin: Inset{left: 0. right: 4.}}
+        label_align: Align{x: 0.0 y: 0.5}
+        icon_walk: Walk{width: 0. height: 0.}
+        draw_bg.border_size: 0.0
+        draw_bg.border_radius: 12.0
+        draw_bg.color: #00000000
+        draw_bg.color_hover: #DCE4F0
+        draw_bg.color_down: #C5D0DE
+        draw_bg.color_focus: #00000000
+        draw_bg.border_color: #00000000
+        draw_text.color: #5A6B7D
+        draw_text.color_hover: #0B1220
+        draw_text.color_down: #0B1220
+        draw_text.color_focus: #5A6B7D
         draw_text.max_lines: 2
         draw_text.text_overflow: Ellipsis
+        draw_text.text_style.font_size: 13
+    }
+    let RailTabOn = Button{
+        width: Fill
+        height: Fit
+        padding: Inset{left: 40. right: 12. top: 12. bottom: 12.}
+        align: Align{x: 0.0 y: 0.5}
+        flow: Right{wrap: true}
+        grab_key_focus: false
+        reset_hover_on_click: true
+        label_walk: Walk{width: Fill, height: Fit, margin: Inset{left: 0. right: 4.}}
+        label_align: Align{x: 0.0 y: 0.5}
+        icon_walk: Walk{width: 0. height: 0.}
+        draw_bg.border_size: 0.0
+        draw_bg.border_radius: 12.0
+        draw_bg.color: #10236D
+        draw_bg.color_hover: #10236D
+        draw_bg.color_down: #0C1C55
+        draw_bg.color_focus: #10236D
+        draw_bg.border_color: #10236D
+        draw_text.color: #FFFFFF
+        draw_text.color_hover: #FFFFFF
+        draw_text.color_down: #FFFFFF
+        draw_text.color_focus: #FFFFFF
+        draw_text.max_lines: 2
+        draw_text.text_overflow: Ellipsis
+        draw_text.text_style.font_size: 13
+    }
+    // Phone bottom peers (<720) — scrollable chips; same idle/active Overlay rule.
+    let NavChip = Button{
+        width: Fit{min: FitBound.Abs(88.)}
+        height: 56
+        padding: Inset{left: 36. right: 12. top: 8. bottom: 8.}
+        align: Align{x: 0.0 y: 0.5}
+        grab_key_focus: false
+        reset_hover_on_click: true
+        label_walk: Walk{width: Fit, height: Fit, margin: Inset{left: 0. right: 2.}}
+        icon_walk: Walk{width: 0. height: 0.}
+        draw_bg.border_size: 0.0
+        draw_bg.border_radius: 12.0
+        draw_bg.color: #00000000
+        draw_bg.color_hover: #DCE4F0
+        draw_bg.color_down: #C5D0DE
+        draw_bg.color_focus: #00000000
+        draw_bg.border_color: #00000000
+        draw_text.color: #5A6B7D
+        draw_text.color_hover: #0B1220
+        draw_text.color_down: #0B1220
+        draw_text.color_focus: #5A6B7D
+        draw_text.text_style.font_size: 12
+    }
+    let NavChipOn = Button{
+        width: Fit{min: FitBound.Abs(88.)}
+        height: 56
+        padding: Inset{left: 36. right: 12. top: 8. bottom: 8.}
+        align: Align{x: 0.0 y: 0.5}
+        grab_key_focus: false
+        reset_hover_on_click: true
+        label_walk: Walk{width: Fit, height: Fit, margin: Inset{left: 0. right: 2.}}
+        icon_walk: Walk{width: 0. height: 0.}
+        draw_bg.border_size: 0.0
+        draw_bg.border_radius: 12.0
+        draw_bg.color: #10236D
+        draw_bg.color_hover: #10236D
+        draw_bg.color_down: #0C1C55
+        draw_bg.color_focus: #10236D
+        draw_bg.border_color: #10236D
+        draw_text.color: #FFFFFF
+        draw_text.color_hover: #FFFFFF
+        draw_text.color_down: #FFFFFF
+        draw_text.color_focus: #FFFFFF
+        draw_text.text_style.font_size: 12
+    }
+    let NavMark = Image{
+        width: 22
+        height: 22
+        margin: Inset{left: 10. right: 0. top: 0. bottom: 0.}
     }
     // Hub roster row (Flutter `chat_hub_screen` chrome): avatar initial, title,
     // availability, preview, right-side "Unknown" chip + unread count badge.
@@ -392,10 +533,10 @@ script_mod! {
             align: Center
             draw_bg.border_radius: 22.0
             draw_bg.border_size: 0.0
-            draw_bg.color: #D9FDD3
+            draw_bg.color: #D6E8FF
             initial := Label{
                 text: "?"
-                draw_text.color: #008069
+                draw_text.color: #0183FB
                 draw_text.text_style.font_size: 17
             }
         }
@@ -407,7 +548,7 @@ script_mod! {
             title := Label{
                 width: Fill
                 text: ""
-                draw_text.color: #111B21
+                draw_text.color: #0B1220
                 draw_text.text_style.font_size: 15
                 draw_text.max_lines: 1
                 draw_text.text_overflow: Ellipsis
@@ -415,7 +556,7 @@ script_mod! {
             status := Label{
                 width: Fill
                 text: ""
-                draw_text.color: #008069
+                draw_text.color: #0183FB
                 draw_text.text_style.font_size: 12
                 draw_text.max_lines: 1
                 draw_text.text_overflow: Ellipsis
@@ -423,7 +564,7 @@ script_mod! {
             preview := Label{
                 width: Fill
                 text: ""
-                draw_text.color: #667781
+                draw_text.color: #7A8B9C
                 draw_text.text_style.font_size: 13
                 draw_text.max_lines: 1
                 draw_text.text_overflow: Ellipsis
@@ -455,7 +596,7 @@ script_mod! {
                 padding: Inset{left: 7. right: 7. top: 2. bottom: 2.}
                 draw_bg.border_radius: 10.0
                 draw_bg.border_size: 0.0
-                draw_bg.color: #25D366
+                draw_bg.color: #0183FB
                 count := Label{
                     text: ""
                     draw_text.color: #FFFFFF
@@ -519,7 +660,7 @@ script_mod! {
     // Hub action strip — tall finger band; title above stays compact (no HScroll).
     let ActionBar = ScrollXView{
         show_bg: true
-        draw_bg.color: #F7F7F7
+        draw_bg.color: #EEF2F8
         width: Fill
         height: 96
         flow: Right
@@ -553,37 +694,37 @@ script_mod! {
                 window.inner_size: vec2(1180, 760)
                 window.title: "Ghal Bol"
                 // Match Android launch chrome — avoid a long black GL clear before first paint.
-                pass +: {clear_color: #F7F7F7}
+                pass +: {clear_color: #EEF2F8}
                 // Makepad dark theme draws caption glyphs with color_label_inner (near-white)
-                // on a transparent caption bar. Our clear is #F7F7F7, so min/max/close vanish
+                // on a transparent caption bar. Our clear is #EEF2F8, so min/max/close vanish
                 // under Wayland custom chrome. Force light bar + dark glyphs.
                 caption_bar +: {
-                    draw_bg.color: #F7F7F7
+                    draw_bg.color: #EEF2F8
                     caption_label +: {
-                        label +: {draw_text +: {color: #111B21}}
+                        label +: {draw_text +: {color: #0B1220}}
                     }
                     windows_buttons +: {
                         min +: {
                             draw_bg +: {
-                                color: #111B21
-                                color_hover: #111B21
-                                color_down: #111B21
-                                bg_color_hover: #E9EDEF
-                                bg_color_down: #D1D7DB
+                                color: #0B1220
+                                color_hover: #0B1220
+                                color_down: #0B1220
+                                bg_color_hover: #DCE4F0
+                                bg_color_down: #C5D0DE
                             }
                         }
                         max +: {
                             draw_bg +: {
-                                color: #111B21
-                                color_hover: #111B21
-                                color_down: #111B21
-                                bg_color_hover: #E9EDEF
-                                bg_color_down: #D1D7DB
+                                color: #0B1220
+                                color_hover: #0B1220
+                                color_down: #0B1220
+                                bg_color_hover: #DCE4F0
+                                bg_color_down: #C5D0DE
                             }
                         }
                         close +: {
                             draw_bg +: {
-                                color: #111B21
+                                color: #0B1220
                                 color_hover: #FFFFFF
                                 color_down: #FFFFFF
                                 bg_color_hover: #E81123
@@ -598,7 +739,7 @@ script_mod! {
                 body +: {
                     keyboard_resize: true
                     identity_view := Panel{
-                        draw_bg.color: #F7F7F7
+                        draw_bg.color: #EEF2F8
                         width: Fill
                         height: Fill
                         flow: Down
@@ -632,7 +773,7 @@ script_mod! {
                                     Selectable{
                                         width: Fit
                                         text: "Ghal Bol"
-                                        draw_text.color: #111B21
+                                        draw_text.color: #0B1220
                                         draw_text.text_style.font_size: 30
                                     }
                                     // Fill width + label_align:Center — layout align alone leaves wrapped ink left.
@@ -641,7 +782,7 @@ script_mod! {
                                         height: Fit
                                         label_align: Center
                                         text: state.hint
-                                        draw_text.color: #54656F
+                                        draw_text.color: #5A6B7D
                                         draw_text.max_lines: 6
                                     }
                                     if state.status != ""
@@ -650,7 +791,7 @@ script_mod! {
                                             height: Fit
                                             label_align: Center
                                             text: state.status
-                                            draw_text.color: #667781
+                                            draw_text.color: #7A8B9C
                                             draw_text.max_lines: 4
                                         }
                                     if state.algo_line != ""
@@ -658,7 +799,7 @@ script_mod! {
                                             width: Fit
                                             height: Fit
                                             text: state.algo_line
-                                            draw_text.color: #008069
+                                            draw_text.color: #0183FB
                                         }
                                 }
                             }
@@ -706,10 +847,10 @@ script_mod! {
                                 algo_secp := Quiet{
                                     text: "secp256k1  [on]"
                                     width: Fit
-                                    draw_bg.color: #DCF8C6
-                                    draw_bg.color_hover: #C8F0B0
-                                    draw_bg.color_down: #B7E89A
-                                    draw_bg.color_focus: #DCF8C6
+                                    draw_bg.color: #D6E8FF
+                                    draw_bg.color_hover: #BFD9FF
+                                    draw_bg.color_down: #A8CBFF
+                                    draw_bg.color_focus: #D6E8FF
                                     on_click: ||{
                                         mod.state.algo = "secp256k1"
                                         mod.state.algo_line = "Algorithm: secp256k1"
@@ -717,17 +858,17 @@ script_mod! {
                                         ui.algo_secp.set_text("secp256k1  [on]")
                                         ui.algo_ed.set_text("ed25519")
                                         ui.algo_p256.set_text("ecdsa-p256")
-                                        ui.algo_secp.draw_bg.color = #DCF8C6
-                                        ui.algo_secp.draw_bg.color_hover = #C8F0B0
-                                        ui.algo_secp.draw_bg.color_down = #B7E89A
-                                        ui.algo_secp.draw_bg.color_focus = #DCF8C6
+                                        ui.algo_secp.draw_bg.color = #D6E8FF
+                                        ui.algo_secp.draw_bg.color_hover = #BFD9FF
+                                        ui.algo_secp.draw_bg.color_down = #A8CBFF
+                                        ui.algo_secp.draw_bg.color_focus = #D6E8FF
                                         ui.algo_ed.draw_bg.color = #FFFFFF
-                                        ui.algo_ed.draw_bg.color_hover = #E9EDEF
-                                        ui.algo_ed.draw_bg.color_down = #D1D7DB
+                                        ui.algo_ed.draw_bg.color_hover = #DCE4F0
+                                        ui.algo_ed.draw_bg.color_down = #C5D0DE
                                         ui.algo_ed.draw_bg.color_focus = #FFFFFF
                                         ui.algo_p256.draw_bg.color = #FFFFFF
-                                        ui.algo_p256.draw_bg.color_hover = #E9EDEF
-                                        ui.algo_p256.draw_bg.color_down = #D1D7DB
+                                        ui.algo_p256.draw_bg.color_hover = #DCE4F0
+                                        ui.algo_p256.draw_bg.color_down = #C5D0DE
                                         ui.algo_p256.draw_bg.color_focus = #FFFFFF
                                         ui.identity_copy.render()
                                     }
@@ -742,17 +883,17 @@ script_mod! {
                                         ui.algo_secp.set_text("secp256k1")
                                         ui.algo_ed.set_text("ed25519  [on]")
                                         ui.algo_p256.set_text("ecdsa-p256")
-                                        ui.algo_ed.draw_bg.color = #DCF8C6
-                                        ui.algo_ed.draw_bg.color_hover = #C8F0B0
-                                        ui.algo_ed.draw_bg.color_down = #B7E89A
-                                        ui.algo_ed.draw_bg.color_focus = #DCF8C6
+                                        ui.algo_ed.draw_bg.color = #D6E8FF
+                                        ui.algo_ed.draw_bg.color_hover = #BFD9FF
+                                        ui.algo_ed.draw_bg.color_down = #A8CBFF
+                                        ui.algo_ed.draw_bg.color_focus = #D6E8FF
                                         ui.algo_secp.draw_bg.color = #FFFFFF
-                                        ui.algo_secp.draw_bg.color_hover = #E9EDEF
-                                        ui.algo_secp.draw_bg.color_down = #D1D7DB
+                                        ui.algo_secp.draw_bg.color_hover = #DCE4F0
+                                        ui.algo_secp.draw_bg.color_down = #C5D0DE
                                         ui.algo_secp.draw_bg.color_focus = #FFFFFF
                                         ui.algo_p256.draw_bg.color = #FFFFFF
-                                        ui.algo_p256.draw_bg.color_hover = #E9EDEF
-                                        ui.algo_p256.draw_bg.color_down = #D1D7DB
+                                        ui.algo_p256.draw_bg.color_hover = #DCE4F0
+                                        ui.algo_p256.draw_bg.color_down = #C5D0DE
                                         ui.algo_p256.draw_bg.color_focus = #FFFFFF
                                         ui.identity_copy.render()
                                     }
@@ -767,17 +908,17 @@ script_mod! {
                                         ui.algo_secp.set_text("secp256k1")
                                         ui.algo_ed.set_text("ed25519")
                                         ui.algo_p256.set_text("ecdsa-p256  [on]")
-                                        ui.algo_p256.draw_bg.color = #DCF8C6
-                                        ui.algo_p256.draw_bg.color_hover = #C8F0B0
-                                        ui.algo_p256.draw_bg.color_down = #B7E89A
-                                        ui.algo_p256.draw_bg.color_focus = #DCF8C6
+                                        ui.algo_p256.draw_bg.color = #D6E8FF
+                                        ui.algo_p256.draw_bg.color_hover = #BFD9FF
+                                        ui.algo_p256.draw_bg.color_down = #A8CBFF
+                                        ui.algo_p256.draw_bg.color_focus = #D6E8FF
                                         ui.algo_secp.draw_bg.color = #FFFFFF
-                                        ui.algo_secp.draw_bg.color_hover = #E9EDEF
-                                        ui.algo_secp.draw_bg.color_down = #D1D7DB
+                                        ui.algo_secp.draw_bg.color_hover = #DCE4F0
+                                        ui.algo_secp.draw_bg.color_down = #C5D0DE
                                         ui.algo_secp.draw_bg.color_focus = #FFFFFF
                                         ui.algo_ed.draw_bg.color = #FFFFFF
-                                        ui.algo_ed.draw_bg.color_hover = #E9EDEF
-                                        ui.algo_ed.draw_bg.color_down = #D1D7DB
+                                        ui.algo_ed.draw_bg.color_hover = #DCE4F0
+                                        ui.algo_ed.draw_bg.color_down = #C5D0DE
                                         ui.algo_ed.draw_bg.color_focus = #FFFFFF
                                         ui.identity_copy.render()
                                     }
@@ -791,7 +932,7 @@ script_mod! {
                     }
                     hub_view := Panel{
                         visible: false
-                        draw_bg.color: #F0F2F5
+                        draw_bg.color: #E4EAF3
                         flow: Down
                         padding: Inset{
                             top: (mod.widgets.SAFE_INSET_PAD_TOP)
@@ -805,27 +946,53 @@ script_mod! {
                             flow: Right
                         nav_rail := SolidView{
                             show_bg: true
-                            draw_bg.color: #F7F7F7
+                            draw_bg.color: #EEF2F8
                             width: 176
                             height: Fill
                             flow: Down
-                            spacing: 10
+                            spacing: 8
                             padding: Inset{top: 16. bottom: 14. left: 12. right: 12.}
                             Selectable{
                                 text: "Ghal Bol"
-                                draw_text.color: #008069
+                                draw_text.color: #10236D
                                 draw_text.text_style.font_size: 14
                                 width: Fill
                             }
-                            tab_chats := RailTab{ text: "Chats" }
-                            tab_identity := RailTab{ text: "Identity" }
-                            tab_more := RailTab{ text: "More" }
+                            // Peers are roots (go_peer). Idle+active Overlay — paint from hub_tab.
+                            rail_chats_slot := View{
+                                width: Fill height: Fit flow: Overlay
+                                tab_chats := RailTab{ text: "Chats" }
+                                tab_chats_on := RailTabOn{ text: "Chats" visible: false }
+                                mark_chats := NavMark{ abs_pos: vec2(10, 13) }
+                            }
+                            rail_contacts_slot := View{
+                                width: Fill height: Fit flow: Overlay
+                                tab_contacts := RailTab{ text: "Contacts" }
+                                tab_contacts_on := RailTabOn{ text: "Contacts" visible: false }
+                                mark_contacts := NavMark{ abs_pos: vec2(10, 13) }
+                            }
+                            rail_invite_slot := View{
+                                width: Fill height: Fit flow: Overlay
+                                tab_invite := RailTab{ text: "Invite" }
+                                tab_invite_on := RailTabOn{ text: "Invite" visible: false }
+                                mark_invite := NavMark{ abs_pos: vec2(10, 13) }
+                            }
+                            rail_settings_slot := View{
+                                width: Fill height: Fit flow: Overlay
+                                tab_settings := RailTab{ text: "Settings" }
+                                tab_settings_on := RailTabOn{ text: "Settings" visible: false }
+                                mark_settings := NavMark{ abs_pos: vec2(10, 13) }
+                            }
                             Filler{}
-                            lock_button := RailTab{ text: "Lock" }
+                            rail_lock_slot := View{
+                                width: Fill height: Fit flow: Overlay
+                                lock_button := RailTab{ text: "Lock" }
+                                mark_lock := NavMark{ abs_pos: vec2(10, 13) }
+                            }
                         }
                         rail_divider := SolidView{
                             show_bg: true
-                            draw_bg.color: #D1D7DB
+                            draw_bg.color: #C5D0DE
                             width: 1
                             height: Fill
                         }
@@ -846,7 +1013,7 @@ script_mod! {
                                 // again nest HScroll beside the title on narrow chrome.
                                 roster_bar := SolidView{
                                     show_bg: true
-                                    draw_bg.color: #F7F7F7
+                                    draw_bg.color: #EEF2F8
                                     width: Fill
                                     height: Fit
                                     flow: Down
@@ -859,7 +1026,7 @@ script_mod! {
                                         padding: Inset{left: 12. right: 12. top: 4. bottom: 0.}
                                         Label{
                                             text: "Ghal Bol"
-                                            draw_text.color: #111B21
+                                            draw_text.color: #0B1220
                                             draw_text.text_style.font_size: 16
                                             width: Fill
                                             draw_text.max_lines: 1
@@ -911,13 +1078,13 @@ script_mod! {
                                                 align: Center
                                                 Label{
                                                     text: state.roster_empty_title
-                                                    draw_text.color: #111B21
+                                                    draw_text.color: #0B1220
                                                     draw_text.text_style.font_size: 18
                                                 }
                                                 Label{
                                                     width: Fill
                                                     text: state.roster_empty_body
-                                                    draw_text.color: #667781
+                                                    draw_text.color: #7A8B9C
                                                 }
                                             }
                                         else for i, row in state.roster {
@@ -925,8 +1092,8 @@ script_mod! {
                                             // count badge (Flutter roster chrome).
                                             if row.pk == state.selected_pk
                                                 RosterRow{
-                                                    draw_bg.color: #DCF8C6
-                                                    avatar.draw_bg.color: #B7E89A
+                                                    draw_bg.color: #D6E8FF
+                                                    avatar.draw_bg.color: #A8CBFF
                                                     avatar.initial.text: row.initial
                                                     body.title.text: row.title
                                                     body.status.text: row.status
@@ -947,7 +1114,7 @@ script_mod! {
                                                     body.status.text: row.status
                                                     body.status.visible: row.status != ""
                                                     body.preview.text: row.preview
-                                                    body.preview.draw_text.color: #111B21
+                                                    body.preview.draw_text.color: #0B1220
                                                     side.chip.visible: row.unknown == "1"
                                                     side.badge.visible: true
                                                     side.badge.count.text: row.unread
@@ -976,7 +1143,7 @@ script_mod! {
                                 // Title row + horizontally scrollable action strip (icons).
                                 chat_bar := SolidView{
                                     show_bg: true
-                                    draw_bg.color: #F7F7F7
+                                    draw_bg.color: #EEF2F8
                                     width: Fill
                                     height: Fit
                                     flow: Down
@@ -991,7 +1158,7 @@ script_mod! {
                                         chat_back_button := IconBtn{ text: "\u{f060}" visible: false }
                                         chat_title_label := Label{
                                             text: state.selected_title
-                                            draw_text.color: #111B21
+                                            draw_text.color: #0B1220
                                             draw_text.text_style.font_size: 17
                                             width: Fill
                                             draw_text.max_lines: 1
@@ -1020,7 +1187,7 @@ script_mod! {
                                         Label{
                                             width: Fill
                                             text: "You have not added this person yet."
-                                            draw_text.color: #111B21
+                                            draw_text.color: #0B1220
                                             draw_text.text_style.font_size: 13
                                             draw_text.max_lines: 2
                                             draw_text.text_overflow: Ellipsis
@@ -1028,10 +1195,10 @@ script_mod! {
                                         trust_add_button := Quiet{
                                             text: "Add"
                                             padding: Inset{left: 14. right: 14. top: 8. bottom: 8.}
-                                            draw_text.color: #008069
-                                            draw_text.color_hover: #008069
-                                            draw_text.color_down: #008069
-                                            draw_text.color_focus: #008069
+                                            draw_text.color: #0183FB
+                                            draw_text.color_hover: #0183FB
+                                            draw_text.color_down: #0183FB
+                                            draw_text.color_focus: #0183FB
                                         }
                                         trust_block_button := Quiet{
                                             text: "Block"
@@ -1070,13 +1237,13 @@ script_mod! {
                                         call_label := Label{
                                             width: Fill
                                             text: state.call_line
-                                            draw_text.color: #667781
+                                            draw_text.color: #7A8B9C
                                         }
                                         if state.lines.len() == 0
                                             Label{
                                                 width: Fill
                                                 text: state.transcript
-                                                draw_text.color: #54656F
+                                                draw_text.color: #5A6B7D
                                             }
                                         else for i, line in state.lines {
                                             // Outgoing (right) / inbound (left). Opposite-side
@@ -1097,11 +1264,11 @@ script_mod! {
                                                             spacing: 2
                                                             Bubble{
                                                                 width: Fit{max: FitBound.Abs(280)}
-                                                                draw_bg.color: #DCF8C6
-                                                                draw_bg.color_hover: #C8F0B0
-                                                                draw_bg.color_down: #B7E89A
-                                                                draw_bg.border_color: #DCF8C6
-                                                                draw_text.color: #111B21
+                                                                draw_bg.color: #D6E8FF
+                                                                draw_bg.color_hover: #BFD9FF
+                                                                draw_bg.color_down: #A8CBFF
+                                                                draw_bg.border_color: #D6E8FF
+                                                                draw_text.color: #0B1220
                                                                 text: line.body
                                                                 on_click: ||{
                                                                     mod.state.play_path = line.path
@@ -1117,7 +1284,7 @@ script_mod! {
                                                                 align: Align{x: 1.0 y: 0.5}
                                                                 Label{
                                                                     text: line.caption
-                                                                    draw_text.color: #667781
+                                                                    draw_text.color: #7A8B9C
                                                                     draw_text.text_style.font_size: 11
                                                                 }
                                                                 if line.read == "1"
@@ -1135,14 +1302,14 @@ script_mod! {
                                                                 else
                                                                     Label{
                                                                         text: line.tick
-                                                                        draw_text.color: #667781
+                                                                        draw_text.color: #7A8B9C
                                                                         draw_text.text_style.font_size: 12
                                                                     }
                                                             }
                                                         }
                                                     else if line.read == "1"
                                                         TextBubble{
-                                                            draw_bg.color: #DCF8C6
+                                                            draw_bg.color: #D6E8FF
                                                             body.text: line.body
                                                             meta.caption.text: line.caption
                                                             meta.tick.text: line.tick
@@ -1150,7 +1317,7 @@ script_mod! {
                                                         }
                                                     else if line.read == "failed"
                                                         TextBubble{
-                                                            draw_bg.color: #DCF8C6
+                                                            draw_bg.color: #D6E8FF
                                                             body.text: line.body
                                                             meta.caption.text: line.caption
                                                             meta.tick.text: line.tick
@@ -1158,7 +1325,7 @@ script_mod! {
                                                         }
                                                     else
                                                         TextBubble{
-                                                            draw_bg.color: #DCF8C6
+                                                            draw_bg.color: #D6E8FF
                                                             body.text: line.body
                                                             meta.caption.text: line.caption
                                                             meta.tick.text: line.tick
@@ -1189,14 +1356,14 @@ script_mod! {
                                                                 Label{
                                                                     width: Fit{max: FitBound.Abs(256)}
                                                                     text: line.body
-                                                                    draw_text.color: #111B21
+                                                                    draw_text.color: #0B1220
                                                                     draw_text.text_style.font_size: 14
                                                                     draw_text.max_lines: 2
                                                                     draw_text.text_overflow: Ellipsis
                                                                 }
                                                                 Label{
                                                                     text: line.detail
-                                                                    draw_text.color: #667781
+                                                                    draw_text.color: #7A8B9C
                                                                     draw_text.text_style.font_size: 12
                                                                 }
                                                                 View{
@@ -1218,7 +1385,7 @@ script_mod! {
                                                                     Filler{}
                                                                     Label{
                                                                         text: line.caption
-                                                                        draw_text.color: #667781
+                                                                        draw_text.color: #7A8B9C
                                                                         draw_text.text_style.font_size: 11
                                                                     }
                                                                 }
@@ -1242,14 +1409,14 @@ script_mod! {
                                                                 Label{
                                                                     width: Fit{max: FitBound.Abs(256)}
                                                                     text: line.body
-                                                                    draw_text.color: #111B21
+                                                                    draw_text.color: #0B1220
                                                                     draw_text.text_style.font_size: 14
                                                                     draw_text.max_lines: 2
                                                                     draw_text.text_overflow: Ellipsis
                                                                 }
                                                                 Label{
                                                                     text: line.detail
-                                                                    draw_text.color: #667781
+                                                                    draw_text.color: #7A8B9C
                                                                     draw_text.text_style.font_size: 12
                                                                 }
                                                                 View{
@@ -1280,7 +1447,7 @@ script_mod! {
                                                                     Filler{}
                                                                     Label{
                                                                         text: line.caption
-                                                                        draw_text.color: #667781
+                                                                        draw_text.color: #7A8B9C
                                                                         draw_text.text_style.font_size: 11
                                                                     }
                                                                 }
@@ -1295,10 +1462,10 @@ script_mod! {
                                                             Bubble{
                                                                 width: Fit{max: FitBound.Abs(280)}
                                                                 draw_bg.color: #FFFFFF
-                                                                draw_bg.color_hover: #F0F2F5
-                                                                draw_bg.color_down: #E9EDEF
+                                                                draw_bg.color_hover: #E4EAF3
+                                                                draw_bg.color_down: #DCE4F0
                                                                 draw_bg.border_color: #FFFFFF
-                                                                draw_text.color: #111B21
+                                                                draw_text.color: #0B1220
                                                                 text: line.body
                                                                 on_click: ||{
                                                                     mod.state.play_path = line.path
@@ -1308,7 +1475,7 @@ script_mod! {
                                                             }
                                                             Label{
                                                                 text: line.caption
-                                                                draw_text.color: #667781
+                                                                draw_text.color: #7A8B9C
                                                                 draw_text.text_style.font_size: 11
                                                             }
                                                         }
@@ -1326,7 +1493,7 @@ script_mod! {
                                 // gutters, field max ~4 lines then scrolls — not a growing slab.
                                 composer_bar := SolidView{
                                     show_bg: true
-                                    draw_bg.color: #F0F0F0
+                                    draw_bg.color: #E4EAF3
                                     width: Fill
                                     height: Fit
                                     flow: Down
@@ -1361,7 +1528,7 @@ script_mod! {
                                             align: Align{y: 0.5}
                                             draw_bg.border_radius: 20.0
                                             draw_bg.border_size: 1.0
-                                            draw_bg.border_color: #D1D7DB
+                                            draw_bg.border_color: #C5D0DE
                                             draw_bg.color: #FFFFFF
                                             RoundedView{
                                                 width: 8
@@ -1372,7 +1539,7 @@ script_mod! {
                                             }
                                             record_timer_label := Label{
                                                 text: "0:00"
-                                                draw_text.color: #111B21
+                                                draw_text.color: #0B1220
                                                 draw_text.text_style.font_size: 14
                                             }
                                         }
@@ -1432,115 +1599,173 @@ script_mod! {
                                 }
                             }
                         }
-                        identity_pane := Panel{
+                        contacts_pane := Panel{
                             visible: false
                             draw_bg.color: #FFFFFF
                             width: Fill
                             height: Fill
                             flow: Down
                             spacing: 0
-                            padding: Inset{left: 0. right: 0. top: 0. bottom: 0.}
-                            identity_scroll := VScroll{
+                            contacts_scroll := VScroll{
+                                spacing: 10
+                                padding: 32
+                                Selectable{
+                                    text: "Contacts"
+                                    draw_text.color: #0B1220
+                                    draw_text.text_style.font_size: 24
+                                }
+                                Selectable{
+                                    width: Fill
+                                    text: "People you chat with. Add by public key, rename, or remove. Blocking is local to this device."
+                                    draw_text.color: #5A6B7D
+                                }
+                                contacts_button := HubDestBtn{ text: "Contacts — add, rename, or remove by public key" }
+                                add_contact_button := HubDestBtn{ text: "Add contact by public key" }
+                                blocked_button := HubDestBtn{ text: "Blocked contacts — people you blocked on this device" }
+                            }
+                        }
+                        invite_pane := Panel{
+                            visible: false
+                            draw_bg.color: #FFFFFF
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 0
+                            invite_scroll := VScroll{
+                                spacing: 10
+                                padding: 32
+                                Selectable{
+                                    text: "Invite"
+                                    draw_text.color: #0B1220
+                                    draw_text.text_style.font_size: 24
+                                }
+                                Selectable{
+                                    width: Fill
+                                    text: "Share your invitation so a guest can store your public key and dial. You do not need theirs first."
+                                    draw_text.color: #5A6B7D
+                                }
+                                invite_button_id := StackPrimaryBtn{ text: "Show QR invitation" }
+                                ActionStack{
+                                    invite_copy_button := StackSecondaryBtn{ text: "Copy invitation link" }
+                                    key_copy_button := StackSecondaryBtn{ text: "Copy public key" }
+                                }
+                                Selectable{
+                                    text: "Join someone"
+                                    draw_text.color: #0B1220
+                                    draw_text.text_style.font_size: 18
+                                }
+                                join_nav_button := HubDestBtn{ text: "Paste invitation link or ghalbol:// URI" }
+                                scan_nav_button := HubDestBtn{ text: "Scan invitation QR with camera" }
+                                scan_file_button := HubDestBtn{ text: "Join from QR picture — PNG or JPEG" }
+                            }
+                        }
+                        settings_pane := Panel{
+                            visible: false
+                            draw_bg.color: #FFFFFF
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 0
+                            settings_scroll := VScroll{
                                 spacing: 14
                                 padding: 32
                                 Selectable{
-                                    text: "Identity"
-                                    draw_text.color: #111B21
+                                    text: "Settings"
+                                    draw_text.color: #0B1220
                                     draw_text.text_style.font_size: 24
                                 }
                                 Selectable{
                                     width: Fill
                                     text: state.identity_blurb
-                                    draw_text.color: #54656F
-                                }
-                                invite_button_id := Go{ text: "Show QR invitation" width: Fit }
-                                View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right{wrap: true}
-                                    spacing: 10
-                                    invite_copy_button := Quiet{ text: "Copy invitation" }
-                                    key_copy_button := Quiet{ text: "Copy public key" }
+                                    draw_text.color: #5A6B7D
                                 }
                                 Selectable{
                                     text: "Your identity"
-                                    draw_text.color: #111B21
+                                    draw_text.color: #0B1220
                                     draw_text.text_style.font_size: 18
                                 }
                                 Selectable{
                                     width: Fill
                                     text: state.identity_detail
-                                    draw_text.color: #111B21
+                                    draw_text.color: #0B1220
                                 }
                                 Selectable{
-                                    text: "Backup and private key"
-                                    draw_text.color: #111B21
+                                    text: "Display name on invitations"
+                                    draw_text.color: #0B1220
                                     draw_text.text_style.font_size: 16
                                 }
-                                View{
+                                Selectable{
                                     width: Fill
-                                    height: Fit
-                                    flow: Right{wrap: true}
-                                    spacing: 10
-                                    key_button := Quiet{ text: "Show private key" }
-                                    backup_button := Quiet{ text: "Export backup" }
-                                    password_button := Quiet{ text: "Change password" }
+                                    text: "Optional name guests see when they scan your QR. Saved on this device."
+                                    draw_text.color: #7A8B9C
+                                }
+                                display_name_input := Field{
+                                    empty_text: "Your name (optional)"
+                                    width: Fill
+                                }
+                                save_display_name_button := StackSecondaryBtn{ text: "Save display name" }
+                                Selectable{
+                                    text: "Backup and private key"
+                                    draw_text.color: #0B1220
+                                    draw_text.text_style.font_size: 16
+                                }
+                                ActionStack{
+                                    key_button := StackSecondaryBtn{ text: "Show private key" }
+                                    backup_button := StackSecondaryBtn{ text: "Export backup" }
+                                    password_button := StackSecondaryBtn{ text: "Change password" }
                                 }
                                 Selectable{
                                     width: Fill
                                     text: "App password is required to view the secret. Keep backups with your password."
-                                    draw_text.color: #667781
+                                    draw_text.color: #7A8B9C
                                 }
-                                about_button := MenuRow{ text: "Availability and About" }
+                                language_button := HubDestBtn{ text: "Language — display language for this app" }
+                                delivery_nav_button := HubDestBtn{ text: "Delivery storage" }
+                                log_button := HubDestBtn{ text: "App log — session diagnostics" }
+                                about_button := HubDestBtn{ text: "Availability and About" }
                                 logout_button := Stop{ text: "Log out" width: Fit }
-                            }
-                        }
-                        more_pane := Panel{
-                            visible: false
-                            draw_bg.color: #FFFFFF
-                            width: Fill
-                            height: Fill
-                            flow: Down
-                            spacing: 0
-                            more_scroll := VScroll{
-                                spacing: 10
-                                padding: 32
-                                Selectable{
-                                    text: "More"
-                                    draw_text.color: #111B21
-                                    draw_text.text_style.font_size: 24
-                                }
-                                Selectable{
-                                    width: Fill
-                                    text: "1:1 P2P encrypted chat with voice and video. No phone number or cloud account required."
-                                    draw_text.color: #54656F
-                                }
-                                contacts_button := MenuRow{ text: "Contacts — add, rename, or remove by public key" }
-                                blocked_button := MenuRow{ text: "Blocked contacts — people you blocked on this device" }
-                                log_button := MenuRow{ text: "App log — session diagnostics" }
-                                language_button := MenuRow{ text: "Language — display language for this app" }
-                                scan_file_button := MenuRow{ text: "Join from QR picture — open a PNG or JPEG invite" }
                             }
                         }
                         }
                         bottom_nav := SolidView{
                             visible: false
                             show_bg: true
-                            draw_bg.color: #F0F0F0
+                            draw_bg.color: #E4EAF3
                             width: Fill
                             height: Fit
                             flow: Right
-                            spacing: 10
-                            padding: Inset{left: 12. right: 12. top: 12. bottom: 12.}
+                            spacing: 0
+                            padding: Inset{left: 8. right: 8. top: 8. bottom: 8.}
                             align: Align{y: 0.5}
-                            bottom_chats := RailTab{ text: "Chats" }
-                            bottom_identity := RailTab{ text: "Identity" }
-                            bottom_more := RailTab{ text: "More" }
+                            bottom_nav_scroll := HScroll{
+                                height: 64
+                                padding: Inset{left: 4. right: 4. top: 4. bottom: 4.}
+                                bottom_chats_slot := View{
+                                    width: Fit height: Fit flow: Overlay
+                                    bottom_chats := NavChip{ text: "Chats" }
+                                    bottom_chats_on := NavChipOn{ text: "Chats" visible: false }
+                                }
+                                bottom_contacts_slot := View{
+                                    width: Fit height: Fit flow: Overlay
+                                    bottom_contacts := NavChip{ text: "Contacts" }
+                                    bottom_contacts_on := NavChipOn{ text: "Contacts" visible: false }
+                                }
+                                bottom_invite_slot := View{
+                                    width: Fit height: Fit flow: Overlay
+                                    bottom_invite := NavChip{ text: "Invite" }
+                                    bottom_invite_on := NavChipOn{ text: "Invite" visible: false }
+                                }
+                                bottom_settings_slot := View{
+                                    width: Fit height: Fit flow: Overlay
+                                    bottom_settings := NavChip{ text: "Settings" }
+                                    bottom_settings_on := NavChipOn{ text: "Settings" visible: false }
+                                }
+                            }
                         }
                     }
                     sheet_view := Panel{
                         visible: false
-                        draw_bg.color: #F7F7F7
+                        draw_bg.color: #EEF2F8
                         width: Fill
                         height: Fill
                         flow: Down
@@ -1564,13 +1789,13 @@ script_mod! {
                                     sheet_title := Selectable{
                                         width: Fill
                                         text: state.sheet_title
-                                        draw_text.color: #111B21
+                                        draw_text.color: #0B1220
                                         draw_text.text_style.font_size: 22
                                     }
                                     sheet_body := Selectable{
                                         width: Fill
                                         text: state.sheet_body
-                                        draw_text.color: #54656F
+                                        draw_text.color: #5A6B7D
                                     }
                                     if state.languages.len() > 0
                                         for i, row in state.languages {
@@ -1579,7 +1804,7 @@ script_mod! {
                                                     width: Fill
                                                     margin: Inset{left: 4. right: 4. top: 12. bottom: 4.}
                                                     text: row.name
-                                                    draw_text.color: #667781
+                                                    draw_text.color: #7A8B9C
                                                     draw_text.text_style.font_size: 12
                                                 }
                                             else
@@ -1611,7 +1836,7 @@ script_mod! {
                             scan_frame := SolidView{
                                 visible: false
                                 show_bg: true
-                                draw_bg.color: #111B21
+                                draw_bg.color: #0B1220
                                 width: Fill
                                 height: Fit
                                 padding: 12
@@ -1681,7 +1906,7 @@ script_mod! {
                     call_view := SolidView{
                         visible: false
                         show_bg: true
-                        draw_bg.color: #111B21
+                        draw_bg.color: #0B1220
                         width: Fill
                         height: Fill
                         flow: Down
@@ -1711,7 +1936,7 @@ script_mod! {
                                     align: Center
                                     draw_bg.border_radius: 56.0
                                     draw_bg.border_size: 0.0
-                                    draw_bg.color: #008069
+                                    draw_bg.color: #0183FB
                                     call_initial := Label{
                                         text: "?"
                                         draw_text.color: #FFFFFF
@@ -1762,6 +1987,7 @@ script_mod! {
                             accept_call_button := Go{ text: "Accept" height: Fit }
                             mute_button := Quiet{ text: "Mute" height: Fit }
                             speaker_button := Quiet{ text: "Speaker" height: Fit }
+                            flip_camera_button := Quiet{ text: "Flip camera" height: Fit }
                             end_call_button := Stop{ text: "End call" height: Fit }
                         }
                     }
@@ -1872,13 +2098,16 @@ pub struct App {
     /// Room ⋮ menu is open.
     #[rust]
     chat_menu_open: bool,
+    /// Nav WebP marks loaded once into rail Image widgets.
+    #[rust]
+    nav_icons_loaded: bool,
     /// Last recording-bar visibility we applied (avoids redraw spam).
     #[rust]
     recording_ui: bool,
 }
 
 impl App {
-    fn push_identity_copy(&self, cx: &mut Cx) {
+    fn push_identity_copy(&mut self, cx: &mut Cx) {
         let exists = host::keystore_exists(&self.namespace);
         let primary = if exists {
             "Unlock"
@@ -1890,9 +2119,9 @@ impl App {
         let hint = if exists {
             "Enter your password to unlock this device. An app password encrypts your identity on this device and is never sent to a server."
         } else if self.create_new {
-            "Choose a password to create a device identity. An app password encrypts it on this device and is never sent to a server."
+            "Choose a password to create a secp256k1 device identity (required for mailbox text). An app password encrypts it on this device and is never sent to a server."
         } else {
-            "Paste a private key and choose a password. Keys from cryptocurrency wallets are strongly discouraged."
+            "Paste a private key and choose its algorithm. Non-secp256k1 keys can call but cannot use mailbox text until multi-algo seal ships."
         };
         let mode = if self.create_new {
             "Import an existing key"
@@ -1925,8 +2154,15 @@ impl App {
         self.ui.widget(cx, ids!(delete_button)).set_visible(cx, exists);
         self.ui.widget(cx, ids!(import_backup_button)).set_visible(cx, setup);
         // Algo line + chips only while creating/importing — never on unlock.
+        // Create: secp256k1 only (mailbox seal). Import: all three (calls work; text needs secp).
         if setup {
+            if self.create_new {
+                self.algorithm = "secp256k1".into();
+            }
             self.mark_algorithm(cx);
+            let show_multi = !self.create_new;
+            self.ui.widget(cx, ids!(algo_ed)).set_visible(cx, show_multi);
+            self.ui.widget(cx, ids!(algo_p256)).set_visible(cx, show_multi);
         }
     }
 
@@ -1946,7 +2182,11 @@ impl App {
         } else {
             "ecdsa-p256"
         };
-        let algo_line = format!("Algorithm: {}", self.algorithm);
+        let algo_line = if self.create_new {
+            "Algorithm: secp256k1 (mailbox text)".to_string()
+        } else {
+            format!("Algorithm: {}", self.algorithm)
+        };
         // Green chip on the active algo; Quiet white on the others.
         let (secp_on, ed_on, p256_on) = (
             self.algorithm == "secp256k1",
@@ -2006,18 +2246,19 @@ impl App {
         } else if !self.shell_split && self.narrow_show_room && !self.open_peer.is_empty() {
             host::set_open_room(Some(&self.open_peer));
         }
+        // 0 Chats · 1 Contacts · 2 Invite · 3 Settings (no More hub).
         let chats = tab == 0;
-        let identity = tab == 1;
-        let more = tab == 2;
         self.ui.widget(cx, ids!(chats_pane)).set_visible(cx, chats);
-        self.ui.widget(cx, ids!(identity_pane)).set_visible(cx, identity);
-        self.ui.widget(cx, ids!(more_pane)).set_visible(cx, more);
-        style_nav_tab(cx, &mut self.ui.widget(cx, ids!(tab_chats)), chats);
-        style_nav_tab(cx, &mut self.ui.widget(cx, ids!(tab_identity)), identity);
-        style_nav_tab(cx, &mut self.ui.widget(cx, ids!(tab_more)), more);
-        style_nav_tab(cx, &mut self.ui.widget(cx, ids!(bottom_chats)), chats);
-        style_nav_tab(cx, &mut self.ui.widget(cx, ids!(bottom_identity)), identity);
-        style_nav_tab(cx, &mut self.ui.widget(cx, ids!(bottom_more)), more);
+        self.ui
+            .widget(cx, ids!(contacts_pane))
+            .set_visible(cx, tab == 1);
+        self.ui
+            .widget(cx, ids!(invite_pane))
+            .set_visible(cx, tab == 2);
+        self.ui
+            .widget(cx, ids!(settings_pane))
+            .set_visible(cx, tab == 3);
+        self.paint_nav_tabs(cx);
         if !self.history_suppress && prev != tab {
             self.record_hub_nav();
         }
@@ -2282,8 +2523,8 @@ impl App {
             .set_visible(cx, on_hub && !show_rail);
 
         if show_rail {
-            // Never use a skinny icon-only rail: text labels ("Identity") must fit with
-            // padding. Wide windows get a roomier rail; otherwise keep a readable minimum.
+            // Never use a skinny icon-only rail: peer labels ("Contacts", "Settings")
+            // must fit with padding + nav marks. Wide windows get a roomier rail.
             self.ui.view(cx, ids!(nav_rail)).set_walk(
                 cx,
                 Walk {
@@ -2319,10 +2560,10 @@ impl App {
             );
         }
         if on_hub && !chats {
-            let pane = if self.hub_tab == 1 {
-                ids!(identity_pane)
-            } else {
-                ids!(more_pane)
+            let pane = match self.hub_tab {
+                1 => ids!(contacts_pane),
+                2 => ids!(invite_pane),
+                _ => ids!(settings_pane),
             };
             self.ui.view(cx, pane).set_walk(
                 cx,
@@ -2401,6 +2642,10 @@ impl App {
             return;
         }
         let creating = !host::keystore_exists(&self.namespace) && self.create_new;
+        // Shipping mailbox seal is secp256k1-only — force secp on create.
+        if creating && self.algorithm != "secp256k1" {
+            self.algorithm = "secp256k1".into();
+        }
         let secret = if self.create_new { None } else { Some(self.secret.as_str()) };
         let algo = if host::keystore_exists(&self.namespace) {
             None
@@ -2428,10 +2673,20 @@ impl App {
                     return;
                 }
                 let net = host::start_network(&ns);
-                let status = match &net {
+                let mut status = match &net {
                     Ok(_) => String::new(),
                     Err(e) => format!("Network: {e}"),
                 };
+                if let Some(algo) = host::unlocked_algorithm() {
+                    if algo != "secp256k1" {
+                        let warn = "This identity is not secp256k1 — mailbox text, voice notes, and files will not work until multi-algo seal ships. Calls still work.";
+                        status = if status.is_empty() {
+                            warn.into()
+                        } else {
+                            format!("{status}\n{warn}")
+                        };
+                    }
+                }
                 self.show_hub(cx, &pk, &status);
             }
             Err(e) => {
@@ -2484,12 +2739,13 @@ impl App {
             ui.chat_log.render()
             ui.chat_title_label.set_text("Select a chat")
         });
-        self.push_identity_pane(cx);
+        self.push_settings_pane(cx);
         self.apply_language(cx);
         self.hub_tab = 0;
         self.narrow_show_room = false;
         self.hub_history.reset(self.hub_snapshot());
         self.set_screen(cx, "hub");
+        self.paint_nav_tabs(cx);
         self.apply_shell_layout(cx);
     }
 
@@ -2562,9 +2818,12 @@ impl App {
         let action = action.to_string();
         let show_invite = page == "invite";
         let show_scan = page == "scan";
-        let show_paste = matches!(page, "join" | "key" | "password" | "invite" | "import_backup");
+        let show_paste = matches!(
+            page,
+            "join" | "key" | "password" | "invite" | "import_backup" | "delivery"
+        );
         let show_pk = matches!(page, "add" | "blocked" | "password");
-        let show_alias = matches!(page, "add" | "about" | "password");
+        let show_alias = matches!(page, "add" | "about" | "password" | "contacts");
         let paste_secret = matches!(page, "key" | "password");
         let pk_secret = page == "password";
         let alias_secret = page == "password";
@@ -2666,7 +2925,16 @@ impl App {
         let roster = host::list_roster(&self.namespace).unwrap_or_default();
         match page {
             "invite" => {
-                let links = host::invite_links(&session.public_key_hex, None).unwrap_or_default();
+                let alias = host::local_display_name(&self.namespace);
+                let links = host::invite_links(
+                    &session.public_key_hex,
+                    if alias.is_empty() {
+                        None
+                    } else {
+                        Some(alias.as_str())
+                    },
+                )
+                .unwrap_or_default();
                 let body = "QR encodes your https://ghalbol.com invite (public key and display name). The other person taps Join and scans this code, or pastes the link.".to_string();
                 self.show_sheet(
                     cx,
@@ -2727,11 +2995,21 @@ impl App {
                 };
                 let target = short_key(&self.open_peer);
                 let body = if self.open_peer.is_empty() {
-                    body
+                    format!(
+                        "{body}\n\nOpen a chat first to rename or remove that contact. Type a new name in Display name, then Save to rename; leave the name empty and Save to remove."
+                    )
                 } else {
-                    format!("{body}\n\n{target}")
+                    format!(
+                        "{body}\n\nOpen chat: {target}\nType a new name in Display name → Save to rename.\nClear the name and Save to remove."
+                    )
                 };
-                self.show_sheet(cx, page, &i18n::phrase(&lang, "contacts"), body, &i18n::phrase(&lang, "remove"));
+                self.show_sheet(
+                    cx,
+                    page,
+                    &i18n::phrase(&lang, "contacts"),
+                    body,
+                    "Save",
+                );
             }
             "blocked" => {
                 let body = roster
@@ -2743,12 +3021,22 @@ impl App {
                 let body = if body.is_empty() {
                     i18n::phrase(&lang, "blocked_empty")
                 } else {
-                    format!("{body}\n\n{}", i18n::phrase(&lang, "blocked_empty"))
+                    format!(
+                        "{body}\n\n{}",
+                        i18n::phrase(&lang, "blocked_help")
+                    )
                 };
                 self.show_sheet(cx, page, &i18n::phrase(&lang, "blocked"), body, &i18n::phrase(&lang, "toggle"));
             }
             "delivery" => {
-                self.show_sheet(cx, page, &i18n::phrase(&lang, "delivery"), host::delivery_summary(), &i18n::phrase(&lang, "refresh"));
+                self.show_sheet(
+                    cx,
+                    page,
+                    &i18n::phrase(&lang, "delivery"),
+                    host::delivery_summary(),
+                    &i18n::phrase(&lang, "refresh"),
+                );
+                // Paste a message_id then Save to extend TTL (+7 days) while still queued.
             }
             "log" => {
                 self.show_sheet(cx, page, &i18n::phrase(&lang, "log"), host::app_log_text(), &i18n::phrase(&lang, "refresh"));
@@ -3034,7 +3322,11 @@ impl App {
             self.add_pk = pk;
         }
         let alias = self.ui.text_input(cx, ids!(alias_input)).text();
-        if !alias.is_empty() || self.page == "about" || self.page == "password" {
+        if !alias.is_empty()
+            || self.page == "about"
+            || self.page == "password"
+            || self.page == "contacts"
+        {
             self.add_alias = alias;
         }
         let page = self.page.clone();
@@ -3044,7 +3336,14 @@ impl App {
             "add" => host::add_contact(&ns, &self.add_pk, Some(self.add_alias.trim())).map(|()| "Contact added".into()),
             "contacts" => {
                 let pk = self.open_peer.trim().to_string();
-                host::remove_contact(&ns, &pk).map(|()| "Removed".into())
+                if pk.is_empty() {
+                    Err("Open a chat first, then rename or remove that contact.".into())
+                } else if self.add_alias.trim().is_empty() {
+                    host::remove_contact(&ns, &pk).map(|()| "Removed".into())
+                } else {
+                    host::rename_contact(&ns, &pk, self.add_alias.trim())
+                        .map(|()| "Renamed".into())
+                }
             }
             "blocked" => {
                 let pk = self.add_pk.trim().to_string();
@@ -3066,7 +3365,16 @@ impl App {
                 let status = self.add_alias.trim().to_string();
                 self.save_availability(&status)
             }
-            "delivery" | "log" => Ok(String::new()),
+            "delivery" => {
+                let mid = self.paste.trim();
+                if mid.is_empty() {
+                    // Refresh — reopen paints a fresh summary + quota.
+                    self.open_page(cx, "delivery");
+                    return;
+                }
+                host::extend_mailbox_ttl(mid).map(|()| "TTL extended".into())
+            }
+            "log" => Ok(String::new()),
             "invite" => {
                 let link = self.paste.trim();
                 if link.is_empty() {
@@ -3294,14 +3602,22 @@ impl App {
             host::fetch_attachment(&peer, &path)
         } else if action == "save" {
             host::save_attachment(&path)
+        } else if action == "resend" {
+            host::resend_failed(&peer, &path).map(|()| "Resent".into())
         } else {
             host::open_local_file(&path).map(|()| "Opened".into())
         };
         let note = match &msg {
-            Ok(text) if action == "fetch" || action == "voice" => text.clone(),
+            Ok(text) if action == "fetch" || action == "voice" || action == "resend" => {
+                text.clone()
+            }
             Err(e) => e.clone(),
             Ok(_) => String::new(),
         };
+        if action == "resend" && msg.is_ok() {
+            self.chat_rev = 0;
+            self.refresh_transcript(cx);
+        }
         if !note.is_empty() {
             script_eval!(cx, {
                 mod.state.call_line = #(note)
@@ -3350,9 +3666,62 @@ impl App {
         let accept = i18n::text(lang, i18n::Key::Accept).to_string();
         let mute = i18n::text(lang, i18n::Key::Mute).to_string();
         let speaker = i18n::phrase(lang, "speaker");
+        let flip_camera = i18n::phrase(lang, "flip_camera").to_string();
         let end = i18n::text(lang, i18n::Key::EndCall).to_string();
         let scan = i18n::text(lang, i18n::Key::ScanQr).to_string();
         let scan_file = i18n::text(lang, i18n::Key::QrPicture).to_string();
+        let chats = i18n::text(lang, i18n::Key::Chats).to_string();
+        let invite_tab = i18n::text(lang, i18n::Key::InviteTab).to_string();
+        let settings = i18n::text(lang, i18n::Key::Settings).to_string();
+        let contacts_menu = contacts.clone();
+        let voice_call = i18n::text(lang, i18n::Key::VoiceCall).to_string();
+        let video_call = i18n::text(lang, i18n::Key::VideoCall).to_string();
+        let share_menu = i18n::phrase(lang, "share");
+        let join_menu = join.clone();
+        let add_menu = i18n::phrase(lang, "add_short");
+        let block_menu = i18n::text(lang, i18n::Key::Block).to_string();
+        let lock_menu = lock.clone();
+        let add_contact_nav = i18n::phrase(lang, "add");
+        let join_nav = i18n::phrase(lang, "paste");
+        let scan_nav = scan.clone();
+        let delivery_nav = delivery.clone();
+        let show_qr = invitation.clone();
+        let nav = [
+            chats.clone(),
+            chats.clone(),
+            chats.clone(),
+            chats,
+            contacts.clone(),
+            contacts.clone(),
+            contacts.clone(),
+            contacts,
+            invite_tab.clone(),
+            invite_tab.clone(),
+            invite_tab.clone(),
+            invite_tab,
+            settings.clone(),
+            settings.clone(),
+            settings.clone(),
+            settings,
+        ];
+        let [
+            tab_chats_l,
+            tab_chats_on_l,
+            bottom_chats_l,
+            bottom_chats_on_l,
+            tab_contacts_l,
+            tab_contacts_on_l,
+            bottom_contacts_l,
+            bottom_contacts_on_l,
+            tab_invite_l,
+            tab_invite_on_l,
+            bottom_invite_l,
+            bottom_invite_on_l,
+            tab_settings_l,
+            tab_settings_on_l,
+            bottom_settings_l,
+            bottom_settings_on_l,
+        ] = nav;
         script_eval!(cx, {
             ui.unlock_button.set_text(#(unlock))
             ui.new_chat_button.set_text(#(new_chat))
@@ -3360,7 +3729,7 @@ impl App {
             ui.join_button.set_text(#(join))
             ui.scan_button.set_text(#(scan))
             ui.scan_file_button.set_text(#(scan_file))
-            ui.contacts_button.set_text(#(contacts))
+            ui.contacts_button.set_text(#(contacts_menu))
             ui.blocked_button.set_text(#(blocked))
             ui.delivery_button.set_text(#(delivery))
             ui.log_button.set_text(#(log))
@@ -3373,22 +3742,51 @@ impl App {
             ui.hub_lock_button.set_text(#(lock_hub))
             ui.logout_button.set_text(#(logout))
             ui.older_button.set_text(#(older))
+            // Hub peers — idle + active faces share the same label.
+            ui.tab_chats.set_text(#(tab_chats_l))
+            ui.tab_chats_on.set_text(#(tab_chats_on_l))
+            ui.bottom_chats.set_text(#(bottom_chats_l))
+            ui.bottom_chats_on.set_text(#(bottom_chats_on_l))
+            ui.tab_contacts.set_text(#(tab_contacts_l))
+            ui.tab_contacts_on.set_text(#(tab_contacts_on_l))
+            ui.bottom_contacts.set_text(#(bottom_contacts_l))
+            ui.bottom_contacts_on.set_text(#(bottom_contacts_on_l))
+            ui.tab_invite.set_text(#(tab_invite_l))
+            ui.tab_invite_on.set_text(#(tab_invite_on_l))
+            ui.bottom_invite.set_text(#(bottom_invite_l))
+            ui.bottom_invite_on.set_text(#(bottom_invite_on_l))
+            ui.tab_settings.set_text(#(tab_settings_l))
+            ui.tab_settings_on.set_text(#(tab_settings_on_l))
+            ui.bottom_settings.set_text(#(bottom_settings_l))
+            ui.bottom_settings_on.set_text(#(bottom_settings_on_l))
             // Call screen keeps readable labels (not FA-only).
             ui.accept_call_button.set_text(#(accept))
             ui.mute_button.set_text(#(mute))
             ui.speaker_button.set_text(#(speaker))
+            ui.flip_camera_button.set_text(#(flip_camera))
             ui.end_call_button.set_text(#(end))
+            // Room ⋮ menu + peer HubDest rows (composer IconBtn glyphs stay FA).
+            ui.menu_call_button.set_text(#(voice_call))
+            ui.menu_video_button.set_text(#(video_call))
+            ui.menu_share_button.set_text(#(share_menu))
+            ui.menu_join_button.set_text(#(join_menu))
+            ui.menu_add_button.set_text(#(add_menu))
+            ui.menu_block_button.set_text(#(block_menu))
+            ui.menu_lock_button.set_text(#(lock_menu))
+            ui.add_contact_button.set_text(#(add_contact_nav))
+            ui.join_nav_button.set_text(#(join_nav))
+            ui.scan_nav_button.set_text(#(scan_nav))
+            ui.delivery_nav_button.set_text(#(delivery_nav))
+            ui.invite_button_id.set_text(#(show_qr))
         });
-        // Chat / composer IconBtn glyphs stay FA — do not overwrite with long strings.
-        let _ = (
-            i18n::text(lang, i18n::Key::VoiceCall),
-            i18n::text(lang, i18n::Key::VideoCall),
+        // Composer/mic/attach stay FA IconBtn glyphs — keep Key variants constructed
+        // so catalogs stay complete without translating onto icon faces.
+        let _chrome_icon_keys = (
             i18n::text(lang, i18n::Key::VoiceNote),
             i18n::text(lang, i18n::Key::ChooseFile),
             i18n::text(lang, i18n::Key::Send),
-            i18n::text(lang, i18n::Key::Block),
-            i18n::phrase(lang, "add_short"),
         );
+        let _ = _chrome_icon_keys;
     }
 
     fn sync_open_chat(&mut self, cx: &mut Cx) {
@@ -3601,16 +3999,33 @@ impl App {
             } else {
                 String::new()
             };
-            let action = if line.kind == "voice" && !line.audio_path.is_empty() {
-                "voice"
+            let (open, action) = if line.outgoing
+                && line.delivery == "failed"
+                && !line.message_id.is_empty()
+                && (line.kind == "text"
+                    || line.kind.is_empty()
+                    || line.kind == "voice"
+                    || (line.kind == "attachment_offer" && !line.local_path.is_empty()))
+            {
+                (line.message_id.clone(), "resend".to_string())
+            } else if line.kind == "voice" && !line.audio_path.is_empty() {
+                (open, "voice".to_string())
             } else if line.kind == "attachment_offer" && line.local_path.is_empty() && !line.message_id.is_empty() {
-                "fetch"
+                (line.message_id.clone(), "fetch".to_string())
             } else if line.kind == "attachment_offer" && !line.local_path.is_empty() {
-                "file"
+                (open, "file".to_string())
             } else if !open.is_empty() && line.kind != "text" {
-                "file"
+                (open, "file".to_string())
             } else {
-                ""
+                (open, String::new())
+            };
+            let body = if action == "resend" {
+                format!(
+                    "{body}\n{}",
+                    i18n::phrase(&self.lang, "tap_to_resend")
+                )
+            } else {
+                body
             };
             script_eval!(cx, {
                 mod.state.lines.push({
@@ -3709,7 +4124,7 @@ impl App {
         });
     }
 
-    fn push_identity_pane(&self, cx: &mut Cx) {
+    fn push_settings_pane(&self, cx: &mut Cx) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -3719,10 +4134,12 @@ impl App {
             session.app_namespace, session.public_key_hex
         );
         let self_line = format!("You  {}", short_key(&session.public_key_hex));
+        let display = host::local_display_name(&session.app_namespace);
         script_eval!(cx, {
             mod.state.identity_blurb = #(blurb)
             mod.state.identity_detail = #(detail)
             mod.state.self_line = #(self_line)
+            ui.display_name_input.set_text(#(display))
         });
     }
 
@@ -3980,6 +4397,9 @@ impl App {
         if host::delivery_offline_hint().is_none() {
             self.delivery_hint.clear();
         }
+        if let Some(qw) = host::take_delivery_quota_warning() {
+            self.delivery_hint = qw;
+        }
         let line = if !call.is_empty() {
             call
         } else {
@@ -4128,11 +4548,11 @@ impl MatchEvent for App {
             self.algorithm = "secp256k1".into();
             self.mark_algorithm(cx);
         }
-        if self.ui.button(cx, ids!(algo_ed)).clicked(actions) {
+        if self.ui.button(cx, ids!(algo_ed)).clicked(actions) && !self.create_new {
             self.algorithm = "ed25519".into();
             self.mark_algorithm(cx);
         }
-        if self.ui.button(cx, ids!(algo_p256)).clicked(actions) {
+        if self.ui.button(cx, ids!(algo_p256)).clicked(actions) && !self.create_new {
             self.algorithm = "ecdsa-p256".into();
             self.mark_algorithm(cx);
         }
@@ -4187,20 +4607,33 @@ impl MatchEvent for App {
             self.open_page(cx, "add");
         }
         if self.ui.button(cx, ids!(tab_chats)).clicked(actions)
+            || self.ui.button(cx, ids!(tab_chats_on)).clicked(actions)
             || self.ui.button(cx, ids!(bottom_chats)).clicked(actions)
+            || self.ui.button(cx, ids!(bottom_chats_on)).clicked(actions)
         {
             self.set_hub_tab(cx, 0);
         }
-        if self.ui.button(cx, ids!(tab_identity)).clicked(actions)
-            || self.ui.button(cx, ids!(bottom_identity)).clicked(actions)
+        if self.ui.button(cx, ids!(tab_contacts)).clicked(actions)
+            || self.ui.button(cx, ids!(tab_contacts_on)).clicked(actions)
+            || self.ui.button(cx, ids!(bottom_contacts)).clicked(actions)
+            || self.ui.button(cx, ids!(bottom_contacts_on)).clicked(actions)
         {
-            self.push_identity_pane(cx);
             self.set_hub_tab(cx, 1);
         }
-        if self.ui.button(cx, ids!(tab_more)).clicked(actions)
-            || self.ui.button(cx, ids!(bottom_more)).clicked(actions)
+        if self.ui.button(cx, ids!(tab_invite)).clicked(actions)
+            || self.ui.button(cx, ids!(tab_invite_on)).clicked(actions)
+            || self.ui.button(cx, ids!(bottom_invite)).clicked(actions)
+            || self.ui.button(cx, ids!(bottom_invite_on)).clicked(actions)
         {
             self.set_hub_tab(cx, 2);
+        }
+        if self.ui.button(cx, ids!(tab_settings)).clicked(actions)
+            || self.ui.button(cx, ids!(tab_settings_on)).clicked(actions)
+            || self.ui.button(cx, ids!(bottom_settings)).clicked(actions)
+            || self.ui.button(cx, ids!(bottom_settings_on)).clicked(actions)
+        {
+            self.push_settings_pane(cx);
+            self.set_hub_tab(cx, 3);
         }
         if self.ui.button(cx, ids!(chat_back_button)).clicked(actions) {
             let _ = self.navigate_back(cx, false);
@@ -4213,7 +4646,15 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(invite_copy_button)).clicked(actions) {
             if let Some(session) = self.session.clone() {
-                let msg = match host::invite_links(&session.public_key_hex, None) {
+                let alias = host::local_display_name(&self.namespace);
+                let msg = match host::invite_links(
+                    &session.public_key_hex,
+                    if alias.is_empty() {
+                        None
+                    } else {
+                        Some(alias.as_str())
+                    },
+                ) {
                     Ok((https, _)) => match copy_to_clipboard(cx, &https) {
                         Ok(()) => {
                             "Invitation copied. Paste it on the other device under Join.".to_string()
@@ -4234,10 +4675,20 @@ impl MatchEvent for App {
                 script_eval!(cx, { mod.state.identity_blurb = #(msg) });
             }
         }
-        if self.ui.button(cx, ids!(join_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(join_button)).clicked(actions)
+            || self.ui.button(cx, ids!(join_nav_button)).clicked(actions)
+        {
             self.open_page(cx, "join");
         }
-        if self.ui.button(cx, ids!(scan_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(add_contact_button)).clicked(actions) {
+            self.open_page(cx, "add");
+        }
+        if self.ui.button(cx, ids!(delivery_nav_button)).clicked(actions) {
+            self.open_page(cx, "delivery");
+        }
+        if self.ui.button(cx, ids!(scan_button)).clicked(actions)
+            || self.ui.button(cx, ids!(scan_nav_button)).clicked(actions)
+        {
             self.open_page(cx, "scan");
             let msg = match host::start_qr_scan() {
                 Ok(()) => "Point the camera at an invitation QR…".to_string(),
@@ -4338,6 +4789,16 @@ impl MatchEvent for App {
             };
             script_eval!(cx, {
                 ui.speaker_button.set_text(#(label))
+                mod.state.call_line = #(msg)
+                ui.call_copy.render()
+            });
+        }
+        if self.ui.button(cx, ids!(flip_camera_button)).clicked(actions) {
+            let msg = match host::flip_call_camera() {
+                Ok(()) => i18n::phrase(&self.lang, "flip_camera").to_string(),
+                Err(e) => e,
+            };
+            script_eval!(cx, {
                 mod.state.call_line = #(msg)
                 ui.call_copy.render()
             });
@@ -4506,6 +4967,20 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(password_button)).clicked(actions) {
             self.open_page(cx, "password");
+        }
+        if self.ui.button(cx, ids!(save_display_name_button)).clicked(actions) {
+            let name = self.ui.text_input(cx, ids!(display_name_input)).text();
+            let msg = match host::set_local_display_name(&self.namespace, &name) {
+                Ok(()) => {
+                    if name.trim().is_empty() {
+                        "Display name cleared".to_string()
+                    } else {
+                        "Display name saved — new invitations include it".to_string()
+                    }
+                }
+                Err(e) => e,
+            };
+            script_eval!(cx, { mod.state.identity_blurb = #(msg) });
         }
         if self.ui.button(cx, ids!(lock_button)).clicked(actions) {
             self.submit_lock(cx);
@@ -4983,58 +5458,77 @@ fn copy_to_clipboard(cx: &mut Cx, text: &str) -> Result<(), String> {
 fn apply_algo_chip_style(cx: &mut Cx, button: &mut WidgetRef, on: bool) {
     if on {
         script_apply_eval!(cx, button, {
-            draw_bg.color: #DCF8C6
-            draw_bg.color_hover: #C8F0B0
-            draw_bg.color_down: #B7E89A
-            draw_bg.color_focus: #DCF8C6
+            draw_bg.color: #D6E8FF
+            draw_bg.color_hover: #BFD9FF
+            draw_bg.color_down: #A8CBFF
+            draw_bg.color_focus: #D6E8FF
         });
     } else {
         script_apply_eval!(cx, button, {
             draw_bg.color: #FFFFFF
-            draw_bg.color_hover: #E9EDEF
-            draw_bg.color_down: #D1D7DB
+            draw_bg.color_hover: #DCE4F0
+            draw_bg.color_down: #C5D0DE
             draw_bg.color_focus: #FFFFFF
         });
     }
     button.redraw(cx);
 }
 
-fn style_nav_tab(cx: &mut Cx, button: &mut WidgetRef, active: bool) {
-    // Colors only — Walk/Align/Inset are not in script_apply scope; RailTab sets layout at define time.
-    if active {
-        script_apply_eval!(cx, button, {
-            draw_bg.color: #008069
-            draw_bg.color_hover: #017561
-            draw_bg.color_down: #006655
-            draw_bg.color_focus: #008069
-            draw_bg.border_size: 1.0
-            draw_bg.border_radius: 10.0
-            draw_bg.border_color: #006655
-            draw_bg.border_color_hover: #006655
-            draw_bg.border_color_down: #006655
-            draw_bg.border_color_focus: #006655
-            draw_text.color: #FFFFFF
-            draw_text.color_hover: #FFFFFF
-            draw_text.color_down: #FFFFFF
-            draw_text.color_focus: #FFFFFF
-        });
-    } else {
-        script_apply_eval!(cx, button, {
-            draw_bg.color: #FFFFFF
-            draw_bg.color_hover: #E9EDEF
-            draw_bg.color_down: #D1D7DB
-            draw_bg.color_focus: #FFFFFF
-            draw_bg.border_size: 1.0
-            draw_bg.border_radius: 10.0
-            draw_bg.border_color: #D1D7DB
-            draw_bg.border_color_hover: #D1D7DB
-            draw_bg.border_color_down: #D1D7DB
-            draw_bg.border_color_focus: #008069
-            draw_text.color: #111B21
-            draw_text.color_hover: #111B21
-            draw_text.color_down: #111B21
-            draw_text.color_focus: #111B21
-        });
+/// Makepad Button has no selected bit — only hover/down/focus. Selection is
+/// Overlay idle+active faces painted from `hub_tab` (kumkaj lesson).
+impl App {
+    fn paint_nav_tabs(&mut self, cx: &mut Cx) {
+        let tab = self.hub_tab;
+        let pairs: [(&[LiveId], &[LiveId], bool); 4] = [
+            (ids!(tab_chats), ids!(tab_chats_on), tab == 0),
+            (ids!(tab_contacts), ids!(tab_contacts_on), tab == 1),
+            (ids!(tab_invite), ids!(tab_invite_on), tab == 2),
+            (ids!(tab_settings), ids!(tab_settings_on), tab == 3),
+        ];
+        let bottom: [(&[LiveId], &[LiveId], bool); 4] = [
+            (ids!(bottom_chats), ids!(bottom_chats_on), tab == 0),
+            (ids!(bottom_contacts), ids!(bottom_contacts_on), tab == 1),
+            (ids!(bottom_invite), ids!(bottom_invite_on), tab == 2),
+            (ids!(bottom_settings), ids!(bottom_settings_on), tab == 3),
+        ];
+        for (idle, on, selected) in pairs.into_iter().chain(bottom) {
+            // Clear stuck hover/focus so a deselected face never stays lit.
+            self.ui.button(cx, idle).reset_hover(cx);
+            self.ui.button(cx, on).reset_hover(cx);
+            self.ui.widget(cx, idle).set_visible(cx, !selected);
+            self.ui.widget(cx, on).set_visible(cx, selected);
+        }
+        self.ensure_nav_icons(cx);
+    }
+
+    fn ensure_nav_icons(&mut self, cx: &mut Cx) {
+        if self.nav_icons_loaded {
+            return;
+        }
+        let marks: [(&[LiveId], &[u8]); 5] = [
+            (
+                ids!(mark_chats),
+                include_bytes!("../resources/nav/chats.webp"),
+            ),
+            (
+                ids!(mark_contacts),
+                include_bytes!("../resources/nav/contacts.webp"),
+            ),
+            (
+                ids!(mark_invite),
+                include_bytes!("../resources/nav/invite.webp"),
+            ),
+            (
+                ids!(mark_settings),
+                include_bytes!("../resources/nav/settings.webp"),
+            ),
+            (ids!(mark_lock), include_bytes!("../resources/nav/lock.webp")),
+        ];
+        for (path, bytes) in marks {
+            let img = self.ui.image(cx, path);
+            let _ = img.load_image_from_data(cx, bytes);
+        }
+        self.nav_icons_loaded = true;
     }
 }
 
@@ -5275,7 +5769,7 @@ mod hub_history_tests {
     }
 
     #[test]
-    fn identity_tab_back_restores_chats_room() {
+    fn contacts_tab_back_restores_chats_room() {
         let mut h = HubHistoryStack::default();
         h.reset(HubHistoryEntry {
             hub_tab: 0,
@@ -5283,6 +5777,7 @@ mod hub_history_tests {
             conversation_key: "peer1".into(),
             page: String::new(),
         });
+        // hub_tab 1 = Contacts peer (was Identity under the old More/Identity hub).
         h.record(HubHistoryEntry {
             hub_tab: 1,
             narrow_show_room: false,

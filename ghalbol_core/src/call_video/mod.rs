@@ -389,6 +389,11 @@ impl VideoEngine {
         self.encoder.set_bitrate_bps(bps)
     }
 
+    /// True when the jitter buffer needs a peer keyframe (loss / late join).
+    pub fn take_keyframe_request(&mut self) -> bool {
+        self.jitter.take_keyframe_request()
+    }
+
     #[cfg(test)]
     pub fn open_failures(&self) -> u64 {
         self.rx_open_failures
@@ -397,10 +402,6 @@ impl VideoEngine {
 
 #[cfg(test)]
 impl VideoEngine {
-    pub fn take_keyframe_request(&mut self) -> bool {
-        self.jitter.take_keyframe_request()
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_h264(frame_key: &[u8; 32], local_is_a: bool) -> Result<Self, String> {
         Ok(Self::with_params(

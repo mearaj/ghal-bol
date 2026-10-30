@@ -338,6 +338,7 @@ async fn process_one(
                         | crate::call_sig_v1::CallSigKind::Reject
                         | crate::call_sig_v1::CallSigKind::VideoOn
                         | crate::call_sig_v1::CallSigKind::VideoOff
+                        | crate::call_sig_v1::CallSigKind::KeyRequest
                 );
             if need_bridge {
                 if !crate::coord_runtime::coord_is_configured() {

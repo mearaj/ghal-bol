@@ -1,6 +1,6 @@
 # GhalBol — Brand Overview
 
-**GhalBol** (ghalbol.com) — brand for a **family of communication products**. The name "Ghal Bol" means communication in the source language; this brand covers all our real-time and asynchronous communication applications.
+**GhalBol** (ghalbol.com) — brand for a **family of communication products** (a communication operating / management system family), parallel to how **Kumkaj** brands business operating systems with concrete products (Moklanjo, Khaynjo). The name "Ghal Bol" means communication in the source language.
 
 ## Products under the GhalBol brand
 
@@ -10,9 +10,16 @@
 
 ## Architecture doctrine
 
-- GhalBol products share the **common workspace**: build tooling, the `ghalbol_core` library, and infrastructure crates (`ghalbol_coord`, `ghalbol_delivery`, `ghalbol_ddns`).
+Same workspace pattern as Kumkaj: **brand umbrella + independent products**, with **copy-then-diverge** for UI.
+
+| Layer | Shared? | Notes |
+|-------|---------|--------|
+| Workspace / Makepad / packaging scripts | Yes | One Cargo workspace |
+| `ghalbol_core` + coord/delivery/ddns | Yes | Communication **product logic** and infra — intentional (Kumkaj deliberately has no shared product crate; GhalBol does, because crypto/delivery/calls are the shared communication stack) |
+| App UI under `apps/<product>/` | No | Each product owns Splash faces, resources, env, scripts. Reuse faces by copying lessons from siblings / Kumkaj docs — not a shared UI crate |
+
 - Each product under `apps/<product>/` owns all of its app/UI code independently.
-- Infrastructure crates (`ghalbol_coord`, `ghalbol_delivery`) are shared across products where they serve a common need — but **no shared core product library** between apps.
+- UI lessons (intent→face, Overlay selection, 720 chrome) live in [`MAKEPAD_UI.md`](MAKEPAD_UI.md) and [`.cursor/rules/makepad-layout-faces.mdc`](../.cursor/rules/makepad-layout-faces.mdc).
 
 ## Naming convention
 
@@ -47,11 +54,16 @@ ghalbol-workspace/          # Brand root
 └── scripts/                # Shared build/packaging tooling
 ```
 
+## Visual identity (Ghal Bol chat)
+
+Palette is sampled from [`docs/assets/app_icon.png`](assets/app_icon.png): cool shell `#EEF2F8`, electric blue primary `#0183FB`, navy chrome `#10236D`. Documented in [`MAKEPAD_UI.md`](MAKEPAD_UI.md) § Palette. Future products may diverge (Kumkaj lesson: each product gets the design that serves *its* users).
+
 ## Future products
 
 Future communication products under the GhalBol brand will live in `apps/<product>/` following the same structure as `apps/ghalbol/`. Each product gets its own:
 - App crate with Keystore ID
 - Environment files (development.env, production.env)
-- Resource bundles (fonts, icons)
+- Resource bundles (fonts, icons, optional `resources/nav/` marks)
 - Per-app scripts (dev.sh, android-dev.sh, windows-dev.sh)
 - Tools entry (`tools/<product>-dev`, `tools/<product>-windows-dev`)
+- Its own Splash face copy (intent→face vocabulary recommended; palette may differ)

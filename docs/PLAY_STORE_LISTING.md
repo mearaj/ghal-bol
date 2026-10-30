@@ -22,8 +22,8 @@ Ghal Bol is realtime peer-to-peer messaging built for direct communication betwe
 
 **How it works**
 - Each install creates a local cryptographic identity you control
-- When both peers are online, messages sync directly between devices
-- A lightweight coordination service helps peers find each other — it never stores your messages
+- Text is end-to-end encrypted and relayed via a delivery mailbox until the recipient acknowledges it — servers never see plaintext
+- Voice and video calls connect peer-to-peer on the same network when possible, otherwise through a lightweight coordination bridge that never stores your media
 
 **Who it’s for**
 - People who want private, direct messaging without a central chat cloud

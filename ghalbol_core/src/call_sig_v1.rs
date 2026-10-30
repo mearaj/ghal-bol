@@ -41,6 +41,8 @@ pub enum CallSigKind {
     Ice,
     VideoOn,
     VideoOff,
+    /// RX → TX: force an immediate video keyframe after loss / late join.
+    KeyRequest,
 }
 
 impl CallSigKind {
@@ -55,6 +57,7 @@ impl CallSigKind {
             "ice" => Ok(Self::Ice),
             "video_on" => Ok(Self::VideoOn),
             "video_off" => Ok(Self::VideoOff),
+            "key_request" => Ok(Self::KeyRequest),
             other => Err(format!("unknown call signal: {other}")),
         }
     }
@@ -70,6 +73,7 @@ impl CallSigKind {
             Self::Ice => "ice",
             Self::VideoOn => "video_on",
             Self::VideoOff => "video_off",
+            Self::KeyRequest => "key_request",
         }
     }
 }

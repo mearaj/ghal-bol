@@ -21,6 +21,9 @@ static FRAME_TX: OnceLock<Mutex<Option<mpsc::Sender<RawVideoFrame>>>> = OnceLock
 static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "android")]
 static FRAMES_RX: AtomicU64 = AtomicU64::new(0);
+/// `false` = front (default), `true` = back.
+#[cfg(target_os = "android")]
+static PREFER_BACK: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "android")]
 fn frame_tx() -> &'static Mutex<Option<mpsc::Sender<RawVideoFrame>>> {
@@ -192,7 +195,12 @@ mod ndk_camera {
 
     pub fn start() -> Result<(), String> {
         stop();
-        let camera = Camera::open(Facing::Front, CAP_WIDTH as i32, CAP_HEIGHT as i32, on_image)?;
+        let facing = if PREFER_BACK.load(Ordering::Relaxed) {
+            Facing::Back
+        } else {
+            Facing::Front
+        };
+        let camera = Camera::open(facing, CAP_WIDTH as i32, CAP_HEIGHT as i32, on_image)?;
         if let Ok(mut g) = live().lock() {
             *g = Some(camera);
         }
@@ -204,6 +212,22 @@ mod ndk_camera {
         let camera = live().lock().ok().and_then(|mut g| g.take());
         drop(camera);
     }
+}
+
+/// Toggle front/back camera while a video call capture is active.
+#[cfg(target_os = "android")]
+pub fn flip_camera() -> Result<(), String> {
+    if !CAPTURE_ACTIVE.load(Ordering::Relaxed) {
+        return Err("No active video camera to flip".into());
+    }
+    let next = !PREFER_BACK.load(Ordering::Relaxed);
+    PREFER_BACK.store(next, Ordering::Relaxed);
+    ndk_camera::start().map_err(|e| {
+        // Revert preference if reopen failed.
+        PREFER_BACK.store(!next, Ordering::Relaxed);
+        e
+    })?;
+    Ok(())
 }
 
 /// Start camera capture. Desktop uses nokhwa; Android uses the NDK camera.
@@ -231,6 +255,7 @@ pub fn spawn(controls: VideoControls) -> Result<mpsc::Receiver<RawVideoFrame>, S
 pub fn stop_capture() {
     CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
     FRAMES_RX.store(0, Ordering::Relaxed);
+    PREFER_BACK.store(false, Ordering::Relaxed);
     ndk_camera::stop();
     if let Ok(mut g) = frame_tx().lock() {
         g.take();

@@ -607,6 +607,10 @@ async fn handle_inbound_call_frame(frame: &[u8], ctx: &WireDispatchCtx) {
                 None,
             );
         }
+        CallSigKind::KeyRequest => {
+            // Peer cannot decode — force our next encoded frame to be an IDR.
+            let _ = ctx.session.call_video_force_keyframe(&parsed.call_id);
+        }
         CallSigKind::Hangup | CallSigKind::Reject => {
             platform_incoming_call_dismiss();
             drop_pending_call_invite(&parsed.call_id);
@@ -1072,6 +1076,31 @@ pub(crate) async fn start_call_video_for_peer(
             session_ctl,
         )
         .await;
+    });
+    // Drain RX keyframe-needed → outbound `key_request` (throttled ~1/s).
+    let key_ctl = controls.clone();
+    let key_peer = pk.clone();
+    let key_cid = call_id.clone();
+    tokio::spawn(async move {
+        let mut last = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or_else(std::time::Instant::now);
+        while !key_ctl.is_stopped() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if !key_ctl.take_outbound_key_request() {
+                continue;
+            }
+            if last.elapsed() < Duration::from_secs(1) {
+                continue;
+            }
+            last = std::time::Instant::now();
+            let _ = crate::p2p_runtime::p2p_call_signal(&serde_json::json!({
+                "recipient_public_key_hex": key_peer,
+                "call_id": key_cid,
+                "signal": "key_request",
+                "payload": {},
+            }));
+        }
     });
     crate::p2p::call_active::on_video_start(&call_id, &pk, camera_enabled);
     emit_call_media(&events_tx, &call_id, &pk, "video_started", None);

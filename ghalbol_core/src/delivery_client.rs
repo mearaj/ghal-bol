@@ -11,10 +11,12 @@ use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::delivery_auth::{
-    session_challenge_bytes, sign_delivery_challenge, upload_challenge_bytes,
+    extend_challenge_bytes, session_challenge_bytes, sign_delivery_challenge,
+    upload_challenge_bytes,
 };
 use crate::delivery_msg_v1::{
-    build_attachment_envelope, build_text_envelope, build_voice_envelope,
+    build_attachment_envelope, build_availability_envelope, build_text_envelope,
+    build_voice_envelope,
 };
 use crate::p2p::native_log;
 use crate::session_runtime::unlocked_identity_clone;
@@ -262,6 +264,56 @@ impl DeliverySession {
         Ok(resp)
     }
 
+    pub async fn upload_availability(
+        &mut self,
+        ident: &crate::DecryptedIdentity,
+        message_id: &str,
+        recipient_wire: &str,
+        status: &str,
+        updated_at_ms: i64,
+        ttl_secs: Option<u64>,
+    ) -> Result<Value, String> {
+        let op_nonce_hex = self.op_nonce_hex.as_deref().ok_or("missing op_nonce_hex")?;
+        let op_nonce = parse_nonce32(op_nonce_hex)?;
+        let created_at_ms = now_ms();
+        let envelope = build_availability_envelope(
+            ident,
+            message_id,
+            recipient_wire,
+            status,
+            updated_at_ms,
+            created_at_ms,
+        )?;
+        let recipient_norm = envelope
+            .get("recipient_wire")
+            .and_then(|v| v.as_str())
+            .unwrap_or(recipient_wire);
+        let upload_msg = upload_challenge_bytes(&op_nonce, message_id, recipient_norm);
+        let sig = sign_delivery_challenge(ident, &upload_msg)?;
+        let mut frame = json!({
+            "type": "message.upload",
+            "envelope": envelope,
+            "op_nonce_hex": op_nonce_hex,
+            "signature_hex": hex::encode(sig),
+        });
+        if let Some(ttl) = ttl_secs {
+            frame["ttl_secs"] = json!(ttl);
+        }
+        self.write
+            .send(Message::Text(frame.to_string().into()))
+            .await
+            .map_err(|e| format!("upload send: {e}"))?;
+        let resp =
+            recv_until_type(&mut self.read, "message.upload.ok", &mut self.prefetched).await?;
+        if let Some(n) = resp.get("op_nonce_hex").and_then(|v| v.as_str()) {
+            self.op_nonce_hex = Some(n.to_string());
+        }
+        if let Some(q) = resp.get("quota") {
+            self.quota = q.clone();
+        }
+        Ok(resp)
+    }
+
     pub async fn inbox_read(&mut self, message_id: &str, sender_wire: &str) -> Result<(), String> {
         self.write
             .send(Message::Text(
@@ -314,6 +366,36 @@ impl DeliverySession {
             &mut self.prefetched,
         )
         .await
+    }
+
+    /// Extend TTL while the row is still `queued` (rejected once expired — client must resend).
+    pub async fn extend_ttl(
+        &mut self,
+        ident: &crate::DecryptedIdentity,
+        message_id: &str,
+        extend_secs: u64,
+    ) -> Result<Value, String> {
+        let op_nonce_hex = self.op_nonce_hex.as_deref().ok_or("missing op_nonce_hex")?;
+        let op_nonce = parse_nonce32(op_nonce_hex)?;
+        let msg = extend_challenge_bytes(&op_nonce, message_id);
+        let sig = sign_delivery_challenge(ident, &msg)?;
+        let frame = json!({
+            "type": "mailbox.ttl.extend",
+            "message_id": message_id,
+            "extend_secs": extend_secs,
+            "op_nonce_hex": op_nonce_hex,
+            "signature_hex": hex::encode(sig),
+        });
+        self.write
+            .send(Message::Text(frame.to_string().into()))
+            .await
+            .map_err(|e| format!("extend send: {e}"))?;
+        let resp =
+            recv_until_type(&mut self.read, "mailbox.ttl.extended", &mut self.prefetched).await?;
+        if let Some(n) = resp.get("op_nonce_hex").and_then(|v| v.as_str()) {
+            self.op_nonce_hex = Some(n.to_string());
+        }
+        Ok(resp)
     }
 
 
@@ -496,6 +578,42 @@ pub fn blocking_upload_attachment(
             let mut session = connect_and_auth(&ws_url, &ident).await?;
             session
                 .upload_attachment(&ident, &message_id, &recipient_wire, &inner, ttl_secs)
+                .await
+        })
+    })
+}
+
+pub fn blocking_upload_availability(
+    url: &str,
+    recipient_wire: &str,
+    status: &str,
+    updated_at_ms: i64,
+    message_id: &str,
+    ttl_secs: Option<u64>,
+) -> Result<Value, String> {
+    let url = url.to_string();
+    let recipient_wire = recipient_wire.to_string();
+    let status = status.to_string();
+    let message_id = message_id.to_string();
+    on_delivery_io_thread(move || {
+        crate::rustls_init::ensure_rustls_crypto_provider();
+        let ws_url = ws_url_from_base(&url);
+        let ident = unlocked_identity_clone().map_err(|e| e.to_string())?;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("tokio: {e}"))?;
+        rt.block_on(async {
+            let mut session = connect_and_auth(&ws_url, &ident).await?;
+            session
+                .upload_availability(
+                    &ident,
+                    &message_id,
+                    &recipient_wire,
+                    &status,
+                    updated_at_ms,
+                    ttl_secs,
+                )
                 .await
         })
     })

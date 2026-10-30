@@ -245,6 +245,6 @@ Phases 0–4 track feature completeness in the repo. **All shipping apps use the
 - [IDENTITY.md](IDENTITY.md) — user-facing identity model (today: secp256k1)
 - [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md) — connect invite URIs
 - [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md) — DM envelopes (transport KEM v2)
-- [GHALBOL_CALL_NATIVE_V2.md](GHALBOL_CALL_NATIVE_V2.md) — call media keys (today: identity-derived)
+- [GHALBOL_CALL_NATIVE_V2.md](GHALBOL_CALL_NATIVE_V2.md) — call media keys (transport KEM `derive_call_media_keys_from_transport`)
 - [DESIGN.md](DESIGN.md) — layers and E2E overview
 - [TRANSPORT.md](TRANSPORT.md) — current connectivity stack (transport only; not identity spec)

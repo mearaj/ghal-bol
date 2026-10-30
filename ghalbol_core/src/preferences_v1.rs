@@ -28,6 +28,9 @@ pub struct PreferencesV1 {
     pub coord_insecure_tls: bool,
     #[serde(default)]
     pub ui_locale: Option<String>,
+    /// Optional name embedded in invitations (`global_alias`).
+    #[serde(default)]
+    pub local_display_name: Option<String>,
 }
 
 impl Default for PreferencesV1 {
@@ -39,6 +42,7 @@ impl Default for PreferencesV1 {
             coord_base_url: None,
             coord_insecure_tls: false,
             ui_locale: None,
+            local_display_name: None,
         }
     }
 }
@@ -227,6 +231,21 @@ pub fn ui_locale_set(cfg: &StorageConfig, locale: &str) -> Result<(), KeystoreSt
     let mut prefs = load_preferences_v1(cfg)?;
     prefs.ui_locale = Some(locale);
     save_preferences_v1(cfg, &prefs)
+}
+
+pub fn local_display_name_get(cfg: &StorageConfig) -> Result<Option<String>, KeystoreStorageError> {
+    Ok(load_preferences_v1(cfg)?.local_display_name)
+}
+
+pub fn local_display_name_set(
+    cfg: &StorageConfig,
+    name_raw: &str,
+) -> Result<Option<String>, KeystoreStorageError> {
+    let mut prefs = load_preferences_v1(cfg)?;
+    prefs.local_display_name = sanitize_peer_display_alias(name_raw);
+    let out = prefs.local_display_name.clone();
+    save_preferences_v1(cfg, &prefs)?;
+    Ok(out)
 }
 
 /// Removes `preferences_v1.json` for [cfg] if present.

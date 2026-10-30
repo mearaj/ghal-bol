@@ -1,0 +1,61 @@
+---
+description: Makepad 2 selection, CTA wrap/center, intent→face, and wrap+Fill hang — Ghal Bol lessons (from Kumkaj)
+globs: apps/**/*.{rs,md}
+alwaysApply: false
+---
+
+# Makepad 2 faces (Ghal Bol)
+
+Canonical docs: [`docs/MAKEPAD_UI.md`](../../docs/MAKEPAD_UI.md) § Layout tokens · § Hub peers · § Selection.
+
+**Brand:** GhalBol is the family; **Ghal Bol** is this chat product under `apps/ghalbol/`. UI is per-product (copy-then-diverge); do not add a shared UI crate that couples future apps.
+
+**Responsive:** size grids from the widget turtle/walk width. Phone chrome &lt; **720** css px = bottom nav chips; ≥ **720** = side rail. **Text:** display copy is selectable (`Selectable`) unless it sits inside a tap target.
+
+## Intent → face (same job → same look)
+
+| Intent | Face |
+|--------|------|
+| Navigate / leave screen | `HubDestBtn` / `MenuRow` — **never** filled primary |
+| Select in place (tabs, chips) | Overlay idle+active (`RailTab`/`RailTabOn`, `NavChip`/`NavChipOn`) |
+| Submit on this form (one) | `Go` / `StackPrimaryBtn` |
+| Quiet alt | `Quiet` / `StackSecondaryBtn` |
+| Destroy | `Stop` |
+| Multi-word CTAs | `ActionStack` + `Stack*` (full width, wrap, no ellipsis) |
+| Short strip filters only | `BarChip` (ellipsis OK) |
+
+Frequency does **not** promote a hub jump to primary.
+
+## Selection (Makepad has no selected bit)
+
+Button only has hover/down/focus animators.
+
+1. Overlay **idle + active** faces for hub peers.
+2. Idle must **not** reuse the active navy fill on hover/focus.
+3. Paint from `hub_tab` via `paint_nav_tabs` every tab change.
+4. Nav: `grab_key_focus: false`, `reset_hover_on_click: true`.
+
+```text
+❌ style one Button's hover to mean "selected"
+❌ Idle RailTab color_hover = active navy
+✅ Overlay RailTab + RailTabOn; paint_nav_tabs from hub_tab
+```
+
+## Labels / wrap / Fill hang
+
+Full-width CTAs: wrap + center, **Fit** label walk, always `padding` **and** `label_walk.margin`. Never `max_lines:1` + Ellipsis on translated full-width buttons.
+
+**Hang:** never `flow: Right{wrap: true}` with `width: Fill` children. Use `ActionStack` / `flow: Down`.
+
+```text
+❌ Form row: Field + Field + Fit Quiet CTA (letters stack vertically)
+✅ Fields only in the row; ActionStack CTAs underneath
+```
+
+## Palette (from `docs/assets/app_icon.png`)
+
+Cool shell `#EEF2F8`, ink `#0B1220`, electric blue primary `#0183FB`, navy chrome `#10236D` (active peers), soft online accent `#01C98A` sparingly. **Not** WhatsApp teal.
+
+## Hub peers (no More hub)
+
+**Chats · Contacts · Invite · Settings** (+ **Lock** chrome). Peers are roots; sheets drill down with Back / history.

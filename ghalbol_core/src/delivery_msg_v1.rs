@@ -138,6 +138,49 @@ pub fn build_attachment_envelope(
     }))
 }
 
+/// Control upload: availability status (no chat bubble; short TTL on the mailbox).
+pub fn build_availability_envelope(
+    ident: &DecryptedIdentity,
+    message_id: &str,
+    recipient_wire: &str,
+    status: &str,
+    updated_at_ms: i64,
+    created_at_ms: i64,
+) -> Result<Value, String> {
+    let sender_wire = ident.identity_wire();
+    let recipient_norm = normalize_contact_identity_wire(recipient_wire)?;
+    let recipient_id = Identity::parse(&recipient_norm)?;
+    if recipient_id.algorithm != crate::identity::IdentityAlgorithm::Secp256k1 {
+        return Err("delivery cipher: secp256k1 recipients only in v1".to_string());
+    }
+    let inner = json!({
+        "kind": "availability_status",
+        "status": status,
+        "updated_at_ms": updated_at_ms,
+    })
+    .to_string();
+    let sealed = seal_to_secp256k1_public(&recipient_id.public_key, inner.as_bytes())?;
+    let ciphertext_hex = hex::encode(&sealed);
+    let sign_bytes = envelope_sign_bytes(
+        message_id,
+        &sender_wire,
+        &recipient_norm,
+        created_at_ms,
+        &ciphertext_hex,
+    );
+    let signature = sign_delivery_challenge(ident, &sign_bytes)?;
+    Ok(json!({
+        "ghalbol.share": DELIVERY_MSG_SHARE,
+        "format_version": DELIVERY_MSG_FORMAT_VERSION,
+        "message_id": message_id,
+        "sender_wire": sender_wire,
+        "recipient_wire": recipient_norm,
+        "created_at_ms": created_at_ms,
+        "ciphertext_hex": ciphertext_hex,
+        "signature_hex": hex::encode(signature),
+    }))
+}
+
 pub fn open_text_from_envelope(
     ident: &DecryptedIdentity,
     envelope: &Value,
@@ -158,7 +201,7 @@ pub fn open_text_from_envelope(
         .and_then(|v| v.as_str())
         .ok_or("missing ciphertext_hex")?;
     let sealed = hex::decode(ciphertext_hex.trim()).map_err(|e| format!("ciphertext hex: {e}"))?;
-    let sk = ident.secp256k1_secret();
+    let sk = ident.try_secp256k1_secret()?;
     let plain = crate::offline_seal_v1::open_sealed_secp256k1(sk, &sealed)?;
     let inner: Value = serde_json::from_slice(&plain).map_err(|e| format!("inner json: {e}"))?;
     let text = inner
@@ -183,6 +226,7 @@ pub fn open_voice_from_envelope(
     ))
 }
 
+#[derive(Debug)]
 pub enum DeliveryOpenedMessage {
     Text {
         message_id: String,
@@ -200,6 +244,13 @@ pub enum DeliveryOpenedMessage {
         message_id: String,
         sender_wire: String,
         inner: crate::attach_v1::AttachmentInner,
+    },
+    /// Control: peer availability text — not a chat bubble.
+    AvailabilityStatus {
+        message_id: String,
+        sender_wire: String,
+        status: String,
+        updated_at_ms: i64,
     },
 }
 
@@ -226,6 +277,31 @@ pub fn open_message_from_envelope(
             message_id,
             sender_wire,
             inner: attach,
+        });
+    }
+    let kind = inner
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if kind == "availability_status"
+        || (inner.get("status").is_some()
+            && inner.get("updated_at_ms").is_some()
+            && inner.get("text").is_none())
+    {
+        let status = inner
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let updated_at_ms = inner
+            .get("updated_at_ms")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        return Ok(DeliveryOpenedMessage::AvailabilityStatus {
+            message_id,
+            sender_wire,
+            status,
+            updated_at_ms,
         });
     }
     let text = inner
@@ -260,7 +336,7 @@ fn open_plain_from_envelope(
         .and_then(|v| v.as_str())
         .ok_or("missing ciphertext_hex")?;
     let sealed = hex::decode(ciphertext_hex.trim()).map_err(|e| format!("ciphertext hex: {e}"))?;
-    let sk = ident.secp256k1_secret();
+    let sk = ident.try_secp256k1_secret()?;
     let plain = crate::offline_seal_v1::open_sealed_secp256k1(sk, &sealed)?;
     Ok((message_id, sender_wire, plain))
 }
@@ -320,5 +396,31 @@ mod tests {
         verify_delivery_envelope(&env).unwrap();
         let (_id, _from, text) = open_text_from_envelope(&b, &env).unwrap();
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn roundtrip_availability_status() {
+        let (_ks_a, a) = crate::create_keystore_v1("pw", None).unwrap();
+        let (_ks_b, b) = crate::create_keystore_v1("pw2", None).unwrap();
+        let env = build_availability_envelope(
+            &a,
+            "avail-1",
+            &b.identity_wire(),
+            "Busy",
+            2_000,
+            1_000,
+        )
+        .unwrap();
+        match open_message_from_envelope(&b, &env).unwrap() {
+            DeliveryOpenedMessage::AvailabilityStatus {
+                status,
+                updated_at_ms,
+                ..
+            } => {
+                assert_eq!(status, "Busy");
+                assert_eq!(updated_at_ms, 2_000);
+            }
+            other => panic!("expected AvailabilityStatus, got {other:?}"),
+        }
     }
 }

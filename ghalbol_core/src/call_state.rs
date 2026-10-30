@@ -256,6 +256,17 @@ pub fn apply_outbound(peer_pk_hex: &str, call_id: &str, kind: CallSigKind) -> Re
                 return Err("call_id mismatch".to_string());
             }
         }
+        CallSigKind::KeyRequest => {
+            let Some(c) = cur else {
+                return Err("no active call".to_string());
+            };
+            if c.call_id != call_id {
+                return Err("call_id mismatch".to_string());
+            }
+            if c.phase != CallPhase::Connected {
+                return Err("key_request only when connected".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -344,6 +355,15 @@ pub fn apply_inbound(peer_pk_hex: &str, call_id: &str, kind: CallSigKind) -> Res
             if c.call_id != call_id {
                 return Err("call_id mismatch".to_string());
             }
+        }
+        CallSigKind::KeyRequest => {
+            let Some(c) = cur else {
+                return Err("no active call".to_string());
+            };
+            if c.call_id != call_id {
+                return Err("call_id mismatch".to_string());
+            }
+            // No phase change — peer asked us to emit a video keyframe.
         }
     }
     Ok(())

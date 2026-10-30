@@ -401,13 +401,66 @@ fn write_root_unlocked(path: &Path, root: &Value) -> Result<(), TranscriptStoreE
 fn delivery_rank(delivery: &str) -> i32 {
     match delivery {
         "pending" => 0,
-        "sent" => 1,
+        // Failed may replace pending/sent (expiry / hard upload error) but must not
+        // demote delivered/read.
         "failed" => 1,
-        "delivered" => 2,
-        "read" => 3,
-        "downloaded" => 3,
+        "sent" => 2,
+        "delivered" => 3,
+        "read" => 4,
+        "downloaded" => 4,
         _ => 0,
     }
+}
+
+/// Mark an outbound row failed (mailbox expired or permanent upload error).
+/// Allows `pending`/`sent` → `failed`; never demotes `delivered`/`read`.
+pub fn patch_outgoing_failed(
+    app_namespace: &str,
+    conversation_key: &str,
+    message_id: &str,
+) -> Result<bool, TranscriptStoreError> {
+    let mid = message_id.trim();
+    if mid.is_empty() || conversation_key.trim().is_empty() {
+        return Ok(false);
+    }
+    let (_guard, path) = TranscriptIoGuard::for_namespace(app_namespace)?;
+    let mut all = read_root_unlocked(&path)?;
+    let Some(ns_obj) = all.get_mut(app_namespace).and_then(|v| v.as_object_mut()) else {
+        return Ok(false);
+    };
+    let keys = expand_conversation_keys(app_namespace, &[conversation_key.to_string()]);
+    let mut changed = false;
+    for ck in keys {
+        let Some(thread) = ns_obj.get_mut(ck.as_str()).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for item in thread.iter_mut() {
+            let Some(parsed) = StoredChatLine::from_json(item) else {
+                continue;
+            };
+            if !parsed.outgoing || parsed.message_id.as_deref().unwrap_or("").trim() != mid {
+                continue;
+            }
+            let cur = delivery_rank(&parsed.delivery);
+            // Only pending (0) or sent (2); failed itself is 1 — skip no-ops.
+            if parsed.delivery == "failed" || cur >= delivery_rank("delivered") {
+                continue;
+            }
+            let mut next = parsed;
+            next.delivery = "failed".to_string();
+            *item = next.to_json();
+            changed = true;
+        }
+    }
+    if changed {
+        flow_log::info(
+            "Transcript",
+            format!("patched outgoing delivery=failed mid={mid} conv={conversation_key}"),
+        );
+        write_root_unlocked(&path, &all)?;
+        bump_transcript_revision(app_namespace, conversation_key);
+    }
+    Ok(changed)
 }
 
 fn pick_better_duplicate(a: &StoredChatLine, b: &StoredChatLine) -> StoredChatLine {

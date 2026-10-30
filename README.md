@@ -4,7 +4,7 @@
 
 ## Workspace Structure (Kumkaj Model)
 
-This workspace follows the Kumkaj pattern: a common workspace shared across multiple apps, with no shared product core. Each app under `apps/` owns all its code independently.
+This workspace follows the Kumkaj brand pattern: **GhalBol** is the communication-product family; concrete apps live under `apps/` and own their UI independently (**copy-then-diverge**). Unlike Kumkaj, GhalBol **does** share `ghalbol_core` (crypto, delivery, calls) across communication products — UI still stays per-app.
 
 ```
 ghalbol/

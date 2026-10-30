@@ -8,7 +8,7 @@ Connectivity: [TRANSPORT.md](TRANSPORT.md) § **Connectivity lifecycle**, § **N
 |----------|----------|
 | [GHALBOL_BRAND.md](GHALBOL_BRAND.md) | Brand doctrine: GhalBol family, product layout, naming |
 | [DESIGN.md](DESIGN.md) | **Canonical** layers, truthful ticks, room open/close, transcripts, trust, process |
-| [MAKEPAD_UI.md](MAKEPAD_UI.md) | Makepad 2 shell (`ghalbol_app`); Splash, scrolling, language/fonts, `host` |
+| [MAKEPAD_UI.md](MAKEPAD_UI.md) | Makepad 2 shell (`ghalbol_app`); palette, intent→face, hub peers, scrolling, `host` |
 | [TRANSPORT.md](TRANSPORT.md) | Calls (native connect) + delivery text policy; network truth; bridge/CGNAT |
 | [GHALBOL_CONNECT_V1.md](GHALBOL_CONNECT_V1.md) | Call transport wire (mDNS + Noise + mux + coord bridge) |
 | [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md) | Call-signaling / native mux wire; text product path is delivery |

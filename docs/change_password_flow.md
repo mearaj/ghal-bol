@@ -8,7 +8,7 @@ encryption key differs.
 
 ## Entry point
 
-Identity → **Password**
+Settings → **Change password**
 (`ghalbol_app`, `host::change_password`).
 
 ## Steps

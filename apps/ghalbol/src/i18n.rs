@@ -44,6 +44,9 @@ pub enum Key {
     Send,
     ScanQr,
     QrPicture,
+    Chats,
+    InviteTab,
+    Settings,
 }
 
 pub fn system_code() -> String {
@@ -172,246 +175,295 @@ const EN: &[&str] = &[
     "Private key", "Backup", "Password", "About", "Language", "Lock", "Log out", "Older messages",
     "Voice call", "Video call", "Accept", "Mute", "End call", "Block", "Voice note", "Choose file", "Send",
     "Scan QR", "QR picture",
+    "Chats", "Invite", "Settings"
 ];
 const ES: &[&str] = &[
     "Desbloquear", "Chat nuevo", "Mi invitación", "Unirse", "Contactos", "Bloqueados", "Entrega", "Registro",
     "Clave privada", "Copia", "Contraseña", "Acerca de", "Idioma", "Bloquear", "Salir", "Mensajes anteriores",
     "Llamada de voz", "Videollamada", "Aceptar", "Silencio", "Colgar", "Bloquear", "Nota de voz", "Elegir archivo", "Enviar",
+    "Escanear QR", "Imagen QR", "Chats", "Invitar", "Ajustes"
 ];
 const FR: &[&str] = &[
     "Déverrouiller", "Nouvelle discussion", "Mon invitation", "Rejoindre", "Contacts", "Bloqués", "Remise", "Journal",
     "Clé privée", "Sauvegarde", "Mot de passe", "À propos", "Langue", "Verrouiller", "Déconnexion", "Messages plus anciens",
     "Appel vocal", "Appel vidéo", "Accepter", "Muet", "Raccrocher", "Bloquer", "Message vocal", "Choisir un fichier", "Envoyer",
+    "Scanner QR", "Image QR", "Discussions", "Inviter", "Réglages"
 ];
 const PT: &[&str] = &[
     "Desbloquear", "Nova conversa", "Meu convite", "Entrar", "Contatos", "Bloqueados", "Entrega", "Registo",
     "Chave privada", "Cópia", "Palavra-passe", "Sobre", "Idioma", "Bloquear", "Sair", "Mensagens antigas",
     "Chamada de voz", "Videochamada", "Aceitar", "Silenciar", "Desligar", "Bloquear", "Mensagem de voz", "Escolher ficheiro", "Enviar",
+    "Ler QR", "Imagem QR", "Conversas", "Convidar", "Definições"
 ];
 const DE: &[&str] = &[
     "Entsperren", "Neuer Chat", "Meine Einladung", "Beitreten", "Kontakte", "Blockiert", "Zustellung", "Protokoll",
     "Privater Schlüssel", "Sicherung", "Passwort", "Über", "Sprache", "Sperren", "Abmelden", "Ältere Nachrichten",
     "Sprachanruf", "Videoanruf", "Annehmen", "Stumm", "Auflegen", "Blockieren", "Sprachnachricht", "Datei wählen", "Senden",
+    "QR scannen", "QR-Bild", "Chats", "Einladen", "Einstellungen"
 ];
 const IT: &[&str] = &[
     "Sblocca", "Nuova chat", "Il mio invito", "Entra", "Contatti", "Bloccati", "Consegna", "Registro",
     "Chiave privata", "Backup", "Password", "Informazioni", "Lingua", "Blocca", "Esci", "Messaggi precedenti",
     "Chiamata vocale", "Videochiamata", "Accetta", "Muto", "Chiudi", "Blocca", "Nota vocale", "Scegli file", "Invia",
+    "Scansiona QR", "Immagine QR", "Chat", "Invita", "Impostazioni"
 ];
 const NL: &[&str] = &[
     "Ontgrendelen", "Nieuwe chat", "Mijn uitnodiging", "Deelnemen", "Contacten", "Geblokkeerd", "Aflevering", "Logboek",
     "Privésleutel", "Back-up", "Wachtwoord", "Over", "Taal", "Vergrendelen", "Afmelden", "Oudere berichten",
     "Spraakoproep", "Videogesprek", "Accepteren", "Dempen", "Ophangen", "Blokkeren", "Spraakbericht", "Bestand kiezen", "Versturen",
+    "QR scannen", "QR-afbeelding", "Chats", "Uitnodigen", "Instellingen"
 ];
 const PL: &[&str] = &[
     "Odblokuj", "Nowy czat", "Moje zaproszenie", "Dołącz", "Kontakty", "Zablokowani", "Dostarczenie", "Dziennik",
     "Klucz prywatny", "Kopia", "Hasło", "O aplikacji", "Język", "Zablokuj", "Wyloguj", "Starsze wiadomości",
     "Rozmowa głosowa", "Rozmowa wideo", "Odbierz", "Wycisz", "Zakończ", "Zablokuj", "Wiadomość głosowa", "Wybierz plik", "Wyślij",
+    "Skanuj QR", "Obraz QR", "Czaty", "Zaproś", "Ustawienia"
 ];
 const UK: &[&str] = &[
     "Розблокувати", "Новий чат", "Моє запрошення", "Приєднатися", "Контакти", "Заблоковані", "Доставлення", "Журнал",
     "Приватний ключ", "Резервна копія", "Пароль", "Про застосунок", "Мова", "Заблокувати", "Вийти", "Старіші повідомлення",
     "Голосовий дзвінок", "Відеодзвінок", "Прийняти", "Вимкнути звук", "Завершити", "Заблокувати", "Голосове повідомлення", "Обрати файл", "Надіслати",
+    "Сканувати QR", "Зображення QR", "Чати", "Запросити", "Налаштування"
 ];
 const RU: &[&str] = &[
     "Разблокировать", "Новый чат", "Моё приглашение", "Присоединиться", "Контакты", "Заблокированные", "Доставка", "Журнал",
     "Закрытый ключ", "Резервная копия", "Пароль", "О приложении", "Язык", "Заблокировать", "Выйти", "Старые сообщения",
     "Голосовой звонок", "Видеозвонок", "Принять", "Без звука", "Завершить", "Заблокировать", "Голосовое сообщение", "Выбрать файл", "Отправить",
+    "Сканировать QR", "Изображение QR", "Чаты", "Пригласить", "Настройки"
 ];
 const AR: &[&str] = &[
     "فتح القفل", "محادثة جديدة", "دعوتي", "انضمام", "جهات الاتصال", "المحظورون", "التسليم", "السجل",
     "المفتاح الخاص", "نسخة احتياطية", "كلمة المرور", "حول", "اللغة", "قفل", "خروج", "رسائل أقدم",
     "مكالمة صوتية", "مكالمة فيديو", "قبول", "كتم", "إنهاء", "حظر", "رسالة صوتية", "اختيار ملف", "إرسال",
+    "مسح QR", "صورة QR", "المحادثات", "دعوة", "الإعدادات"
 ];
 const FA: &[&str] = &[
     "باز کردن قفل", "گفتگوی جدید", "دعوت من", "پیوستن", "مخاطبان", "مسدودشده", "تحویل", "گزارش",
     "کلید خصوصی", "پشتیبان", "گذرواژه", "درباره", "زبان", "قفل", "خروج", "پیام‌های قدیمی‌تر",
     "تماس صوتی", "تماس تصویری", "پذیرفتن", "بی‌صدا", "پایان", "مسدود", "پیام صوتی", "انتخاب پرونده", "ارسال",
+    "اسکن QR", "تصویر QR", "گفتگوها", "دعوت", "تنظیمات"
 ];
 const TR: &[&str] = &[
     "Kilidi aç", "Yeni sohbet", "Davetim", "Katıl", "Kişiler", "Engellenenler", "Teslim", "Günlük",
     "Özel anahtar", "Yedek", "Parola", "Hakkında", "Dil", "Kilitle", "Çıkış", "Eski mesajlar",
     "Sesli arama", "Görüntülü arama", "Kabul et", "Sessiz", "Bitir", "Engelle", "Sesli mesaj", "Dosya seç", "Gönder",
+    "QR tara", "QR resmi", "Sohbetler", "Davet", "Ayarlar"
 ];
 const ZH: &[&str] = &[
     "解锁", "新聊天", "我的邀请", "加入", "联系人", "已屏蔽", "投递", "日志",
     "私钥", "备份", "密码", "关于", "语言", "锁定", "退出", "更早的消息",
     "语音通话", "视频通话", "接听", "静音", "挂断", "屏蔽", "语音消息", "选择文件", "发送",
+    "扫描二维码", "二维码图片", "聊天", "邀请", "设置"
 ];
 const JA: &[&str] = &[
     "ロック解除", "新しいチャット", "自分の招待", "参加", "連絡先", "ブロック中", "配信", "ログ",
     "秘密鍵", "バックアップ", "パスワード", "情報", "言語", "ロック", "ログアウト", "以前のメッセージ",
     "音声通話", "ビデオ通話", "応答", "ミュート", "終了", "ブロック", "ボイスメッセージ", "ファイルを選択", "送信",
+    "QRをスキャン", "QR画像", "チャット", "招待", "設定"
 ];
 const KO: &[&str] = &[
     "잠금 해제", "새 대화", "내 초대", "참여", "연락처", "차단됨", "전달", "로그",
     "개인 키", "백업", "비밀번호", "정보", "언어", "잠금", "로그아웃", "이전 메시지",
     "음성 통화", "영상 통화", "수락", "음소거", "종료", "차단", "음성 메시지", "파일 선택", "보내기",
+    "QR 스캔", "QR 사진", "채팅", "초대", "설정"
 ];
 const VI: &[&str] = &[
     "Mở khóa", "Cuộc trò chuyện mới", "Lời mời của tôi", "Tham gia", "Danh bạ", "Đã chặn", "Chuyển phát", "Nhật ký",
     "Khóa riêng", "Bản sao lưu", "Mật khẩu", "Giới thiệu", "Ngôn ngữ", "Khóa", "Đăng xuất", "Tin nhắn cũ hơn",
     "Cuộc gọi thoại", "Cuộc gọi video", "Chấp nhận", "Tắt tiếng", "Kết thúc", "Chặn", "Tin nhắn thoại", "Chọn tệp", "Gửi",
+    "Quét QR", "Ảnh QR", "Trò chuyện", "Mời", "Cài đặt"
 ];
 const TH: &[&str] = &[
     "ปลดล็อก", "แชทใหม่", "คำเชิญของฉัน", "เข้าร่วม", "รายชื่อ", "ที่บล็อก", "การส่ง", "บันทึก",
     "กุญแจส่วนตัว", "สำรอง", "รหัสผ่าน", "เกี่ยวกับ", "ภาษา", "ล็อก", "ออก", "ข้อความเก่ากว่า",
     "โทรเสียง", "โทรวิดีโอ", "รับ", "ปิดเสียง", "วางสาย", "บล็อก", "ข้อความเสียง", "เลือกไฟล์", "ส่ง",
+    "สแกน QR", "รูป QR", "แชท", "เชิญ", "การตั้งค่า"
 ];
 const ID: &[&str] = &[
     "Buka kunci", "Obrolan baru", "Undangan saya", "Gabung", "Kontak", "Diblokir", "Pengiriman", "Catatan",
     "Kunci pribadi", "Cadangan", "Kata sandi", "Tentang", "Bahasa", "Kunci", "Keluar", "Pesan lebih lama",
     "Panggilan suara", "Panggilan video", "Terima", "Bisukan", "Akhiri", "Blokir", "Pesan suara", "Pilih berkas", "Kirim",
+    "Pindai QR", "Gambar QR", "Obrolan", "Undang", "Pengaturan"
 ];
 const SW: &[&str] = &[
     "Fungua", "Mazungumzo mapya", "Mwaliko wangu", "Jiunge", "Anwani", "Waliozuiwa", "Uwasilishaji", "Kumbukumbu",
     "Ufunguo wa siri", "Nakala", "Nenosiri", "Kuhusu", "Lugha", "Funga", "Toka", "Ujumbe wa zamani",
     "Simu ya sauti", "Simu ya video", "Kubali", "Nyamaza", "Maliza", "Zui", "Ujumbe wa sauti", "Chagua faili", "Tuma",
+    "Changanua QR", "Picha ya QR", "Soga", "Alika", "Mipangilio"
 ];
 const HI: &[&str] = &[
     "अनलॉक", "नई बातचीत", "मेरा निमंत्रण", "जुड़ें", "संपर्क", "अवरुद्ध", "डिलीवरी", "लॉग",
     "निजी कुंजी", "बैकअप", "पासवर्ड", "परिचय", "भाषा", "लॉक", "लॉग आउट", "पुराने संदेश",
     "वॉइस कॉल", "वीडियो कॉल", "स्वीकार", "म्यूट", "कॉल समाप्त", "ब्लॉक", "वॉइस नोट", "फ़ाइल चुनें", "भेजें",
+    "QR स्कैन", "QR चित्र", "चैट", "निमंत्रण", "सेटिंग्स"
 ];
 const BN: &[&str] = &[
     "আনলক", "নতুন চ্যাট", "আমার আমন্ত্রণ", "যোগ দিন", "পরিচিতি", "অবরুদ্ধ", "ডেলিভারি", "লগ",
     "ব্যক্তিগত চাবি", "ব্যাকআপ", "পাসওয়ার্ড", "সম্পর্কে", "ভাষা", "লক", "লগ আউট", "পুরোনো বার্তা",
     "ভয়েস কল", "ভিডিও কল", "গ্রহণ", "নিঃশব্দ", "কল শেষ", "ব্লক", "ভয়েস নোট", "ফাইল বেছে নিন", "পাঠান",
+    "QR স্ক্যান", "QR ছবি", "চ্যাট", "আমন্ত্রণ", "সেটিংস"
 ];
 const AS: &[&str] = &[
     "আনলক", "নতুন চেট", "মোৰ আমন্ত্ৰণ", "যোগদান", "সম্পৰ্ক", "অৱৰুদ্ধ", "ডেলিভাৰী", "লগ",
     "ব্যক্তিগত চাবি", "বেকআপ", "পাছৱৰ্ড", "বিষয়ে", "ভাষা", "লক", "লগ আউট", "পুৰণি বাৰ্তা",
     "ভয়েচ কল", "ভিডিঅ' কল", "গ্ৰহণ", "নিমাত", "কল শেষ", "ব্লক", "ভয়েচ নোট", "ফাইল বাছক", "পঠাওক",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const BRX: &[&str] = &[
     "खुलि", "गोदान थुनलाइ", "आंनि सावरायनाय", "ज्वं", "सम्पर्क", "ब्लक", "फहंनाय", "लग",
     "प्राइभेट कि", "बेकआप", "पासवर्ड", "सोमोन्दै", "राव", "लक", "लग आउट", "गोजाम थुनलाइ",
     "भइस कल", "भिडिअ कल", "नाजाव", "म्युट", "कल जोबनाय", "ब्लक", "भइस नट", "फाइल सायख", "दाखाय",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const DOI: &[&str] = &[
     "अनलॉक", "नवी गल्ल", "मेरा नेउता", "जुड़ो", "संपर्क", "ब्लॉक", "डिलीवरी", "लॉग",
     "प्राइवेट कुंजी", "बैकअप", "पासवर्ड", "बारे", "भाषा", "लॉक", "लॉग आउट", "पुराने संदेश",
     "वॉइस काल", "वीडियो काल", "मंजूर", "म्यूट", "काल बंद", "ब्लॉक", "वॉइस नोट", "फाइल चुनो", "भेजो",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const GU: &[&str] = &[
     "અનલૉક", "નવી વાતચીત", "મારું આમંત્રણ", "જોડાઓ", "સંપર્કો", "અવરોધિત", "ડિલિવરી", "લૉગ",
     "ખાનગી ચાવી", "બૅકઅપ", "પાસવર્ડ", "વિશે", "ભાષા", "લૉક", "લૉગ આઉટ", "જૂના સંદેશા",
     "વૉઇસ કૉલ", "વિડિયો કૉલ", "સ્વીકારો", "મ્યૂટ", "કૉલ બંધ", "બ્લૉક", "વૉઇસ નોટ", "ફાઇલ પસંદ કરો", "મોકલો",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const KN: &[&str] = &[
     "ಅನ್‌ಲಾಕ್", "ಹೊಸ ಚಾಟ್", "ನನ್ನ ಆಮಂತ್ರಣ", "ಸೇರಿ", "ಸಂಪರ್ಕಗಳು", "ನಿರ್ಬಂಧಿತ", "ತಲುಪಿಸುವಿಕೆ", "ಲಾಗ್",
     "ಖಾಸಗಿ ಕೀ", "ಬ್ಯಾಕಪ್", "ಪಾಸ್‌ವರ್ಡ್", "ಬಗ್ಗೆ", "ಭಾಷೆ", "ಲಾಕ್", "ಲಾಗ್ ಔಟ್", "ಹಳೆಯ ಸಂದೇಶಗಳು",
     "ಧ್ವನಿ ಕರೆ", "ವೀಡಿಯೊ ಕರೆ", "ಸ್ವೀಕರಿಸಿ", "ಮ್ಯೂಟ್", "ಕರೆ ಮುಗಿಸಿ", "ನಿರ್ಬಂಧಿಸಿ", "ಧ್ವನಿ ಟಿಪ್ಪಣಿ", "ಕಡತ ಆಯ್ಕೆ", "ಕಳುಹಿಸಿ",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const KS: &[&str] = &[
     "اَن لاک", "نٔو گَپ", "مےٚن دَعوت", "شٲمِل", "رابطہٕ", "بُلاک", "ڈِلیوری", "لاگ",
     "پرائیویٹ کی", "بیک اَپ", "پاسوَرڈ", "مُتعَلِق", "زَبان", "لاک", "لاگ آؤٹ", "پرٛون پٲغام",
     "آواز کال", "ویڈیو کال", "قَبول", "میوٹ", "کال خَتم", "بُلاک", "آواز نوٹ", "فایل چُنِو", "سَوزِو",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const KOK: &[&str] = &[
     "अनलॉक", "नवी गप्प", "म्हजें आमंत्रण", "जोडचे", "संपर्क", "ब्लॉक", "डिलिव्हरी", "लॉग",
     "खाजगी चावी", "बॅकअप", "पासवर्ड", "विशीं", "भास", "लॉक", "लॉग आउट", "आदले संदेश",
     "व्हॉइस कॉल", "व्हिडिओ कॉल", "मान्य", "म्यूट", "कॉल बंद", "ब्लॉक", "व्हॉइस नोट", "फायल वेंच", "धाड",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const ML: &[&str] = &[
     "അൺലോക്ക്", "പുതിയ ചാറ്റ്", "എന്റെ ക്ഷണം", "ചേരുക", "കോൺടാക്റ്റുകൾ", "തടഞ്ഞവ", "ഡെലിവറി", "ലോഗ്",
     "സ്വകാര്യ കീ", "ബാക്കപ്പ്", "പാസ്‌വേഡ്", "കുറിച്ച്", "ഭാഷ", "ലോക്ക്", "ലോഗ് ഔട്ട്", "പഴയ സന്ദേശങ്ങൾ",
     "വോയ്‌സ് കോൾ", "വീഡിയോ കോൾ", "സ്വീകരിക്കുക", "മ്യൂട്ട്", "കോൾ അവസാനിപ്പിക്കുക", "ബ്ലോക്ക്", "വോയ്‌സ് നോട്ട്", "ഫയൽ തിരഞ്ഞെടുക്കുക", "അയയ്ക്കുക",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const MNI: &[&str] = &[
     "অনলক", "অনৌবা চ্যাট", "ঐগী ইনভিটেশন", "শোকহনবা", "কন্টেক্ট", "ব্লক", "দেলিভারি", "লগ",
     "প্রাইভেট কি", "বেকআপ", "পাসৱার্দ", "মরমদা", "লোন", "লক", "লগ আউট", "অরিবা মেসেজ",
     "ভয়েস কল", "ভিদিও কল", "য়াহনবা", "মিউট", "কল লোইশিনবা", "ব্লক", "ভয়েস নোট", "ফাইল খনবা", "থার্কপা",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const MR: &[&str] = &[
     "अनलॉक", "नवीन गप्पा", "माझे आमंत्रण", "सामील व्हा", "संपर्क", "अवरोधित", "डिलिव्हरी", "लॉग",
     "खाजगी कळ", "बॅकअप", "पासवर्ड", "माहिती", "भाषा", "लॉक", "लॉग आउट", "जुने संदेश",
     "व्हॉइस कॉल", "व्हिडिओ कॉल", "स्वीकारा", "म्यूट", "कॉल बंद", "ब्लॉक", "व्हॉइस नोट", "फाइल निवडा", "पाठवा",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const MAI: &[&str] = &[
     "अनलॉक", "नव गप", "हमर निमंत्रण", "जोड़ू", "संपर्क", "ब्लॉक", "डिलीवरी", "लॉग",
     "निजी चाबी", "बैकअप", "पासवर्ड", "बारे", "भाषा", "लॉक", "लॉग आउट", "पुरान संदेश",
     "आवाज काल", "वीडियो काल", "स्वीकार", "म्यूट", "काल बंद", "ब्लॉक", "आवाज नोट", "फाइल चुनू", "पठाउ",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const NE: &[&str] = &[
     "अनलक", "नयाँ कुराकानी", "मेरो निमन्त्रणा", "सामेल", "सम्पर्क", "ब्लक", "डेलिभरी", "लग",
     "निजी साँचो", "ब्याकअप", "पासवर्ड", "बारे", "भाषा", "लक", "लग आउट", "पुराना सन्देश",
     "भ्वाइस कल", "भिडियो कल", "स्वीकार", "म्युट", "कल अन्त्य", "ब्लक", "भ्वाइस नोट", "फाइल छान्नुहोस्", "पठाउनुहोस्",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const OR: &[&str] = &[
     "ଅନଲକ୍", "ନୂଆ ଚାଟ୍", "ମୋ ନିମନ୍ତ୍ରଣ", "ଯୋଗ ଦିଅନ୍ତୁ", "ସମ୍ପର୍କ", "ଅବରୋଧିତ", "ଡେଲିଭରି", "ଲଗ୍",
     "ବ୍ୟକ୍ତିଗତ ଚାବି", "ବ୍ୟାକଅପ୍", "ପାସୱାର୍ଡ", "ବିଷୟରେ", "ଭାଷା", "ଲକ୍", "ଲଗ୍ ଆଉଟ୍", "ପୁରୁଣା ସନ୍ଦେଶ",
     "ଭଏସ୍ କଲ୍", "ଭିଡିଓ କଲ୍", "ଗ୍ରହଣ", "ମ୍ୟୁଟ୍", "କଲ୍ ଶେଷ", "ବ୍ଲକ୍", "ଭଏସ୍ ନୋଟ୍", "ଫାଇଲ୍ ବାଛନ୍ତୁ", "ପଠାନ୍ତୁ",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const PA: &[&str] = &[
     "ਅਨਲਾਕ", "ਨਵੀਂ ਗੱਲਬਾਤ", "ਮੇਰਾ ਸੱਦਾ", "ਜੁੜੋ", "ਸੰਪਰਕ", "ਬਲਾਕ", "ਡਿਲਿਵਰੀ", "ਲਾਗ",
     "ਨਿੱਜੀ ਕੁੰਜੀ", "ਬੈਕਅੱਪ", "ਪਾਸਵਰਡ", "ਬਾਰੇ", "ਭਾਸ਼ਾ", "ਲਾਕ", "ਲਾਗ ਆਉਟ", "ਪੁਰਾਣੇ ਸੁਨੇਹੇ",
     "ਵੌਇਸ ਕਾਲ", "ਵੀਡੀਓ ਕਾਲ", "ਸਵੀਕਾਰ", "ਮਿਊਟ", "ਕਾਲ ਖਤਮ", "ਬਲਾਕ", "ਵੌਇਸ ਨੋਟ", "ਫਾਈਲ ਚੁਣੋ", "ਭੇਜੋ",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const SA: &[&str] = &[
     "उद्घाटय", "नवीनसंलापः", "मम आमन्त्रणम्", "संगच्छ", "सम्पर्काः", "अवरुद्धाः", "प्रेषणम्", "वृत्तान्तः",
     "गुप्तकुञ्जिका", "प्रतिकृतिः", "गुप्तशब्दः", "विषये", "भाषा", "पिधत्स्व", "निर्गच्छ", "प्राचीनानि सन्देशानि",
     "ध्वनिकॉल", "दृश्यकॉल", "स्वीकुरु", "मूकम्", "समापय", "वारय", "ध्वनिसन्देशः", "सञ्चिकां चिनु", "प्रेषय",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const SAT: &[&str] = &[
     "खोल", "नावा कथा", "इञाक् आमंत्रण", "जोड़ोक", "संपर्क", "ब्लॉक", "पाहुँच", "लॉग",
     "निजी चाबी", "बैकअप", "पासवर्ड", "बारे", "भाषा", "बंद", "बाहर", "मारां संदेश",
     "आवाज काल", "वीडियो काल", "माना", "चुप", "काल चबा", "रोक", "आवाज नोट", "फाइल बाछा", "कुल",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const SD: &[&str] = &[
     "اڻ لاڪ", "نئين ڳالهه", "منهنجي دعوت", "شامل ٿيو", "رابطا", "بلاڪ", "پهچ", "لاگ",
     "نجي چاٻي", "بيڪ اپ", "پاسورڊ", "بابت", "ٻولي", "لاڪ", "لاگ آئوٽ", "پراڻا پيغام",
     "آواز ڪال", "وڊيو ڪال", "قبول", "خاموش", "ڪال ختم", "بلاڪ", "آواز نوٽ", "فائل چونڊيو", "موڪليو",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const TA: &[&str] = &[
     "திற", "புதிய அரட்டை", "என் அழைப்பு", "சேர்", "தொடர்புகள்", "தடுக்கப்பட்டவை", "வழங்கல்", "பதிவு",
     "தனிப்பட்ட திறவுகோல்", "காப்பு", "கடவுச்சொல்", "பற்றி", "மொழி", "பூட்டு", "வெளியேறு", "பழைய செய்திகள்",
     "குரல் அழைப்பு", "காணொலி அழைப்பு", "ஏற்றுக்கொள்", "ஒலிநிறுத்து", "அழைப்பை முடி", "தடு", "குரல் குறிப்பு", "கோப்பைத் தேர்", "அனுப்பு",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const TE: &[&str] = &[
     "అన్‌లాక్", "కొత్త చాట్", "నా ఆహ్వానం", "చేరండి", "పరిచయాలు", "నిరోధించినవి", "డెలివరీ", "లాగ్",
     "ప్రైవేట్ కీ", "బ్యాకప్", "పాస్‌వర్డ్", "గురించి", "భాష", "లాక్", "లాగ్ అవుట్", "పాత సందేశాలు",
     "వాయిస్ కాల్", "వీడియో కాల్", "అంగీకరించు", "మ్యూట్", "కాల్ ముగించు", "నిరోధించు", "వాయిస్ నోట్", "ఫైల్ ఎంచుకో", "పంపు",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const UR: &[&str] = &[
     "ان لاک", "نئی گفتگو", "میری دعوت", "شامل ہوں", "رابطے", "مسدود", "ترسیل", "لاگ",
     "نجی کلید", "بیک اپ", "پاس ورڈ", "تعارف", "زبان", "لاک", "لاگ آؤٹ", "پرانی پیغامات",
     "وائس کال", "ویڈیو کال", "قبول", "خاموش", "کال ختم", "بلاک", "وائس نوٹ", "فائل منتخب کریں", "بھیجیں",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const BHO: &[&str] = &[
     "अनलॉक", "नव बात", "हमार निमंत्रण", "जुड़ीं", "संपर्क", "ब्लॉक", "डिलीवरी", "लॉग",
     "निजी चाभी", "बैकअप", "पासवर्ड", "बारे", "भाषा", "लॉक", "लॉग आउट", "पुरान संदेश",
     "आवाज काल", "वीडियो काल", "मानीं", "म्यूट", "काल बंद", "ब्लॉक", "आवाज नोट", "फाइल चुनीं", "भेजीं",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const HNE: &[&str] = &[
     "अनलॉक", "नवा बात", "मोर नेवता", "जुड़ो", "संपर्क", "ब्लॉक", "डिलीवरी", "लॉग",
     "निजी चाबी", "बैकअप", "पासवर्ड", "बारे", "भाषा", "लॉक", "लॉग आउट", "पुराना संदेश",
     "आवाज काल", "वीडियो काल", "मान", "म्यूट", "काल बंद", "ब्लॉक", "आवाज नोट", "फाइल चुन", "भेज",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const LUS: &[&str] = &[
     "Hawng", "Thuchah thar", "Ka sawmna", "Tel rawh", "Contact", "Kharkhup", "Thlen", "Log",
     "Private key", "Backup", "Password", "Chungchang", "Ṭawng", "Khar", "Chhuak", "Thuchah hlui",
     "Aw call", "Video call", "Pawm", "Mute", "Call tit", "Kharkhup", "Aw message", "File thlang", "Thawn",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const KHA: &[&str] = &[
     "Plie", "Jingiathuhkhana thymmai", "Ka jingkhot", "Iasoh", "Kontak", "Lah pynkhang", "Pynphai", "Log",
     "Private key", "Backup", "Password", "Shaphang", "Ktien", "Khang", "Mih", "Jingthoh baroh",
     "Call aw", "Call video", "Pdiang", "Mute", "Kut call", "Pynkhang", "Jingthoh aw", "Jied file", "Phah",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const GRT: &[&str] = &[
     "Oka", "Gital chat", "Angni invitation", "Bakrimbo", "Contact", "Block", "Poraiani", "Log",
     "Private key", "Backup", "Password", "Gimin", "Ku·sik", "Khak", "Ong·kat", "Da·al message",
     "Voice call", "Video call", "Ra·chak", "Mute", "Call bon", "Block", "Voice note", "File se", "Watat",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const TRP: &[&str] = &[
     "Unlock", "Chat koktwma", "Ani invitation", "Baksa", "Contact", "Block", "Delivery", "Log",
     "Private key", "Backup", "Password", "Bising", "Kok", "Lock", "Logout", "Message oswi",
     "Voice call", "Video call", "Nai", "Mute", "Call thangkha", "Block", "Voice note", "File sal", "Thang",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 const LEP: &[&str] = &[
     "Unlock", "Chat thom", "Go invitation", "Nyot", "Contact", "Block", "Delivery", "Log",
     "Private key", "Backup", "Password", "Tham", "Róng", "Lock", "Logout", "Message nyim",
     "Voice call", "Video call", "Nyen", "Mute", "Call chót", "Block", "Voice note", "File lyo", "Lyo",
+    "Scan QR", "QR picture", "Chats", "Invite", "Settings"
 ];
 
 /// Worldwide language catalogue (picker). UI chrome expands over time; missing
@@ -813,6 +865,9 @@ fn extra(lang: &str, id: &str) -> Option<&'static str> {
             ("none", "No contacts yet"),
             ("blocked", "Blocked contacts"),
             ("blocked_empty", "No blocked contacts. Paste a public key below to block someone already in your list."),
+            ("blocked_help", "Paste a public key below and tap Toggle block to unblock."),
+            ("tap_to_resend", "Tap to resend"),
+            ("flip_camera", "Flip camera"),
             ("delivery", "Delivery storage"),
             ("log", "App log"),
             ("key", "Private key"),
@@ -856,15 +911,20 @@ mod tests {
 
     #[test]
     fn every_catalog_matches_the_key_count() {
-        let n = Key::Send as usize + 1;
-        assert_eq!(EN.len(), n + 2);
+        // Base chrome through Send (25). EN also holds ScanQr, QrPicture, Chats,
+        // InviteTab, Settings (30). Other catalogs may stay at 25 and fall back to EN
+        // for the trailing keys via `text()`.
+        let base = Key::Send as usize + 1;
+        assert_eq!(EN.len(), Key::Settings as usize + 1);
+        assert_eq!(Key::Settings as usize + 1, base + 5);
         for lang in LANGUAGES {
             let rows = catalog(lang.code);
             assert!(
-                rows.len() == n || rows.len() == EN.len(),
-                "{} has {} strings",
+                rows.len() == base || rows.len() == EN.len(),
+                "{} has {} strings (want {base} or {})",
                 lang.code,
-                rows.len()
+                rows.len(),
+                EN.len()
             );
         }
     }

@@ -215,6 +215,46 @@ pub fn add_contact(
     Ok(())
 }
 
+/// Rename (or clear) a contact's display alias. Empty alias clears the name.
+pub fn rename_contact(
+    app_namespace: &str,
+    public_key_hex: &str,
+    alias: &str,
+) -> Result<(), String> {
+    let pk = public_key_hex.trim();
+    if !contacts_v1::is_valid_public_key_hex(pk) {
+        return Err("public key is not valid".into());
+    }
+    let contact = SavedContact {
+        public_key_hex: pk.to_string(),
+        display_alias: Some(alias.to_string()),
+        availability_status: None,
+        last_message_preview: None,
+        last_message_at_ms: None,
+        unread_count: 0,
+        created_at_ms: None,
+        updated_at_ms: None,
+        is_known: true,
+        is_blocked: false,
+        chat_room_exit_at_ms: None,
+    };
+    let _ = contacts_v1::upsert_contact(app_namespace, contact).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Display name embedded in invitations (`global_alias`). Empty clears.
+pub fn local_display_name(app_namespace: &str) -> String {
+    preferences_v1::local_display_name_get(&cfg(app_namespace))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+pub fn set_local_display_name(app_namespace: &str, name: &str) -> Result<(), String> {
+    preferences_v1::local_display_name_set(&cfg(app_namespace), name).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn mark_known(app_namespace: &str, public_key_hex: &str) -> Result<(), String> {
     contacts_v1::set_contact_trust(app_namespace, public_key_hex, Some(true), Some(false))
         .map_err(|e| e.to_string())?;
@@ -660,10 +700,11 @@ pub fn call_banner() -> String {
     if status.get("active").and_then(|v| v.as_bool()) == Some(true) {
         let voice = status.get("voice_active").and_then(|v| v.as_bool()) == Some(true);
         let video = call_shows_video_from(&status);
+        let e2e = " · End-to-end encrypted";
         return if video {
-            format!("Video call · {peer_label}")
+            format!("Video call · {peer_label}{e2e}")
         } else if voice {
-            format!("Voice call · {peer_label}")
+            format!("Voice call · {peer_label}{e2e}")
         } else {
             format!("Connecting · {peer_label}")
         };
@@ -768,15 +809,176 @@ pub fn delivery_summary() -> String {
         .get("last_error")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let quota = status.get("quota").cloned().unwrap_or(Value::Null);
+    let used = quota
+        .get("used_bytes")
+        .or_else(|| quota.get("used"))
+        .and_then(|v| v.as_u64());
+    let alloc = quota
+        .get("allocated_bytes")
+        .or_else(|| quota.get("allocated"))
+        .and_then(|v| v.as_u64());
+    let quota_line = match (used, alloc) {
+        (Some(u), Some(a)) if a > 0 => {
+            format!(
+                "Quota: {} / {} ({:.0}%)\n",
+                format_bytes(u),
+                format_bytes(a),
+                (u as f64 / a as f64) * 100.0
+            )
+        }
+        _ => String::new(),
+    };
     let rows = list
         .pointer("/snapshot/rows")
         .and_then(|v| v.as_array())
-        .map(|rows| rows.len())
-        .unwrap_or(0);
+        .cloned()
+        .unwrap_or_default();
     let list_err = list.get("error").and_then(|v| v.as_str()).unwrap_or("");
-    format!(
-        "Delivery mailbox\nConnected: {connected}\nURL: {url}\nStored messages: {rows}\n{err}{list_err}"
-    )
+    let mut body = format!(
+        "Delivery mailbox\nConnected: {connected}\nURL: {url}\n{quota_line}Stored messages: {}\n",
+        rows.len()
+    );
+    if !err.is_empty() {
+        body.push_str(err);
+        body.push('\n');
+    }
+    if !list_err.is_empty() {
+        body.push_str(list_err);
+        body.push('\n');
+    }
+    for row in rows.iter().take(40) {
+        let mid = row
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let state = row.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+        let size = row
+            .get("size_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let exp = row
+            .get("expires_at_ms")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        body.push_str(&format!(
+            "· {mid}  {state}  {}  expires_ms={exp}\n",
+            format_bytes(size)
+        ));
+    }
+    if rows.len() > 40 {
+        body.push_str(&format!("…and {} more\n", rows.len() - 40));
+    }
+    body.push_str(
+        "\nQueued rows can be extended (Refresh then Extend). Expired rows need Tap to resend in chat.",
+    );
+    body
+}
+
+fn format_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    if n >= MB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.1} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Extend TTL for a still-queued mailbox message (default +7 days).
+pub fn extend_mailbox_ttl(message_id: &str) -> Result<(), String> {
+    let v = crate::delivery_runtime::delivery_extend_ttl(message_id, 7 * 24 * 3600);
+    if v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
+        Ok(())
+    } else {
+        Err(v
+            .get("error")
+            .and_then(|x| x.as_str())
+            .unwrap_or("extend failed")
+            .to_string())
+    }
+}
+
+/// Resend a failed/expired outbound text as a **new** mailbox upload (docs: no extend after expiry).
+pub fn resend_text(peer_public_key_hex: &str, old_message_id: &str) -> Result<(), String> {
+    resend_failed(peer_public_key_hex, old_message_id)
+}
+
+/// Resend a failed/expired outbound text, voice note, or attachment as a **new** upload.
+pub fn resend_failed(peer_public_key_hex: &str, old_message_id: &str) -> Result<(), String> {
+    let peer = peer_public_key_hex.trim();
+    let mid = old_message_id.trim();
+    if peer.is_empty() || mid.is_empty() {
+        return Err("missing peer or message id".into());
+    }
+    let ns = crate::dm_event_handler::active_app_namespace()
+        .ok_or_else(|| "not unlocked".to_string())?;
+    let lines = crate::dm_transcript_store::load_merged(&ns, &[peer.to_string()], None)
+        .map_err(|e| e.to_string())?;
+    let line = lines
+        .into_iter()
+        .find(|l| {
+            l.outgoing
+                && l.message_id.as_deref().unwrap_or("") == mid
+                && (l.delivery == "failed" || l.delivery == "pending")
+        })
+        .ok_or_else(|| "no failed message to resend".to_string())?;
+    let kind = line.msg_kind.trim();
+    if kind.is_empty() || kind == "text" {
+        let text = line.text.trim();
+        if text.is_empty() {
+            return Err("message body empty".into());
+        }
+        return send_text(peer, text);
+    }
+    if kind == "voice" {
+        let path = line
+            .audio_path
+            .as_deref()
+            .or(line.local_path.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "voice file missing for resend".to_string())?;
+        let opus = std::fs::read(path).map_err(|e| format!("read voice: {e}"))?;
+        let duration_ms = line.duration_ms.unwrap_or(1).max(1);
+        return send_voice_note(peer, duration_ms, opus);
+    }
+    if kind == "attachment_offer" {
+        let path = line
+            .local_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "attachment file missing for resend".to_string())?;
+        return send_attachment(peer, path);
+    }
+    Err(format!("cannot resend msg_kind={kind}"))
+}
+
+/// Identity algorithm of the unlocked session (`secp256k1`, `ed25519`, …).
+pub fn unlocked_algorithm() -> Option<String> {
+    crate::session_runtime::unlocked_identity_clone()
+        .ok()
+        .map(|id| id.algorithm().wire_id().to_string())
+}
+
+/// One-shot quota warning for the chat chrome (clears after read).
+pub fn take_delivery_quota_warning() -> Option<String> {
+    crate::delivery_runtime::take_quota_warning()
+}
+
+/// Flip the in-call camera (front ↔ back on Android; no-op elsewhere when unsupported).
+pub fn flip_call_camera() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        return crate::call_video::android_video::flip_camera();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("Camera flip is only available on Android during a video call".into())
+    }
 }
 
 /// Short line for chat chrome when text is queued but the mailbox is down.
@@ -1147,8 +1349,21 @@ pub fn save_attachment(local_path: &str) -> Result<String, String> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        let home = std::env::var_os("HOME").ok_or_else(|| "HOME unset".to_string())?;
-        let dest_dir = std::path::PathBuf::from(home).join("Downloads");
+        let dest_dir = {
+            #[cfg(target_os = "windows")]
+            {
+                std::env::var_os("USERPROFILE")
+                    .map(std::path::PathBuf::from)
+                    .map(|p| p.join("Downloads"))
+                    .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Downloads")))
+                    .ok_or_else(|| "USERPROFILE/HOME unset".to_string())?
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let home = std::env::var_os("HOME").ok_or_else(|| "HOME unset".to_string())?;
+                std::path::PathBuf::from(home).join("Downloads")
+            }
+        };
         std::fs::create_dir_all(&dest_dir).map_err(|e| format!("Downloads: {e}"))?;
         let mut dest = dest_dir.join(&name);
         if dest.exists() {
@@ -1191,7 +1406,27 @@ pub fn open_local_file(path: &str) -> Result<(), String> {
     {
         return crate::incoming_call_android::open_file(path);
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(all(
+        not(target_os = "android"),
+        not(target_os = "windows"),
+        not(target_os = "macos")
+    ))]
     {
         std::process::Command::new("xdg-open")
             .arg(path)

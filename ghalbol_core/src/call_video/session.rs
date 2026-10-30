@@ -37,6 +37,8 @@ pub struct VideoControls {
     pub stop: Arc<AtomicBool>,
     /// Forces the next captured frame to be encoded as a keyframe.
     pub force_keyframe: Arc<AtomicBool>,
+    /// Set by the RX jitter when a peer keyframe is needed; drained to send `key_request`.
+    pub outbound_key_request: Arc<AtomicBool>,
     /// Source frames encoded+sent.
     pub frames_sent: Arc<AtomicU64>,
     /// Frames decoded+rendered.
@@ -59,6 +61,12 @@ impl VideoControls {
     }
     pub fn is_stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+    pub fn take_outbound_key_request(&self) -> bool {
+        self.outbound_key_request.swap(false, Ordering::Relaxed)
+    }
+    pub fn note_outbound_key_request(&self) {
+        self.outbound_key_request.store(true, Ordering::Relaxed);
     }
     #[cfg(test)]
     pub fn sent(&self) -> u64 {
@@ -148,10 +156,10 @@ pub async fn run_video_session(
                         controls.frames_received.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                // Note: receiver-side keyframe recovery currently relies on the
-                // encoder's periodic intra frames (see codec config). The engine's
-                // `take_keyframe_request()` flag is reserved for an explicit
-                // peer key-request signal (future optimization).
+                // Ask the peer for a keyframe when the jitter buffer cannot recover.
+                if engine.take_keyframe_request() {
+                    controls.note_outbound_key_request();
+                }
             }
             _ = stop_poll.tick() => {
                 if let Some(bps) = adaptive.tick() {

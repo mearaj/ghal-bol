@@ -1,6 +1,8 @@
-# AI agent guide — Ghal Bol workspace
+# AI agent guide — GhalBol / Ghal Bol workspace
 
-**Read this file first** in a new session. Then **`docs/DESIGN.md`** before changing P2P, acks, invites, or persistence. Transport: **`docs/TRANSPORT.md`** — especially § **Connectivity lifecycle**, § **Network truth**, § **Asymmetric LAN↔WAN mux recovery**. UI shell: **`docs/MAKEPAD_UI.md`**.
+**Read this file first** in a new session. Then **`docs/DESIGN.md`** before changing P2P, acks, invites, or persistence. Transport: **`docs/TRANSPORT.md`** — especially § **Connectivity lifecycle**, § **Network truth**, § **Asymmetric LAN↔WAN mux recovery**. UI shell: **`docs/MAKEPAD_UI.md`**. Brand vs products: **`docs/GHALBOL_BRAND.md`**. Makepad faces (selection / wrap / intent): **`.cursor/rules/makepad-layout-faces.mdc`**.
+
+**Brand:** **GhalBol** = communication product family (parallel to Kumkaj’s BOS family). **Ghal Bol** = shipping chat app under `apps/ghalbol/`. UI is per-product; `ghalbol_core` is the shared communication logic stack.
 
 **Connectivity policy (agents):** `docs/TRANSPORT.md` § **Connectivity lifecycle**, § **Network truth**, § **Parallel LAN + WAN transport**. Do **not** throttle coord bridge lookup or WAN recovery ticks because of informal “don’t flood” notes — throttle **storms** only. Register when **publishable endpoints change**, not every tick.
 
@@ -17,7 +19,7 @@
  few seconds. **Text messaging** uses `ghalbol_delivery` (mailbox), not native-connect P2P.
  Coord upkeep serves **calls** and presence. See `text_transport.rs` and [DESIGN.md](docs/DESIGN.md) § Goals.
 1. **`ghalbol_core` (Rust) owns all product logic** — crypto, keystore, **text** (`delivery_runtime`), **calls** (native connect), contacts, transcripts, invite codec. The app calls **`ghalbol_core::host`** in-process.
-2. **`ghalbol_app` (Makepad 2) is the only UI.** Screens, navigation, hub, composer, and delivery ticks. **Do not re-implement ack policy, outbox, or transcript merge in the UI.** The open room is **`host::set_open_room`**. App visibility (read gate) is **`host::set_app_visible`**. **Do not** HTTP coord lookup or register from the UI. Splash is `script_mod!`. Where Makepad 2 lacks a widget, fill the gap in Splash. See `docs/MAKEPAD_UI.md`.
+2. **`ghalbol_app` (Makepad 2) is the only Ghal Bol UI.** Screens, navigation, hub, composer, and delivery ticks. Hub peers are **Chats · Contacts · Invite · Settings** (+ Lock) — no More hub; selection is idle+active Overlay (`paint_nav_tabs`). Intent→face: navigate = `HubDestBtn`, submit = `Go`/`StackPrimaryBtn`, destroy = `Stop`. **Do not re-implement ack policy, outbox, or transcript merge in the UI.** The open room is **`host::set_open_room`**. App visibility (read gate) is **`host::set_app_visible`**. **Do not** HTTP coord lookup or register from the UI. Splash is `script_mod!`. Where Makepad 2 lacks a widget, fill the gap in Splash. See `docs/MAKEPAD_UI.md`.
 3. **`docs/DESIGN.md` is canonical** for architecture; **`docs/TRANSPORT.md`** for transport and connectivity policy. Wire detail: `docs/GHALBOL_DM_MSG_V1.md`. Invites: `docs/GHALBOL_URI_SCHEME.md`. If code and agent-editable docs disagree, **fix both in the same change**.
 4. **Guest scans host QR** — guest stores host `public_key_hex` and dials. **Host may have zero contacts** until first inbound. **Never** require mutual QR or “both sides need each other’s key from QR”.
 5. **Do not stop / restart native connect on every contact change** — use `register_dm_peer` / `sync_contacts` hot-register only.

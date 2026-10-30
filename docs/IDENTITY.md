@@ -56,18 +56,24 @@ The debug app does **not** write identity or chat stores to `com.ghalbol/` unles
 
 ---
 
+## Shipping algorithms (chat vs calls)
+
+**Create UI** offers **secp256k1 only**. The delivery mailbox offline seal (`offline_seal_v1` / `delivery_msg_v1`) is secp256k1 ECDH today — new installs must use secp so text messaging works.
+
+**Ed25519** and **ecdsa-p256** remain importable for existing keystores. Calls work for all three; mailbox text for non-secp identities needs a future multi-algo seal ([MULTI_ALGO.md](MULTI_ALGO.md)).
+
 ## Identity creation (Makepad)
 
 Two modes on first launch when **no keystore** exists on the device.
 
 ### Option 1 — Automatic generation (recommended)
 
-1. User chooses **Create new**, selects an **identity algorithm** (`secp256k1` default), and sets an **app password** (required).
+1. User chooses **Create new** (secp256k1 only — mailbox seal) and sets an **app password** (required).
 2. App generates a keypair locally in Rust (`create_keystore_v1_with_algorithm`; default omits `identity_algorithm` on disk for secp256k1).
 3. Private key is encrypted and written to `keystore_v1.json`.
 4. Public key becomes the peer identity (invites, server registration).
 
-**secp256k1** is the default. **All three** supported algorithms (`secp256k1`, `ed25519`, `ecdsa-p256`) can enter the chat shell and run P2P on this build (`p2p_ready` from native unlock). See [MULTI_ALGO.md](MULTI_ALGO.md).
+**Import** still offers all three algorithms (`secp256k1`, `ed25519`, `ecdsa-p256`). Non-secp imports can call and run P2P; mailbox text needs a future multi-algo seal. See [MULTI_ALGO.md](MULTI_ALGO.md).
 
 **App password is always required** for create, unlock, import, view private key, and delete identity. It encrypts the keystore at rest and is never sent to servers. Optional biometrics may unlock the same blob later, but they do not replace the password.
 
@@ -91,7 +97,7 @@ Users may import **any valid 64-hex secp256k1 private key**; the app does not fo
 
 **Recommended sources:**
 
-- a **64-hex secret exported from Ghal Bol** (Identity → Show private key, after app password), or  
+- a **64-hex secret exported from Ghal Bol** (Settings → Show private key, after app password), or  
 - an **encrypted Ghal Bol keystore backup** from this app.
 
 The first-time UI shows an advisory notice when **Import key** is selected.
@@ -100,13 +106,13 @@ The first-time UI shows an advisory notice when **Import key** is selected.
 
 ## Private key visibility
 
-The private key is never shown by default. **View private key** (Identity tab) requires entering the **app password** again, even when the session is already unlocked.
+The private key is never shown by default. **View private key** (Settings peer) requires entering the **app password** again, even when the session is already unlocked.
 
 This limits exposure from casual device access or shoulder surfing.
 
 **Flow (implemented):**
 
-1. Identity → **Show private key**
+1. Settings → **Show private key**
 2. App password prompt
 3. On success: display 64-hex secret + copy (with warning)
 

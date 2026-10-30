@@ -1805,10 +1805,14 @@ pub fn p2p_set_availability_status(status_raw: &str) -> Value {
             }
         }
     }
+    // Mailbox path so peers who never share a native mux still learn status.
+    let mailbox_sent =
+        crate::delivery_runtime::delivery_broadcast_availability(status.as_deref().unwrap_or(""), updated_at_ms);
     json_ok(serde_json::json!({
         "ok": true,
         "status": status,
         "broadcast_count": sent,
+        "mailbox_broadcast_count": mailbox_sent,
         "updated_at_ms": updated_at_ms,
     }))
 }

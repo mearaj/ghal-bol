@@ -1,6 +1,7 @@
 //! Slim session state for native connect (identity-wire keyed).
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, RwLock};
 
 use super::types::{
@@ -204,6 +205,20 @@ impl SessionState {
             .and_then(|g| {
                 g.get(call_id).map(|e| {
                     e.controls.set_camera_off(off);
+                    true
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Peer sent `key_request` — force the next local encoded frame to be an IDR.
+    pub fn call_video_force_keyframe(&self, call_id: &str) -> bool {
+        self.call_video
+            .lock()
+            .ok()
+            .and_then(|g| {
+                g.get(call_id).map(|e| {
+                    e.controls.force_keyframe.store(true, Ordering::Relaxed);
                     true
                 })
             })

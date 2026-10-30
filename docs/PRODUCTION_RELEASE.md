@@ -1,6 +1,6 @@
 # Production release
 
-Checklist for shipping Ghal Bol. The UI is `ghalbol_app` (Makepad 2). It links `ghalbol_core` in-process.
+Checklist for shipping Ghal Bol. The UI is `ghalbol_app` (Makepad 2). It links `ghalbol_core` in-process. Hub peers: **Chats · Contacts · Invite · Settings** (+ Lock) — see [MAKEPAD_UI.md](MAKEPAD_UI.md).
 
 **Live coord:** `https://coord.ghalbol.com`
 

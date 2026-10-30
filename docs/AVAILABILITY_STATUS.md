@@ -11,8 +11,8 @@ transport online/offline and **not** Stories — coord presence stays dial-only.
 |-------|--------|---------|
 | Local status string | Rust prefs | `preferences_v1.json` → `availability_status` |
 | Peer status (received) | Rust contacts | `contacts_v1.json` → `availability_status` |
-| Sync | Rust | Sealed DM `MsgKind::AvailabilityStatus` on set + on connect |
-| UI | Makepad | Set status (Identity / More); roster subtitle chip |
+| Sync | Rust | Native-connect `MsgKind::AvailabilityStatus` **and** delivery-mailbox control upload (same sealed inner) on set |
+| UI | Makepad | Set status (Settings → Availability and About); roster subtitle chip |
 
 ## Presets (v1)
 
@@ -39,9 +39,11 @@ Inner JSON:
 
 ## Sync policy
 
-1. User sets status → save prefs → enqueue sealed status DM to each registered DM peer.
-2. When a peer session becomes ready → send current local status once (so late contacts learn it).
+1. User sets status → save prefs → enqueue sealed status DM (`MsgKind::AvailabilityStatus`) to each registered DM peer over **native-connect**, **and** upload a short-TTL availability control envelope on the **delivery mailbox** for each secp256k1 contact.
+2. When a peer session becomes ready → send current local status once on native-connect (so late contacts learn it).
 3. Empty status clears the peer’s stored field when received.
+
+Mailbox availability uses the same offline seal as text (`kind: availability_status` inner JSON). Non-secp contacts only receive status over native-connect until multi-algo mailbox seal ships.
 
 ## Anti-patterns
 

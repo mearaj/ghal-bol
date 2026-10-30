@@ -47,13 +47,14 @@ impl IdentityAlgorithm {
         }
     }
 
-    /// Algorithms users may select at first-time identity creation (excludes unimplemented).
+    /// Algorithms users may select at first-time identity creation.
+    ///
+    /// Shipping text mailbox seal is secp256k1-only (`offline_seal_v1` /
+    /// `delivery_msg_v1`). Create UI offers secp only so new installs get working
+    /// chat. Ed25519 / P-256 remain importable for existing keystores (calls work;
+    /// mailbox text needs a future seal).
     pub fn creatable_algorithms() -> &'static [IdentityAlgorithm] {
-        &[
-            IdentityAlgorithm::Secp256k1,
-            IdentityAlgorithm::Ed25519,
-            IdentityAlgorithm::EcdsaP256,
-        ]
+        &[IdentityAlgorithm::Secp256k1]
     }
 
     /// Whether the shipping libp2p P2P stack can run with this identity.
@@ -65,10 +66,14 @@ impl IdentityAlgorithm {
     pub fn create_description(self) -> &'static str {
         match self {
             Self::Secp256k1 => {
-                "Default — secp256k1 identity; full chat, calls, and P2P on this build."
+                "Default — secp256k1. Full chat (delivery mailbox), voice/video calls."
             }
-            Self::Ed25519 => "Ed25519 identity — full chat, calls, and P2P on this build.",
-            Self::EcdsaP256 => "NIST P-256 identity — full chat, calls, and P2P on this build.",
+            Self::Ed25519 => {
+                "Ed25519 — calls work; delivery mailbox text seal is secp256k1-only on this build."
+            }
+            Self::EcdsaP256 => {
+                "NIST P-256 — calls work; delivery mailbox text seal is secp256k1-only on this build."
+            }
         }
     }
 

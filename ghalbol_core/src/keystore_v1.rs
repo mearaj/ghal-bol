@@ -96,9 +96,19 @@ impl DecryptedIdentity {
     }
 
     pub fn secp256k1_secret(&self) -> &SecretKey {
+        self.try_secp256k1_secret()
+            .expect("secp256k1_secret() requires secp256k1 identity")
+    }
+
+    /// Prefer this over [`Self::secp256k1_secret`] on mailbox / delivery paths so a
+    /// non-secp identity returns `Err` instead of panicking the process.
+    pub fn try_secp256k1_secret(&self) -> Result<&SecretKey, String> {
         match &self.material {
-            IdentityKeyMaterial::Secp256k1 { secret } => secret,
-            _ => panic!("secp256k1_secret() requires secp256k1 identity"),
+            IdentityKeyMaterial::Secp256k1 { secret } => Ok(secret),
+            _ => Err(format!(
+                "mailbox seal needs secp256k1 identity (have {})",
+                self.algorithm().wire_id()
+            )),
         }
     }
 

@@ -93,7 +93,10 @@ impl VideoJitter {
             for k in pre {
                 self.map.remove(&k);
             }
-            let frame = self.map.remove(&ks).expect("keyframe present");
+            let Some(frame) = self.map.remove(&ks) else {
+                self.keyframe_request = true;
+                return None;
+            };
             self.next_seq = Some(ks + 1);
             return Some(frame);
         }
@@ -104,7 +107,6 @@ impl VideoJitter {
     }
 
     /// Take and clear the pending keyframe-request flag (polled by the transport).
-    #[cfg(test)]
     pub fn take_keyframe_request(&mut self) -> bool {
         let r = self.keyframe_request;
         self.keyframe_request = false;

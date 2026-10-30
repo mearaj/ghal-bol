@@ -1,6 +1,6 @@
 # Ghal Bol — system design
 
-How the app works today. Wire detail is in [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md). Invites are in [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md). Connectivity is in [TRANSPORT.md](TRANSPORT.md).
+How the **Ghal Bol** chat product works today under the **GhalBol** brand ([GHALBOL_BRAND.md](GHALBOL_BRAND.md)). Wire detail is in [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG_V1.md). Invites are in [GHALBOL_URI_SCHEME.md](GHALBOL_URI_SCHEME.md). Connectivity is in [TRANSPORT.md](TRANSPORT.md). UI shell and faces: [MAKEPAD_UI.md](MAKEPAD_UI.md).
 
 ## Goals
 
@@ -14,7 +14,7 @@ How the app works today. Wire detail is in [GHALBOL_DM_MSG_V1.md](GHALBOL_DM_MSG
 
 ```text
 ghalbol_app (Makepad 2)
-  identity, hub, chat, invites, calls
+  unlock, hub peers (Chats · Contacts · Invite · Settings), chat, sheets, calls
   host::set_open_room, host::poll_event
         │ in-process
 ghalbol_core
@@ -29,7 +29,7 @@ ghalbol_core
 | Contacts, unread, preview, trust | `contacts_v1.rs` |
 | Transcript lines and `delivery` | `dm_transcript_store.rs` |
 | Invites | `connect_invite_v1.rs` |
-| Screens | `ghalbol_app` via `host` |
+| Screens / hub peers / faces | `ghalbol_app` via `host` (see MAKEPAD_UI.md) |
 
 The UI does not implement ack policy, the outbox, or transcript merge. It does not call coord HTTP.
 

@@ -38,7 +38,8 @@ pub fn sign_delivery_challenge(ident: &DecryptedIdentity, msg: &[u8]) -> Result<
         IdentityAlgorithm::Secp256k1 => {
             let hash = Sha256::digest(msg);
             let digest = secp256k1::Message::from_digest(hash.into());
-            let sig = secp256k1::Secp256k1::new().sign_ecdsa(digest, ident.secp256k1_secret());
+            let sig =
+                secp256k1::Secp256k1::new().sign_ecdsa(digest, ident.try_secp256k1_secret()?);
             Ok(sig.serialize_der().to_vec())
         }
         IdentityAlgorithm::Ed25519 | IdentityAlgorithm::EcdsaP256 => ident.sign_message(msg),
